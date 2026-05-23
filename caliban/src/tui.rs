@@ -638,6 +638,91 @@ pub(crate) async fn run(
     Ok(())
 }
 
+fn handle_slash_command(line: &str, app: &mut App) {
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("");
+    let arg = parts.next().unwrap_or("").trim();
+    match cmd {
+        "/help" => {
+            app.transcript.push(TranscriptLine::Info(
+                "commands: /help /exit /quit /clear /sessions /save [<name>] /usage".into(),
+            ));
+        }
+        "/exit" | "/quit" => {
+            app.should_exit = true;
+        }
+        "/clear" => {
+            app.transcript.clear();
+        }
+        "/sessions" => match &app.store {
+            Some(store) => match store.list() {
+                Ok(list) if list.is_empty() => {
+                    app.transcript
+                        .push(TranscriptLine::Info("no sessions yet".into()));
+                }
+                Ok(list) => {
+                    for m in list {
+                        app.transcript.push(TranscriptLine::Info(format!(
+                            "{} \u{2014} {} turns, {} tokens \u{2014} {}",
+                            m.name,
+                            m.turn_count,
+                            m.total_tokens,
+                            m.updated_at.format("%Y-%m-%d %H:%M:%S"),
+                        )));
+                    }
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("list error: {e}")));
+                }
+            },
+            None => {
+                app.transcript
+                    .push(TranscriptLine::Info("no session store".into()));
+            }
+        },
+        "/save" => {
+            if let (Some(store), Some(sess)) = (&app.store, app.session.as_ref()) {
+                let target_name = if arg.is_empty() {
+                    sess.name.clone()
+                } else {
+                    arg.to_string()
+                };
+                let mut to_save = sess.clone();
+                to_save.name.clone_from(&target_name);
+                match store.save(&to_save) {
+                    Ok(()) => app
+                        .transcript
+                        .push(TranscriptLine::Info(format!("saved as '{target_name}'"))),
+                    Err(e) => app
+                        .transcript
+                        .push(TranscriptLine::Error(format!("save error: {e}"))),
+                }
+            } else {
+                app.transcript
+                    .push(TranscriptLine::Info("no session to save".into()));
+            }
+        }
+        "/usage" => match app.session.as_ref() {
+            Some(s) => app.transcript.push(TranscriptLine::Info(format!(
+                "session {}: {} turns, {} input + {} output tokens",
+                s.name,
+                s.turn_count(),
+                s.total_usage.input_tokens,
+                s.total_usage.output_tokens,
+            ))),
+            None => app
+                .transcript
+                .push(TranscriptLine::Info("no session active".into())),
+        },
+        unknown => {
+            app.transcript.push(TranscriptLine::Info(format!(
+                "unknown command: {unknown} \u{2014} type /help"
+            )));
+        }
+    }
+}
+
 fn handle_event(
     event: &crossterm::event::Event,
     app: &mut App,
@@ -706,11 +791,8 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             app.history_index = None;
             app.auto_scroll = true;
 
-            // Stub slash commands (full implementation in T.4).
             if prompt.starts_with('/') {
-                app.transcript.push(TranscriptLine::Info(
-                    "slash commands not yet implemented (coming in T.4)".into(),
-                ));
+                handle_slash_command(&prompt, app);
                 return;
             }
 
