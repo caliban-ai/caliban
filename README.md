@@ -149,13 +149,16 @@ the registered tools so the model knows it's running in caliban. Override
 with `--system "<text>"`, load from `--system-file <PATH>`, or disable with
 `--no-system`. View the active prompt via `/system` in the TUI.
 
+The REPL preserves message history across turns, even without `--session`.
+Use `--session <name>` to persist that history to disk between invocations.
+
 Type `/help`, `/config`, `/mcp`, or `/skills` to open a sub-menu overlay
 showing slash command reference, active configuration, planned MCP
 server config, or planned skills config respectively. `Esc` or `q`
 closes any overlay.
 
 Slash commands (typed at the prompt and submitted with Enter):
-`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`, `/system`.
+`/help`, `/exit`, `/quit`, `/clear` (clear transcript and in-memory history; also clears session if active), `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`, `/system`.
 
 Ctrl-C during a turn cancels it and returns to the prompt. Ctrl-C or
 Ctrl-D at an empty prompt exits cleanly.

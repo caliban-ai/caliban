@@ -29,6 +29,7 @@ decision with context, the decision itself, and consequences.
 | [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
 | [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted |
+| [0015](0015-context-and-path-fixes.md) | Context preservation + path conventions (~ expansion) | accepted |
 
 ## Adding a new ADR
 
