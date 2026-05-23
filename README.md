@@ -133,14 +133,19 @@ Invoke `caliban` with no prompt + a TTY stdin to enter the TUI:
 │                                                                │
 │ [caliban: 2 turns · 132↑ 48↓ tokens]                           │
 ├────────────────────────────────────────────────────────────────┤
-│ ~/dev/personal/iron-orrery · openai gpt-4o · session: research │
-├────────────────────────────────────────────────────────────────┤
 │ > █                                                            │
+├────────────────────────────────────────────────────────────────┤
+│ ~/dev/personal/iron-orrery · openai gpt-4o · session: research │
 └────────────────────────────────────────────────────────────────┘
 ```
 
+Type `/help`, `/config`, `/mcp`, or `/skills` to open a sub-menu overlay
+showing slash command reference, active configuration, planned MCP
+server config, or planned skills config respectively. `Esc` or `q`
+closes any overlay.
+
 Slash commands (typed at the prompt and submitted with Enter):
-`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`.
+`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`.
 
 Ctrl-C during a turn cancels it and returns to the prompt. Ctrl-C or
 Ctrl-D at an empty prompt exits cleanly.
