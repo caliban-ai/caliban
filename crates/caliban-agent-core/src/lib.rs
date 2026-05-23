@@ -8,6 +8,7 @@ pub mod error;
 pub mod hooks;
 pub mod registry;
 pub mod retry;
+pub mod session;
 pub mod stream;
 pub mod tool;
 pub mod turn;
@@ -18,6 +19,7 @@ pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
+pub use session::Session;
 pub use stream::{RunOutcome, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
 pub use tool::{Tool, ToolContext, ToolError};
 
