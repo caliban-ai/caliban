@@ -59,6 +59,14 @@ impl<T: Transport> AnthropicProvider<T> {
     }
 }
 
+#[cfg(feature = "bedrock")]
+impl AnthropicProvider<crate::transport::bedrock::BedrockTransport> {
+    /// Construct an `AnthropicProvider` that talks to Claude via AWS Bedrock.
+    pub fn bedrock(cfg: crate::config::BedrockConfig) -> Self {
+        Self::from_transport(crate::transport::bedrock::BedrockTransport::new(cfg))
+    }
+}
+
 #[async_trait]
 impl<T: Transport> Provider for AnthropicProvider<T> {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {

@@ -62,3 +62,56 @@ impl DirectConfig {
         Ok(cfg)
     }
 }
+
+#[cfg(feature = "bedrock")]
+pub use bedrock_cfg::*;
+
+#[cfg(feature = "bedrock")]
+mod bedrock_cfg {
+    use std::time::Duration;
+
+    use aws_config::SdkConfig;
+
+    use crate::error::AnthropicError;
+
+    /// Configuration for AWS Bedrock transport (Claude on Bedrock).
+    #[derive(Debug, Clone)]
+    pub struct BedrockConfig {
+        /// AWS SDK config holding credentials, region, retry policy.
+        pub sdk_config: SdkConfig,
+        /// Request timeout.
+        pub timeout: Duration,
+        /// Bedrock-required Anthropic API version string.
+        pub anthropic_version: String,
+    }
+
+    impl BedrockConfig {
+        /// Build a `BedrockConfig` from the default AWS credential provider chain
+        /// (env, profile, IMDS, etc.).
+        ///
+        /// # Errors
+        ///
+        /// Currently infallible. Async because credential loading is async.
+        pub async fn from_aws_credentials() -> Result<Self, AnthropicError> {
+            let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await;
+            Ok(Self {
+                sdk_config,
+                timeout: Duration::from_secs(60),
+                anthropic_version: "bedrock-2023-05-31".to_string(),
+            })
+        }
+
+        /// Construct from an already-built `SdkConfig` (e.g., when the caller has
+        /// pre-loaded credentials or wants to override the region/profile).
+        #[must_use]
+        pub fn from_sdk_config(sdk_config: SdkConfig) -> Self {
+            Self {
+                sdk_config,
+                timeout: Duration::from_secs(60),
+                anthropic_version: "bedrock-2023-05-31".to_string(),
+            }
+        }
+    }
+}

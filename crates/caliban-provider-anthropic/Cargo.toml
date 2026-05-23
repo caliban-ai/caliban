@@ -10,7 +10,7 @@ publish     = false
 
 [features]
 default = []
-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types", "dep:async-stream"]
 vertex  = ["dep:gcp_auth"]
 live-tests = []
 
@@ -32,6 +32,7 @@ tokio              = { workspace = true }
 aws-config             = { workspace = true, optional = true }
 aws-sdk-bedrockruntime = { workspace = true, optional = true }
 aws-smithy-types       = { workspace = true, optional = true }
+async-stream           = { workspace = true, optional = true }
 gcp_auth               = { workspace = true, optional = true }
 
 [dev-dependencies]

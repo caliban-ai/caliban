@@ -620,6 +620,7 @@ dependencies = [
 name = "caliban-provider-anthropic"
 version = "0.0.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
