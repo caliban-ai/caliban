@@ -10,6 +10,7 @@ pub mod registry;
 pub mod retry;
 pub mod stream;
 pub mod tool;
+pub mod turn;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
