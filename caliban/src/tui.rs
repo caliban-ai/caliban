@@ -670,15 +670,28 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
     for entry in &app.transcript {
         match entry {
             TranscriptLine::UserPrompt(s) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "user: ",
-                        Style::default()
-                            .add_modifier(Modifier::BOLD)
-                            .fg(Color::Cyan),
-                    ),
-                    Span::raw(s.as_str()),
-                ]));
+                // Multi-line composition (Shift/Alt+Enter) embeds '\n' in
+                // the buffer. Each segment becomes its own Line; the first
+                // gets the "user:" label, the rest are indented to align.
+                let label = Span::styled(
+                    "user: ",
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::Cyan),
+                );
+                for (i, segment) in s.split('\n').enumerate() {
+                    if i == 0 {
+                        lines.push(Line::from(vec![
+                            label.clone(),
+                            Span::raw(segment.to_string()),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw("      "), // align with "user: " prefix (6 chars)
+                            Span::raw(segment.to_string()),
+                        ]));
+                    }
+                }
                 lines.push(Line::raw(""));
             }
             TranscriptLine::AssistantText(s) => {
