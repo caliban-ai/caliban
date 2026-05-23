@@ -4,9 +4,10 @@ A from-scratch Rust agent harness — a replacement for Claude Code that puts
 the operator in control of model routing, memory, skills, and prompt context.
 
 > **Project status:** Layer 1 complete (provider + agent-core + tools-builtin)
-> + Layer 4 CLI + sessions + REPL. Private repo, designed to be open-sourced.
-> Daily-usable: single-prompt mode, persistent sessions, or interactive REPL.
-> Memory architecture, MCP client, model-router, and TUI remain as future
+> + Layer 4 CLI + sessions + ratatui-based TUI. Private repo, designed to be
+> open-sourced. Daily-usable: single-prompt mode, persistent sessions, or
+> interactive TUI with status bar + dedicated input area. Memory architecture,
+> MCP client, model-router, and additional UX surfaces remain as future
 > sub-projects.
 
 ## Why
@@ -95,10 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Sessions and REPL
+## Sessions and interactive TUI
 
-caliban can persist conversations across invocations and provides an
-interactive REPL for iterative work.
+caliban persists conversations across invocations and provides an interactive
+TUI for iterative work.
 
 ### Persistent single-prompt sessions
 
@@ -117,30 +118,32 @@ Sessions are saved as pretty-printed JSON under
 `~/.local/share/caliban/sessions/<name>.json` (override with
 `--sessions-dir`).
 
-### Interactive REPL
+### Interactive TUI
 
-Invoke `caliban` with no prompt + a TTY stdin to enter the REPL:
+Invoke `caliban` with no prompt + a TTY stdin to enter the TUI:
 
-```bash
-ANTHROPIC_API_KEY=$KEY caliban --session research
-caliban v0.0.0 — anthropic claude-3-5-sonnet — session: research (3 turns, 4.5k tokens)
-Type your message; /help for commands; /exit or Ctrl-D to quit.
-
-> What's in Cargo.toml?
-[streaming response, tool calls...]
-
-> /usage
-session research: 5 turns, 4682 input + 1294 output tokens
-
-> /exit
-[caliban: saved session 'research']
+```
+┌────────────────────────────────────────────────────────────────┐
+│ user: What's in README.md?                                     │
+│                                                                │
+│ 🔧 Read({"path":"README.md"})                                  │
+│    → → Read README.md, lines 1-83 of 83                        │
+│                                                                │
+│ assistant: It's a Rust agent harness…                          │
+│                                                                │
+│ [caliban: 2 turns · 132↑ 48↓ tokens]                           │
+├────────────────────────────────────────────────────────────────┤
+│ ~/dev/personal/iron-orrery · openai gpt-4o · session: research │
+├────────────────────────────────────────────────────────────────┤
+│ > █                                                            │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-Slash commands: `/help`, `/exit`, `/quit`, `/clear`, `/sessions`,
-`/save [<name>]`, `/usage`.
+Slash commands (typed at the prompt and submitted with Enter):
+`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`.
 
-Ctrl-C during a turn cancels that turn and returns to the prompt.
-Ctrl-C or Ctrl-D at the prompt exits cleanly.
+Ctrl-C during a turn cancels it and returns to the prompt. Ctrl-C or
+Ctrl-D at an empty prompt exits cleanly.
 
 ## Provider matrix
 

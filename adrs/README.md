@@ -26,6 +26,7 @@ decision with context, the decision itself, and consequences.
 | [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted |
 | [0010](0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted |
 | [0011](0011-sessions-and-repl.md) | Sessions persisted to disk + interactive REPL | accepted |
+| [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 
 ## Adding a new ADR
 
