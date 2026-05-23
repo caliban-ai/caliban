@@ -409,6 +409,47 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 #[allow(clippy::too_many_lines)]
+fn format_tool_input(input: &str, max_chars: usize) -> String {
+    use serde_json::Value;
+    match serde_json::from_str::<Value>(input) {
+        Ok(Value::Object(map)) => {
+            let mut parts: Vec<String> = Vec::with_capacity(map.len());
+            for (k, v) in &map {
+                let v_str = match v {
+                    Value::String(s) => {
+                        if s.chars().count() > 40 {
+                            let truncated: String = s.chars().take(40).collect();
+                            format!("\"{truncated}\u{2026}\"")
+                        } else {
+                            format!("\"{s}\"")
+                        }
+                    }
+                    Value::Bool(b) => b.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Null => "null".to_string(),
+                    other => other.to_string(),
+                };
+                parts.push(format!("{k}={v_str}"));
+            }
+            let joined = parts.join(", ");
+            if joined.chars().count() > max_chars {
+                let truncated: String = joined.chars().take(max_chars).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                joined
+            }
+        }
+        _ => {
+            if input.chars().count() > max_chars {
+                let truncated: String = input.chars().take(max_chars).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                input.to_string()
+            }
+        }
+    }
+}
+
 fn render_transcript(app: &App) -> Vec<Line<'_>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
     for entry in &app.transcript {
@@ -442,7 +483,7 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
                 result,
                 ..
             } => {
-                let input_summary: String = input.chars().take(80).collect();
+                let input_summary = format_tool_input(input, 80);
                 lines.push(Line::styled(
                     format!("\u{1F527} {name}({input_summary})"),
                     Style::default().fg(Color::Yellow),
