@@ -3,13 +3,12 @@
 A from-scratch Rust agent harness — a replacement for Claude Code that puts
 the operator in control of model routing, memory, skills, and prompt context.
 
-> **Project status:** Layer 1 (provider abstraction) complete. Private repo,
-> designed to be open-sourced. caliban-provider defines the provider-neutral
-> message IR; four schema-family adapter crates (anthropic, openai, ollama,
-> google) implement Provider for eight (schema, transport) wirings: direct,
-> AWS Bedrock, Google Vertex AI (for Anthropic + Gemini), Azure OpenAI.
-> The `caliban` binary is still a `--version` stub — the agent loop, tools,
-> and CLI live in later sub-projects.
+> **Project status:** Layer 1 (provider abstraction + agent-core) complete.
+> Private repo, designed to be open-sourced. caliban-agent-core drives an
+> LLM agent loop on top of caliban-provider, with Tool dispatch, cancellation,
+> retry, compaction, hooks, and a TurnEvent stream. The `caliban` binary is
+> still a stub — the built-in tools (Read/Write/Edit/Bash/Grep/Glob) and CLI
+> are coming in subsequent sub-projects.
 
 ## Why
 
@@ -66,6 +65,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 (Set `ANTHROPIC_API_KEY` before running.)
 
+## Example usage (library, with caliban-agent-core)
+
+```rust
+use std::sync::Arc;
+
+use caliban_agent_core::{Agent, ToolRegistry, Session};
+use caliban_provider::Provider;
+use caliban_provider_anthropic::{config::DirectConfig, AnthropicProvider};
+use tokio_util::sync::CancellationToken;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let provider: Arc<dyn Provider + Send + Sync> = Arc::new(
+        AnthropicProvider::direct(DirectConfig::from_env()?)?,
+    );
+
+    let agent = Arc::new(Agent::builder()
+        .provider(provider)
+        .tools(ToolRegistry::new())  // populate with caliban-tools-builtin (D) once it exists
+        .model("claude-3-5-sonnet")
+        .max_tokens(1024)
+        .build()?);
+
+    let mut session = Session::new(agent);
+    session.system("You are helpful.").user_text("Hello!");
+    let new_msgs = session.run().await?;
+    for m in new_msgs { println!("{m:?}"); }
+    Ok(())
+}
+```
+
 ## Provider matrix
 
 | Schema family | Direct | AWS Bedrock | Google Vertex | Azure |
@@ -92,6 +122,7 @@ crates/              # libraries
   caliban-provider-openai/     # OpenAI (direct + Azure)
   caliban-provider-ollama/     # Ollama (direct)
   caliban-provider-google/     # Gemini (AI Studio + Vertex)
+  caliban-agent-core/          # agent loop, tools, session
 adrs/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans
 .github/workflows/   # CI
@@ -118,7 +149,9 @@ boilerplate.
 
 ## Architecture decisions
 
-See [`adrs/`](adrs/). Notable Layer-0 decisions:
+See [`adrs/`](adrs/). Notable decisions:
+
+**Layer 0:**
 - [Async runtime: tokio](adrs/0001-async-runtime.md)
 - [Error model: thiserror libs, anyhow binary](adrs/0002-error-model.md)
 - [License: AGPL-3.0](adrs/0003-license-agpl-3.0.md)
@@ -127,6 +160,9 @@ See [`adrs/`](adrs/). Notable Layer-0 decisions:
 - [Message schema (IR)](adrs/0006-message-schema-ir.md)
 - [Transport trait pattern](adrs/0007-transport-trait-pattern.md)
 - [System role positional](adrs/0008-system-role-positional.md)
+
+**Layer 1 / C:**
+- [Agent-core design (stream-as-primitive, sequential tools, opt-in compaction)](adrs/0009-agent-core-design.md)
 
 ## Design specs
 

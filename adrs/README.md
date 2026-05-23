@@ -23,6 +23,7 @@ decision with context, the decision itself, and consequences.
 | [0006](0006-message-schema-ir.md) | Message schema → provider-neutral IR | accepted |
 | [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
 | [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
+| [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted |
 
 ## Adding a new ADR
 
