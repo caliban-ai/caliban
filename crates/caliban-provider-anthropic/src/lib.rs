@@ -67,6 +67,20 @@ impl AnthropicProvider<crate::transport::bedrock::BedrockTransport> {
     }
 }
 
+#[cfg(feature = "vertex")]
+impl AnthropicProvider<crate::transport::vertex::VertexTransport> {
+    /// Construct an `AnthropicProvider` that talks to Claude via Google Vertex AI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
+    pub fn vertex(cfg: crate::config::VertexConfig) -> caliban_provider::Result<Self> {
+        let transport = crate::transport::vertex::VertexTransport::new(cfg)
+            .map_err(caliban_provider::Error::adapter)?;
+        Ok(Self::from_transport(transport))
+    }
+}
+
 #[async_trait]
 impl<T: Transport> Provider for AnthropicProvider<T> {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {

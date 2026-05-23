@@ -66,6 +66,69 @@ impl DirectConfig {
 #[cfg(feature = "bedrock")]
 pub use bedrock_cfg::*;
 
+#[cfg(feature = "vertex")]
+pub use vertex_cfg::*;
+
+#[cfg(feature = "vertex")]
+mod vertex_cfg {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gcp_auth::TokenProvider;
+
+    use crate::error::AnthropicError;
+
+    /// Configuration for Google Vertex AI transport (Anthropic Claude on Vertex).
+    #[derive(Clone)]
+    pub struct VertexConfig {
+        /// GCP token provider (handles refresh).
+        pub token_provider: Arc<dyn TokenProvider>,
+        /// GCP project ID.
+        pub project: String,
+        /// GCP region (e.g., `"us-central1"`).
+        pub region: String,
+        /// Request timeout.
+        pub timeout: Duration,
+        /// Vertex-required Anthropic API version string.
+        pub anthropic_version: String,
+    }
+
+    impl std::fmt::Debug for VertexConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("VertexConfig")
+                .field("project", &self.project)
+                .field("region", &self.region)
+                .field("timeout", &self.timeout)
+                .field("anthropic_version", &self.anthropic_version)
+                .field("token_provider", &"<dyn TokenProvider>")
+                .finish()
+        }
+    }
+
+    impl VertexConfig {
+        /// Build from ADC (application default credentials) — env, gcloud, metadata server, etc.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the `gcp_auth` provider cannot be obtained.
+        pub async fn from_gcp_credentials(
+            project: impl Into<String>,
+            region: impl Into<String>,
+        ) -> Result<Self, AnthropicError> {
+            let token_provider = gcp_auth::provider()
+                .await
+                .map_err(|e| AnthropicError::Transport(Box::new(e)))?;
+            Ok(Self {
+                token_provider,
+                project: project.into(),
+                region: region.into(),
+                timeout: Duration::from_secs(60),
+                anthropic_version: "vertex-2023-10-16".to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(feature = "bedrock")]
 mod bedrock_cfg {
     use std::time::Duration;
