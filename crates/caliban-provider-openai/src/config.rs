@@ -53,7 +53,7 @@ impl DirectConfig {
     /// or `Err(OpenAIError::Transport)` if `OPENAI_BASE_URL` is not a valid URL.
     pub fn from_env() -> Result<Self, OpenAIError> {
         let key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| OpenAIError::MissingConfig("OPENAI_API_KEY"))?;
+            .map_err(|_| OpenAIError::MissingConfig("OPENAI_API_KEY".into()))?;
         let mut cfg = Self::new(SecretString::new(key.into()));
         if let Ok(url) = std::env::var("OPENAI_BASE_URL") {
             cfg.base_url = Url::parse(&url).map_err(|e| OpenAIError::Transport(Box::new(e)))?;
@@ -73,24 +73,28 @@ mod azure {
     use std::time::Duration;
 
     use secrecy::SecretString;
+    use url::Url;
 
     use crate::error::OpenAIError;
 
     const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-    /// Configuration for the Azure OpenAI transport.
+    /// Configuration for the Azure `OpenAI` transport.
     #[derive(Debug, Clone)]
     pub struct AzureConfig {
         /// The API key for `api-key` header authentication.
         pub api_key: SecretString,
-        /// The Azure OpenAI resource name (subdomain of `openai.azure.com`).
+        /// The Azure `OpenAI` resource name (subdomain of `openai.azure.com`).
         pub resource: String,
-        /// The Azure OpenAI API version (e.g., `"2024-10-21"`).
+        /// The Azure `OpenAI` API version (e.g., `"2024-10-21"`).
         pub api_version: String,
         /// Request timeout.
         pub timeout: Duration,
         /// Map from canonical model name to Azure deployment name.
         pub deployments: HashMap<String, String>,
+        /// Optional base URL override (used in tests to point at a mock server).
+        /// When `None`, the URL is derived from `resource`.
+        pub base_url: Option<Url>,
     }
 
     impl AzureConfig {
@@ -104,9 +108,9 @@ mod azure {
         /// Returns `Err` if required env vars are absent.
         pub fn from_env() -> Result<Self, OpenAIError> {
             let api_key = std::env::var("AZURE_OPENAI_API_KEY")
-                .map_err(|_| OpenAIError::MissingConfig("AZURE_OPENAI_API_KEY"))?;
+                .map_err(|_| OpenAIError::MissingConfig("AZURE_OPENAI_API_KEY".into()))?;
             let resource = std::env::var("AZURE_OPENAI_RESOURCE")
-                .map_err(|_| OpenAIError::MissingConfig("AZURE_OPENAI_RESOURCE"))?;
+                .map_err(|_| OpenAIError::MissingConfig("AZURE_OPENAI_RESOURCE".into()))?;
             let api_version =
                 std::env::var("AZURE_OPENAI_API_VERSION").unwrap_or_else(|_| "2024-10-21".into());
             Ok(Self {
@@ -115,7 +119,27 @@ mod azure {
                 api_version,
                 timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
                 deployments: HashMap::new(),
+                base_url: None,
             })
+        }
+
+        /// Add a mapping from a canonical model name to an Azure deployment name.
+        ///
+        /// Enables fluent construction:
+        /// ```rust,ignore
+        /// AzureConfig::from_env()?
+        ///     .with_deployment("gpt-4o", "my-gpt-4o-deploy")
+        ///     .with_deployment("gpt-4o-mini", "my-mini-deploy")
+        /// ```
+        #[must_use]
+        pub fn with_deployment(
+            mut self,
+            canonical_model: impl Into<String>,
+            deployment: impl Into<String>,
+        ) -> Self {
+            self.deployments
+                .insert(canonical_model.into(), deployment.into());
+            self
         }
     }
 }

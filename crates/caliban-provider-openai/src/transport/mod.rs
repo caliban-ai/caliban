@@ -37,3 +37,6 @@ pub trait Transport: Send + Sync + 'static {
 }
 
 pub mod direct;
+
+#[cfg(feature = "azure")]
+pub mod azure;

@@ -28,7 +28,7 @@ pub enum OpenAIError {
 
     /// A required environment-variable or config field was absent.
     #[error("missing config field: {0}")]
-    MissingConfig(&'static str),
+    MissingConfig(String),
 
     /// A generic transport-level error.
     #[error("transport error: {0}")]

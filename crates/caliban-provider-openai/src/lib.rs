@@ -58,6 +58,20 @@ impl<T: Transport> OpenAIProvider<T> {
     }
 }
 
+#[cfg(feature = "azure")]
+impl OpenAIProvider<crate::transport::azure::AzureTransport> {
+    /// Construct an `OpenAIProvider` using the Azure `OpenAI` Service transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the underlying `reqwest` client cannot be built.
+    pub fn azure(cfg: crate::config::AzureConfig) -> Result<Self> {
+        crate::transport::azure::AzureTransport::new(cfg)
+            .map(|t| Self { transport: t })
+            .map_err(Error::adapter)
+    }
+}
+
 #[async_trait]
 impl<T: Transport> Provider for OpenAIProvider<T> {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
