@@ -3,9 +3,13 @@
 A from-scratch Rust agent harness — a replacement for Claude Code that puts
 the operator in control of model routing, memory, skills, and prompt context.
 
-> **Project status:** Layer 0 (workspace bootstrap). Private repo, designed
-> to be open-sourced. The user-facing binary (`caliban --version`) exists
-> as a stub; no real agent runtime yet.
+> **Project status:** Layer 1 (provider abstraction) complete. Private repo,
+> designed to be open-sourced. caliban-provider defines the provider-neutral
+> message IR; four schema-family adapter crates (anthropic, openai, ollama,
+> google) implement Provider for eight (schema, transport) wirings: direct,
+> AWS Bedrock, Google Vertex AI (for Anthropic + Gemini), Azure OpenAI.
+> The `caliban` binary is still a `--version` stub — the agent loop, tools,
+> and CLI live in later sub-projects.
 
 ## Why
 
@@ -39,12 +43,55 @@ cargo test  --workspace             # run all tests
 cargo run   --bin caliban -- --version    # smoke-test the binary
 ```
 
+## Example usage (library)
+
+```rust
+use caliban_provider::{CompletionRequest, Provider};
+use caliban_provider_anthropic::{config::DirectConfig, AnthropicProvider};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = DirectConfig::from_env()?;
+    let provider = AnthropicProvider::direct(cfg)?;
+    let req = CompletionRequest::builder("claude-3-5-sonnet")
+        .system("You are helpful.")
+        .user_text("What is the airspeed velocity of an unladen swallow?")
+        .max_tokens(256)
+        .build()?;
+    let resp = provider.complete(req).await?;
+    println!("{:?}", resp.message);
+    Ok(())
+}
+```
+
+(Set `ANTHROPIC_API_KEY` before running.)
+
+## Provider matrix
+
+| Schema family | Direct | AWS Bedrock | Google Vertex | Azure |
+|---|---|---|---|---|
+| Anthropic Claude | ✅ default | ✅ `bedrock` feature | ✅ `vertex` feature | — |
+| OpenAI | ✅ default | — | — | ✅ `azure` feature |
+| Gemini | ✅ default (AI Studio) | — | ✅ `vertex` feature | — |
+| Ollama (OpenAI-compat, local) | ✅ default | — | — | — |
+
+Cargo feature flags gate cloud transports per-crate. To enable Bedrock-Claude + Vertex-Gemini + Azure-OpenAI:
+
+```bash
+cargo build --features caliban-provider-anthropic/bedrock,caliban-provider-google/vertex,caliban-provider-openai/azure
+```
+
 ## Repository layout
 
 ```
 caliban/             # the user-facing binary
 crates/              # libraries
-  caliban-core/      # foundational types (Layer 1 seed)
+  caliban-core/                # foundational types
+  caliban-provider/            # provider trait + IR
+  caliban-provider-anthropic/  # Claude (direct + Bedrock + Vertex)
+  caliban-provider-openai/     # OpenAI (direct + Azure)
+  caliban-provider-ollama/     # Ollama (direct)
+  caliban-provider-google/     # Gemini (AI Studio + Vertex)
 adrs/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans
 .github/workflows/   # CI

@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   check:
-    name: fmt · clippy · build · test
+    name: fmt · clippy · build · test (default features)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -30,10 +30,34 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo build
         run: cargo build --workspace --all-targets
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace
+
+  check-cloud:
+    name: build + test (bedrock + vertex + azure features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (cloud features)
+        run: cargo build --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
+
+      - name: cargo clippy (cloud features)
+        run: cargo clippy --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex --all-targets -- -D warnings
+
+      - name: cargo test (cloud features)
+        run: cargo test --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex

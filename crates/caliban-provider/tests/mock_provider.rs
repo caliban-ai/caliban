@@ -1,5 +1,5 @@
-#![cfg(feature = "mock")]
 #![allow(missing_docs)]
+#![cfg(feature = "mock")]
 
 use caliban_provider::{
     CompletionRequest, CompletionResponse, Message, MockProvider, Provider, StopReason,

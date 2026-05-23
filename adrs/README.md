@@ -20,6 +20,9 @@ decision with context, the decision itself, and consequences.
 | [0003](0003-license-agpl-3.0.md) | License → `AGPL-3.0-only` | accepted |
 | [0004](0004-naming-conventions.md) | Naming → `caliban-*` libraries, `caliban` binary | accepted |
 | [0005](0005-workspace-layout.md) | Workspace layout → `crates/` for libs, binaries at root | accepted |
+| [0006](0006-message-schema-ir.md) | Message schema → provider-neutral IR | accepted |
+| [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
+| [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
 
 ## Adding a new ADR
 
