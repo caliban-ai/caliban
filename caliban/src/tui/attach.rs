@@ -83,6 +83,167 @@ pub(crate) fn read_dir_candidates(dir: &Path, show_hidden: bool) -> Vec<Candidat
     out
 }
 
+/// Successfully resolved message ready to send.
+#[derive(Debug)]
+pub(crate) struct ResolvedMessage {
+    pub(crate) visible_text: String,
+    pub(crate) attachments: Vec<Attachment>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Attachment {
+    /// Absolute path to the file on disk. Currently read-only metadata
+    /// for callers (we ship the content inline, not the path) but kept
+    /// because the next slice — tool-call rendering — will use it.
+    #[allow(dead_code, reason = "consumed by future tool-call rendering")]
+    pub(crate) path: PathBuf,
+    pub(crate) display_path: String,
+    pub(crate) bytes: u64,
+    pub(crate) content: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AttachError {
+    #[error("@{} is {bytes} bytes; over the per-file limit of {limit}", path.display())]
+    Oversize {
+        path: PathBuf,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error("attachments total {running_total} bytes; over the budget of {limit}")]
+    BudgetExceeded { running_total: u64, limit: u64 },
+    #[error("@{} is not valid UTF-8", path.display())]
+    NotUtf8 { path: PathBuf },
+    #[error("@{}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+/// Resolve every `@<path>` token in `buffer`. Tokens that don't resolve to an
+/// existing regular file are left as literal text. If any resolved file
+/// violates the per-file or aggregate size caps, returns an error and DOES
+/// NOT attach anything.
+pub(crate) fn resolve_attachments(
+    buffer: &str,
+    workspace_root: &Path,
+    cwd: &Path,
+    per_file_max: u64,
+    total_budget: u64,
+) -> Result<ResolvedMessage, AttachError> {
+    let home = dirs::home_dir();
+    let mut attachments = Vec::new();
+    let mut running_total: u64 = 0;
+
+    for tok in extract_at_tokens(buffer) {
+        let (dir, name) = split_at_token(&tok, workspace_root, cwd, home.as_deref());
+        let candidate = if name.is_empty() {
+            dir.clone()
+        } else {
+            dir.join(&name)
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        let meta = match std::fs::metadata(&candidate) {
+            Ok(m) => m,
+            Err(source) => {
+                return Err(AttachError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
+        };
+        let bytes = meta.len();
+        if bytes > per_file_max {
+            return Err(AttachError::Oversize {
+                path: candidate,
+                bytes,
+                limit: per_file_max,
+            });
+        }
+        running_total = running_total.saturating_add(bytes);
+        if running_total > total_budget {
+            return Err(AttachError::BudgetExceeded {
+                running_total,
+                limit: total_budget,
+            });
+        }
+        let bytes_vec = match std::fs::read(&candidate) {
+            Ok(b) => b,
+            Err(source) => {
+                return Err(AttachError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
+        };
+        let Ok(content) = String::from_utf8(bytes_vec) else {
+            return Err(AttachError::NotUtf8 { path: candidate });
+        };
+        let display_path = candidate
+            .strip_prefix(workspace_root)
+            .map_or_else(
+                |_| candidate.display().to_string(),
+                |p| p.display().to_string(),
+            );
+        attachments.push(Attachment {
+            path: candidate,
+            display_path,
+            bytes,
+            content,
+        });
+    }
+
+    Ok(ResolvedMessage {
+        visible_text: buffer.to_string(),
+        attachments,
+    })
+}
+
+/// Pull out every `@<token>` from `buffer`. Token = run of non-whitespace
+/// after `@`, where the `@` sits at start-of-buffer or after whitespace.
+fn extract_at_tokens(buffer: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = buffer.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && !(bytes[end] as char).is_whitespace() {
+                end += 1;
+            }
+            if end > start {
+                out.push(buffer[start..end].to_string());
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Build the outgoing wire string: `visible_text` followed by framed
+/// `--- attached: ... ---` blocks for each attachment.
+pub(crate) fn format_outgoing(msg: &ResolvedMessage) -> String {
+    if msg.attachments.is_empty() {
+        return msg.visible_text.clone();
+    }
+    let mut out = msg.visible_text.clone();
+    for a in &msg.attachments {
+        out.push_str("\n\n--- attached: ");
+        out.push_str(&a.display_path);
+        out.push_str(" (");
+        out.push_str(&a.bytes.to_string());
+        out.push_str(" bytes) ---\n");
+        out.push_str(&a.content);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +356,75 @@ mod tests {
         let (d, n) = split_at_token("src/", Path::new("/ws"), Path::new("/ws"), None);
         assert_eq!(d, PathBuf::from("/ws/src/"));
         assert_eq!(n, "");
+    }
+
+    #[test]
+    fn resolves_single_attachment() {
+        let td = TempDir::new().unwrap();
+        let p = td.path().join("hello.txt");
+        fs::write(&p, "hi there").unwrap();
+        let msg = format!("Look at @{}", p.display());
+        let r = resolve_attachments(&msg, td.path(), td.path(), 1024, 4096).unwrap();
+        assert_eq!(r.attachments.len(), 1);
+        assert_eq!(r.attachments[0].bytes, 8);
+        assert_eq!(r.attachments[0].content, "hi there");
+    }
+
+    #[test]
+    fn missing_path_left_as_literal() {
+        let td = TempDir::new().unwrap();
+        let msg = "hello @nonexistent there";
+        let r = resolve_attachments(msg, td.path(), td.path(), 1024, 4096).unwrap();
+        assert!(r.attachments.is_empty());
+        assert_eq!(r.visible_text, msg);
+    }
+
+    #[test]
+    fn oversize_returns_error() {
+        let td = TempDir::new().unwrap();
+        let p = td.path().join("big.txt");
+        fs::write(&p, vec![b'x'; 4096]).unwrap();
+        let msg = format!("@{}", p.display());
+        let err = resolve_attachments(&msg, td.path(), td.path(), 1024, 8192).unwrap_err();
+        assert!(matches!(err, AttachError::Oversize { .. }));
+    }
+
+    #[test]
+    fn budget_exceeded_returns_error() {
+        let td = TempDir::new().unwrap();
+        let a = td.path().join("a.txt");
+        let b = td.path().join("b.txt");
+        fs::write(&a, vec![b'x'; 700]).unwrap();
+        fs::write(&b, vec![b'x'; 700]).unwrap();
+        let msg = format!("@{} @{}", a.display(), b.display());
+        let err = resolve_attachments(&msg, td.path(), td.path(), 1024, 1024).unwrap_err();
+        assert!(matches!(err, AttachError::BudgetExceeded { .. }));
+    }
+
+    #[test]
+    fn multiple_attachments_in_order() {
+        let td = TempDir::new().unwrap();
+        let a = td.path().join("a.txt");
+        let b = td.path().join("b.txt");
+        fs::write(&a, "aa").unwrap();
+        fs::write(&b, "bb").unwrap();
+        let msg = format!("@{} and @{}", a.display(), b.display());
+        let r = resolve_attachments(&msg, td.path(), td.path(), 1024, 4096).unwrap();
+        assert_eq!(r.attachments.len(), 2);
+        assert_eq!(r.attachments[0].content, "aa");
+        assert_eq!(r.attachments[1].content, "bb");
+    }
+
+    #[test]
+    fn format_outgoing_includes_attachment_block() {
+        let td = TempDir::new().unwrap();
+        let p = td.path().join("note.txt");
+        fs::write(&p, "body").unwrap();
+        let msg = format!("see @{}", p.display());
+        let r = resolve_attachments(&msg, td.path(), td.path(), 1024, 4096).unwrap();
+        let wire = format_outgoing(&r);
+        assert!(wire.contains("--- attached: "));
+        assert!(wire.contains("note.txt"));
+        assert!(wire.contains("body"));
     }
 }

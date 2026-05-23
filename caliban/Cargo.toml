@@ -22,7 +22,7 @@ caliban-agent-core         = { path = "../crates/caliban-agent-core" }
 caliban-sessions           = { path = "../crates/caliban-sessions" }
 caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
 anyhow                     = { workspace = true }
-clap                       = { version = "4", features = ["derive"] }
+clap                       = { version = "4", features = ["derive", "env"] }
 tokio                      = { workspace = true, features = ["full"] }
 tokio-util                 = { workspace = true }
 futures                    = { workspace = true }

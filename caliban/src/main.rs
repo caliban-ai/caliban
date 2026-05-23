@@ -123,6 +123,14 @@ pub(crate) struct Args {
     /// Append-log events + draws to ~/.cache/caliban/debug.log
     #[arg(long)]
     pub(crate) debug: bool,
+
+    /// Maximum size of a single `@`-attachment in bytes (default 256 KB).
+    #[arg(long, default_value_t = 262_144, env = "CALIBAN_MAX_ATTACH_BYTES")]
+    pub(crate) max_attach_bytes: u64,
+
+    /// Aggregate size cap across all `@`-attachments in one message (default 1 MB).
+    #[arg(long, default_value_t = 1_048_576, env = "CALIBAN_ATTACH_BUDGET_BYTES")]
+    pub(crate) attach_budget_bytes: u64,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {

@@ -180,6 +180,13 @@ pub(crate) enum TranscriptLine {
     Info(String),
     /// Error message.
     Error(String),
+    /// 📎 marker shown under a user prompt for each `@`-attached file.
+    Attached {
+        /// Path the model sees in the `--- attached: ... ---` framing.
+        display_path: String,
+        /// Byte size of the attached content.
+        bytes: u64,
+    },
 }
 
 /// State for a currently-running agent turn.
@@ -736,9 +743,33 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
                     Style::default().fg(Color::Red),
                 ));
             }
+            TranscriptLine::Attached {
+                display_path,
+                bytes,
+            } => {
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("📎 {display_path} ({})", format_bytes(*bytes)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         }
     }
     lines
+}
+
+/// Human-readable byte size for the 📎 attachment line.
+fn format_bytes(n: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 // === Overlay helpers ===
@@ -1642,7 +1673,7 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 return;
             }
 
-            let _line = app.input.submit();
+            let line = app.input.submit();
             app.auto_scroll = true;
 
             if prompt.starts_with('/') {
@@ -1650,8 +1681,50 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 return;
             }
 
+            // Resolve any @-attachments before we send. On failure, restore
+            // the buffer and surface the error as a toast — no roundtrip.
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let resolved = match attach::resolve_attachments(
+                &line,
+                &workspace_root,
+                &app.cwd,
+                app.args.max_attach_bytes,
+                app.args.attach_budget_bytes,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let hint = match &e {
+                        attach::AttachError::Oversize { .. } => {
+                            "Drop the @ or raise --max-attach-bytes."
+                        }
+                        attach::AttachError::BudgetExceeded { .. } => {
+                            "Remove an attachment or raise --attach-budget-bytes."
+                        }
+                        attach::AttachError::NotUtf8 { .. } => {
+                            "Binary files can't be inlined; ask me to Read it instead."
+                        }
+                        attach::AttachError::Io { .. } => "Check the path and try again.",
+                    };
+                    app.toast = Some(toast::Toast::error(format!("{e} — {hint}")));
+                    app.input.buffer = line;
+                    app.input.cursor = app.input.buffer.len();
+                    return;
+                }
+            };
+            let outgoing_text = attach::format_outgoing(&resolved);
+
             app.transcript
                 .push(TranscriptLine::UserPrompt(prompt.clone()));
+            for a in &resolved.attachments {
+                app.transcript.push(TranscriptLine::Attached {
+                    display_path: a.display_path.clone(),
+                    bytes: a.bytes,
+                });
+            }
 
             // Build message history: in-memory history + new user prompt.
             let mut messages: Vec<caliban_provider::Message> = app.messages.clone();
@@ -1666,7 +1739,7 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 }
             }
 
-            messages.push(caliban_provider::Message::user_text(prompt));
+            messages.push(caliban_provider::Message::user_text(outgoing_text));
 
             // Start the agent stream.
             let cancel = tokio_util::sync::CancellationToken::new();
