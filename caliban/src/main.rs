@@ -401,15 +401,14 @@ async fn main() -> Result<()> {
     )?;
 
     // For fresh sessions (no prior messages), insert the system prompt at position 0.
-    if let Some(sess) = session.as_mut() {
-        if sess.messages.is_empty() {
-            if let Some(ref prompt) = system_prompt {
-                sess.messages
-                    .push(caliban_provider::Message::system_text(prompt.clone()));
-            }
-        }
-        // Existing sessions: leave the persisted system as-is (don't overwrite).
+    if let Some(sess) = session.as_mut()
+        && sess.messages.is_empty()
+        && let Some(ref prompt) = system_prompt
+    {
+        sess.messages
+            .push(caliban_provider::Message::system_text(prompt.clone()));
     }
+    // Existing sessions: leave the persisted system as-is (don't overwrite).
 
     // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
@@ -448,10 +447,8 @@ async fn main() -> Result<()> {
     let has_system = messages
         .first()
         .is_some_and(|m| m.role == caliban_provider::Role::System);
-    if !has_system {
-        if let Some(ref sp) = system_prompt {
-            messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
-        }
+    if !has_system && let Some(ref sp) = system_prompt {
+        messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
     }
 
     messages.push(Message::user_text(prompt));
@@ -460,18 +457,18 @@ async fn main() -> Result<()> {
         run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
 
     // Save session back if requested
-    if let (Some(store), Some(ref mut s)) = (store.as_ref(), session.as_mut()) {
-        if !args.no_save {
-            s.merge_run(final_messages, total_usage);
-            store.save(s)?;
-            if !args.quiet {
-                eprintln!(
-                    "[caliban: saved session '{}' ({} turns, {} tokens)]",
-                    s.name,
-                    s.turn_count(),
-                    s.total_usage.input_tokens + s.total_usage.output_tokens,
-                );
-            }
+    if let (Some(store), Some(ref mut s)) = (store.as_ref(), session.as_mut())
+        && !args.no_save
+    {
+        s.merge_run(final_messages, total_usage);
+        store.save(s)?;
+        if !args.quiet {
+            eprintln!(
+                "[caliban: saved session '{}' ({} turns, {} tokens)]",
+                s.name,
+                s.turn_count(),
+                s.total_usage.input_tokens + s.total_usage.output_tokens,
+            );
         }
     }
 

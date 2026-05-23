@@ -344,13 +344,13 @@ impl App {
 
     /// Return the current working directory as a tilde-collapsed display string.
     pub(crate) fn cwd_display(&self) -> String {
-        if let Some(home) = dirs::home_dir() {
-            if let Ok(stripped) = self.cwd.strip_prefix(&home) {
-                if stripped.as_os_str().is_empty() {
-                    return "~".into();
-                }
-                return format!("~/{}", stripped.display());
+        if let Some(home) = dirs::home_dir()
+            && let Ok(stripped) = self.cwd.strip_prefix(&home)
+        {
+            if stripped.as_os_str().is_empty() {
+                return "~".into();
             }
+            return format!("~/{}", stripped.display());
         }
         self.cwd.display().to_string()
     }
@@ -427,19 +427,19 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     frame.render_widget(hrule_top, chunks[1]);
 
     // chunks[2] = ephemeral toast (zero rows when no toast is active).
-    if toast_rows == 1 {
-        if let Some(t) = &app.toast {
-            let (fg, bg) = match t.level {
-                toast::ToastLevel::Error => (Color::White, Color::Red),
-                toast::ToastLevel::Warn => (Color::Black, Color::Yellow),
-                toast::ToastLevel::Info => (Color::Gray, Color::Reset),
-            };
-            let line = Paragraph::new(Line::from(Span::styled(
-                t.text.clone(),
-                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-            )));
-            frame.render_widget(line, chunks[2]);
-        }
+    if toast_rows == 1
+        && let Some(t) = &app.toast
+    {
+        let (fg, bg) = match t.level {
+            toast::ToastLevel::Error => (Color::White, Color::Red),
+            toast::ToastLevel::Warn => (Color::Black, Color::Yellow),
+            toast::ToastLevel::Info => (Color::Gray, Color::Reset),
+        };
+        let line = Paragraph::new(Line::from(Span::styled(
+            t.text.clone(),
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        )));
+        frame.render_widget(line, chunks[2]);
     }
 
     // chunks[3] = input — character-wrapped manually so cursor math stays aligned.
@@ -1176,12 +1176,12 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
         }
         TurnEvent::AssistantTextDelta { text, .. } => {
             // First delta of this stream → transition to Streaming activity.
-            if let Some(running) = app.running.as_mut() {
-                if !matches!(running.activity, Activity::Streaming { .. }) {
-                    running.activity = Activity::Streaming {
-                        since: std::time::Instant::now(),
-                    };
-                }
+            if let Some(running) = app.running.as_mut()
+                && !matches!(running.activity, Activity::Streaming { .. })
+            {
+                running.activity = Activity::Streaming {
+                    since: std::time::Instant::now(),
+                };
             }
             // Find or create the in-progress AssistantText line.
             if let Some(TranscriptLine::AssistantText(buf)) = app.transcript.last_mut() {
@@ -1191,12 +1191,12 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             }
         }
         TurnEvent::AssistantThinkingDelta { text, .. } => {
-            if let Some(running) = app.running.as_mut() {
-                if !matches!(running.activity, Activity::Thinking { .. }) {
-                    running.activity = Activity::Thinking {
-                        since: std::time::Instant::now(),
-                    };
-                }
+            if let Some(running) = app.running.as_mut()
+                && !matches!(running.activity, Activity::Thinking { .. })
+            {
+                running.activity = Activity::Thinking {
+                    since: std::time::Instant::now(),
+                };
             }
             if let Some(TranscriptLine::AssistantThinking(buf)) = app.transcript.last_mut() {
                 buf.push_str(&text);
@@ -1231,11 +1231,10 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                     input,
                     ..
                 } = entry
+                    && *id == tool_use_id
                 {
-                    if *id == tool_use_id {
-                        input.push_str(&partial_json);
-                        break;
-                    }
+                    input.push_str(&partial_json);
+                    break;
                 }
             }
         }
@@ -1266,11 +1265,10 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                     result,
                     ..
                 } = entry
+                    && *id == tool_use_id
                 {
-                    if *id == tool_use_id {
-                        *result = Some((is_error, result_text));
-                        break;
-                    }
+                    *result = Some((is_error, result_text));
+                    break;
                 }
             }
         }
@@ -1302,16 +1300,16 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             // Persist to session if applicable (consumes final_messages).
             if let Some(sess) = app.session.as_mut() {
                 sess.merge_run(final_messages, total_usage);
-                if let Some(store) = app.store.as_ref() {
-                    if !app.args.no_save {
-                        match store.save(sess) {
-                            Ok(()) => app
-                                .transcript
-                                .push(TranscriptLine::Info("session saved".into())),
-                            Err(e) => app
-                                .transcript
-                                .push(TranscriptLine::Error(format!("save failed: {e}"))),
-                        }
+                if let Some(store) = app.store.as_ref()
+                    && !app.args.no_save
+                {
+                    match store.save(sess) {
+                        Ok(()) => app
+                            .transcript
+                            .push(TranscriptLine::Info("session saved".into())),
+                        Err(e) => app
+                            .transcript
+                            .push(TranscriptLine::Error(format!("save failed: {e}"))),
                     }
                 }
             }
@@ -1399,10 +1397,10 @@ pub(crate) async fn run(
     }
 
     // Save session on clean exit (no-op if RunEnd already saved it).
-    if let (Some(store), Some(sess)) = (app.store.as_ref(), app.session.as_ref()) {
-        if !app.args.no_save {
-            let _ = store.save(sess);
-        }
+    if let (Some(store), Some(sess)) = (app.store.as_ref(), app.session.as_ref())
+        && !app.args.no_save
+    {
+        let _ = store.save(sess);
     }
 
     Ok(())
@@ -1753,10 +1751,8 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             let has_system = messages
                 .first()
                 .is_some_and(|m| m.role == caliban_provider::Role::System);
-            if !has_system {
-                if let Some(ref sp) = app.system_prompt {
-                    messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
-                }
+            if !has_system && let Some(ref sp) = app.system_prompt {
+                messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
             }
 
             messages.push(caliban_provider::Message::user_text(outgoing_text));

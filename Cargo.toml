@@ -17,7 +17,7 @@ members = [
 edition = "2024"
 license = "AGPL-3.0-only"
 authors = ["John Ford <john.ford2002@gmail.com>"]
-rust-version = "1.85"
+rust-version = "1.90"
 # repository = TODO: set once the GitHub repo exists
 
 [workspace.dependencies]

@@ -285,13 +285,13 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
 
     // If there is text content (and no refusal was already added), add it.
     if msg.refusal.is_none() {
-        if let Some(text) = msg.content {
-            if !text.is_empty() {
-                content_blocks.push(caliban_provider::ContentBlock::Text(IrTextBlock {
-                    text,
-                    cache_control: None,
-                }));
-            }
+        if let Some(text) = msg.content
+            && !text.is_empty()
+        {
+            content_blocks.push(caliban_provider::ContentBlock::Text(IrTextBlock {
+                text,
+                cache_control: None,
+            }));
         }
 
         // Convert tool calls to ToolUse blocks.

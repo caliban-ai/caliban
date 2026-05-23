@@ -157,18 +157,15 @@ pub(crate) fn map_openai_sse_to_events(
                         };
                     }
                     // Accumulate arguments.
-                    if let Some(block) = state.tool_blocks.get(&tc.index) {
-                        let our_index = block.our_index;
-                        if let Some(func) = &tc.function {
-                            if let Some(args) = &func.arguments {
-                                if !args.is_empty() {
-                                    yield StreamEvent::Delta {
-                                        index: our_index,
-                                        delta: StreamingDelta::ToolUseInputJson(args.clone()),
-                                    };
-                                }
-                            }
-                        }
+                    if let Some(block) = state.tool_blocks.get(&tc.index)
+                        && let Some(func) = &tc.function
+                        && let Some(args) = &func.arguments
+                        && !args.is_empty()
+                    {
+                        yield StreamEvent::Delta {
+                            index: block.our_index,
+                            delta: StreamingDelta::ToolUseInputJson(args.clone()),
+                        };
                     }
                 }
 
