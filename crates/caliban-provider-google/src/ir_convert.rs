@@ -7,9 +7,9 @@ use caliban_provider::{
 };
 
 use crate::schema::request::{
-    NativeContent, NativeFunctionCall, NativeFunctionCallingConfig, NativeFunctionDeclaration,
-    NativeFunctionResponse, NativeGenerationConfig, NativeInlineData, NativePart, NativeRequest,
-    NativeSystemInstruction, NativeToolConfig, NativeToolList,
+    NativeContent, NativeFileData, NativeFunctionCall, NativeFunctionCallingConfig,
+    NativeFunctionDeclaration, NativeFunctionResponse, NativeGenerationConfig, NativeInlineData,
+    NativePart, NativeRequest, NativeSystemInstruction, NativeToolConfig, NativeToolList,
 };
 use crate::schema::response::{NativeFinishReason, NativeResponse};
 
@@ -18,16 +18,23 @@ use crate::schema::response::{NativeFinishReason, NativeResponse};
 /// Leading `Role::System` messages are collected into `systemInstruction`.
 /// `Role::User` → `"user"`, `Role::Assistant` → `"model"`.
 ///
+/// Set `allow_url_images` to `true` when targeting Vertex AI (which supports `fileData`
+/// URI parts). Set it to `false` for AI Studio, which requires base64 inline data and
+/// will return an error if a URL image is encountered.
+///
 /// # Errors
 ///
-/// Returns `Err` if an `Image::Url` block is encountered (not supported for AI Studio),
-/// or if a `ToolResult` block's content cannot be serialized to JSON.
+/// Returns `Err` if `allow_url_images` is `false` and an `Image::Url` block is
+/// encountered, or if a `ToolResult` block's content cannot be serialized to JSON.
 ///
 /// # Panics
 ///
 /// This function cannot panic in practice; the `expect` is guarded by a preceding `peek`.
 #[allow(clippy::too_many_lines)]
-pub fn ir_to_native_request(req: caliban_provider::CompletionRequest) -> Result<NativeRequest> {
+pub fn ir_to_native_request(
+    req: caliban_provider::CompletionRequest,
+    allow_url_images: bool,
+) -> Result<NativeRequest> {
     let mut messages_iter = req.messages.into_iter().peekable();
 
     // Collect leading System messages into systemInstruction.
@@ -107,10 +114,23 @@ pub fn ir_to_native_request(req: caliban_provider::CompletionRequest) -> Result<
                                     data,
                                 }));
                             }
-                            IrImageSource::Url { .. } => {
-                                return Err(Error::InvalidRequest(
-                                    "Google AI Studio requires base64 images; got URL".into(),
-                                ));
+                            IrImageSource::Url { url } => {
+                                if allow_url_images {
+                                    // Vertex AI supports fileData URI parts.
+                                    // We can't always know the MIME type from the URL
+                                    // alone; use a generic fallback — callers that know
+                                    // the MIME type should use Base64 or supply it at
+                                    // a higher layer.
+                                    let mime = infer_mime_from_url(&url);
+                                    parts.push(NativePart::FileData(NativeFileData {
+                                        mime_type: mime,
+                                        file_uri: url,
+                                    }));
+                                } else {
+                                    return Err(Error::InvalidRequest(
+                                        "Google AI Studio requires base64 images; got URL".into(),
+                                    ));
+                                }
                             }
                         },
                         ContentBlock::ToolResult(tr) => {
@@ -295,8 +315,10 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
                     input: fc.args,
                 }));
             }
-            // InlineData and FunctionResponse in responses are ignored.
-            NativePart::InlineData(_) | NativePart::FunctionResponse(_) => {}
+            // InlineData, FileData, and FunctionResponse in responses are ignored.
+            NativePart::InlineData(_)
+            | NativePart::FileData(_)
+            | NativePart::FunctionResponse(_) => {}
         }
     }
 
@@ -318,6 +340,29 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
             cache_read_input_tokens: None,
         },
     })
+}
+
+/// Infer a MIME type from a URL's file extension.
+///
+/// Falls back to `"application/octet-stream"` for unknown extensions.
+fn infer_mime_from_url(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url);
+    match path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png".to_string(),
+        Some("jpg" | "jpeg") => "image/jpeg".to_string(),
+        Some("gif") => "image/gif".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("pdf") => "application/pdf".to_string(),
+        Some("mp4") => "video/mp4".to_string(),
+        Some("mp3") => "audio/mpeg".to_string(),
+        Some("wav") => "audio/wav".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
 }
 
 /// Map a Gemini finish reason to an IR `StopReason`.

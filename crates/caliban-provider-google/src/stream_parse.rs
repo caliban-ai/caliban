@@ -151,8 +151,10 @@ pub(crate) fn map_gemini_sse_to_events(
 
                         yield StreamEvent::ContentBlockStop { index: block_index };
                     }
-                    // InlineData and FunctionResponse in response parts are ignored.
-                    NativePart::InlineData(_) | NativePart::FunctionResponse(_) => {}
+                    // InlineData, FileData, and FunctionResponse in response parts are ignored.
+                    NativePart::InlineData(_)
+                    | NativePart::FileData(_)
+                    | NativePart::FunctionResponse(_) => {}
                 }
             }
 

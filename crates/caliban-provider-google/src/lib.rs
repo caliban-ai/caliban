@@ -58,13 +58,28 @@ impl<T: Transport> GoogleProvider<T> {
     }
 }
 
+#[cfg(feature = "vertex")]
+impl GoogleProvider<crate::transport::vertex::VertexTransport> {
+    /// Construct a `GoogleProvider` using the Google Vertex AI transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the underlying `reqwest` client cannot be built.
+    pub fn vertex(cfg: crate::config::VertexConfig) -> Result<Self> {
+        crate::transport::vertex::VertexTransport::new(cfg)
+            .map(|t| Self { transport: t })
+            .map_err(Error::adapter)
+    }
+}
+
 #[async_trait]
 impl<T: Transport> Provider for GoogleProvider<T> {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         req.validate()?;
         let canonical_model = req.model.clone();
         let wire_model = self.transport.wire_model_id(&canonical_model);
-        let native = ir_convert::ir_to_native_request(req)?;
+        let allow_urls = self.transport.supports_url_images();
+        let native = ir_convert::ir_to_native_request(req, allow_urls)?;
         let native_resp = self
             .transport
             .send(&wire_model, &native)
@@ -77,7 +92,8 @@ impl<T: Transport> Provider for GoogleProvider<T> {
         req.validate()?;
         let canonical_model = req.model.clone();
         let wire_model = self.transport.wire_model_id(&canonical_model);
-        let native = ir_convert::ir_to_native_request(req)?;
+        let allow_urls = self.transport.supports_url_images();
+        let native = ir_convert::ir_to_native_request(req, allow_urls)?;
         let bytes_stream = self
             .transport
             .stream(&wire_model, &native)

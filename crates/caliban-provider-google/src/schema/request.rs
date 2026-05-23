@@ -43,6 +43,8 @@ pub enum NativePart {
     Text(String),
     /// Inline base64-encoded binary data.
     InlineData(NativeInlineData),
+    /// A file reference by URI (Vertex AI only; not supported on AI Studio).
+    FileData(NativeFileData),
     /// A function call issued by the model.
     FunctionCall(NativeFunctionCall),
     /// A function response provided by the user.
@@ -64,6 +66,11 @@ impl Serialize for NativePart {
             NativePart::InlineData(d) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("inlineData", d)?;
+                map.end()
+            }
+            NativePart::FileData(d) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("fileData", d)?;
                 map.end()
             }
             NativePart::FunctionCall(fc) => {
@@ -97,6 +104,11 @@ impl<'de> Deserialize<'de> for NativePart {
                 serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?;
             return Ok(NativePart::InlineData(d));
         }
+        if let Some(v) = map.get("fileData") {
+            let d: NativeFileData =
+                serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?;
+            return Ok(NativePart::FileData(d));
+        }
         if let Some(v) = map.get("functionCall") {
             let fc: NativeFunctionCall =
                 serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?;
@@ -121,6 +133,18 @@ pub struct NativeInlineData {
     pub mime_type: String,
     /// Base64-encoded data.
     pub data: String,
+}
+
+/// A file reference by URI (Vertex AI only).
+///
+/// AI Studio does not support `fileData` parts; use [`NativeInlineData`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFileData {
+    /// MIME type of the referenced file (e.g. `"image/png"`).
+    pub mime_type: String,
+    /// A URI pointing to the file (e.g. an HTTPS or GCS URL).
+    pub file_uri: String,
 }
 
 /// A function call issued by the model.

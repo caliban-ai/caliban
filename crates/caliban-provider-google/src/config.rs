@@ -1,5 +1,64 @@
 //! Per-transport configuration structs for the Google Gemini adapter.
 
+#[cfg(feature = "vertex")]
+pub use vertex_cfg::*;
+
+#[cfg(feature = "vertex")]
+mod vertex_cfg {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gcp_auth::TokenProvider;
+
+    use crate::error::GoogleError;
+
+    /// Configuration for Google Vertex AI transport (Gemini on Vertex).
+    #[derive(Clone)]
+    pub struct VertexConfig {
+        /// GCP token provider (handles refresh).
+        pub token_provider: Arc<dyn TokenProvider>,
+        /// GCP project ID.
+        pub project: String,
+        /// GCP region (e.g., `"us-central1"`).
+        pub region: String,
+        /// Request timeout.
+        pub timeout: Duration,
+    }
+
+    impl std::fmt::Debug for VertexConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("VertexConfig")
+                .field("project", &self.project)
+                .field("region", &self.region)
+                .field("timeout", &self.timeout)
+                .field("token_provider", &"<dyn TokenProvider>")
+                .finish()
+        }
+    }
+
+    impl VertexConfig {
+        /// Build from Application Default Credentials.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the `gcp_auth` provider cannot be obtained.
+        pub async fn from_gcp_credentials(
+            project: impl Into<String>,
+            region: impl Into<String>,
+        ) -> Result<Self, GoogleError> {
+            let token_provider = gcp_auth::provider()
+                .await
+                .map_err(|e| GoogleError::Transport(Box::new(e)))?;
+            Ok(Self {
+                token_provider,
+                project: project.into(),
+                region: region.into(),
+                timeout: Duration::from_secs(60),
+            })
+        }
+    }
+}
+
 use std::time::Duration;
 
 use secrecy::SecretString;

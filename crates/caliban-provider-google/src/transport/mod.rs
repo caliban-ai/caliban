@@ -32,6 +32,17 @@ pub trait Transport: Send + Sync + 'static {
     fn wire_model_id(&self, canonical: &str) -> String {
         canonical.to_string()
     }
+
+    /// Whether this transport accepts URL images (as `fileData` parts).
+    ///
+    /// AI Studio requires base64-inline images; Vertex AI supports URI references.
+    /// Defaults to `false`.
+    fn supports_url_images(&self) -> bool {
+        false
+    }
 }
 
 pub mod ai_studio;
+
+#[cfg(feature = "vertex")]
+pub mod vertex;
