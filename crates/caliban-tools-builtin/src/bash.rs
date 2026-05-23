@@ -62,9 +62,41 @@ async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R, cap: usize) -> Stri
 
 /// Outcome of the `tokio::select!` in [`BashTool::invoke`].
 enum RawOutcome {
-    Done(std::process::ExitStatus),
+    Done(std::io::Result<std::process::ExitStatus>),
     Timeout,
     Cancelled,
+}
+
+/// Send `SIGKILL` to the child's entire process group (so subprocesses spawned
+/// by the shell don't survive as orphans), then `wait()` to reap the zombie.
+///
+/// On non-Unix targets only the immediate child is killed (via `start_kill` /
+/// `kill_on_drop`); subprocess containment requires Windows Job objects which
+/// are not in scope here.
+#[allow(unused_variables)]
+#[allow(unsafe_code)] // libc::kill is a stable, well-defined FFI call; required to signal a process group (negative PID) which the safe API in std doesn't expose
+async fn kill_process_tree(child_pid: Option<u32>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child_pid {
+        if let Ok(pid_i32) = i32::try_from(pid) {
+            // SAFETY: `libc::kill` takes two integer arguments and returns an
+            // integer; no pointer dereferences, no aliasing concerns. A negative
+            // first argument signals the entire process group with PGID = our
+            // child's PID (because we called `process_group(0)` on Command).
+            // ESRCH on an already-dead group is fine; we ignore the return.
+            unsafe {
+                libc::kill(-pid_i32, libc::SIGKILL);
+            }
+        }
+    }
+    // start_kill is a no-op if the process already exited, otherwise it
+    // sends SIGKILL to the leader (redundant with the group kill above,
+    // but harmless and serves as a fallback on non-Unix).
+    let _ = child.start_kill();
+    // Explicit wait so we don't leave a zombie. kill_on_drop sends SIGKILL
+    // but does NOT wait — without this, we'd accumulate zombies in long-
+    // running caliban sessions.
+    let _ = child.wait().await;
 }
 
 #[async_trait]
@@ -112,16 +144,28 @@ impl Tool for BashTool {
             None => self.root.root().to_path_buf(),
         };
 
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
             .arg(&parsed.command)
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(ToolError::execution)?;
+            .kill_on_drop(true);
+
+        // Put the child into its own process group so on timeout/cancel
+        // we can SIGKILL the entire tree — not just the shell, but any
+        // subprocesses it spawned (e.g., `sh -c "find / | xargs grep …"`
+        // forks find AND grep AND xargs). Without process_group(0), the
+        // shell dies and its descendants get reparented to init,
+        // leaving orphans.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn().map_err(ToolError::execution)?;
+        // Capture the PID now while we still have access to the Child.
+        // On Unix the child's PID equals its PGID (because of process_group(0)).
+        let child_pid = child.id();
 
         let stdout_pipe = child.stdout.take().expect("piped");
         let stderr_pipe = child.stderr.take().expect("piped");
@@ -130,25 +174,24 @@ impl Tool for BashTool {
         let read_out = tokio::spawn(read_capped(stdout_pipe, STDOUT_CAP));
         let read_err = tokio::spawn(read_capped(stderr_pipe, STDERR_CAP));
 
-        // Spawn the wait as a task that owns `child`.
-        // kill_on_drop(true) means dropping `child` (when the task is aborted)
-        // sends SIGKILL to the process automatically.
-        let wait_task: tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>> =
-            tokio::spawn(async move { child.wait().await });
-
-        let raw = tokio::select! {
-            result = wait_task => {
-                let status = result
-                    .map_err(|e| ToolError::execution(std::io::Error::other(e.to_string())))?
-                    .map_err(ToolError::execution)?;
-                RawOutcome::Done(status)
+        // IMPORTANT: do NOT spawn the wait into a separate task — that pattern
+        // leaks the child on timeout/cancel because dropping a tokio JoinHandle
+        // does not abort the task. Instead, keep `child.wait()` as a pinned
+        // local future so we retain access to `child` after select! returns and
+        // can clean up the process tree ourselves.
+        let outcome = {
+            let wait_fut = child.wait();
+            tokio::pin!(wait_fut);
+            tokio::select! {
+                result = &mut wait_fut => RawOutcome::Done(result),
+                () = tokio::time::sleep(timeout) => RawOutcome::Timeout,
+                () = cx.cancel.cancelled() => RawOutcome::Cancelled,
             }
-            () = tokio::time::sleep(timeout) => RawOutcome::Timeout,
-            () = cx.cancel.cancelled() => RawOutcome::Cancelled,
         };
 
-        match raw {
-            RawOutcome::Done(status) => {
+        match outcome {
+            RawOutcome::Done(status_result) => {
+                let status = status_result.map_err(ToolError::execution)?;
                 let stdout_str = read_out.await.unwrap_or_default();
                 let stderr_str = read_err.await.unwrap_or_default();
                 let exit_code_num = status.code();
@@ -184,7 +227,7 @@ impl Tool for BashTool {
             }
 
             RawOutcome::Timeout => {
-                // Aborting the wait task drops `child`, which triggers kill_on_drop.
+                kill_process_tree(child_pid, &mut child).await;
                 read_out.abort();
                 read_err.abort();
                 Err(ToolError::execution(std::io::Error::new(
@@ -194,6 +237,7 @@ impl Tool for BashTool {
             }
 
             RawOutcome::Cancelled => {
+                kill_process_tree(child_pid, &mut child).await;
                 read_out.abort();
                 read_err.abort();
                 Err(ToolError::Cancelled)
@@ -320,6 +364,61 @@ mod tests {
         assert!(
             matches!(err, ToolError::Cancelled),
             "expected Cancelled, got: {err}"
+        );
+    }
+
+    /// Regression test for the orphan-shell bug: when a shell command spawns
+    /// subprocesses (a backgrounded `sleep`), cancellation must kill the
+    /// entire process group, not just the shell leader.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_kills_subprocess_tree() {
+        use std::process::Command;
+
+        let tmp = TempDir::new().unwrap();
+        let tool = BashTool::new(WorkspaceRoot::new(tmp.path()));
+        let cancel = CancellationToken::new();
+
+        // Use an unusual sleep duration as a marker so we can find this specific
+        // sleep process via `ps`. PID-derived to avoid clashes with concurrent runs.
+        let marker_seconds: u32 = 30000 + (std::process::id() % 1000);
+        // Backgrounded sleep + `wait` forces the shell to fork a separate
+        // /bin/sleep subprocess (rather than exec-replacing itself). If our
+        // process-group kill works, both die together; if not, sleep orphans.
+        let cmd = format!("/bin/sleep {marker_seconds} & wait");
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+        let cx = ToolContext {
+            tool_use_id: "t1".into(),
+            cancel,
+        };
+        let err = tool.invoke(json!({"command": cmd}), cx).await.unwrap_err();
+        assert!(matches!(err, ToolError::Cancelled));
+
+        // Give the OS a beat to actually reap the now-killed processes.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // ps lists all processes; look for our specific sleep duration. If the
+        // process-group SIGKILL worked, no process should be carrying it.
+        let needle = format!("sleep {marker_seconds}");
+        let output = Command::new("ps")
+            .arg("-eo")
+            .arg("pid,command")
+            .output()
+            .expect("ps should run");
+        let ps_text = String::from_utf8_lossy(&output.stdout);
+        let surviving: Vec<&str> = ps_text
+            .lines()
+            .filter(|l| l.contains(&needle) && !l.contains("grep") && !l.contains("ps -eo"))
+            .collect();
+        assert!(
+            surviving.is_empty(),
+            "subprocess(es) survived cancellation:\n{}",
+            surviving.join("\n"),
         );
     }
 }

@@ -833,6 +833,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

@@ -55,7 +55,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 dirs   = "5"
 
 [workspace.lints.rust]
-unsafe_code      = "forbid"
+unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)
 missing_docs     = "warn"
 unreachable_pub  = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
