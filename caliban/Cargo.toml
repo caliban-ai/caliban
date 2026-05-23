@@ -13,7 +13,18 @@ name = "caliban"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true }
+caliban-provider           = { path = "../crates/caliban-provider" }
+caliban-provider-anthropic = { path = "../crates/caliban-provider-anthropic" }
+caliban-provider-openai    = { path = "../crates/caliban-provider-openai" }
+caliban-provider-ollama    = { path = "../crates/caliban-provider-ollama" }
+caliban-provider-google    = { path = "../crates/caliban-provider-google" }
+caliban-agent-core         = { path = "../crates/caliban-agent-core" }
+caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
+anyhow                     = { workspace = true }
+clap                       = { version = "4", features = ["derive"] }
+tokio                      = { workspace = true, features = ["full"] }
+tokio-util                 = { workspace = true }
+futures                    = { workspace = true }
 
 [lints]
 workspace = true
