@@ -24,9 +24,8 @@ The relevant tiers of copyleft are:
 
 Every crate's `Cargo.toml` declares `license = "AGPL-3.0-only"` via
 `license.workspace = true`. The full AGPL-3.0 text lives in `LICENSE`
-at the workspace root. The README states implications. caliban crates
-won't compose into permissive Rust projects on crates.io — this is
-intentional.
+at the workspace root. The README states the license prominently and
+explains the implications for service operators and forks.
 
 ## Consequences
 
