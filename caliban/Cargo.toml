@@ -28,6 +28,8 @@ tokio-util                 = { workspace = true }
 futures                    = { workspace = true }
 rustyline                  = "14"
 dirs                       = { workspace = true }
+ratatui = { version = "0.29.0", features = ["crossterm"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

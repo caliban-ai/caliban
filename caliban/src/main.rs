@@ -4,6 +4,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 mod repl;
+mod tui;
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -106,6 +107,10 @@ pub(crate) struct Args {
     /// Override the sessions directory.
     #[arg(long, value_name = "DIR")]
     pub(crate) sessions_dir: Option<PathBuf>,
+
+    /// Use the new TUI instead of the simple REPL (experimental).
+    #[arg(long)]
+    pub(crate) tui: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -327,6 +332,11 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // --- TUI dispatch: --tui flag overrides the REPL.
+    if args.tui {
+        return tui::run(args, agent, store, session).await;
+    }
 
     // --- REPL dispatch: no prompt + stdin is a TTY → enter interactive REPL.
     // The REPL manages its own per-turn Ctrl-C handling; we do NOT register
