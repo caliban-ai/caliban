@@ -21,6 +21,7 @@ pub(crate) enum Overlay {
     Config,
     Mcp,
     Skills,
+    System,
 }
 
 impl Overlay {
@@ -30,6 +31,7 @@ impl Overlay {
             Self::Config => "Configuration",
             Self::Mcp => "MCP Servers",
             Self::Skills => "Skills",
+            Self::System => "System Prompt",
         }
     }
 
@@ -39,6 +41,7 @@ impl Overlay {
             Self::Config => "config",
             Self::Mcp => "mcp",
             Self::Skills => "skills",
+            Self::System => "system",
         }
     }
 }
@@ -526,6 +529,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
         Overlay::Config => config_lines(app),
         Overlay::Mcp => mcp_lines(),
         Overlay::Skills => skills_lines(),
+        Overlay::System => system_lines(app),
     };
 
     let body = Paragraph::new(content_lines).wrap(Wrap { trim: false });
@@ -543,6 +547,7 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ("/config", "Show active configuration"),
         ("/mcp", "MCP server configuration (stub)"),
         ("/skills", "Skills configuration (stub)"),
+        ("/system", "View current system prompt"),
     ];
 
     let mut out = vec![Line::raw("")];
@@ -755,6 +760,44 @@ fn skills_lines() -> Vec<Line<'static>> {
     ));
     out.push(Line::raw(""));
     out.push(Line::styled("  Press q or Esc to close.", dim));
+    out
+}
+
+fn system_lines(app: &App) -> Vec<Line<'static>> {
+    let system_text = app
+        .session
+        .as_ref()
+        .and_then(|s| {
+            s.messages
+                .iter()
+                .find(|m| m.role == caliban_provider::Role::System)
+        })
+        .and_then(|m| {
+            m.content.iter().find_map(|c| match c {
+                caliban_provider::ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+        })
+        .or_else(|| app.system_prompt.clone());
+
+    let mut out = vec![Line::raw("")];
+    match system_text {
+        Some(text) => {
+            for line in text.lines() {
+                out.push(Line::raw(line.to_string()));
+            }
+        }
+        None => {
+            out.push(Line::raw(
+                "(no system prompt — use --system or --system-file to set one)",
+            ));
+        }
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "  Press q or Esc to close. Edit via --system-file or by editing the session JSON.",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
     out
 }
 
@@ -1011,6 +1054,9 @@ fn handle_slash_command(line: &str, app: &mut App) {
         }
         "/skills" => {
             app.view = ViewState::Overlay(Overlay::Skills);
+        }
+        "/system" => {
+            app.view = ViewState::Overlay(Overlay::System);
         }
         "/exit" | "/quit" => {
             app.should_exit = true;
