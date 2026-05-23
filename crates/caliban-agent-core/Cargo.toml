@@ -25,7 +25,7 @@ rand             = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../caliban-provider", features = ["mock"] }
-tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 proptest         = { workspace = true }
 
 [lints]

@@ -27,17 +27,7 @@ pub mod compact {
     impl Compactor for NoopCompactor {}
 }
 
-/// Retry policy and executor for provider calls.
-///
-/// This module contains a placeholder type that will be replaced with a full
-/// implementation in Task 3.
-pub mod retry {
-    /// Configurable retry policy for provider calls.
-    ///
-    /// Placeholder — populated in Task 3.
-    #[derive(Debug, Default)]
-    pub struct RetryPolicy {}
-}
+pub mod retry;
 
 /// Outcome of a single agent turn.
 ///
@@ -53,6 +43,7 @@ pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
 pub use registry::ToolRegistry;
+pub use retry::RetryPolicy;
 pub use tool::{Tool, ToolContext, ToolError};
 
 // Re-export from caliban-provider so callers can construct messages without
