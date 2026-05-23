@@ -15,6 +15,9 @@ use crate::schema::response::{NativeFinishReason, NativeResponse};
 
 /// Convert a caliban IR `CompletionRequest` to an `OpenAI` `NativeRequest`.
 ///
+/// `system_role` controls the `"role"` string used for system messages.  Pass
+/// `"system"` for standard models and `"developer"` for o1-series models.
+///
 /// # Errors
 ///
 /// Returns `Err` if a `ToolUseBlock`'s `input` value cannot be serialized to a JSON string.
@@ -26,6 +29,7 @@ use crate::schema::response::{NativeFinishReason, NativeResponse};
 pub fn ir_to_native_request(
     req: caliban_provider::CompletionRequest,
     stream: bool,
+    system_role: &str,
 ) -> Result<NativeRequest> {
     let mut messages_iter = req.messages.into_iter().peekable();
 
@@ -48,7 +52,7 @@ pub fn ir_to_native_request(
     // Prepend system message if any leading system content existed.
     if !system_texts.is_empty() {
         native_messages.push(NativeMessage {
-            role: "system".into(),
+            role: system_role.into(),
             content: Some(NativeContent::Text(system_texts.join("\n\n"))),
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -75,7 +79,7 @@ pub fn ir_to_native_request(
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 native_messages.push(NativeMessage {
-                    role: "system".into(),
+                    role: system_role.into(),
                     content: Some(NativeContent::Text(text)),
                     tool_calls: Vec::new(),
                     tool_call_id: None,

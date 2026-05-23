@@ -21,6 +21,24 @@ const fn caps(max_input: u32, max_output: u32, vision: bool, thinking: bool) -> 
     }
 }
 
+/// Like [`caps`] but advertises `DeveloperRole` for o1-series models.
+const fn caps_o1(max_input: u32, max_output: u32, vision: bool, thinking: bool) -> Capabilities {
+    Capabilities {
+        max_input_tokens: max_input,
+        max_output_tokens: max_output,
+        vision,
+        tool_use: ToolUseCapability::ParallelCalls,
+        thinking,
+        prompt_caching: PromptCachingCapability::Automatic,
+        json_mode: true,
+        streaming: true,
+        stop_sequences: true,
+        top_k: false,
+        system_prompt: SystemPromptCapability::DeveloperRole,
+        refusal_field: true,
+    }
+}
+
 /// Return the full list of known `OpenAI` models.
 #[must_use]
 pub fn models() -> Vec<ModelInfo> {
@@ -41,13 +59,13 @@ pub fn models() -> Vec<ModelInfo> {
             id: "o1-preview".into(),
             native_id: "o1-preview".into(),
             display_name: "o1 preview".into(),
-            capabilities: caps(128_000, 32_768, false, true),
+            capabilities: caps_o1(128_000, 32_768, false, true),
         },
         ModelInfo {
             id: "o1-mini".into(),
             native_id: "o1-mini".into(),
             display_name: "o1 mini".into(),
-            capabilities: caps(128_000, 65_536, false, true),
+            capabilities: caps_o1(128_000, 65_536, false, true),
         },
     ]
 }

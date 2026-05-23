@@ -35,7 +35,7 @@ pub fn models() -> Vec<ModelInfo> {
             id: "claude-3-5-haiku".into(),
             native_id: "claude-3-5-haiku-20241022".into(),
             display_name: "Claude 3.5 Haiku".into(),
-            capabilities: caps(200_000, 8_192, false, false),
+            capabilities: caps(200_000, 8_192, true, false),
         },
         ModelInfo {
             id: "claude-3-opus".into(),

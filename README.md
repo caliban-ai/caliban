@@ -124,8 +124,11 @@ See [`adrs/`](adrs/). Notable Layer-0 decisions:
 - [License: AGPL-3.0](adrs/0003-license-agpl-3.0.md)
 - [Naming conventions](adrs/0004-naming-conventions.md)
 - [Workspace layout](adrs/0005-workspace-layout.md)
+- [Message schema (IR)](adrs/0006-message-schema-ir.md)
+- [Transport trait pattern](adrs/0007-transport-trait-pattern.md)
+- [System role positional](adrs/0008-system-role-positional.md)
 
 ## Design specs
 
-The Layer-0 spec lives at
-[`docs/superpowers/specs/2026-05-22-layer-0-bootstrap-design.md`](docs/superpowers/specs/2026-05-22-layer-0-bootstrap-design.md).
+- [Layer 0 · Workspace & ADRs](docs/superpowers/specs/2026-05-22-layer-0-bootstrap-design.md)
+- [Layer 1 · Provider Abstraction](docs/superpowers/specs/2026-05-22-layer-1-provider-design.md)

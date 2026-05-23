@@ -20,7 +20,7 @@ mod stream_parse; // populated in Task 5
 use async_trait::async_trait;
 use caliban_provider::{
     Capabilities, CompletionRequest, CompletionResponse, Error, MessageStream, ModelInfo, Provider,
-    Result,
+    Result, SystemPromptCapability,
 };
 
 use crate::config::DirectConfig;
@@ -77,7 +77,12 @@ impl<T: Transport> Provider for OpenAIProvider<T> {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         req.validate()?;
         let canonical_model = req.model.clone();
-        let mut native = ir_convert::ir_to_native_request(req, false)?;
+        let caps = self.capabilities(&canonical_model);
+        let system_role = match caps.system_prompt {
+            SystemPromptCapability::DeveloperRole => "developer",
+            _ => "system",
+        };
+        let mut native = ir_convert::ir_to_native_request(req, false, system_role)?;
         native.model = self.transport.wire_model_id(&canonical_model);
         self.transport.finalize_request(&mut native);
         let native_resp = self.transport.send(native).await.map_err(Error::from)?;
@@ -87,7 +92,12 @@ impl<T: Transport> Provider for OpenAIProvider<T> {
     async fn stream(&self, req: CompletionRequest) -> Result<MessageStream> {
         req.validate()?;
         let canonical_model = req.model.clone();
-        let mut native = ir_convert::ir_to_native_request(req, true)?;
+        let caps = self.capabilities(&canonical_model);
+        let system_role = match caps.system_prompt {
+            SystemPromptCapability::DeveloperRole => "developer",
+            _ => "system",
+        };
+        let mut native = ir_convert::ir_to_native_request(req, true, system_role)?;
         native.model = self.transport.wire_model_id(&canonical_model);
         // Opt into usage reporting on the final streaming chunk.
         native.stream_options = Some(crate::schema::request::NativeStreamOptions {

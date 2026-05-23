@@ -1,0 +1,46 @@
+name: ci-cloud
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - 'crates/caliban-provider-anthropic/src/transport/bedrock.rs'
+      - 'crates/caliban-provider-anthropic/src/transport/vertex.rs'
+      - 'crates/caliban-provider-google/src/transport/vertex.rs'
+      - 'crates/caliban-provider-openai/src/transport/azure.rs'
+      - 'crates/caliban-provider-anthropic/src/config.rs'
+      - 'crates/caliban-provider-google/src/config.rs'
+      - 'crates/caliban-provider-openai/src/config.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/ci-cloud.yml'
+  pull_request:
+    branches: ["**"]
+    paths:
+      - 'crates/caliban-provider-anthropic/src/transport/bedrock.rs'
+      - 'crates/caliban-provider-anthropic/src/transport/vertex.rs'
+      - 'crates/caliban-provider-google/src/transport/vertex.rs'
+      - 'crates/caliban-provider-openai/src/transport/azure.rs'
+      - 'crates/caliban-provider-anthropic/src/config.rs'
+      - 'crates/caliban-provider-google/src/config.rs'
+      - 'crates/caliban-provider-openai/src/config.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/ci-cloud.yml'
+
+concurrency:
+  group: ci-cloud-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-cloud:
+    name: build + test (bedrock + vertex + azure features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo build  --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
+          cargo clippy --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex --all-targets -- -D warnings
+          cargo test   --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
