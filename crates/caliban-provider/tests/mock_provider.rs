@@ -71,3 +71,19 @@ async fn mock_provider_serves_stream() {
     assert!(matches!(stop, StopReason::EndTurn));
     assert_eq!(usage.input_tokens, 4);
 }
+
+#[tokio::test]
+async fn collect_message_handles_out_of_order_events() {
+    use futures::stream;
+
+    let events = vec![Ok(StreamEvent::Delta {
+        index: 0,
+        delta: StreamingDelta::Text("orphan".into()),
+    })];
+    let stream: caliban_provider::MessageStream = Box::pin(stream::iter(events));
+    let result = collect_message(stream).await;
+    assert!(matches!(
+        result,
+        Err(caliban_provider::Error::InvalidRequest(_))
+    ));
+}

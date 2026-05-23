@@ -63,7 +63,9 @@ fn rejects_image_in_system() {
             Message {
                 role: Role::System,
                 content: vec![ContentBlock::Image(ImageBlock {
-                    source: ImageSource::Url("https://x/img.png".into()),
+                    source: ImageSource::Url {
+                        url: "https://x/img.png".into(),
+                    },
                     cache_control: None,
                 })],
             },
@@ -111,4 +113,24 @@ fn multiple_leading_system_messages_ok() {
         .build()
         .expect("valid");
     assert_eq!(req.messages.len(), 3);
+}
+
+#[test]
+fn multi_system_preserves_call_order() {
+    let req = CompletionRequest::builder("m")
+        .system("first")
+        .system("second")
+        .user_text("u")
+        .build()
+        .unwrap();
+    let texts: Vec<&str> = req
+        .messages
+        .iter()
+        .take(2)
+        .map(|m| match &m.content[0] {
+            caliban_provider::ContentBlock::Text(t) => t.text.as_str(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(texts, vec!["first", "second"]);
 }

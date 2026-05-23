@@ -110,5 +110,8 @@ pub enum ImageSource {
         data: String,
     },
     /// A URL pointing to the image.
-    Url(String),
+    Url {
+        /// The URL of the image.
+        url: String,
+    },
 }

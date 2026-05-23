@@ -54,3 +54,18 @@ proptest! {
         prop_assert_eq!(parsed, m);
     }
 }
+
+#[test]
+fn image_source_url_round_trips() {
+    use caliban_provider::{ContentBlock, ImageBlock, ImageSource};
+    let cb = ContentBlock::Image(ImageBlock {
+        source: ImageSource::Url {
+            url: "https://example.com/img.png".to_string(),
+        },
+        cache_control: None,
+    });
+    let json = serde_json::to_string(&cb).expect("serializes");
+    assert!(json.contains("\"url\":\"https://example.com/img.png\""));
+    let parsed: ContentBlock = serde_json::from_str(&json).expect("deserializes");
+    assert_eq!(parsed, cb);
+}

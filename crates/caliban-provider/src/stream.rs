@@ -45,8 +45,10 @@ pub enum StreamEvent {
     /// End-of-message metadata delta.
     MessageDelta {
         /// Why the model stopped, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<StopReason>,
         /// Incremental usage update.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         usage_delta: Option<Usage>,
     },
     /// The message is fully complete.
@@ -95,6 +97,7 @@ pub type MessageStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send +
 ///
 /// Returns the first stream error encountered, or `Error::InvalidRequest` if
 /// an unsupported block type is streamed.
+#[allow(clippy::too_many_lines)]
 pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, StopReason, Usage)> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut block_types: Vec<StreamingContentType> = Vec::new();
@@ -127,15 +130,25 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
             }
             StreamEvent::Delta { index, delta } => {
                 let i = index as usize;
+                if i >= block_types.len() {
+                    return Err(Error::InvalidRequest(format!(
+                        "Delta event for uninitialized block index {i}"
+                    )));
+                }
                 match delta {
-                    StreamingDelta::ToolUseInputJson(s) => block_json[i].push_str(&s),
                     StreamingDelta::Text(s) | StreamingDelta::Thinking(s) => {
                         block_text[i].push_str(&s);
                     }
+                    StreamingDelta::ToolUseInputJson(s) => block_json[i].push_str(&s),
                 }
             }
             StreamEvent::ContentBlockStop { index } => {
                 let i = index as usize;
+                if i >= block_types.len() {
+                    return Err(Error::InvalidRequest(format!(
+                        "ContentBlockStop for uninitialized block index {i}"
+                    )));
+                }
                 let block = match &block_types[i] {
                     StreamingContentType::Text => ContentBlock::Text(TextBlock {
                         text: std::mem::take(&mut block_text[i]),

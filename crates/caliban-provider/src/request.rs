@@ -121,6 +121,7 @@ fn validate_messages(messages: &[Message]) -> Result<()> {
 }
 
 /// Builder for [`CompletionRequest`].
+#[must_use = "builder has no effect until .build() is called"]
 pub struct CompletionRequestBuilder {
     model: String,
     messages: Vec<Message>,
@@ -136,92 +137,89 @@ pub struct CompletionRequestBuilder {
 }
 
 impl CompletionRequestBuilder {
-    /// Prepend a system message.
-    #[must_use]
+    /// Append a system message after any existing leading System messages.
+    ///
+    /// Multiple calls to `.system()` preserve call order: the second call
+    /// inserts after the first, not before it.
     pub fn system(mut self, text: impl Into<String>) -> Self {
-        self.messages.insert(0, Message::system_text(text));
+        // Insert after any existing leading System messages, before the first non-System.
+        let insertion_index = self
+            .messages
+            .iter()
+            .position(|m| m.role != Role::System)
+            .unwrap_or(self.messages.len());
+        self.messages
+            .insert(insertion_index, Message::system_text(text));
         self
     }
 
     /// Append a user text message.
-    #[must_use]
     pub fn user_text(mut self, text: impl Into<String>) -> Self {
         self.messages.push(Message::user_text(text));
         self
     }
 
     /// Append an assistant text message.
-    #[must_use]
     pub fn assistant_text(mut self, text: impl Into<String>) -> Self {
         self.messages.push(Message::assistant_text(text));
         self
     }
 
     /// Append an arbitrary message.
-    #[must_use]
     pub fn message(mut self, m: Message) -> Self {
         self.messages.push(m);
         self
     }
 
     /// Add a tool declaration.
-    #[must_use]
     pub fn tool(mut self, t: Tool) -> Self {
         self.tools.push(t);
         self
     }
 
     /// Set the tool-choice policy.
-    #[must_use]
     pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
         self.tool_choice = choice;
         self
     }
 
     /// Set the maximum number of output tokens.
-    #[must_use]
     pub fn max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = n;
         self
     }
 
     /// Set the sampling temperature.
-    #[must_use]
     pub fn temperature(mut self, t: f32) -> Self {
         self.temperature = Some(t);
         self
     }
 
     /// Set the nucleus-sampling probability.
-    #[must_use]
     pub fn top_p(mut self, p: f32) -> Self {
         self.top_p = Some(p);
         self
     }
 
     /// Set the top-k sampling cutoff.
-    #[must_use]
     pub fn top_k(mut self, k: u32) -> Self {
         self.top_k = Some(k);
         self
     }
 
     /// Add a stop sequence.
-    #[must_use]
     pub fn stop_sequence(mut self, s: impl Into<String>) -> Self {
         self.stop_sequences.push(s.into());
         self
     }
 
     /// Enable extended thinking with the given configuration.
-    #[must_use]
     pub fn thinking(mut self, cfg: ThinkingConfig) -> Self {
         self.thinking = Some(cfg);
         self
     }
 
     /// Attach an opaque user identifier.
-    #[must_use]
     pub fn user_id(mut self, id: impl Into<String>) -> Self {
         self.metadata.user_id = Some(id.into());
         self
@@ -232,6 +230,7 @@ impl CompletionRequestBuilder {
     /// # Errors
     ///
     /// Returns `Err(Error::InvalidRequest)` if any validation rule is violated.
+    #[must_use = "discarding the Result silently ignores validation errors"]
     pub fn build(self) -> Result<CompletionRequest> {
         let req = CompletionRequest {
             model: self.model,
