@@ -32,6 +32,9 @@ tracing                    = { workspace = true }
 tracing-subscriber         = { workspace = true }
 ratatui = { version = "0.29.0", features = ["crossterm"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
+nucleo-matcher           = { workspace = true }
+ignore                   = { workspace = true }
+thiserror                = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

@@ -2,6 +2,11 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod attach;
+mod completer;
+mod input;
+mod toast;
+
 use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
