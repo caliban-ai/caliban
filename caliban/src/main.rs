@@ -14,7 +14,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(other) => {
-            eprintln!("unknown argument: {other}");
+            eprintln!("caliban: unknown argument: {other}");
             ExitCode::from(2)
         }
         None => {
