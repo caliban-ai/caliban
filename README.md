@@ -3,12 +3,12 @@
 A from-scratch Rust agent harness — a replacement for Claude Code that puts
 the operator in control of model routing, memory, skills, and prompt context.
 
-> **Project status:** Layer 1 (provider abstraction + agent-core) complete.
-> Private repo, designed to be open-sourced. caliban-agent-core drives an
-> LLM agent loop on top of caliban-provider, with Tool dispatch, cancellation,
-> retry, compaction, hooks, and a TurnEvent stream. The `caliban` binary is
-> still a stub — the built-in tools (Read/Write/Edit/Bash/Grep/Glob) and CLI
-> are coming in subsequent sub-projects.
+> **Project status:** Layer 1 complete — provider abstraction + agent-core
+> + built-in tools. Private repo, designed to be open-sourced.
+> `caliban-tools-builtin` ships Read/Write/Edit/Bash/Glob/Grep that the
+> agent can dispatch. The `caliban` binary is still a `--version` stub;
+> the CLI sub-project (Layer 4) wires everything together for a
+> human-testable scenario.
 
 ## Why
 
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent = Arc::new(Agent::builder()
         .provider(provider)
-        .tools(ToolRegistry::new())  // populate with caliban-tools-builtin (D) once it exists
+        .tools(ToolRegistry::new())  // See caliban-tools-builtin for real tool implementations
         .model("claude-3-5-sonnet")
         .max_tokens(1024)
         .build()?);
@@ -123,6 +123,7 @@ crates/              # libraries
   caliban-provider-ollama/     # Ollama (direct)
   caliban-provider-google/     # Gemini (AI Studio + Vertex)
   caliban-agent-core/          # agent loop, tools, session
+  caliban-tools-builtin/       # built-in tools (Read/Write/Edit/Bash/Glob/Grep)
 adrs/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans
 .github/workflows/   # CI
