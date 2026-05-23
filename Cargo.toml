@@ -9,6 +9,7 @@ members = [
     "crates/caliban-provider-google",
     "crates/caliban-agent-core",
     "crates/caliban-tools-builtin",
+    "crates/caliban-sessions",
     "caliban",
 ]
 
@@ -49,6 +50,8 @@ grep-regex    = "0.1"
 grep-searcher = "0.1"
 grep-matcher  = "0.1"
 tempfile      = "3"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+dirs   = "5"
 
 [workspace.lints.rust]
 unsafe_code      = "forbid"

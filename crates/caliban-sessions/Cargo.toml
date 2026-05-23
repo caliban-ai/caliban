@@ -1,0 +1,24 @@
+[package]
+name        = "caliban-sessions"
+version     = "0.0.0"
+description = "Session persistence for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-provider = { path = "../caliban-provider" }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+chrono           = { workspace = true }
+tempfile         = { workspace = true }
+dirs             = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
