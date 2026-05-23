@@ -1,0 +1,42 @@
+[package]
+name        = "caliban-provider-anthropic"
+version     = "0.0.0"
+description = "Anthropic Claude schema family for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default = []
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+vertex  = ["dep:gcp_auth"]
+live-tests = []
+
+[dependencies]
+caliban-provider   = { path = "../caliban-provider" }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+reqwest            = { workspace = true }
+secrecy            = { workspace = true }
+futures            = { workspace = true }
+eventsource-stream = { workspace = true }
+url                = { workspace = true }
+bytes              = { workspace = true }
+http               = { workspace = true }
+tokio              = { workspace = true }
+
+aws-config             = { workspace = true, optional = true }
+aws-sdk-bedrockruntime = { workspace = true, optional = true }
+aws-smithy-types       = { workspace = true, optional = true }
+gcp_auth               = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

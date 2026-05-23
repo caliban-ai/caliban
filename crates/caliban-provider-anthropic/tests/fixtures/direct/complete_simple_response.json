@@ -1,0 +1,10 @@
+{
+  "id": "msg_01ABC",
+  "model": "claude-3-5-sonnet-20241022",
+  "role": "assistant",
+  "type": "message",
+  "content": [{"type": "text", "text": "Hello!"}],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {"input_tokens": 12, "output_tokens": 3, "cache_creation_input_tokens": null, "cache_read_input_tokens": null}
+}

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/caliban-core",
     "crates/caliban-provider",
+    "crates/caliban-provider-anthropic",
     "caliban",
 ]
 
