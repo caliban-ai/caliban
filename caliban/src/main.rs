@@ -119,6 +119,10 @@ pub(crate) struct Args {
     /// Run with no system prompt (disables the default).
     #[arg(long, conflicts_with_all = ["system", "system_file"])]
     pub(crate) no_system: bool,
+
+    /// Append-log events + draws to ~/.cache/caliban/debug.log
+    #[arg(long)]
+    pub(crate) debug: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -297,6 +301,30 @@ async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
     let args = Args::parse();
+
+    // Install file-backed tracing subscriber when --debug or CALIBAN_DEBUG is set.
+    let debug = args.debug || std::env::var("CALIBAN_DEBUG").is_ok();
+    if debug {
+        let log_path = dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"));
+        if let Some(path) = log_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                use tracing_subscriber::layer::SubscriberExt as _;
+                use tracing_subscriber::util::SubscriberInitExt as _;
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false);
+                tracing_subscriber::registry().with(layer).init();
+                tracing::info!("caliban debug logging started — {}", path.display());
+            }
+        }
+    }
 
     let workspace = match &args.workspace {
         Some(p) => WorkspaceRoot::new(p.clone()),

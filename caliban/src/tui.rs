@@ -843,6 +843,7 @@ fn render_status(app: &App) -> Line<'static> {
 #[allow(clippy::too_many_lines)]
 fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
     use caliban_agent_core::TurnEvent;
+    tracing::debug!(?evt, "agent event");
     match evt {
         TurnEvent::TurnStart { .. } => {
             // No transcript change; render shows "running…" via app.running.
@@ -958,6 +959,7 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
 }
 
 fn handle_agent_error(e: &caliban_agent_core::Error, app: &mut App) {
+    tracing::warn!(error = %e, "agent error");
     if matches!(e, caliban_agent_core::Error::Cancelled) {
         app.transcript
             .push(TranscriptLine::Info("turn cancelled".into()));
@@ -990,6 +992,7 @@ pub(crate) async fn run(
 
     loop {
         guard.terminal().draw(|frame| render(frame, &app))?;
+        tracing::trace!("draw");
         stdout().flush().ok();
         if app.should_exit {
             break;
@@ -1139,6 +1142,7 @@ fn handle_event(
     agent_stream: &mut Option<TurnEventStream>,
 ) {
     use crossterm::event::Event;
+    tracing::trace!(?event, "term event");
     if let Event::Key(key) = event {
         if key.kind != KeyEventKind::Press {
             return;
