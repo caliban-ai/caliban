@@ -3,6 +3,8 @@
 //! Each tool implements `caliban_agent_core::Tool` with a JSON Schema for its
 //! input. All tools share a `WorkspaceRoot` for path resolution.
 
+pub mod read;
 pub mod workspace;
 
+pub use read::ReadTool;
 pub use workspace::WorkspaceRoot;
