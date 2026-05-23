@@ -52,7 +52,7 @@ caliban/
 ### Rationale for each path choice
 
 - **`crates/caliban-core/`** — workspace requires ≥1 member to compile; `caliban-core` will become the trait-crate seed where shared types and the `Provider` trait eventually land (B). Layer 0 ships it empty except for a smoke test.
-- **`caliban/` at root, not under `crates/`** — binaries live at the workspace root; libraries under `crates/`. Future binaries (`caliban-tui`, `caliban-orchestrator`) join `caliban/` at root.
+- **`caliban/` at root, not under `crates/`** — binaries live at the workspace root; libraries under `crates/`. Future binaries (`caliban-tui`, `caliban-orchestrator`) each become their own subdirectory at the workspace root (siblings of `caliban/`), not nested inside it.
 - **`adrs/` at root, not `docs/adrs/`** — ADRs are first-class Layer 0 deliverables; top-level placement makes them impossible to miss.
 - **`docs/superpowers/specs/`** — follows the superpowers brainstorming convention. Specs design what we'll build; ADRs record what we decided. Different artifact, different home.
 - **No `tests/` at root** — integration tests live alongside their crate (`crates/<name>/tests/`). Workspace-level integration tests deferred until cross-crate behavior exists.

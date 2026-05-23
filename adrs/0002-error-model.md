@@ -27,9 +27,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 Cross-crate errors convert at boundaries with `#[from]` or explicit
 `From` impls. No shared error crate.
 
-The `caliban` binary uses `anyhow::Result` in `main()` and top-level
-command handlers. `?` propagates errors with context using
-`.context("...")` from `anyhow::Context`.
+The `caliban` binary will use `anyhow::Result` in `main()` and top-level
+command handlers once real command logic exists. `?` propagates errors
+with context using `.context("...")` from `anyhow::Context`.
+
+At Layer 0 the binary is an argv-only stub returning `std::process::ExitCode`
+directly (so it can distinguish exit codes 0 / 2 for success vs. misuse);
+`anyhow` is declared as a workspace-inherited dependency and will be
+imported as soon as the first error-propagating command lands.
 
 ## Consequences
 
