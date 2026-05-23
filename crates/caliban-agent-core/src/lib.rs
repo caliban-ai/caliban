@@ -3,24 +3,13 @@
 //! `caliban-provider`.
 
 pub mod agent;
+pub mod compact;
 pub mod error;
 pub mod hooks;
 pub mod registry;
-pub mod tool;
-
-pub mod compact;
-
 pub mod retry;
-
-/// Outcome of a single agent turn.
-///
-/// This is a temporary placeholder. Task 5 replaces it with the full type
-/// from `src/stream.rs`.
-#[derive(Debug)]
-pub struct TurnOutcome {
-    /// Placeholder field. Real definition arrives in Task 5.
-    _placeholder: (),
-}
+pub mod stream;
+pub mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
@@ -28,6 +17,7 @@ pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
+pub use stream::{RunOutcome, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
 pub use tool::{Tool, ToolContext, ToolError};
 
 // Re-export from caliban-provider so callers can construct messages without
