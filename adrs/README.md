@@ -28,6 +28,7 @@ decision with context, the decision itself, and consequences.
 | [0011](0011-sessions-and-repl.md) | Sessions persisted to disk + interactive REPL | accepted |
 | [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
+| [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted |
 
 ## Adding a new ADR
 

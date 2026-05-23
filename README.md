@@ -42,6 +42,11 @@ cargo test  --workspace             # run all tests
 cargo run   --bin caliban -- --version    # smoke-test the binary
 ```
 
+For diagnosing TUI issues, run with `--debug` (or set `CALIBAN_DEBUG=1`).
+caliban will append-log events and draws to a file under the platform's
+cache directory (e.g. `~/.cache/caliban/debug.log` on Linux,
+`~/Library/Caches/caliban/debug.log` on macOS).
+
 ## Example usage (library)
 
 ```rust
@@ -139,13 +144,18 @@ Invoke `caliban` with no prompt + a TTY stdin to enter the TUI:
 └────────────────────────────────────────────────────────────────┘
 ```
 
+By default, caliban prepends a system prompt describing itself, the cwd, and
+the registered tools so the model knows it's running in caliban. Override
+with `--system "<text>"`, load from `--system-file <PATH>`, or disable with
+`--no-system`. View the active prompt via `/system` in the TUI.
+
 Type `/help`, `/config`, `/mcp`, or `/skills` to open a sub-menu overlay
 showing slash command reference, active configuration, planned MCP
 server config, or planned skills config respectively. `Esc` or `q`
 closes any overlay.
 
 Slash commands (typed at the prompt and submitted with Enter):
-`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`.
+`/help`, `/exit`, `/quit`, `/clear`, `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`, `/system`.
 
 Ctrl-C during a turn cancels it and returns to the prompt. Ctrl-C or
 Ctrl-D at an empty prompt exits cleanly.
