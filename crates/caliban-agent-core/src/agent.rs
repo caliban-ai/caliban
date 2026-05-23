@@ -52,8 +52,6 @@ impl Default for AgentConfig {
 /// Construct via [`AgentBuilder`] (`Agent::builder()`). The turn loop itself is
 /// added in subsequent tasks; this struct exposes the API surface and configuration
 /// accessors.
-// Fields are forward-declared for API surface; the turn loop (Task 5) reads them.
-#[allow(dead_code)]
 pub struct Agent {
     pub(crate) provider: Arc<dyn Provider + Send + Sync>,
     pub(crate) tools: ToolRegistry,

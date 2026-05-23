@@ -293,12 +293,14 @@ async fn dispatch_tool(
     let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> = match decision {
         HookDecision::Deny(msg) => {
             let content = vec![ContentBlock::Text(TextBlock {
-                text: format!("Tool denied: {msg}"),
+                text: format!("Tool call denied: {msg}"),
                 cache_control: None,
             })];
             // Inform the after_tool hook about the denial.
-            let denial_err = ToolError::invalid_input(format!("denied: {msg}"));
-            let _ = agent.hooks.after_tool(&tool_ctx, &Err(denial_err)).await;
+            let denial_err = ToolError::execution(std::io::Error::other(format!("denied: {msg}")));
+            if let Err(e) = agent.hooks.after_tool(&tool_ctx, &Err(denial_err)).await {
+                tracing::warn!(tool = tool_name, error = %e, "after_tool hook error (non-fatal)");
+            }
             return Ok(ToolResultBlock {
                 tool_use_id: tool_use_id.to_string(),
                 content,
@@ -321,7 +323,9 @@ async fn dispatch_tool(
     };
 
     // after_tool hook (non-fatal; errors are logged by tracing, not propagated)
-    let _ = agent.hooks.after_tool(&tool_ctx, &invoke_result).await;
+    if let Err(e) = agent.hooks.after_tool(&tool_ctx, &invoke_result).await {
+        tracing::warn!(tool = tool_name, error = %e, "after_tool hook error (non-fatal)");
+    }
 
     match invoke_result {
         Err(ToolError::Cancelled) => Err(StopCondition::Cancelled),
@@ -449,6 +453,10 @@ impl Agent {
                 let mut acc = MessageAccumulator::new();
 
                 while let Some(evt_result) = provider_stream.next().await {
+                    if cancel.is_cancelled() {
+                        stopped_for = StopCondition::Cancelled;
+                        break 'outer;
+                    }
                     let evt = match evt_result {
                         Ok(e) => e,
                         Err(e) => {
