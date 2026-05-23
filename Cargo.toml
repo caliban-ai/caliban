@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["John Ford <john.ford2002@gmail.com>"]
+rust-version = "1.85"
+# repository = TODO: set once the GitHub repo exists
+
+[workspace.dependencies]
+tokio     = { version = "1", features = ["full"] }
+thiserror = "1"
+anyhow    = "1"
+
+[workspace.lints.rust]
+unsafe_code      = "forbid"
+missing_docs     = "warn"
+unreachable_pub  = "warn"
+rust_2018_idioms = "warn"
+
+[workspace.lints.clippy]
+all      = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo    = "warn"
+module_name_repetitions = "allow"
+must_use_candidate      = "allow"
