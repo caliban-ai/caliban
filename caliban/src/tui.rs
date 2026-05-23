@@ -15,7 +15,7 @@ pub(crate) enum ViewState {
 
 /// Which overlay is currently being shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Config/Mcp/Skills are wired in U.3 and U.4
+#[allow(dead_code)] // Mcp/Skills are wired in U.4
 pub(crate) enum Overlay {
     SlashHelp,
     Config,
@@ -583,8 +583,86 @@ fn slash_help_lines() -> Vec<Line<'static>> {
     out
 }
 
-fn config_lines(_app: &App) -> Vec<Line<'static>> {
-    vec![Line::raw("coming soon")]
+#[allow(clippy::too_many_lines)]
+fn config_lines(app: &App) -> Vec<Line<'_>> {
+    let provider = match app.args.provider {
+        crate::ProviderKind::Anthropic => "anthropic",
+        crate::ProviderKind::Openai => "openai",
+        crate::ProviderKind::Ollama => "ollama",
+        crate::ProviderKind::Google => "google",
+    };
+    let model = app
+        .args
+        .model
+        .clone()
+        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+
+    let workspace = app
+        .args
+        .workspace
+        .as_ref()
+        .map_or_else(|| app.cwd_display(), |p| p.display().to_string());
+
+    let tools_line = if app.args.no_tools {
+        "disabled".to_string()
+    } else {
+        "enabled (Read, Write, Edit, Bash, Glob, Grep)".to_string()
+    };
+
+    let session_line = match &app.session {
+        Some(s) => format!(
+            "{} ({} turns, {} tokens)",
+            s.name,
+            s.turn_count(),
+            s.total_usage
+                .input_tokens
+                .saturating_add(s.total_usage.output_tokens),
+        ),
+        None => "(ephemeral \u{2014} no session)".to_string(),
+    };
+
+    let sessions_dir = app.args.sessions_dir.as_ref().map_or_else(
+        || match caliban_sessions::SessionStore::default_root() {
+            Ok(p) => p.display().to_string(),
+            Err(_) => "(unavailable)".to_string(),
+        },
+        |p| p.display().to_string(),
+    );
+
+    let temperature_line = match app.args.temperature {
+        Some(t) => format!("{t}"),
+        None => "(default)".to_string(),
+    };
+
+    let kv = |k: &'static str, v: String| -> Line<'static> {
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(format!("{k:<20}"), Style::default().fg(Color::Cyan)),
+            Span::raw(v),
+        ])
+    };
+
+    let mut out = vec![Line::raw("")];
+    out.push(kv("Provider", provider.to_string()));
+    out.push(kv("Model", model));
+    out.push(kv("Max tokens", app.args.max_tokens.to_string()));
+    out.push(kv("Max turns", app.args.max_turns.to_string()));
+    out.push(kv("Temperature", temperature_line));
+    out.push(Line::raw(""));
+    out.push(kv("Workspace root", workspace));
+    out.push(kv("Restrict paths", app.args.restrict_paths.to_string()));
+    out.push(kv("Tools", tools_line));
+    out.push(Line::raw(""));
+    out.push(kv("Sessions dir", sessions_dir));
+    out.push(kv("Active session", session_line));
+    out.push(Line::raw(""));
+    out.push(kv("Quiet mode", app.args.quiet.to_string()));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "  Press q or Esc to close.",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out
 }
 
 fn mcp_lines() -> Vec<Line<'static>> {
@@ -829,6 +907,9 @@ fn handle_slash_command(line: &str, app: &mut App) {
     match cmd {
         "/help" => {
             app.view = ViewState::Overlay(Overlay::SlashHelp);
+        }
+        "/config" => {
+            app.view = ViewState::Overlay(Overlay::Config);
         }
         "/exit" | "/quit" => {
             app.should_exit = true;
