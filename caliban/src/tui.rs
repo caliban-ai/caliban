@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::Args;
 
@@ -302,13 +302,15 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Min(0),    // 0: output region (flex)
+            Constraint::Length(1), // 1: top border (horizontal rule)
+            Constraint::Length(1), // 2: input area
+            Constraint::Length(1), // 3: bottom border
+            Constraint::Length(1), // 4: status bar
         ])
         .split(frame.area());
 
-    // Output region
+    // chunks[0] = output region
     let lines = render_transcript(app);
     let total_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let visible = chunks[0].height;
@@ -322,17 +324,28 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         .scroll((scroll, 0));
     frame.render_widget(output, chunks[0]);
 
-    // Status bar
-    let status_widget = Paragraph::new(render_status(app));
-    frame.render_widget(status_widget, chunks[1]);
+    // chunks[1] = top horizontal rule
+    let hrule_top = Block::default()
+        .borders(Borders::TOP)
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hrule_top, chunks[1]);
 
-    // Input
+    // chunks[2] = input
     let input_line = Line::from(vec![Span::raw("> "), Span::raw(app.input.as_str())]);
-    let input_widget = Paragraph::new(input_line);
-    frame.render_widget(input_widget, chunks[2]);
+    frame.render_widget(Paragraph::new(input_line), chunks[2]);
 
-    // Cursor positioning: column = 2 ("> " prompt) + char-count up to byte cursor
-    let prefix_cols = u16::try_from(app.input[..app.cursor].chars().count()).unwrap_or(u16::MAX);
+    // chunks[3] = bottom horizontal rule
+    let hrule_bot = Block::default()
+        .borders(Borders::TOP)
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hrule_bot, chunks[3]);
+
+    // chunks[4] = status bar
+    let status = render_status(app);
+    frame.render_widget(Paragraph::new(status), chunks[4]);
+
+    // Cursor position — in chunks[2] (input area)
+    let prefix_cols: u16 = u16::try_from(app.input[..app.cursor].chars().count()).unwrap_or(0);
     frame.set_cursor_position((chunks[2].x + 2 + prefix_cols, chunks[2].y));
 }
 
