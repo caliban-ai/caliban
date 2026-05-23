@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use caliban_agent_core::Agent;
+use caliban_agent_core::{Agent, TurnEventStream};
 use caliban_sessions::{PersistedSession, SessionStore};
 use crossterm::{
     event::{EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -447,11 +447,141 @@ fn render_status(app: &App) -> String {
     s
 }
 
+// === Agent event handlers ===
+
+#[allow(clippy::too_many_lines)]
+fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
+    use caliban_agent_core::TurnEvent;
+    match evt {
+        TurnEvent::TurnStart { .. } => {
+            // No transcript change; render shows "running…" via app.running.
+        }
+        TurnEvent::AssistantTextDelta { text, .. } => {
+            // Find or create the in-progress AssistantText line.
+            if let Some(TranscriptLine::AssistantText(buf)) = app.transcript.last_mut() {
+                buf.push_str(&text);
+            } else {
+                app.transcript.push(TranscriptLine::AssistantText(text));
+            }
+        }
+        TurnEvent::AssistantThinkingDelta { text, .. } => {
+            if let Some(TranscriptLine::AssistantThinking(buf)) = app.transcript.last_mut() {
+                buf.push_str(&text);
+            } else {
+                app.transcript.push(TranscriptLine::AssistantThinking(text));
+            }
+        }
+        TurnEvent::ToolCallStart {
+            tool_use_id, name, ..
+        } => {
+            app.transcript.push(TranscriptLine::ToolCall {
+                tool_use_id,
+                name,
+                input: String::new(),
+                result: None,
+            });
+        }
+        TurnEvent::ToolCallInputDelta {
+            tool_use_id,
+            partial_json,
+            ..
+        } => {
+            for entry in app.transcript.iter_mut().rev() {
+                if let TranscriptLine::ToolCall {
+                    tool_use_id: id,
+                    input,
+                    ..
+                } = entry
+                {
+                    if *id == tool_use_id {
+                        input.push_str(&partial_json);
+                        break;
+                    }
+                }
+            }
+        }
+        TurnEvent::ToolCallEnd {
+            tool_use_id,
+            is_error,
+            content,
+            ..
+        } => {
+            let result_text = content
+                .iter()
+                .filter_map(|c| match c {
+                    caliban_provider::ContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for entry in app.transcript.iter_mut().rev() {
+                if let TranscriptLine::ToolCall {
+                    tool_use_id: id,
+                    result,
+                    ..
+                } = entry
+                {
+                    if *id == tool_use_id {
+                        *result = Some((is_error, result_text));
+                        break;
+                    }
+                }
+            }
+        }
+        TurnEvent::TurnEnd { .. } => {
+            // Push a blank line for visual separation.
+            app.transcript
+                .push(TranscriptLine::AssistantText(String::new()));
+        }
+        TurnEvent::RunEnd {
+            final_messages,
+            total_usage,
+            turn_count,
+            ..
+        } => {
+            app.transcript.push(TranscriptLine::UsageSummary {
+                input_tokens: total_usage.input_tokens,
+                output_tokens: total_usage.output_tokens,
+                turn_count,
+            });
+            // Update session and persist.
+            if let Some(sess) = app.session.as_mut() {
+                sess.merge_run(final_messages, total_usage);
+                if let Some(store) = app.store.as_ref() {
+                    if !app.args.no_save {
+                        match store.save(sess) {
+                            Ok(()) => app
+                                .transcript
+                                .push(TranscriptLine::Info("session saved".into())),
+                            Err(e) => app
+                                .transcript
+                                .push(TranscriptLine::Error(format!("save failed: {e}"))),
+                        }
+                    }
+                }
+            }
+            app.running = None;
+            app.auto_scroll = true;
+        }
+    }
+}
+
+fn handle_agent_error(e: &caliban_agent_core::Error, app: &mut App) {
+    if matches!(e, caliban_agent_core::Error::Cancelled) {
+        app.transcript
+            .push(TranscriptLine::Info("turn cancelled".into()));
+    } else {
+        app.transcript.push(TranscriptLine::Error(e.to_string()));
+    }
+    app.running = None;
+}
+
 // === Event loop ===
 
 /// Run the TUI until the user exits (Ctrl+D or Ctrl+C with empty input).
 ///
 /// Saves the session on clean exit if `--no-save` was not set.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run(
     args: Args,
     agent: Arc<Agent>,
@@ -461,6 +591,7 @@ pub(crate) async fn run(
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(agent, session, store, args);
     let mut events = EventStream::new();
+    let mut agent_stream: Option<TurnEventStream> = None;
 
     loop {
         guard.terminal().draw(|frame| render(frame, &app))?;
@@ -468,18 +599,35 @@ pub(crate) async fn run(
             break;
         }
 
-        // Block on the next terminal event.
-        // (Agent integration is T.2; for now this is a simple sequential loop.)
-        let event = events.next().await;
-        if let Some(Ok(ref ev)) = event {
-            handle_event(ev, &mut app);
-        } else {
-            // Stream ended (terminal closed or error).
-            break;
+        tokio::select! {
+            term_event = events.next() => {
+                let Some(Ok(ref ev)) = term_event else { break };
+                handle_event(ev, &mut app, &mut agent_stream);
+            }
+            agent_event = async {
+                if let Some(s) = agent_stream.as_mut() {
+                    s.next().await
+                } else {
+                    std::future::pending::<Option<Result<caliban_agent_core::TurnEvent, caliban_agent_core::Error>>>().await
+                }
+            } => {
+                match agent_event {
+                    Some(Ok(evt)) => handle_agent_event(evt, &mut app),
+                    Some(Err(ref e)) => {
+                        handle_agent_error(e, &mut app);
+                        agent_stream = None;
+                    }
+                    None => {
+                        // Stream finished cleanly — running was already cleared by RunEnd.
+                        app.running = None;
+                        agent_stream = None;
+                    }
+                }
+            }
         }
     }
 
-    // Save session on exit
+    // Save session on clean exit (no-op if RunEnd already saved it).
     if let (Some(store), Some(sess)) = (app.store.as_ref(), app.session.as_ref()) {
         if !app.args.no_save {
             let _ = store.save(sess);
@@ -489,21 +637,27 @@ pub(crate) async fn run(
     Ok(())
 }
 
-fn handle_event(event: &crossterm::event::Event, app: &mut App) {
+fn handle_event(
+    event: &crossterm::event::Event,
+    app: &mut App,
+    agent_stream: &mut Option<TurnEventStream>,
+) {
     use crossterm::event::Event;
     if let Event::Key(key) = event {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        handle_key(*key, app);
+        handle_key(*key, app, agent_stream);
     }
 }
 
-fn handle_key(key: KeyEvent, app: &mut App) {
+#[allow(clippy::too_many_lines)]
+fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventStream>) {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            if app.running.is_some() {
-                // Cancel handled in T.2
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+            if let Some(running) = &app.running {
+                // Cancel the active turn; the stream will yield Err(Cancelled).
+                running.cancel.cancel();
             } else if app.input.is_empty() {
                 app.should_exit = true;
             } else {
@@ -533,19 +687,49 @@ fn handle_key(key: KeyEvent, app: &mut App) {
         }
         (KeyCode::PageDown, _) => {
             app.scroll = app.scroll.saturating_add(10);
-            // T.2 will re-clamp and toggle auto_scroll when near the bottom
         }
         (KeyCode::Enter, _) => {
+            let prompt = app.input.trim().to_string();
+            if prompt.is_empty() {
+                return;
+            }
+            // Ignore submit if a turn is already running.
+            if app.running.is_some() {
+                return;
+            }
+
             let line = app.input.clone();
             app.input.clear();
             app.cursor = 0;
-            // T.2 dispatches to handle_submit and starts the agent stream.
-            // For T.1, we just echo the input to the transcript.
-            if !line.is_empty() {
-                app.transcript.push(TranscriptLine::UserPrompt(line));
+            app.history.push(line);
+            app.history_index = None;
+            app.auto_scroll = true;
+
+            // Stub slash commands (full implementation in T.4).
+            if prompt.starts_with('/') {
+                app.transcript.push(TranscriptLine::Info(
+                    "slash commands not yet implemented (coming in T.4)".into(),
+                ));
+                return;
             }
+
+            app.transcript
+                .push(TranscriptLine::UserPrompt(prompt.clone()));
+
+            // Build message history: prior session messages + new user prompt.
+            let mut messages: Vec<caliban_provider::Message> = app
+                .session
+                .as_ref()
+                .map(|s| s.messages.clone())
+                .unwrap_or_default();
+            messages.push(caliban_provider::Message::user_text(prompt));
+
+            // Start the agent stream.
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let stream = Arc::clone(&app.agent).stream_until_done(messages, cancel.clone());
+            app.running = Some(RunningTurn { cancel });
+            *agent_stream = Some(stream);
         }
-        // Esc: cancel (implemented in T.2) — fall through to no-op
         _ => {}
     }
 }
