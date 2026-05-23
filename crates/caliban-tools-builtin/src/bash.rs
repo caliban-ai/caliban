@@ -151,8 +151,8 @@ impl Tool for BashTool {
             RawOutcome::Done(status) => {
                 let stdout_str = read_out.await.unwrap_or_default();
                 let stderr_str = read_err.await.unwrap_or_default();
-                let exit_code = status
-                    .code()
+                let exit_code_num = status.code();
+                let exit_code_display = exit_code_num
                     .map_or_else(|| "(killed by signal)".to_string(), |c| c.to_string());
                 let stdout_section = if stdout_str.is_empty() {
                     "(empty)".to_string()
@@ -167,8 +167,16 @@ impl Tool for BashTool {
 
                 let text = format!(
                     "→ Bash command: {}\n→ Exit code: {}\n→ Stdout:\n{}\n→ Stderr:\n{}",
-                    parsed.command, exit_code, stdout_section, stderr_section,
+                    parsed.command, exit_code_display, stdout_section, stderr_section,
                 );
+
+                // Non-zero exit (or killed by signal) → ToolError so the agent flags
+                // is_error=true. The full captured output is in the error message so
+                // the model still sees stdout/stderr/exit-code context.
+                if exit_code_num != Some(0) {
+                    return Err(ToolError::execution(std::io::Error::other(text)));
+                }
+
                 Ok(vec![ContentBlock::Text(TextBlock {
                     text,
                     cache_control: None,
@@ -227,17 +235,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonzero_exit_propagates() {
+    async fn nonzero_exit_returns_tool_error() {
         let tmp = TempDir::new().unwrap();
         let tool = BashTool::new(WorkspaceRoot::new(tmp.path()));
-        let out = tool
+        let err = tool
             .invoke(json!({"command": "exit 7"}), ctx())
             .await
-            .unwrap();
-        let ContentBlock::Text(t) = &out[0] else {
-            panic!("expected Text block")
-        };
-        assert!(t.text.contains("Exit code: 7"), "output: {}", t.text);
+            .unwrap_err();
+        // The full output (including "Exit code: 7") is preserved in the error
+        // message so the model can see what failed.
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, ToolError::Execution(_)),
+            "wrong variant: {err:?}"
+        );
+        assert!(msg.contains("Exit code: 7"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn command_not_found_returns_tool_error() {
+        let tmp = TempDir::new().unwrap();
+        let tool = BashTool::new(WorkspaceRoot::new(tmp.path()));
+        let err = tool
+            .invoke(
+                json!({"command": "this-command-definitely-does-not-exist-zzz"}),
+                ctx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, ToolError::Execution(_)),
+            "wrong variant: {err:?}"
+        );
+        // /bin/sh returns 127 for command not found.
+        assert!(msg.contains("Exit code: 127"), "msg: {msg}");
     }
 
     #[tokio::test]
