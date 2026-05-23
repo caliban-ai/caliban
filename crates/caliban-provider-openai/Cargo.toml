@@ -23,6 +23,7 @@ reqwest            = { workspace = true }
 secrecy            = { workspace = true }
 futures            = { workspace = true }
 eventsource-stream = { workspace = true }
+async-stream       = { workspace = true }
 url                = { workspace = true }
 bytes              = { workspace = true }
 http               = { workspace = true }

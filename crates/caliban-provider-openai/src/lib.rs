@@ -70,10 +70,22 @@ impl<T: Transport> Provider for OpenAIProvider<T> {
         ir_convert::native_response_to_ir(native_resp)
     }
 
-    async fn stream(&self, _req: CompletionRequest) -> Result<MessageStream> {
-        Err(Error::InvalidRequest(
-            "OpenAI streaming not yet wired (see Task 5)".into(),
-        ))
+    async fn stream(&self, req: CompletionRequest) -> Result<MessageStream> {
+        req.validate()?;
+        let canonical_model = req.model.clone();
+        let mut native = ir_convert::ir_to_native_request(req, true)?;
+        native.model = self.transport.wire_model_id(&canonical_model);
+        // Opt into usage reporting on the final streaming chunk.
+        native.stream_options = Some(crate::schema::request::NativeStreamOptions {
+            include_usage: true,
+        });
+        self.transport.finalize_request(&mut native);
+        let bytes_stream = self
+            .transport
+            .stream(native)
+            .await
+            .map_err(caliban_provider::Error::from)?;
+        Ok(stream_parse::map_openai_sse_to_events(bytes_stream))
     }
 
     fn capabilities(&self, model: &str) -> Capabilities {
