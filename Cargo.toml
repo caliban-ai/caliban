@@ -8,6 +8,7 @@ members = [
     "crates/caliban-provider-ollama",
     "crates/caliban-provider-google",
     "crates/caliban-agent-core",
+    "crates/caliban-tools-builtin",
     "caliban",
 ]
 
@@ -42,6 +43,12 @@ proptest = "1"
 tokio-util = { version = "0.7" }
 tracing    = "0.1"
 rand       = "0.8"
+globset       = "0.4"
+ignore        = "0.4"
+grep-regex    = "0.1"
+grep-searcher = "0.1"
+grep-matcher  = "0.1"
+tempfile      = "3"
 
 [workspace.lints.rust]
 unsafe_code      = "forbid"

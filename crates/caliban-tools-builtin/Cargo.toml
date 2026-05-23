@@ -1,0 +1,32 @@
+[package]
+name        = "caliban-tools-builtin"
+version     = "0.0.0"
+description = "Built-in tools (Read/Write/Edit/Bash/Glob/Grep) for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-provider   = { path = "../caliban-provider" }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true, features = ["full"] }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+globset            = { workspace = true }
+ignore             = { workspace = true }
+grep-regex         = { workspace = true }
+grep-searcher      = { workspace = true }
+grep-matcher       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
