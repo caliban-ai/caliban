@@ -64,7 +64,21 @@ impl WorkspaceRoot {
         if input.is_empty() {
             return Err(ToolError::invalid_input("empty path"));
         }
-        let candidate = PathBuf::from(input);
+        // Expand leading ~ or ~/ to the user's home directory.
+        let candidate: PathBuf = if input == "~" {
+            dirs::home_dir().ok_or_else(|| {
+                ToolError::invalid_input("~ used but home directory is unavailable")
+            })?
+        } else if let Some(rest) = input.strip_prefix("~/") {
+            let mut home = dirs::home_dir().ok_or_else(|| {
+                ToolError::invalid_input("~/ used but home directory is unavailable")
+            })?;
+            home.push(rest);
+            home
+        } else {
+            PathBuf::from(input)
+        };
+
         let abs = if candidate.is_absolute() {
             candidate
         } else {
@@ -168,5 +182,46 @@ mod tests {
         let root = WorkspaceRoot::new(tmp.path());
         let err = root.resolve("").unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn resolve_tilde_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = WorkspaceRoot::new(tmp.path());
+        let resolved = root.resolve("~").unwrap();
+        if let Some(home) = dirs::home_dir() {
+            // canonicalize_existing_ancestor may collapse symlinks
+            let expected = std::fs::canonicalize(&home).unwrap_or(home);
+            assert_eq!(resolved, expected);
+        }
+    }
+
+    #[test]
+    fn resolve_tilde_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = WorkspaceRoot::new(tmp.path());
+        let resolved = root.resolve("~/foo.txt").unwrap();
+        if let Some(home) = dirs::home_dir() {
+            let canon_home = std::fs::canonicalize(&home).unwrap_or(home);
+            assert_eq!(resolved, canon_home.join("foo.txt"));
+        }
+    }
+
+    #[test]
+    fn resolve_tilde_in_restricted_mode_outside_root_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let root = WorkspaceRoot::new(tmp.path()).restricted();
+        // ~ resolves outside the tempdir; restricted mode should reject.
+        let err = root.resolve("~/notes.md").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn resolve_no_tilde_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let root = WorkspaceRoot::new(tmp.path());
+        let resolved = root.resolve("subdir/file.txt").unwrap();
+        assert!(resolved.starts_with(root.root()));
+        assert!(resolved.ends_with("subdir/file.txt"));
     }
 }
