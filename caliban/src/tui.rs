@@ -50,7 +50,10 @@ use anyhow::Result;
 use caliban_agent_core::{Agent, TurnEventStream};
 use caliban_sessions::{PersistedSession, SessionStore};
 use crossterm::{
-    event::{EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -72,10 +75,15 @@ pub(crate) struct TerminalGuard {
 
 impl TerminalGuard {
     /// Enter raw mode and the alternate screen, constructing the guard.
+    ///
+    /// Mouse capture is enabled so the scroll wheel reaches the app. Side
+    /// effect: native click-to-select stops working in the alternate screen
+    /// — most macOS terminals offer Option-drag (iTerm2, macOS Terminal) or
+    /// Shift-drag (xterm-likes) as the escape hatch.
     pub(crate) fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut out = stdout();
-        execute!(out, EnterAlternateScreen)?;
+        execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(out);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -89,8 +97,10 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // Restore in reverse order of acquisition. DisableMouseCapture is best-
+        // effort: if it fails, the terminal eventually clears state on its own.
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
     }
 }
 
@@ -213,6 +223,10 @@ pub(crate) struct App {
     pub(crate) scroll: u16,
     /// When `true`, keep the viewport pinned to the bottom of the transcript.
     pub(crate) auto_scroll: bool,
+    /// Largest valid manual-scroll offset, updated each render. Used by the
+    /// mouse wheel handler so a "scroll back down past the end" re-enables
+    /// auto-scroll without recomputing wrap widths in the event path.
+    pub(crate) last_max_scroll: u16,
     /// Set to `true` to break the event loop cleanly.
     pub(crate) should_exit: bool,
     /// Non-`None` while an agent turn is in progress.
@@ -277,6 +291,7 @@ impl App {
             history_index: None,
             scroll: 0,
             auto_scroll: true,
+            last_max_scroll: 0,
             should_exit: false,
             running: None,
             view: ViewState::Main,
@@ -397,7 +412,7 @@ impl App {
 // === Rendering ===
 
 #[allow(clippy::too_many_lines)]
-fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     // Compute how many rows the input area needs based on terminal width.
     // Prompt "> " (2 chars) + input text, character-wrapped at terminal width.
     // Capped at INPUT_MAX_ROWS so a runaway input can't consume the screen.
@@ -441,10 +456,16 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let scroll = if app.auto_scroll {
         max_scroll
     } else {
+        // Clamp in case the transcript shrank under a manually-set offset
+        // (e.g. /clear while scrolled up).
         app.scroll.min(max_scroll)
     };
     let output = Paragraph::new(wrapped_lines).scroll((scroll, 0));
     frame.render_widget(output, chunks[0]);
+    // Commit derived state to app. Safe to mutate now — wrapped_lines and
+    // its borrows on `app.transcript` were consumed by render_widget above.
+    app.last_max_scroll = max_scroll;
+    app.scroll = scroll;
 
     // chunks[1] = top horizontal rule
     let hrule_top = Block::default()
@@ -774,6 +795,10 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ("Up / Down", "Navigate input history"),
         ("Home / End", "Jump to start / end of input"),
         ("PageUp / PageDn", "Scroll transcript"),
+        (
+            "Mouse wheel",
+            "Scroll transcript (Opt/Shift+drag to select text)",
+        ),
         ("Ctrl+C", "Cancel running turn or clear input"),
         ("Ctrl+D", "Exit (when input is empty)"),
         ("Esc / q", "Close this overlay (or cancel a running turn)"),
@@ -1236,7 +1261,7 @@ pub(crate) async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        guard.terminal().draw(|frame| render(frame, &app))?;
+        guard.terminal().draw(|frame| render(frame, &mut app))?;
         tracing::trace!("draw");
         stdout().flush().ok();
         if app.should_exit {
@@ -1393,11 +1418,53 @@ fn handle_event(
 ) {
     use crossterm::event::Event;
     tracing::trace!(?event, "term event");
-    if let Event::Key(key) = event {
-        if key.kind != KeyEventKind::Press {
-            return;
+    match event {
+        Event::Key(key) => {
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
+            handle_key(*key, app, agent_stream);
         }
-        handle_key(*key, app, agent_stream);
+        Event::Mouse(mouse) => handle_mouse(*mouse, app),
+        _ => {}
+    }
+}
+
+/// Rows of scroll per wheel notch. Three is what most terminals give you
+/// natively in their scroll-back and matches the cadence in `PageUp` (10
+/// felt too aggressive for a fine-grained wheel).
+const MOUSE_WHEEL_ROWS: u16 = 3;
+
+fn handle_mouse(event: MouseEvent, app: &mut App) {
+    // Overlays are short static content — ignore wheel inside them rather
+    // than confusing the user by silently scrolling the transcript behind.
+    if matches!(app.view, ViewState::Overlay(_)) {
+        return;
+    }
+    match event.kind {
+        MouseEventKind::ScrollUp => {
+            // When transitioning out of auto-scroll, seed app.scroll from
+            // the current bottom so the first wheel tick actually steps up
+            // from where the user was looking — not from a stale offset.
+            if app.auto_scroll {
+                app.scroll = app.last_max_scroll;
+                app.auto_scroll = false;
+            }
+            app.scroll = app.scroll.saturating_sub(MOUSE_WHEEL_ROWS);
+        }
+        MouseEventKind::ScrollDown => {
+            let next = app.scroll.saturating_add(MOUSE_WHEEL_ROWS);
+            if next >= app.last_max_scroll {
+                // Scrolled past the end → re-pin to live tail.
+                app.scroll = app.last_max_scroll;
+                app.auto_scroll = true;
+            } else {
+                app.scroll = next;
+            }
+        }
+        // Clicks, drags, motion — intentionally ignored. We capture the
+        // mouse only so the wheel reaches us.
+        _ => {}
     }
 }
 
@@ -1451,11 +1518,20 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         (KeyCode::Up, _) => app.history_up(),
         (KeyCode::Down, _) => app.history_down(),
         (KeyCode::PageUp, _) => {
-            app.auto_scroll = false;
+            if app.auto_scroll {
+                app.scroll = app.last_max_scroll;
+                app.auto_scroll = false;
+            }
             app.scroll = app.scroll.saturating_sub(10);
         }
         (KeyCode::PageDown, _) => {
-            app.scroll = app.scroll.saturating_add(10);
+            let next = app.scroll.saturating_add(10);
+            if next >= app.last_max_scroll {
+                app.scroll = app.last_max_scroll;
+                app.auto_scroll = true;
+            } else {
+                app.scroll = next;
+            }
         }
         (KeyCode::Enter, _) => {
             let prompt = app.input.trim().to_string();
