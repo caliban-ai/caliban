@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/caliban-core",
+    "crates/caliban-provider",
     "caliban",
 ]
 
@@ -16,6 +17,22 @@ rust-version = "1.85"
 tokio     = { version = "1", features = ["full"] }
 thiserror = "1"
 anyhow    = "1"
+async-trait        = "0.1"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures            = "0.3"
+secrecy            = { version = "0.10", features = ["serde"] }
+eventsource-stream = "0.2"
+url                = { version = "2", features = ["serde"] }
+bytes              = "1"
+http               = "1"
+aws-config             = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1"
+aws-smithy-types       = "1"
+gcp_auth               = "0.12"
+wiremock = "0.6"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code      = "forbid"
