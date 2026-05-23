@@ -1,0 +1,16 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hi!"}]}
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "Be brief."}]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "generationConfig": {
+    "maxOutputTokens": 64
+  }
+}

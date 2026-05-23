@@ -1,0 +1,39 @@
+[package]
+name        = "caliban-provider-google"
+version     = "0.0.0"
+description = "Google Gemini schema family for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default = []
+vertex  = ["dep:gcp_auth"]
+live-tests = []
+
+[dependencies]
+caliban-provider   = { path = "../caliban-provider" }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+reqwest            = { workspace = true }
+secrecy            = { workspace = true }
+futures            = { workspace = true }
+eventsource-stream = { workspace = true }
+async-stream       = { workspace = true }
+url                = { workspace = true }
+bytes              = { workspace = true }
+http               = { workspace = true }
+tokio              = { workspace = true }
+
+gcp_auth = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
