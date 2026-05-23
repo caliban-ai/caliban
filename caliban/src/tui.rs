@@ -15,7 +15,6 @@ pub(crate) enum ViewState {
 
 /// Which overlay is currently being shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Mcp/Skills are wired in U.4
 pub(crate) enum Overlay {
     SlashHelp,
     Config,
@@ -666,11 +665,92 @@ fn config_lines(app: &App) -> Vec<Line<'_>> {
 }
 
 fn mcp_lines() -> Vec<Line<'static>> {
-    vec![Line::raw("coming soon")]
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut out = vec![Line::raw("")];
+    out.push(Line::raw("   No MCP servers configured."));
+    out.push(Line::raw(""));
+    out.push(Line::raw(
+        "   MCP (Model Context Protocol) lets caliban consume external",
+    ));
+    out.push(Line::raw(
+        "   tool servers — for example, a SilverBullet notebook, a",
+    ));
+    out.push(Line::raw(
+        "   Linear ticket browser, or a custom in-house server.",
+    ));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   Planned configuration:",
+        Style::default().fg(Color::Yellow),
+    ));
+    out.push(Line::raw("     ~/.config/caliban/mcp.toml"));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   Example (future):",
+        Style::default().fg(Color::Yellow),
+    ));
+    out.push(Line::raw("     [[server]]"));
+    out.push(Line::raw("     name = \"silverbullet\""));
+    out.push(Line::raw("     transport = \"stdio\""));
+    out.push(Line::raw("     command = \"sb-mcp\""));
+    out.push(Line::raw("     args = [\"--vault\", \"~/notes\"]"));
+    out.push(Line::raw(""));
+    out.push(Line::raw("     [[server]]"));
+    out.push(Line::raw("     name = \"linear\""));
+    out.push(Line::raw("     transport = \"http\""));
+    out.push(Line::raw("     url = \"https://mcp.example.com/linear\""));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   See caliban-mcp-client (Layer 2 sub-project) — not yet shipped.",
+        dim,
+    ));
+    out.push(Line::raw(""));
+    out.push(Line::styled("  Press q or Esc to close.", dim));
+    out
 }
 
 fn skills_lines() -> Vec<Line<'static>> {
-    vec![Line::raw("coming soon")]
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut out = vec![Line::raw("")];
+    out.push(Line::raw("   No skills configured."));
+    out.push(Line::raw(""));
+    out.push(Line::raw(
+        "   Skills are reusable instruction-and-procedure packages the",
+    ));
+    out.push(Line::raw(
+        "   model can invoke via a Skill tool. They mirror Claude",
+    ));
+    out.push(Line::raw("   Code's superpowers / skills design."));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   Planned configuration:",
+        Style::default().fg(Color::Yellow),
+    ));
+    out.push(Line::raw("     ~/.config/caliban/skills/"));
+    out.push(Line::raw("         <skill-name>/"));
+    out.push(Line::raw("             SKILL.md         (instruction set)"));
+    out.push(Line::raw(
+        "             scripts/         (optional helper scripts)",
+    ));
+    out.push(Line::raw(
+        "             references/      (optional reference docs)",
+    ));
+    out.push(Line::raw(""));
+    out.push(Line::raw(
+        "   The Skill tool would dispatch to the matching skill, load",
+    ));
+    out.push(Line::raw(
+        "   its SKILL.md, and inject the content into the agent's",
+    ));
+    out.push(Line::raw("   context."));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   See caliban-skills (future sub-project) — not yet shipped.",
+        dim,
+    ));
+    out.push(Line::raw(""));
+    out.push(Line::styled("  Press q or Esc to close.", dim));
+    out
 }
 
 fn render_status(app: &App) -> Line<'static> {
@@ -910,6 +990,12 @@ fn handle_slash_command(line: &str, app: &mut App) {
         }
         "/config" => {
             app.view = ViewState::Overlay(Overlay::Config);
+        }
+        "/mcp" => {
+            app.view = ViewState::Overlay(Overlay::Mcp);
+        }
+        "/skills" => {
+            app.view = ViewState::Overlay(Overlay::Skills);
         }
         "/exit" | "/quit" => {
             app.should_exit = true;
