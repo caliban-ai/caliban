@@ -6,6 +6,43 @@ use std::io::{Stdout, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Top-level view state: normal main view or an open overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewState {
+    Main,
+    Overlay(Overlay),
+}
+
+/// Which overlay is currently being shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Config/Mcp/Skills are wired in U.3 and U.4
+pub(crate) enum Overlay {
+    SlashHelp,
+    Config,
+    Mcp,
+    Skills,
+}
+
+impl Overlay {
+    fn title(self) -> &'static str {
+        match self {
+            Self::SlashHelp => "Slash Commands",
+            Self::Config => "Configuration",
+            Self::Mcp => "MCP Servers",
+            Self::Skills => "Skills",
+        }
+    }
+
+    fn short_name(self) -> &'static str {
+        match self {
+            Self::SlashHelp => "help",
+            Self::Config => "config",
+            Self::Mcp => "mcp",
+            Self::Skills => "skills",
+        }
+    }
+}
+
 use anyhow::Result;
 use caliban_agent_core::{Agent, TurnEventStream};
 use caliban_sessions::{PersistedSession, SessionStore};
@@ -130,6 +167,8 @@ pub(crate) struct App {
     pub(crate) should_exit: bool,
     /// Non-`None` while an agent turn is in progress.
     pub(crate) running: Option<RunningTurn>,
+    /// Current view state: main view or an open overlay.
+    pub(crate) view: ViewState,
 }
 
 impl App {
@@ -182,6 +221,7 @@ impl App {
             auto_scroll: true,
             should_exit: false,
             running: None,
+            view: ViewState::Main,
         }
     }
 
@@ -347,6 +387,11 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     // Cursor position — in chunks[2] (input area)
     let prefix_cols: u16 = u16::try_from(app.input[..app.cursor].chars().count()).unwrap_or(0);
     frame.set_cursor_position((chunks[2].x + 2 + prefix_cols, chunks[2].y));
+
+    // Render overlay on top if one is active.
+    if let ViewState::Overlay(o) = app.view {
+        render_overlay(frame, app, o);
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -429,6 +474,127 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
     lines
 }
 
+// === Overlay helpers ===
+
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::Wrap;
+
+    let area = centered_rect(80, 80, frame.area());
+
+    // Clear the area underneath.
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", overlay.title()))
+        .style(Style::default().fg(Color::White).bg(Color::Reset));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let content_lines = match overlay {
+        Overlay::SlashHelp => slash_help_lines(),
+        Overlay::Config => config_lines(app),
+        Overlay::Mcp => mcp_lines(),
+        Overlay::Skills => skills_lines(),
+    };
+
+    let body = Paragraph::new(content_lines).wrap(Wrap { trim: false });
+    frame.render_widget(body, inner);
+}
+
+fn slash_help_lines() -> Vec<Line<'static>> {
+    let entries = [
+        ("/help", "Show this help"),
+        ("/exit, /quit", "Save session and exit"),
+        ("/clear", "Clear transcript"),
+        ("/sessions", "List saved sessions"),
+        ("/save [<name>]", "Save current session (optionally rename)"),
+        ("/usage", "Show accumulated usage"),
+        ("/config", "Show active configuration"),
+        ("/mcp", "MCP server configuration (stub)"),
+        ("/skills", "Skills configuration (stub)"),
+    ];
+
+    let mut out = vec![Line::raw("")];
+    for (cmd, desc) in entries {
+        out.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(format!("{cmd:<18}"), Style::default().fg(Color::Cyan)),
+            Span::raw(desc),
+        ]));
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        " \u{2014} Keyboard ",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
+    out.push(Line::raw(""));
+    let keys = [
+        ("Enter", "Submit prompt or slash command"),
+        ("Backspace / Del", "Edit input"),
+        ("Left / Right", "Move cursor"),
+        ("Up / Down", "Navigate input history"),
+        ("Home / End", "Jump to start / end of input"),
+        ("PageUp / PageDn", "Scroll transcript"),
+        ("Ctrl+C", "Cancel running turn or clear input"),
+        ("Ctrl+D", "Exit (when input is empty)"),
+        ("Esc / q", "Close this overlay (or cancel a running turn)"),
+    ];
+    for (k, desc) in keys {
+        out.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(format!("{k:<18}"), Style::default().fg(Color::Cyan)),
+            Span::raw(desc),
+        ]));
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "  Press q or Esc to close.",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out
+}
+
+fn config_lines(_app: &App) -> Vec<Line<'static>> {
+    vec![Line::raw("coming soon")]
+}
+
+fn mcp_lines() -> Vec<Line<'static>> {
+    vec![Line::raw("coming soon")]
+}
+
+fn skills_lines() -> Vec<Line<'static>> {
+    vec![Line::raw("coming soon")]
+}
+
 fn render_status(app: &App) -> Line<'static> {
     let provider = match app.args.provider {
         crate::ProviderKind::Anthropic => "anthropic",
@@ -453,8 +619,13 @@ fn render_status(app: &App) -> Line<'static> {
     } else {
         String::new()
     };
+    let overlay_part = match app.view {
+        ViewState::Overlay(o) => format!(" \u{00B7} [{} \u{2014} q to close]", o.short_name()),
+        ViewState::Main => String::new(),
+    };
 
-    let text = format!(" {cwd} \u{00B7} {provider} {model}{session_part}{running_part}");
+    let text =
+        format!(" {cwd} \u{00B7} {provider} {model}{session_part}{overlay_part}{running_part}");
     Line::from(Span::styled(
         text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
@@ -657,9 +828,7 @@ fn handle_slash_command(line: &str, app: &mut App) {
     let arg = parts.next().unwrap_or("").trim();
     match cmd {
         "/help" => {
-            app.transcript.push(TranscriptLine::Info(
-                "commands: /help /exit /quit /clear /sessions /save [<name>] /usage".into(),
-            ));
+            app.view = ViewState::Overlay(Overlay::SlashHelp);
         }
         "/exit" | "/quit" => {
             app.should_exit = true;
@@ -752,6 +921,25 @@ fn handle_event(
 
 #[allow(clippy::too_many_lines)]
 fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventStream>) {
+    // Overlay-mode key handling: intercept all keys while an overlay is open.
+    if matches!(app.view, ViewState::Overlay(_)) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                app.view = ViewState::Main;
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                // If a turn is running, cancel it; otherwise close overlay.
+                if let Some(running) = &app.running {
+                    running.cancel.cancel();
+                } else {
+                    app.view = ViewState::Main;
+                }
+            }
+            _ => {} // Overlays are read-only in v1
+        }
+        return;
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
             if let Some(running) = &app.running {
