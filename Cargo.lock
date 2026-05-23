@@ -641,6 +641,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-provider-ollama"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "caliban-provider",
+ "futures",
+ "http 1.4.0",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "caliban-provider-openai"
 version = "0.0.0"
 dependencies = [

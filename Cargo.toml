@@ -5,6 +5,7 @@ members = [
     "crates/caliban-provider",
     "crates/caliban-provider-anthropic",
     "crates/caliban-provider-openai",
+    "crates/caliban-provider-ollama",
     "caliban",
 ]
 

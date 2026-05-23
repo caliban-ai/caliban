@@ -1,0 +1,35 @@
+[package]
+name        = "caliban-provider-ollama"
+version     = "0.0.0"
+description = "Ollama schema family for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default = []
+live-tests = []
+
+[dependencies]
+caliban-provider = { path = "../caliban-provider" }
+async-trait      = { workspace = true }
+async-stream     = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+reqwest          = { workspace = true }
+secrecy          = { workspace = true }
+futures          = { workspace = true }
+url              = { workspace = true }
+bytes            = { workspace = true }
+http             = { workspace = true }
+tokio            = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
