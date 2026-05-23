@@ -1,0 +1,29 @@
+# Architecture Decision Records
+
+This directory contains durable architectural decisions for caliban, in
+[MADR-lite](https://adr.github.io/madr/) format: each file states a single
+decision with context, the decision itself, and consequences.
+
+## Status legend
+
+- **accepted** — the decision is currently in effect.
+- **superseded** — the decision was replaced by a later ADR; the file is kept for history and links to its successor.
+- **proposed** — under discussion; not in effect.
+- **rejected** — considered and explicitly declined.
+
+## Index
+
+| # | Title | Status |
+|---|---|---|
+| [0001](0001-async-runtime.md) | Async runtime → `tokio` | accepted |
+| [0002](0002-error-model.md) | Error model → `thiserror` for libs, `anyhow` for binary | accepted |
+| [0003](0003-license-agpl-3.0.md) | License → `AGPL-3.0-only` | accepted |
+| [0004](0004-naming-conventions.md) | Naming → `caliban-*` libraries, `caliban` binary | accepted |
+| [0005](0005-workspace-layout.md) | Workspace layout → `crates/` for libs, binaries at root | accepted |
+
+## Adding a new ADR
+
+1. Pick the next available number.
+2. Copy an existing ADR as a template.
+3. Set status to `proposed` while open for discussion; flip to `accepted` once decided.
+4. Add an entry to the table above.
