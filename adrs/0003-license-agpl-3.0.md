@@ -30,8 +30,9 @@ explains the implications for service operators and forks.
 ## Consequences
 
 - **Positive:** forks and hosted services must release modifications.
-  Aligns with Mastodon, Nextcloud, Grafana (pre-2018), MongoDB (pre-2018).
-  Author's stated philosophy of community contribution is enforced.
+  Aligns with Mastodon, Nextcloud, Gitea, and Sourcehut — all of which
+  have used AGPL successfully to balance openness with sustainable
+  community contribution. Author's stated philosophy is enforced.
 - **Negative:** caliban crates won't compose into permissive Rust
   projects on crates.io — depending on `caliban-*` makes the consumer
   AGPL. This is *intentional*: caliban is an end product, not a

@@ -16,7 +16,9 @@ lint all interact with crate names.
 - **Library crates** use the `caliban-` prefix: `caliban-core`,
   `caliban-provider`, `caliban-agent-core`, etc. Directory name
   matches the package name.
-- **Binary crate** is named `caliban` with `[[bin]] name = "caliban"`.
+- **Binary crate** is named `caliban`. Its package name is `caliban`, so
+  Cargo's default binary name matches; `caliban/Cargo.toml` makes this
+  explicit with a `[[bin]] name = "caliban"` entry for clarity.
 - **Internal module paths** drop the prefix where it would be
   redundant: `caliban_provider::ProviderClient`, NOT
   `caliban_provider::CalibanProviderClient`.

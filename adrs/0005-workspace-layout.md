@@ -22,9 +22,10 @@ seen in Rust workspaces:
 ## Decision
 
 Adopt the last pattern: library crates under `crates/caliban-<name>/`,
-binary crates at the workspace root (`caliban/`, future
-`caliban-tui/`, `caliban-orchestrator/`). Workspace members are listed
-explicitly in root `Cargo.toml`, no globs.
+binary crates as first-class subdirectories of the workspace root
+(`caliban/`, future `caliban-tui/`, `caliban-orchestrator/`) rather
+than nested under a shared parent directory. Workspace members are
+listed explicitly in root `Cargo.toml`, no globs.
 
 ## Consequences
 
