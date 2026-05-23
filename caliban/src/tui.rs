@@ -271,6 +271,8 @@ pub(crate) struct App {
     pub(crate) view: ViewState,
     /// In-memory message history for the current invocation (ephemeral and session modes).
     pub(crate) messages: Vec<caliban_provider::Message>,
+    /// Ephemeral toast shown above the input area (5s TTL or until next key).
+    pub(crate) toast: Option<toast::Toast>,
 }
 
 impl App {
@@ -329,6 +331,7 @@ impl App {
             running: None,
             view: ViewState::Main,
             messages,
+            toast: None,
         }
     }
 
@@ -371,14 +374,16 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         u16::try_from(total.clamp(1, INPUT_MAX_ROWS as usize)).unwrap_or(INPUT_MAX_ROWS)
     };
 
+    let toast_rows: u16 = u16::from(app.toast.as_ref().is_some_and(|t| !t.is_expired()));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),             // 0: output region (flex)
             Constraint::Length(1),          // 1: top border (horizontal rule)
-            Constraint::Length(input_rows), // 2: input area (dynamic; grows with text)
-            Constraint::Length(1),          // 3: bottom border
-            Constraint::Length(1),          // 4: status bar
+            Constraint::Length(toast_rows), // 2: toast strip (0 when no toast)
+            Constraint::Length(input_rows), // 3: input area (dynamic; grows with text)
+            Constraint::Length(1),          // 4: bottom border
+            Constraint::Length(1),          // 5: status bar
         ])
         .split(area);
 
@@ -414,10 +419,26 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hrule_top, chunks[1]);
 
-    // chunks[2] = input — character-wrapped manually so cursor math stays aligned.
+    // chunks[2] = ephemeral toast (zero rows when no toast is active).
+    if toast_rows == 1 {
+        if let Some(t) = &app.toast {
+            let (fg, bg) = match t.level {
+                toast::ToastLevel::Error => (Color::White, Color::Red),
+                toast::ToastLevel::Warn => (Color::Black, Color::Yellow),
+                toast::ToastLevel::Info => (Color::Gray, Color::Reset),
+            };
+            let line = Paragraph::new(Line::from(Span::styled(
+                t.text.clone(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )));
+            frame.render_widget(line, chunks[2]);
+        }
+    }
+
+    // chunks[3] = input — character-wrapped manually so cursor math stays aligned.
     // We split on '\n' first so multi-line composition (Shift+Enter) gets one
     // logical row per segment, each then char-wrapped at chunk width.
-    let input_chunk_width = chunks[2].width as usize;
+    let input_chunk_width = chunks[3].width as usize;
     if input_chunk_width > 0 {
         let mut input_lines: Vec<Line<'_>> = Vec::new();
         for (seg_idx, segment) in app.input.buffer.split('\n').enumerate() {
@@ -442,28 +463,28 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         if input_lines.is_empty() {
             input_lines.push(Line::raw("> "));
         }
-        frame.render_widget(Paragraph::new(input_lines), chunks[2]);
+        frame.render_widget(Paragraph::new(input_lines), chunks[3]);
     }
 
     // Slash/At completion menu floats just above the input area.
     match app.input.mode {
         InputMode::SlashMenu(ref menu) | InputMode::AtMenu(ref menu) => {
-            render_input_menu(frame, chunks[2], menu);
+            render_input_menu(frame, chunks[3], menu);
         }
         InputMode::Idle => {}
     }
 
-    // chunks[3] = bottom horizontal rule
+    // chunks[4] = bottom horizontal rule
     let hrule_bot = Block::default()
         .borders(Borders::TOP)
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hrule_bot, chunks[3]);
+    frame.render_widget(hrule_bot, chunks[4]);
 
-    // chunks[4] = status bar
+    // chunks[5] = status bar
     let status = render_status(app);
-    frame.render_widget(Paragraph::new(status), chunks[4]);
+    frame.render_widget(Paragraph::new(status), chunks[5]);
 
-    // Cursor position — in chunks[2], accounting for char-wrap AND newlines.
+    // Cursor position — in chunks[3], accounting for char-wrap AND newlines.
     if let Some(width_nz) = std::num::NonZeroUsize::new(input_chunk_width) {
         let width = width_nz.get();
         let before = &app.input.buffer[..app.input.cursor];
@@ -488,7 +509,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             .unwrap_or(INPUT_MAX_ROWS)
             .min(input_rows.saturating_sub(1));
         let cursor_col = u16::try_from(col).unwrap_or(0);
-        frame.set_cursor_position((chunks[2].x + cursor_col, chunks[2].y + cursor_row));
+        frame.set_cursor_position((chunks[3].x + cursor_col, chunks[3].y + cursor_row));
     }
 
     // Render overlay on top if one is active.
@@ -1280,6 +1301,10 @@ pub(crate) async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // Drop expired toast before drawing so it doesn't flicker for one tick.
+        if app.toast.as_ref().is_some_and(toast::Toast::is_expired) {
+            app.toast = None;
+        }
         guard.terminal().draw(|frame| render(frame, &mut app))?;
         tracing::trace!("draw");
         stdout().flush().ok();
@@ -1489,6 +1514,12 @@ fn handle_mouse(event: MouseEvent, app: &mut App) {
 
 #[allow(clippy::too_many_lines)]
 fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventStream>) {
+    // Any keystroke dismisses an active toast — but the keystroke itself
+    // still takes effect below.
+    if app.toast.is_some() {
+        app.toast = None;
+    }
+
     // Overlay-mode key handling: intercept all keys while an overlay is open.
     if matches!(app.view, ViewState::Overlay(_)) {
         match (key.code, key.modifiers) {
