@@ -7,6 +7,7 @@ members = [
     "crates/caliban-provider-openai",
     "crates/caliban-provider-ollama",
     "crates/caliban-provider-google",
+    "crates/caliban-agent-core",
     "caliban",
 ]
 
@@ -38,6 +39,9 @@ aws-smithy-types       = "1"
 gcp_auth               = "0.12"
 wiremock = "0.6"
 proptest = "1"
+tokio-util = { version = "0.7" }
+tracing    = "0.1"
+rand       = "0.8"
 
 [workspace.lints.rust]
 unsafe_code      = "forbid"

@@ -1,0 +1,32 @@
+[package]
+name        = "caliban-agent-core"
+version     = "0.0.0"
+description = "Agent loop, tool dispatch, cancellation, retry, compaction, and hooks for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default = []
+
+[dependencies]
+caliban-provider = { path = "../caliban-provider" }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+futures          = { workspace = true }
+tokio            = { workspace = true }
+tokio-util       = { workspace = true }
+tracing          = { workspace = true }
+rand             = { workspace = true }
+
+[dev-dependencies]
+caliban-provider = { path = "../caliban-provider", features = ["mock"] }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+proptest         = { workspace = true }
+
+[lints]
+workspace = true
