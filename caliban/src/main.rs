@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
-use caliban_provider::{ContentBlock, Provider};
+use caliban_provider::{ContentBlock, Provider, Usage};
+use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_tools_builtin::{
     BashTool, EditTool, GlobTool, GrepTool, ReadTool, WorkspaceRoot, WriteTool,
 };
@@ -35,8 +36,18 @@ fn default_model_for(p: ProviderKind) -> &'static str {
     }
 }
 
+fn provider_name(p: ProviderKind) -> &'static str {
+    match p {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Openai => "openai",
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::Google => "google",
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "caliban", version, about = "caliban agent harness")]
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     /// User prompt. Use "-" to read from stdin.
     #[arg(value_name = "PROMPT")]
@@ -81,6 +92,18 @@ struct Args {
     /// Suppress tool-execution announcements
     #[arg(long)]
     quiet: bool,
+
+    /// Load or create a named session; persists to ~/.local/share/caliban/sessions/<NAME>.json.
+    #[arg(long, value_name = "NAME")]
+    session: Option<String>,
+
+    /// Don't save the session back to disk after the run.
+    #[arg(long)]
+    no_save: bool,
+
+    /// Override the sessions directory.
+    #[arg(long, value_name = "DIR")]
+    sessions_dir: Option<PathBuf>,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -166,66 +189,33 @@ fn summarize_blocks(blocks: &[ContentBlock], max: usize) -> String {
     "(no text)".into()
 }
 
-#[allow(clippy::too_many_lines)]
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+async fn run_and_render(
+    agent: Arc<Agent>,
+    messages: Vec<Message>,
+    cancel: CancellationToken,
+    quiet: bool,
+) -> Result<(Vec<Message>, Usage)> {
+    use caliban_agent_core::TurnEvent;
 
-    let workspace = match &args.workspace {
-        Some(p) => WorkspaceRoot::new(p.clone()),
-        None => WorkspaceRoot::current_dir().context("could not get cwd")?,
-    };
-    let prompt = read_prompt(&args)?;
-    let provider = build_provider(&args)?;
-    let registry = build_registry(&args, workspace);
-
-    let model = args
-        .model
-        .unwrap_or_else(|| default_model_for(args.provider).to_string());
-
-    let mut builder = Agent::builder()
-        .provider(provider)
-        .tools(registry)
-        .model(model)
-        .max_tokens(args.max_tokens)
-        .max_turns(args.max_turns);
-    if let Some(t) = args.temperature {
-        builder = builder.temperature(t);
-    }
-    let agent = Arc::new(builder.build()?);
-
-    let cancel = CancellationToken::new();
-    {
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\n[caliban: cancelling\u{2026}]");
-            cancel.cancel();
-            let _ = tokio::signal::ctrl_c().await;
-            std::process::exit(130);
-        });
-    }
-
-    let messages = vec![Message::user_text(prompt)];
-    let mut stream = Arc::clone(&agent).stream_until_done(messages, cancel);
-
+    let mut stream = agent.stream_until_done(messages, cancel);
     let mut tool_inputs: HashMap<String, String> = HashMap::new();
     let mut at_column_zero = true;
+    let mut final_messages: Vec<Message> = Vec::new();
+    let mut total_usage = Usage::default();
 
     while let Some(event) = stream.next().await {
-        use caliban_agent_core::TurnEvent;
         match event? {
             TurnEvent::AssistantTextDelta { text, .. } => {
                 print!("{text}");
                 std::io::stdout().flush().ok();
                 at_column_zero = text.ends_with('\n');
             }
-            TurnEvent::AssistantThinkingDelta { text, .. } if !args.quiet => {
+            TurnEvent::AssistantThinkingDelta { text, .. } if !quiet => {
                 eprint!("\x1b[2m{text}\x1b[0m");
             }
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
-            } if !args.quiet => {
+            } if !quiet => {
                 if !at_column_zero {
                     eprintln!();
                 }
@@ -247,7 +237,7 @@ async fn main() -> Result<()> {
                 is_error,
                 content,
                 ..
-            } if !args.quiet => {
+            } if !quiet => {
                 let input_str = tool_inputs.remove(&tool_use_id).unwrap_or_default();
                 let input_summary = summarize(&input_str, 80);
                 let result_summary = summarize_blocks(&content, 80);
@@ -257,17 +247,23 @@ async fn main() -> Result<()> {
                 at_column_zero = true;
             }
             TurnEvent::RunEnd {
-                total_usage,
+                final_messages: fm,
+                total_usage: tu,
                 turn_count,
                 ..
-            } if !args.quiet => {
+            } => {
                 if !at_column_zero {
                     println!();
                 }
-                eprintln!(
-                    "\n[caliban: {turn_count} turns \u{00b7} {}\u{2191} {}\u{2193} tokens]",
-                    total_usage.input_tokens, total_usage.output_tokens
-                );
+                if !quiet {
+                    eprintln!(
+                        "\n[caliban: {turn_count} turns \u{00b7} {}\u{2191} {}\u{2193} tokens]",
+                        tu.input_tokens, tu.output_tokens
+                    );
+                }
+                final_messages = fm;
+                total_usage = tu;
+                at_column_zero = true;
             }
             _ => {}
         }
@@ -276,5 +272,95 @@ async fn main() -> Result<()> {
     if !at_column_zero {
         println!();
     }
+
+    Ok((final_messages, total_usage))
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let workspace = match &args.workspace {
+        Some(p) => WorkspaceRoot::new(p.clone()),
+        None => WorkspaceRoot::current_dir().context("could not get cwd")?,
+    };
+    let prompt = read_prompt(&args)?;
+    let provider = build_provider(&args)?;
+    let registry = build_registry(&args, workspace);
+
+    let model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for(args.provider).to_string());
+
+    let mut builder = Agent::builder()
+        .provider(provider)
+        .tools(registry)
+        .model(model.clone())
+        .max_tokens(args.max_tokens)
+        .max_turns(args.max_turns);
+    if let Some(t) = args.temperature {
+        builder = builder.temperature(t);
+    }
+    let agent = Arc::new(builder.build()?);
+
+    let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\n[caliban: cancelling\u{2026}]");
+            cancel.cancel();
+            let _ = tokio::signal::ctrl_c().await;
+            std::process::exit(130);
+        });
+    }
+
+    // Resolve session store (only when --session is given)
+    let store = match (&args.sessions_dir, &args.session) {
+        (_, None) => None,
+        (Some(d), Some(_)) => Some(SessionStore::new(d.clone())),
+        (None, Some(_)) => Some(SessionStore::new(SessionStore::default_root()?)),
+    };
+
+    // Load or create session
+    let mut session = if let (Some(store), Some(name)) = (&store, &args.session) {
+        Some(match store.load(name)? {
+            Some(existing) => existing,
+            None => {
+                PersistedSession::new(name.clone(), provider_name(args.provider), model.clone())
+            }
+        })
+    } else {
+        None
+    };
+
+    // Build initial messages: prior session history + new user prompt
+    let mut messages = session
+        .as_ref()
+        .map(|s| s.messages.clone())
+        .unwrap_or_default();
+    messages.push(Message::user_text(prompt));
+
+    let (final_messages, total_usage) =
+        run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
+
+    // Save session back if requested
+    if let (Some(store), Some(ref mut s)) = (store.as_ref(), session.as_mut()) {
+        if !args.no_save {
+            s.merge_run(final_messages, total_usage);
+            store.save(s)?;
+            if !args.quiet {
+                eprintln!(
+                    "[caliban: saved session '{}' ({} turns, {} tokens)]",
+                    s.name,
+                    s.turn_count(),
+                    s.total_usage.input_tokens + s.total_usage.output_tokens,
+                );
+            }
+        }
+    }
+
     Ok(())
 }
