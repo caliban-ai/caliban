@@ -26,5 +26,10 @@ tokio                      = { workspace = true, features = ["full"] }
 tokio-util                 = { workspace = true }
 futures                    = { workspace = true }
 
+[dev-dependencies]
+caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }
+tempfile         = { workspace = true }
+tokio-util       = { workspace = true }
+
 [lints]
 workspace = true
