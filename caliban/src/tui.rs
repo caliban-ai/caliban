@@ -7,6 +7,24 @@ mod completer;
 mod input;
 mod toast;
 
+use input::InputMode;
+
+/// Slash-command names + their literal insert text. Used by the slash menu
+/// to populate candidates and by `handle_key` to detect the trigger.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "/help"),
+    ("/clear", "/clear"),
+    ("/config", "/config"),
+    ("/mcp", "/mcp"),
+    ("/skills", "/skills"),
+    ("/system", "/system"),
+    ("/sessions", "/sessions"),
+    ("/save", "/save"),
+    ("/usage", "/usage"),
+    ("/exit", "/exit"),
+    ("/quit", "/quit"),
+];
+
 use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,10 +84,10 @@ use crossterm::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::Args;
 
@@ -427,6 +445,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         frame.render_widget(Paragraph::new(input_lines), chunks[2]);
     }
 
+    // Slash/At completion menu floats just above the input area.
+    match app.input.mode {
+        InputMode::SlashMenu(ref menu) | InputMode::AtMenu(ref menu) => {
+            render_input_menu(frame, chunks[2], menu);
+        }
+        InputMode::Idle => {}
+    }
+
     // chunks[3] = bottom horizontal rule
     let hrule_bot = Block::default()
         .borders(Borders::TOP)
@@ -469,6 +495,52 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if let ViewState::Overlay(o) = app.view {
         render_overlay(frame, app, o);
     }
+}
+
+/// Float a completion menu directly above the input area. Capped at 8 rows;
+/// the highlighted item gets a cyan background. Drawn with `Clear` so it
+/// overwrites the transcript rows it floats over.
+fn render_input_menu(
+    frame: &mut ratatui::Frame<'_>,
+    input_area: Rect,
+    menu: &input::MenuState,
+) {
+    if menu.candidates.is_empty() {
+        return;
+    }
+    let max_rows: u16 = 8;
+    let height = u16::try_from(menu.candidates.len())
+        .unwrap_or(max_rows)
+        .min(max_rows);
+    // +2 for top/bottom borders of the list block.
+    let outer_height = height.saturating_add(2);
+    let y = input_area.y.saturating_sub(outer_height);
+    let menu_area = Rect {
+        x: input_area.x,
+        y,
+        width: input_area.width,
+        height: outer_height,
+    };
+    let items: Vec<ListItem<'_>> = menu
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if i == menu.selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(c.display.clone(), style)))
+        })
+        .collect();
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    frame.render_widget(Clear, menu_area);
+    frame.render_widget(list, menu_area);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -675,7 +747,6 @@ fn centered_rect(
 }
 
 fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
-    use ratatui::widgets::Clear;
     use ratatui::widgets::Wrap;
 
     let area = centered_rect(80, 80, frame.area());
@@ -1437,6 +1508,45 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         return;
     }
 
+    // Menu-mode navigation (Tab / arrows / Enter / Esc) intercepts before
+    // the normal input dispatch. Printable characters and Backspace fall
+    // through to the regular handlers; the buffer is then re-evaluated for
+    // menu state at the end of this function.
+    if matches!(
+        app.input.mode,
+        InputMode::SlashMenu(_) | InputMode::AtMenu(_)
+    ) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                app.input.close_menu();
+                return;
+            }
+            (KeyCode::Tab | KeyCode::Down, _) => {
+                if let InputMode::SlashMenu(ref mut m) | InputMode::AtMenu(ref mut m) =
+                    app.input.mode
+                {
+                    m.cycle_next();
+                }
+                return;
+            }
+            (KeyCode::BackTab | KeyCode::Up, _) => {
+                if let InputMode::SlashMenu(ref mut m) | InputMode::AtMenu(ref mut m) =
+                    app.input.mode
+                {
+                    m.cycle_prev();
+                }
+                return;
+            }
+            (KeyCode::Enter, m)
+                if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
+            {
+                app.input.accept_menu_selection();
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
             if let Some(running) = &app.running {
@@ -1534,6 +1644,12 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         }
         _ => {}
     }
+
+    // After buffer mutations, re-evaluate menu state. `maybe_open_slash_menu`
+    // is a no-op unless the buffer is exactly "/"; `refilter_slash_menu` is a
+    // no-op unless the menu is currently open.
+    app.input.maybe_open_slash_menu(SLASH_COMMANDS);
+    app.input.refilter_slash_menu(SLASH_COMMANDS);
 }
 
 #[cfg(test)]

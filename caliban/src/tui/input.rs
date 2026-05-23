@@ -1,12 +1,63 @@
 //! Input state machine for the TUI prompt area.
 
-/// Single-line input buffer with cursor and ↑/↓ history navigation.
+use crate::tui::completer::{Candidate, rank};
+
+/// Active mode of the input — drives both render and key dispatch.
+#[derive(Debug, Default)]
+pub(crate) enum InputMode {
+    #[default]
+    Idle,
+    SlashMenu(MenuState),
+    #[allow(dead_code, reason = "wired in T6 @-completion")]
+    AtMenu(MenuState),
+}
+
+/// State carried by an open slash or @-path menu.
+#[derive(Debug)]
+pub(crate) struct MenuState {
+    pub(crate) candidates: Vec<Candidate>,
+    pub(crate) selected: usize,
+    /// Byte offset of the trigger character (`/` or `@`) in `Input::buffer`.
+    pub(crate) trigger_start: usize,
+}
+
+impl MenuState {
+    pub(crate) fn new(trigger_start: usize, candidates: Vec<Candidate>) -> Self {
+        Self {
+            candidates,
+            selected: 0,
+            trigger_start,
+        }
+    }
+
+    pub(crate) fn cycle_next(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.candidates.len();
+    }
+
+    pub(crate) fn cycle_prev(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.candidates.len() - 1
+        } else {
+            self.selected - 1
+        };
+    }
+}
+
+/// Multi-line input buffer with cursor, history navigation, and an
+/// optional active menu (slash or @-path completion).
 #[derive(Debug, Default)]
 pub(crate) struct Input {
     pub(crate) buffer: String,
     pub(crate) cursor: usize,
     pub(crate) history: Vec<String>,
     pub(crate) history_cursor: Option<usize>,
+    pub(crate) mode: InputMode,
 }
 
 impl Input {
@@ -128,6 +179,97 @@ impl Input {
             self.cursor = self.buffer.len();
         }
     }
+
+    pub(crate) fn close_menu(&mut self) {
+        self.mode = InputMode::Idle;
+    }
+
+    /// Open the slash menu if the buffer is exactly `/` at the very start
+    /// (i.e. the user just typed `/` to begin a slash command).
+    pub(crate) fn maybe_open_slash_menu(&mut self, all_commands: &[(&str, &str)]) {
+        if matches!(self.mode, InputMode::Idle) && self.buffer == "/" && self.cursor == 1 {
+            let cands = rank(all_commands, "", 32);
+            self.mode = InputMode::SlashMenu(MenuState::new(0, cands));
+        }
+    }
+
+    /// Refilter the slash menu against the prefix after the leading `/`.
+    /// Closes the menu if the buffer no longer starts with `/`.
+    pub(crate) fn refilter_slash_menu(&mut self, all_commands: &[(&str, &str)]) {
+        if let InputMode::SlashMenu(ref mut menu) = self.mode {
+            if self.buffer.starts_with('/') {
+                // Slash command name runs from byte 1 to either the cursor
+                // or the next whitespace, whichever comes first.
+                let end = self
+                    .buffer
+                    .find(char::is_whitespace)
+                    .unwrap_or(self.buffer.len());
+                let prefix = &self.buffer[1..end];
+                let cands = rank(all_commands, prefix, 32);
+                menu.candidates = cands;
+                menu.selected = 0;
+                return;
+            }
+            self.mode = InputMode::Idle;
+        }
+    }
+
+    #[allow(dead_code, reason = "wired in T6 @-completion")]
+    pub(crate) fn open_at_menu(&mut self, trigger_start: usize, candidates: Vec<Candidate>) {
+        self.mode = InputMode::AtMenu(MenuState::new(trigger_start, candidates));
+    }
+
+    /// Replace the active token (from `trigger_start` to the next whitespace
+    /// or end-of-buffer) with the selected candidate's `insert` text.
+    /// Returns `true` if the accepted candidate was a directory entry
+    /// (display ends with `/`), so the caller can keep the menu open and
+    /// refresh for the new directory.
+    pub(crate) fn accept_menu_selection(&mut self) -> bool {
+        let (start, end, insert, was_dir) = match &self.mode {
+            InputMode::SlashMenu(m) | InputMode::AtMenu(m) => {
+                let Some(cand) = m.candidates.get(m.selected) else {
+                    self.mode = InputMode::Idle;
+                    return false;
+                };
+                let start = m.trigger_start;
+                let after_trigger = &self.buffer[start..];
+                let end_offset = after_trigger
+                    .find(char::is_whitespace)
+                    .unwrap_or(after_trigger.len());
+                (
+                    start,
+                    start + end_offset,
+                    cand.insert.clone(),
+                    cand.display.ends_with('/'),
+                )
+            }
+            InputMode::Idle => return false,
+        };
+        self.buffer.replace_range(start..end, &insert);
+        self.cursor = start + insert.len();
+        self.mode = InputMode::Idle;
+        was_dir
+    }
+
+    /// Find the active @-token surrounding the cursor, if any. The `@` must
+    /// be at the start of the buffer or preceded by whitespace.
+    #[allow(dead_code, reason = "wired in T6 @-completion")]
+    pub(crate) fn active_at_token(&self) -> Option<(usize, String)> {
+        let before = &self.buffer[..self.cursor];
+        let at_pos = before.rfind('@')?;
+        if at_pos > 0 {
+            let prev = before[..at_pos].chars().next_back().unwrap_or(' ');
+            if !prev.is_whitespace() {
+                return None;
+            }
+        }
+        let after_at = &self.buffer[at_pos + 1..];
+        let end_in_after = after_at
+            .find(char::is_whitespace)
+            .unwrap_or(after_at.len());
+        let token = &self.buffer[at_pos + 1..at_pos + 1 + end_in_after];
+        Some((at_pos, token.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +321,71 @@ mod tests {
         i.insert_newline();
         assert_eq!(i.buffer, "a\nb");
         assert_eq!(i.cursor, 2);
+    }
+
+    #[test]
+    fn slash_opens_menu_at_col_zero() {
+        let mut i = Input::new();
+        i.insert_char('/');
+        i.maybe_open_slash_menu(&[("/help", "/help"), ("/quit", "/quit")]);
+        assert!(matches!(i.mode, InputMode::SlashMenu(_)));
+    }
+
+    #[test]
+    fn typing_refilters_slash_menu() {
+        let cmds = &[("/help", "/help"), ("/quit", "/quit")];
+        let mut i = Input::new();
+        i.insert_char('/');
+        i.maybe_open_slash_menu(cmds);
+        i.insert_char('h');
+        i.refilter_slash_menu(cmds);
+        match &i.mode {
+            InputMode::SlashMenu(m) => assert_eq!(m.candidates[0].display, "/help"),
+            _ => panic!("expected slash menu"),
+        }
+    }
+
+    #[test]
+    fn accept_selection_replaces_token() {
+        let cmds = &[("/help", "/help")];
+        let mut i = Input::new();
+        i.insert_char('/');
+        i.maybe_open_slash_menu(cmds);
+        i.insert_char('h');
+        i.refilter_slash_menu(cmds);
+        i.accept_menu_selection();
+        assert_eq!(i.buffer, "/help");
+        assert!(matches!(i.mode, InputMode::Idle));
+    }
+
+    #[test]
+    fn detects_at_token_at_start_of_buffer() {
+        let mut i = Input::new();
+        i.insert_char('@');
+        i.insert_char('s');
+        let (start, tok) = i.active_at_token().unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(tok, "s");
+    }
+
+    #[test]
+    fn detects_at_token_after_whitespace() {
+        let mut i = Input::new();
+        for c in "hello @sr".chars() {
+            i.insert_char(c);
+        }
+        let (start, tok) = i.active_at_token().unwrap();
+        assert_eq!(start, 6);
+        assert_eq!(tok, "sr");
+    }
+
+    #[test]
+    fn ignores_at_inside_word() {
+        let mut i = Input::new();
+        for c in "user@host".chars() {
+            i.insert_char(c);
+        }
+        assert!(i.active_at_token().is_none());
     }
 
     #[test]
