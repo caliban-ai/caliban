@@ -216,14 +216,8 @@ pub(crate) struct App {
 
     /// Scrolling output region contents.
     pub(crate) transcript: Vec<TranscriptLine>,
-    /// The text currently in the input area.
-    pub(crate) input: String,
-    /// Byte offset of the cursor within `input`.
-    pub(crate) cursor: usize,
-    /// History of submitted prompts (oldest first).
-    pub(crate) history: Vec<String>,
-    /// Index into `history` while navigating; `None` when at the live input.
-    pub(crate) history_index: Option<usize>,
+    /// Input area state (text, cursor, history, mode).
+    pub(crate) input: input::Input,
     /// Manual scroll offset (rows from top) when `auto_scroll` is false.
     pub(crate) scroll: u16,
     /// When `true`, keep the viewport pinned to the bottom of the transcript.
@@ -290,10 +284,7 @@ impl App {
             cwd,
             system_prompt,
             transcript: Vec::new(),
-            input: String::new(),
-            cursor: 0,
-            history,
-            history_index: None,
+            input: input::Input::from_history(history),
             scroll: 0,
             auto_scroll: true,
             last_max_scroll: 0,
@@ -301,102 +292,6 @@ impl App {
             running: None,
             view: ViewState::Main,
             messages,
-        }
-    }
-
-    /// Insert a character at the current cursor position.
-    pub(crate) fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-    }
-
-    /// Delete the character immediately before the cursor.
-    pub(crate) fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.input[..self.cursor]
-            .chars()
-            .next_back()
-            .map_or(0, char::len_utf8);
-        self.cursor -= prev;
-        self.input.drain(self.cursor..self.cursor + prev);
-    }
-
-    /// Delete the character immediately after the cursor.
-    pub(crate) fn delete_forward(&mut self) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        let next = self.input[self.cursor..]
-            .chars()
-            .next()
-            .map_or(0, char::len_utf8);
-        self.input.drain(self.cursor..self.cursor + next);
-    }
-
-    /// Move the cursor one character to the left.
-    pub(crate) fn cursor_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.input[..self.cursor]
-            .chars()
-            .next_back()
-            .map_or(0, char::len_utf8);
-        self.cursor -= prev;
-    }
-
-    /// Move the cursor one character to the right.
-    pub(crate) fn cursor_right(&mut self) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        let next = self.input[self.cursor..]
-            .chars()
-            .next()
-            .map_or(0, char::len_utf8);
-        self.cursor += next;
-    }
-
-    /// Move the cursor to the beginning of the input.
-    pub(crate) fn cursor_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    /// Move the cursor to the end of the input.
-    pub(crate) fn cursor_end(&mut self) {
-        self.cursor = self.input.len();
-    }
-
-    /// Navigate to the previous history entry.
-    pub(crate) fn history_up(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let new_idx = match self.history_index {
-            None => self.history.len() - 1,
-            Some(0) => 0,
-            Some(n) => n - 1,
-        };
-        self.history_index = Some(new_idx);
-        self.input = self.history[new_idx].clone();
-        self.cursor = self.input.len();
-    }
-
-    /// Navigate to the next history entry (or clear the input when past the end).
-    pub(crate) fn history_down(&mut self) {
-        let Some(idx) = self.history_index else {
-            return;
-        };
-        if idx + 1 >= self.history.len() {
-            self.history_index = None;
-            self.input.clear();
-            self.cursor = 0;
-        } else {
-            self.history_index = Some(idx + 1);
-            self.input = self.history[idx + 1].clone();
-            self.cursor = self.input.len();
         }
     }
 
@@ -425,7 +320,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     const INPUT_MAX_ROWS: u16 = 10;
     let area = frame.area();
     let avail_width = area.width as usize;
-    let total_input_chars = PROMPT_CHARS + app.input.chars().count();
+    let total_input_chars = PROMPT_CHARS + app.input.buffer.chars().count();
     let input_rows: u16 = if avail_width == 0 {
         1
     } else {
@@ -482,9 +377,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let input_chunk_width = chunks[2].width as usize;
     if input_chunk_width > 0 {
         let combined: String = {
-            let mut s = String::with_capacity(PROMPT_CHARS + app.input.len());
+            let mut s = String::with_capacity(PROMPT_CHARS + app.input.buffer.len());
             s.push_str("> ");
-            s.push_str(&app.input);
+            s.push_str(&app.input.buffer);
             s
         };
         let chars: Vec<char> = combined.chars().collect();
@@ -514,7 +409,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     // Cursor position — in chunks[2], accounting for character-wrap.
     if let Some(width_nz) = std::num::NonZeroUsize::new(input_chunk_width) {
-        let prefix_chars = PROMPT_CHARS + app.input[..app.cursor].chars().count();
+        let prefix_chars = PROMPT_CHARS + app.input.buffer[..app.input.cursor].chars().count();
         let cursor_row = u16::try_from(prefix_chars / width_nz)
             .unwrap_or(INPUT_MAX_ROWS)
             .min(input_rows.saturating_sub(1));
@@ -1499,29 +1394,28 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             if let Some(running) = &app.running {
                 // Cancel the active turn; the stream will yield Err(Cancelled).
                 running.cancel.cancel();
-            } else if app.input.is_empty() {
+            } else if app.input.buffer.is_empty() {
                 app.should_exit = true;
             } else {
                 app.input.clear();
-                app.cursor = 0;
             }
         }
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.input.is_empty() => {
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.input.buffer.is_empty() => {
             app.should_exit = true;
         }
         (KeyCode::Char(c), m)
             if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
         {
-            app.insert_char(c);
+            app.input.insert_char(c);
         }
-        (KeyCode::Backspace, _) => app.backspace(),
-        (KeyCode::Delete, _) => app.delete_forward(),
-        (KeyCode::Left, _) => app.cursor_left(),
-        (KeyCode::Right, _) => app.cursor_right(),
-        (KeyCode::Home, _) => app.cursor_home(),
-        (KeyCode::End, _) => app.cursor_end(),
-        (KeyCode::Up, _) => app.history_up(),
-        (KeyCode::Down, _) => app.history_down(),
+        (KeyCode::Backspace, _) => app.input.backspace(),
+        (KeyCode::Delete, _) => app.input.delete_forward(),
+        (KeyCode::Left, _) => app.input.cursor_left(),
+        (KeyCode::Right, _) => app.input.cursor_right(),
+        (KeyCode::Home, _) => app.input.cursor_home(),
+        (KeyCode::End, _) => app.input.cursor_end(),
+        (KeyCode::Up, _) => app.input.history_up(),
+        (KeyCode::Down, _) => app.input.history_down(),
         (KeyCode::PageUp, _) => {
             if app.auto_scroll {
                 app.scroll = app.last_max_scroll;
@@ -1539,7 +1433,7 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             }
         }
         (KeyCode::Enter, _) => {
-            let prompt = app.input.trim().to_string();
+            let prompt = app.input.buffer.trim().to_string();
             if prompt.is_empty() {
                 return;
             }
@@ -1548,11 +1442,7 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 return;
             }
 
-            let line = app.input.clone();
-            app.input.clear();
-            app.cursor = 0;
-            app.history.push(line);
-            app.history_index = None;
+            let _line = app.input.submit();
             app.auto_scroll = true;
 
             if prompt.starts_with('/') {
