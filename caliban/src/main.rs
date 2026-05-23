@@ -3,7 +3,6 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::multiple_crate_versions)]
 
-mod repl;
 mod tui;
 
 use std::collections::HashMap;
@@ -107,10 +106,6 @@ pub(crate) struct Args {
     /// Override the sessions directory.
     #[arg(long, value_name = "DIR")]
     pub(crate) sessions_dir: Option<PathBuf>,
-
-    /// Use the new TUI instead of the simple REPL (experimental).
-    #[arg(long)]
-    pub(crate) tui: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -333,18 +328,16 @@ async fn main() -> Result<()> {
         None
     };
 
-    // --- TUI dispatch: --tui flag overrides the REPL.
-    if args.tui {
-        return tui::run(args, agent, store, session).await;
-    }
-
-    // --- REPL dispatch: no prompt + stdin is a TTY → enter interactive REPL.
-    // The REPL manages its own per-turn Ctrl-C handling; we do NOT register
-    // the outer ctrl_c handler in this path.
+    // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
     let stdin_is_tty = std::io::stdin().is_terminal();
-    if !has_prompt && stdin_is_tty {
-        return repl::run(args, agent, store, session).await;
+    if !has_prompt {
+        if stdin_is_tty {
+            return tui::run(args, agent, store, session).await;
+        }
+        anyhow::bail!(
+            "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
+        );
     }
 
     // --- Single-prompt path: register the outer Ctrl-C handler.
