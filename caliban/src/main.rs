@@ -3,6 +3,8 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::multiple_crate_versions)]
 
+mod repl;
+
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -20,14 +22,14 @@ use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ProviderKind {
+pub(crate) enum ProviderKind {
     Anthropic,
     Openai,
     Ollama,
     Google,
 }
 
-fn default_model_for(p: ProviderKind) -> &'static str {
+pub(crate) fn default_model_for(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "claude-3-5-sonnet",
         ProviderKind::Openai => "gpt-4o",
@@ -45,65 +47,65 @@ fn provider_name(p: ProviderKind) -> &'static str {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(name = "caliban", version, about = "caliban agent harness")]
 #[allow(clippy::struct_excessive_bools)]
-struct Args {
+pub(crate) struct Args {
     /// User prompt. Use "-" to read from stdin.
     #[arg(value_name = "PROMPT")]
-    prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
 
     /// Alternative way to specify the prompt
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
-    prompt_flag: Option<String>,
+    pub(crate) prompt_flag: Option<String>,
 
     /// Which provider to use
     #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
-    provider: ProviderKind,
+    pub(crate) provider: ProviderKind,
 
     /// Model name (defaults per provider)
     #[arg(long)]
-    model: Option<String>,
+    pub(crate) model: Option<String>,
 
     /// Per-turn output token limit
     #[arg(long, default_value_t = 2048)]
-    max_tokens: u32,
+    pub(crate) max_tokens: u32,
 
     /// Maximum agent loop iterations
     #[arg(long, default_value_t = 50)]
-    max_turns: u32,
+    pub(crate) max_turns: u32,
 
     /// Sampling temperature
     #[arg(long)]
-    temperature: Option<f32>,
+    pub(crate) temperature: Option<f32>,
 
     /// Workspace root for file/shell tools
     #[arg(long)]
-    workspace: Option<PathBuf>,
+    pub(crate) workspace: Option<PathBuf>,
 
     /// Disable all tools (chat-only mode)
     #[arg(long)]
-    no_tools: bool,
+    pub(crate) no_tools: bool,
 
     /// Reject tool paths outside the workspace root
     #[arg(long)]
-    restrict_paths: bool,
+    pub(crate) restrict_paths: bool,
 
     /// Suppress tool-execution announcements
     #[arg(long)]
-    quiet: bool,
+    pub(crate) quiet: bool,
 
     /// Load or create a named session; persists to ~/.local/share/caliban/sessions/<NAME>.json.
     #[arg(long, value_name = "NAME")]
-    session: Option<String>,
+    pub(crate) session: Option<String>,
 
     /// Don't save the session back to disk after the run.
     #[arg(long)]
-    no_save: bool,
+    pub(crate) no_save: bool,
 
     /// Override the sessions directory.
     #[arg(long, value_name = "DIR")]
-    sessions_dir: Option<PathBuf>,
+    pub(crate) sessions_dir: Option<PathBuf>,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -171,7 +173,7 @@ fn build_registry(args: &Args, workspace: WorkspaceRoot) -> ToolRegistry {
     r
 }
 
-fn summarize(s: &str, max: usize) -> String {
+pub(crate) fn summarize(s: &str, max: usize) -> String {
     let one_line: String = s.lines().next().unwrap_or("").chars().take(max).collect();
     if s.lines().count() > 1 || s.chars().count() > max {
         format!("{one_line}\u{2026}")
@@ -180,7 +182,7 @@ fn summarize(s: &str, max: usize) -> String {
     }
 }
 
-fn summarize_blocks(blocks: &[ContentBlock], max: usize) -> String {
+pub(crate) fn summarize_blocks(blocks: &[ContentBlock], max: usize) -> String {
     for b in blocks {
         if let ContentBlock::Text(t) = b {
             return summarize(&t.text, max);
@@ -279,13 +281,15 @@ async fn run_and_render(
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<()> {
+    use std::io::IsTerminal as _;
+
     let args = Args::parse();
 
     let workspace = match &args.workspace {
         Some(p) => WorkspaceRoot::new(p.clone()),
         None => WorkspaceRoot::current_dir().context("could not get cwd")?,
     };
-    let prompt = read_prompt(&args)?;
+
     let provider = build_provider(&args)?;
     let registry = build_registry(&args, workspace);
 
@@ -305,6 +309,35 @@ async fn main() -> Result<()> {
     }
     let agent = Arc::new(builder.build()?);
 
+    // Resolve session store (only when --session is given)
+    let store = match (&args.sessions_dir, &args.session) {
+        (_, None) => None,
+        (Some(d), Some(_)) => Some(SessionStore::new(d.clone())),
+        (None, Some(_)) => Some(SessionStore::new(SessionStore::default_root()?)),
+    };
+
+    // Load or create session
+    let session = if let (Some(store), Some(name)) = (&store, &args.session) {
+        Some(match store.load(name)? {
+            Some(existing) => existing,
+            None => {
+                PersistedSession::new(name.clone(), provider_name(args.provider), model.clone())
+            }
+        })
+    } else {
+        None
+    };
+
+    // --- REPL dispatch: no prompt + stdin is a TTY → enter interactive REPL.
+    // The REPL manages its own per-turn Ctrl-C handling; we do NOT register
+    // the outer ctrl_c handler in this path.
+    let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    if !has_prompt && stdin_is_tty {
+        return repl::run(args, agent, store, session).await;
+    }
+
+    // --- Single-prompt path: register the outer Ctrl-C handler.
     let cancel = CancellationToken::new();
     {
         let cancel = cancel.clone();
@@ -317,24 +350,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Resolve session store (only when --session is given)
-    let store = match (&args.sessions_dir, &args.session) {
-        (_, None) => None,
-        (Some(d), Some(_)) => Some(SessionStore::new(d.clone())),
-        (None, Some(_)) => Some(SessionStore::new(SessionStore::default_root()?)),
-    };
-
-    // Load or create session
-    let mut session = if let (Some(store), Some(name)) = (&store, &args.session) {
-        Some(match store.load(name)? {
-            Some(existing) => existing,
-            None => {
-                PersistedSession::new(name.clone(), provider_name(args.provider), model.clone())
-            }
-        })
-    } else {
-        None
-    };
+    let prompt = read_prompt(&args)?;
 
     // Build initial messages: prior session history + new user prompt
     let mut messages = session
@@ -343,6 +359,7 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
     messages.push(Message::user_text(prompt));
 
+    let mut session = session;
     let (final_messages, total_usage) =
         run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
 

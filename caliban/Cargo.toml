@@ -26,6 +26,8 @@ clap                       = { version = "4", features = ["derive"] }
 tokio                      = { workspace = true, features = ["full"] }
 tokio-util                 = { workspace = true }
 futures                    = { workspace = true }
+rustyline                  = "14"
+dirs                       = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }
