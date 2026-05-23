@@ -39,6 +39,7 @@ pub(crate) fn build_default(cwd: &Path, tool_names: &[&str], no_tools: bool) -> 
         Conventions:\n\
         - Use tools when needed; don't claim to have read files you haven't actually Read.\n\
         - File paths can be relative to the working directory above, or absolute.\n\
+        - Path arguments to tools also support `~` and `~/...` for the home directory.\n\
         - Bash commands run with /bin/sh -c and timeout after 60s by default.\n\
         - Output is rendered in a terminal UI; prefer concise responses with code blocks for \
         multi-line content rather than long prose paragraphs.\n\
