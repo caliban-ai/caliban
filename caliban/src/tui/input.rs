@@ -8,7 +8,6 @@ pub(crate) enum InputMode {
     #[default]
     Idle,
     SlashMenu(MenuState),
-    #[allow(dead_code, reason = "wired in T6 @-completion")]
     AtMenu(MenuState),
 }
 
@@ -214,7 +213,6 @@ impl Input {
         }
     }
 
-    #[allow(dead_code, reason = "wired in T6 @-completion")]
     pub(crate) fn open_at_menu(&mut self, trigger_start: usize, candidates: Vec<Candidate>) {
         self.mode = InputMode::AtMenu(MenuState::new(trigger_start, candidates));
     }
@@ -253,7 +251,6 @@ impl Input {
 
     /// Find the active @-token surrounding the cursor, if any. The `@` must
     /// be at the start of the buffer or preceded by whitespace.
-    #[allow(dead_code, reason = "wired in T6 @-completion")]
     pub(crate) fn active_at_token(&self) -> Option<(usize, String)> {
         let before = &self.buffer[..self.cursor];
         let at_pos = before.rfind('@')?;

@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::tui::completer::Candidate;
+
 /// Split an `@<token>` (passed WITHOUT the leading `@`) into the directory
 /// to enumerate and the name fragment to match against.
-#[allow(dead_code, reason = "wired in T6 @-completion")]
 ///
 /// Resolution rules:
 /// - `""`           => dir = `workspace_root`, name = ""
@@ -44,9 +45,98 @@ pub(crate) fn split_at_token(
     (dir, name)
 }
 
+/// One directory's immediate children, gitignore-aware. Returns names only;
+/// directories include a trailing `/`. Caps output at 500 entries; sorted
+/// alphabetically with directories grouped naturally by the `/` suffix.
+pub(crate) fn read_dir_candidates(dir: &Path, show_hidden: bool) -> Vec<Candidate> {
+    use ignore::WalkBuilder;
+    let mut out = Vec::new();
+    let walker = WalkBuilder::new(dir)
+        .max_depth(Some(1))
+        .hidden(!show_hidden)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(false)
+        .build();
+    for entry in walker.flatten() {
+        if entry.path() == dir {
+            continue;
+        }
+        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+        let name = entry.file_name().to_string_lossy();
+        let display = if is_dir {
+            format!("{name}/")
+        } else {
+            name.to_string()
+        };
+        let insert_str = display.clone();
+        out.push(Candidate {
+            display,
+            insert: insert_str,
+            score: 0,
+        });
+        if out.len() >= 500 {
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn touch(dir: &Path, rel: &str) {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::File::create(&p).unwrap().write_all(b"x").unwrap();
+    }
+
+    #[test]
+    fn read_dir_lists_files_and_dirs() {
+        let td = TempDir::new().unwrap();
+        touch(td.path(), "alpha.txt");
+        touch(td.path(), "beta.rs");
+        fs::create_dir(td.path().join("sub")).unwrap();
+        let cands = read_dir_candidates(td.path(), false);
+        let displays: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
+        assert!(displays.contains(&"alpha.txt"));
+        assert!(displays.contains(&"beta.rs"));
+        assert!(displays.contains(&"sub/"));
+    }
+
+    #[test]
+    fn read_dir_respects_gitignore() {
+        let td = TempDir::new().unwrap();
+        // .git/ marker is what the `ignore` crate uses to treat the dir as
+        // a git root so .gitignore is honored. Without it the file would
+        // be ignored as a stray .gitignore.
+        fs::create_dir(td.path().join(".git")).unwrap();
+        fs::write(td.path().join(".gitignore"), "secret.txt\n").unwrap();
+        touch(td.path(), "visible.txt");
+        touch(td.path(), "secret.txt");
+        let cands = read_dir_candidates(td.path(), false);
+        let displays: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
+        assert!(displays.contains(&"visible.txt"));
+        assert!(!displays.contains(&"secret.txt"));
+    }
+
+    #[test]
+    fn read_dir_hides_dotfiles_unless_requested() {
+        let td = TempDir::new().unwrap();
+        touch(td.path(), ".env");
+        touch(td.path(), "visible.txt");
+        let hidden = read_dir_candidates(td.path(), false);
+        assert!(!hidden.iter().any(|c| c.display == ".env"));
+        let shown = read_dir_candidates(td.path(), true);
+        assert!(shown.iter().any(|c| c.display == ".env"));
+    }
 
     #[test]
     fn empty_token_is_workspace_root() {

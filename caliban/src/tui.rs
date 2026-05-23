@@ -1540,7 +1540,13 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             (KeyCode::Enter, m)
                 if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
             {
-                app.input.accept_menu_selection();
+                let was_at = matches!(app.input.mode, InputMode::AtMenu(_));
+                let was_dir = app.input.accept_menu_selection();
+                if was_at && was_dir {
+                    // Selecting a directory leaves cursor after `src/`;
+                    // re-open the menu showing the new directory contents.
+                    refresh_at_menu(app);
+                }
                 return;
             }
             _ => {}
@@ -1647,9 +1653,55 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
 
     // After buffer mutations, re-evaluate menu state. `maybe_open_slash_menu`
     // is a no-op unless the buffer is exactly "/"; `refilter_slash_menu` is a
-    // no-op unless the menu is currently open.
+    // no-op unless the menu is currently open. `refresh_at_menu` opens or
+    // refilters the @-completion menu based on whether the cursor sits in
+    // an active @-token.
     app.input.maybe_open_slash_menu(SLASH_COMMANDS);
     app.input.refilter_slash_menu(SLASH_COMMANDS);
+    refresh_at_menu(app);
+}
+
+/// Open or refilter the @-completion menu, given the current buffer state.
+/// Closes the menu if the cursor no longer sits inside an @-token.
+fn refresh_at_menu(app: &mut App) {
+    use crate::tui::attach::{read_dir_candidates, split_at_token};
+    use crate::tui::completer::{Candidate, rank};
+
+    let Some((start, token)) = app.input.active_at_token() else {
+        if matches!(app.input.mode, InputMode::AtMenu(_)) {
+            app.input.close_menu();
+        }
+        return;
+    };
+    let cwd = app.cwd.clone();
+    let workspace_root = app
+        .args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.clone());
+    let home = dirs::home_dir();
+    let (dir, name) = split_at_token(&token, &workspace_root, &cwd, home.as_deref());
+    let show_hidden = name.starts_with('.');
+    let raw = read_dir_candidates(&dir, show_hidden);
+    let items: Vec<(&str, &str)> = raw
+        .iter()
+        .map(|c| (c.display.as_str(), c.insert.as_str()))
+        .collect();
+    let ranked = rank(&items, &name, 32);
+
+    // The candidate `insert` from `read_dir_candidates` is just the leaf
+    // name. Replacement spans @-trigger to end-of-token, so insert text
+    // must reproduce the FULL new token including '@' and the directory
+    // prefix the user already typed.
+    let dir_prefix = &token[..token.len() - name.len()];
+    let ranked_with_full_insert: Vec<Candidate> = ranked
+        .into_iter()
+        .map(|mut c| {
+            c.insert = format!("@{dir_prefix}{}", c.insert);
+            c
+        })
+        .collect();
+    app.input.open_at_menu(start, ranked_with_full_insert);
 }
 
 #[cfg(test)]
