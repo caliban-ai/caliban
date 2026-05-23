@@ -323,10 +323,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(output, chunks[0]);
 
     // Status bar
-    let status_text = render_status(app);
-    let status =
-        Paragraph::new(status_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    frame.render_widget(status, chunks[1]);
+    let status_widget = Paragraph::new(render_status(app));
+    frame.render_widget(status_widget, chunks[1]);
 
     // Input
     let input_line = Line::from(vec![Span::raw("> "), Span::raw(app.input.as_str())]);
@@ -418,8 +416,7 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
     lines
 }
 
-fn render_status(app: &App) -> String {
-    use std::fmt::Write as _;
+fn render_status(app: &App) -> Line<'static> {
     let provider = match app.args.provider {
         crate::ProviderKind::Anthropic => "anthropic",
         crate::ProviderKind::Openai => "openai",
@@ -429,22 +426,26 @@ fn render_status(app: &App) -> String {
     let model = app
         .args
         .model
-        .as_deref()
-        .unwrap_or_else(|| crate::default_model_for(app.args.provider));
-    let mut s = String::with_capacity(80);
-    let _ = write!(s, " {} \u{00B7} {provider} {model}", app.cwd_display());
-    if let Some(sess) = &app.session {
-        let _ = write!(
-            s,
-            " \u{00B7} session: {} ({}t)",
-            sess.name,
-            sess.turn_count()
-        );
-    }
-    if app.running.is_some() {
-        s.push_str(" \u{00B7} running\u{2026}");
-    }
-    s
+        .clone()
+        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+
+    let cwd = app.cwd_display();
+    let session_part = if let Some(sess) = &app.session {
+        format!(" \u{00B7} session: {} ({}t)", sess.name, sess.turn_count())
+    } else {
+        String::new()
+    };
+    let running_part = if app.running.is_some() {
+        " \u{00B7} running\u{2026}".to_string()
+    } else {
+        String::new()
+    };
+
+    let text = format!(" {cwd} \u{00B7} {provider} {model}{session_part}{running_part}");
+    Line::from(Span::styled(
+        text,
+        Style::default().bg(Color::DarkGray).fg(Color::White),
+    ))
 }
 
 // === Agent event handlers ===
