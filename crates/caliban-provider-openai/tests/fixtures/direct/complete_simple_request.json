@@ -1,0 +1,9 @@
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "system", "content": "Be brief."},
+    {"role": "user", "content": "Hi!"}
+  ],
+  "tool_choice": "auto",
+  "max_tokens": 64
+}

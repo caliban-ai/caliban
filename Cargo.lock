@@ -619,6 +619,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-provider-openai"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "caliban-provider",
+ "eventsource-stream",
+ "futures",
+ "http 1.4.0",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
