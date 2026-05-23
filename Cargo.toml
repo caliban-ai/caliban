@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/caliban-core",
+    "caliban",
 ]
 
 [workspace.package]
@@ -20,6 +21,7 @@ anyhow    = "1"
 unsafe_code      = "forbid"
 missing_docs     = "warn"
 unreachable_pub  = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all      = { level = "deny", priority = -1 }
