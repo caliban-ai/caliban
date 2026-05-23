@@ -315,12 +315,24 @@ async fn main() -> Result<()> {
                 .append(true)
                 .open(&path)
             {
+                use tracing_subscriber::EnvFilter;
                 use tracing_subscriber::layer::SubscriberExt as _;
                 use tracing_subscriber::util::SubscriberInitExt as _;
+                // Default filter keeps caliban + caliban_* crates at DEBUG and
+                // silences noisy lower-level traces (mio, hyper, reqwest, …).
+                // Users can override via RUST_LOG env var.
+                let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    EnvFilter::new(
+                        "debug,mio=warn,hyper=warn,hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,tower=warn"
+                    )
+                });
                 let layer = tracing_subscriber::fmt::layer()
                     .with_writer(std::sync::Mutex::new(file))
                     .with_ansi(false);
-                tracing_subscriber::registry().with(layer).init();
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(layer)
+                    .init();
                 tracing::info!("caliban debug logging started — {}", path.display());
             }
         }

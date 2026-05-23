@@ -136,6 +136,51 @@ pub(crate) enum TranscriptLine {
 pub(crate) struct RunningTurn {
     /// Cancel token — call `.cancel()` to interrupt the turn.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
+    /// What the agent is currently doing — drives the status-bar indicator.
+    pub(crate) activity: Activity,
+}
+
+/// What phase of work the agent is currently in.
+#[derive(Debug, Clone)]
+pub(crate) enum Activity {
+    /// Submitted; waiting for the provider to respond.
+    WaitingForModel { since: std::time::Instant },
+    /// Receiving streamed assistant text.
+    Streaming { since: std::time::Instant },
+    /// Receiving streamed reasoning/thinking output.
+    Thinking { since: std::time::Instant },
+    /// Dispatching a named tool.
+    DispatchingTool {
+        name: String,
+        since: std::time::Instant,
+    },
+}
+
+impl Activity {
+    fn label(&self) -> String {
+        match self {
+            Self::WaitingForModel { .. } => "waiting for model".into(),
+            Self::Streaming { .. } => "streaming response".into(),
+            Self::Thinking { .. } => "thinking".into(),
+            Self::DispatchingTool { name, .. } => format!("running {name}"),
+        }
+    }
+
+    fn since(&self) -> std::time::Instant {
+        match self {
+            Self::WaitingForModel { since }
+            | Self::Streaming { since }
+            | Self::Thinking { since }
+            | Self::DispatchingTool { since, .. } => *since,
+        }
+    }
+}
+
+/// Pick a frame from a Braille spinner based on elapsed time. ~10 Hz advance.
+fn spinner_frame(elapsed: std::time::Duration) -> char {
+    const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let idx = (elapsed.as_millis() / 100) as usize % FRAMES.len();
+    FRAMES[idx]
 }
 
 /// All TUI state: agent handle, session, display state, input buffer.
@@ -914,8 +959,15 @@ fn render_status(app: &App) -> Line<'static> {
     } else {
         String::new()
     };
-    let running_part = if app.running.is_some() {
-        " \u{00B7} running\u{2026}".to_string()
+    let running_part = if let Some(running) = &app.running {
+        let elapsed = running.activity.since().elapsed();
+        let secs = elapsed.as_secs();
+        let spinner = spinner_frame(elapsed);
+        format!(
+            " \u{00B7} {spinner} {} ({}s)",
+            running.activity.label(),
+            secs,
+        )
     } else {
         String::new()
     };
@@ -940,9 +992,17 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
     tracing::debug!(?evt, "agent event");
     match evt {
         TurnEvent::TurnStart { .. } => {
-            // No transcript change; render shows "running…" via app.running.
+            // Keep the WaitingForModel activity; refreshed on first delta below.
         }
         TurnEvent::AssistantTextDelta { text, .. } => {
+            // First delta of this stream → transition to Streaming activity.
+            if let Some(running) = app.running.as_mut() {
+                if !matches!(running.activity, Activity::Streaming { .. }) {
+                    running.activity = Activity::Streaming {
+                        since: std::time::Instant::now(),
+                    };
+                }
+            }
             // Find or create the in-progress AssistantText line.
             if let Some(TranscriptLine::AssistantText(buf)) = app.transcript.last_mut() {
                 buf.push_str(&text);
@@ -951,6 +1011,13 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             }
         }
         TurnEvent::AssistantThinkingDelta { text, .. } => {
+            if let Some(running) = app.running.as_mut() {
+                if !matches!(running.activity, Activity::Thinking { .. }) {
+                    running.activity = Activity::Thinking {
+                        since: std::time::Instant::now(),
+                    };
+                }
+            }
             if let Some(TranscriptLine::AssistantThinking(buf)) = app.transcript.last_mut() {
                 buf.push_str(&text);
             } else {
@@ -960,6 +1027,12 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
         TurnEvent::ToolCallStart {
             tool_use_id, name, ..
         } => {
+            if let Some(running) = app.running.as_mut() {
+                running.activity = Activity::DispatchingTool {
+                    name: name.clone(),
+                    since: std::time::Instant::now(),
+                };
+            }
             app.transcript.push(TranscriptLine::ToolCall {
                 tool_use_id,
                 name,
@@ -992,6 +1065,13 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             content,
             ..
         } => {
+            // Tool finished; back to "waiting for model" (next tool dispatch or
+            // the next provider call will update this further).
+            if let Some(running) = app.running.as_mut() {
+                running.activity = Activity::WaitingForModel {
+                    since: std::time::Instant::now(),
+                };
+            }
             let result_text = content
                 .iter()
                 .filter_map(|c| match c {
@@ -1015,6 +1095,13 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             }
         }
         TurnEvent::TurnEnd { .. } => {
+            // Tool dispatch (sequential) and the next turn's provider call are
+            // about to happen — show "waiting for model" until the next event.
+            if let Some(running) = app.running.as_mut() {
+                running.activity = Activity::WaitingForModel {
+                    since: std::time::Instant::now(),
+                };
+            }
             // Push a blank line for visual separation.
             app.transcript
                 .push(TranscriptLine::AssistantText(String::new()));
@@ -1351,7 +1438,12 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             // Start the agent stream.
             let cancel = tokio_util::sync::CancellationToken::new();
             let stream = Arc::clone(&app.agent).stream_until_done(messages, cancel.clone());
-            app.running = Some(RunningTurn { cancel });
+            app.running = Some(RunningTurn {
+                cancel,
+                activity: Activity::WaitingForModel {
+                    since: std::time::Instant::now(),
+                },
+            });
             *agent_stream = Some(stream);
         }
         _ => {}
