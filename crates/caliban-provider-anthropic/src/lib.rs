@@ -71,10 +71,14 @@ impl<T: Transport> Provider for AnthropicProvider<T> {
         ir_convert::native_response_to_ir(native_resp)
     }
 
-    async fn stream(&self, _req: CompletionRequest) -> Result<MessageStream> {
-        Err(Error::InvalidRequest(
-            "Anthropic streaming not yet wired (see Task 3)".into(),
-        ))
+    async fn stream(&self, req: CompletionRequest) -> Result<MessageStream> {
+        req.validate()?;
+        let canonical_model = req.model.clone();
+        let mut native = ir_convert::ir_to_native_request(req, true);
+        native.model = self.transport.wire_model_id(&canonical_model);
+        self.transport.finalize_request(&mut native);
+        let bytes_stream = self.transport.stream(native).await.map_err(Error::from)?;
+        Ok(stream_parse::map_sse_to_events(bytes_stream))
     }
 
     fn capabilities(&self, model: &str) -> Capabilities {
