@@ -147,6 +147,8 @@ pub(crate) struct App {
     pub(crate) args: Args,
     /// Current working directory (for the status bar).
     pub(crate) cwd: PathBuf,
+    /// Resolved system prompt (None if --no-system was given).
+    pub(crate) system_prompt: Option<String>,
 
     /// Scrolling output region contents.
     pub(crate) transcript: Vec<TranscriptLine>,
@@ -177,6 +179,7 @@ impl App {
         session: Option<PersistedSession>,
         store: Option<SessionStore>,
         args: Args,
+        system_prompt: Option<String>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let history = session
@@ -211,6 +214,7 @@ impl App {
             store,
             args,
             cwd,
+            system_prompt,
             transcript: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -930,9 +934,10 @@ pub(crate) async fn run(
     agent: Arc<Agent>,
     store: Option<SessionStore>,
     session: Option<PersistedSession>,
+    system_prompt: Option<String>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(agent, session, store, args);
+    let mut app = App::new(agent, session, store, args, system_prompt);
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
 
@@ -1173,6 +1178,17 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 .as_ref()
                 .map(|s| s.messages.clone())
                 .unwrap_or_default();
+
+            // Inject system prompt if not already present in the message list.
+            let has_system = messages
+                .first()
+                .is_some_and(|m| m.role == caliban_provider::Role::System);
+            if !has_system {
+                if let Some(ref sp) = app.system_prompt {
+                    messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
+                }
+            }
+
             messages.push(caliban_provider::Message::user_text(prompt));
 
             // Start the agent stream.

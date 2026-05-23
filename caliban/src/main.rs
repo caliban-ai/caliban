@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::multiple_crate_versions)]
 
+mod system_prompt;
 mod tui;
 
 use std::collections::HashMap;
@@ -106,6 +107,18 @@ pub(crate) struct Args {
     /// Override the sessions directory.
     #[arg(long, value_name = "DIR")]
     pub(crate) sessions_dir: Option<PathBuf>,
+
+    /// Override system prompt with the given text.
+    #[arg(long, value_name = "STRING", conflicts_with_all = ["system_file", "no_system"])]
+    pub(crate) system: Option<String>,
+
+    /// Override system prompt with the contents of a file.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["system", "no_system"])]
+    pub(crate) system_file: Option<PathBuf>,
+
+    /// Run with no system prompt (disables the default).
+    #[arg(long, conflicts_with_all = ["system", "system_file"])]
+    pub(crate) no_system: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -317,7 +330,7 @@ async fn main() -> Result<()> {
     };
 
     // Load or create session
-    let session = if let (Some(store), Some(name)) = (&store, &args.session) {
+    let mut session = if let (Some(store), Some(name)) = (&store, &args.session) {
         Some(match store.load(name)? {
             Some(existing) => existing,
             None => {
@@ -328,12 +341,34 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Resolve system prompt from CLI flags (or build default).
+    let tool_names: Vec<&str> = agent.tools().names().collect();
+    let system_prompt = system_prompt::resolve(
+        args.system.as_deref(),
+        args.system_file.as_deref(),
+        args.no_system,
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        &tool_names,
+        args.no_tools,
+    )?;
+
+    // For fresh sessions (no prior messages), insert the system prompt at position 0.
+    if let Some(sess) = session.as_mut() {
+        if sess.messages.is_empty() {
+            if let Some(ref prompt) = system_prompt {
+                sess.messages
+                    .push(caliban_provider::Message::system_text(prompt.clone()));
+            }
+        }
+        // Existing sessions: leave the persisted system as-is (don't overwrite).
+    }
+
     // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {
-            return tui::run(args, agent, store, session).await;
+            return tui::run(args, agent, store, session, system_prompt).await;
         }
         anyhow::bail!(
             "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
@@ -355,14 +390,24 @@ async fn main() -> Result<()> {
 
     let prompt = read_prompt(&args)?;
 
-    // Build initial messages: prior session history + new user prompt
+    // Build initial messages: prior session history (or system prompt) + new user prompt.
     let mut messages = session
         .as_ref()
         .map(|s| s.messages.clone())
         .unwrap_or_default();
+
+    // Ephemeral mode (no session): prepend system prompt if not already present.
+    let has_system = messages
+        .first()
+        .is_some_and(|m| m.role == caliban_provider::Role::System);
+    if !has_system {
+        if let Some(ref sp) = system_prompt {
+            messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
+        }
+    }
+
     messages.push(Message::user_text(prompt));
 
-    let mut session = session;
     let (final_messages, total_usage) =
         run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
 
