@@ -2,9 +2,10 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::io::{Stdout, stdout};
+use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Top-level view state: normal main view or an open overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -941,8 +942,12 @@ pub(crate) async fn run(
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
 
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         guard.terminal().draw(|frame| render(frame, &app))?;
+        stdout().flush().ok();
         if app.should_exit {
             break;
         }
@@ -972,7 +977,12 @@ pub(crate) async fn run(
                     }
                 }
             }
+            _ = tick.tick() => {
+                // No-op; the loop will redraw on next iteration.
+            }
         }
+
+        tokio::task::yield_now().await;
     }
 
     // Save session on clean exit (no-op if RunEnd already saved it).
