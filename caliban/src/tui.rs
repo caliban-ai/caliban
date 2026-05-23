@@ -353,16 +353,33 @@ impl App {
 
 #[allow(clippy::too_many_lines)]
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+    // Compute how many rows the input area needs based on terminal width.
+    // Prompt "> " (2 chars) + input text, character-wrapped at terminal width.
+    // Capped at INPUT_MAX_ROWS so a runaway input can't consume the screen.
+    const PROMPT_CHARS: usize = 2;
+    const INPUT_MAX_ROWS: u16 = 10;
+    let area = frame.area();
+    let avail_width = area.width as usize;
+    let total_input_chars = PROMPT_CHARS + app.input.chars().count();
+    let input_rows: u16 = if avail_width == 0 {
+        1
+    } else {
+        let rows = total_input_chars.div_ceil(avail_width).max(1);
+        u16::try_from(rows)
+            .unwrap_or(INPUT_MAX_ROWS)
+            .min(INPUT_MAX_ROWS)
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // 0: output region (flex)
-            Constraint::Length(1), // 1: top border (horizontal rule)
-            Constraint::Length(1), // 2: input area
-            Constraint::Length(1), // 3: bottom border
-            Constraint::Length(1), // 4: status bar
+            Constraint::Min(0),             // 0: output region (flex)
+            Constraint::Length(1),          // 1: top border (horizontal rule)
+            Constraint::Length(input_rows), // 2: input area (dynamic; grows with text)
+            Constraint::Length(1),          // 3: bottom border
+            Constraint::Length(1),          // 4: status bar
         ])
-        .split(frame.area());
+        .split(area);
 
     // chunks[0] = output region
     let lines = render_transcript(app);
@@ -384,9 +401,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hrule_top, chunks[1]);
 
-    // chunks[2] = input
-    let input_line = Line::from(vec![Span::raw("> "), Span::raw(app.input.as_str())]);
-    frame.render_widget(Paragraph::new(input_line), chunks[2]);
+    // chunks[2] = input — character-wrapped manually so cursor math stays aligned.
+    let input_chunk_width = chunks[2].width as usize;
+    if input_chunk_width > 0 {
+        let combined: String = {
+            let mut s = String::with_capacity(PROMPT_CHARS + app.input.len());
+            s.push_str("> ");
+            s.push_str(&app.input);
+            s
+        };
+        let chars: Vec<char> = combined.chars().collect();
+        let mut input_lines: Vec<Line<'_>> = Vec::new();
+        let mut idx = 0;
+        while idx < chars.len() {
+            let end = (idx + input_chunk_width).min(chars.len());
+            let chunk: String = chars[idx..end].iter().collect();
+            input_lines.push(Line::raw(chunk));
+            idx = end;
+        }
+        if input_lines.is_empty() {
+            input_lines.push(Line::raw("> "));
+        }
+        frame.render_widget(Paragraph::new(input_lines), chunks[2]);
+    }
 
     // chunks[3] = bottom horizontal rule
     let hrule_bot = Block::default()
@@ -398,9 +435,15 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let status = render_status(app);
     frame.render_widget(Paragraph::new(status), chunks[4]);
 
-    // Cursor position — in chunks[2] (input area)
-    let prefix_cols: u16 = u16::try_from(app.input[..app.cursor].chars().count()).unwrap_or(0);
-    frame.set_cursor_position((chunks[2].x + 2 + prefix_cols, chunks[2].y));
+    // Cursor position — in chunks[2], accounting for character-wrap.
+    if let Some(width_nz) = std::num::NonZeroUsize::new(input_chunk_width) {
+        let prefix_chars = PROMPT_CHARS + app.input[..app.cursor].chars().count();
+        let cursor_row = u16::try_from(prefix_chars / width_nz)
+            .unwrap_or(INPUT_MAX_ROWS)
+            .min(input_rows.saturating_sub(1));
+        let cursor_col = u16::try_from(prefix_chars % width_nz).unwrap_or(0);
+        frame.set_cursor_position((chunks[2].x + cursor_col, chunks[2].y + cursor_row));
+    }
 
     // Render overlay on top if one is active.
     if let ViewState::Overlay(o) = app.view {
