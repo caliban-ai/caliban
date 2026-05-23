@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = []
+members = [
+    "crates/caliban-core",
+]
 
 [workspace.package]
 edition = "2024"
@@ -18,11 +20,10 @@ anyhow    = "1"
 unsafe_code      = "forbid"
 missing_docs     = "warn"
 unreachable_pub  = "warn"
-rust_2018_idioms = "warn"
 
 [workspace.lints.clippy]
 all      = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
-cargo    = "warn"
+cargo    = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 must_use_candidate      = "allow"

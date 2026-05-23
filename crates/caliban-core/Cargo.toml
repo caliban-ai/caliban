@@ -1,0 +1,12 @@
+[package]
+name        = "caliban-core"
+version     = "0.0.0"
+description = "Foundational types and traits for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[lints]
+workspace = true
