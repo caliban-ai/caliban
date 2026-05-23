@@ -3,12 +3,11 @@
 A from-scratch Rust agent harness — a replacement for Claude Code that puts
 the operator in control of model routing, memory, skills, and prompt context.
 
-> **Project status:** Layer 1 complete — provider abstraction + agent-core
-> + built-in tools. Private repo, designed to be open-sourced.
-> `caliban-tools-builtin` ships Read/Write/Edit/Bash/Glob/Grep that the
-> agent can dispatch. The `caliban` binary is still a `--version` stub;
-> the CLI sub-project (Layer 4) wires everything together for a
-> human-testable scenario.
+> **Project status:** Layer 1 complete (provider + agent-core + tools-builtin)
+> + Layer 4 CLI + sessions + REPL. Private repo, designed to be open-sourced.
+> Daily-usable: single-prompt mode, persistent sessions, or interactive REPL.
+> Memory architecture, MCP client, model-router, and TUI remain as future
+> sub-projects.
 
 ## Why
 
@@ -96,6 +95,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Sessions and REPL
+
+caliban can persist conversations across invocations and provides an
+interactive REPL for iterative work.
+
+### Persistent single-prompt sessions
+
+```bash
+# First invocation — creates session "research"
+ANTHROPIC_API_KEY=$KEY caliban --session research "Read README.md"
+
+# Subsequent invocations — conversation continues
+ANTHROPIC_API_KEY=$KEY caliban --session research "Now look at Cargo.toml"
+
+# One-off run without saving back to the session
+caliban --session research --no-save "what was the first thing I asked?"
+```
+
+Sessions are saved as pretty-printed JSON under
+`~/.local/share/caliban/sessions/<name>.json` (override with
+`--sessions-dir`).
+
+### Interactive REPL
+
+Invoke `caliban` with no prompt + a TTY stdin to enter the REPL:
+
+```bash
+ANTHROPIC_API_KEY=$KEY caliban --session research
+caliban v0.0.0 — anthropic claude-3-5-sonnet — session: research (3 turns, 4.5k tokens)
+Type your message; /help for commands; /exit or Ctrl-D to quit.
+
+> What's in Cargo.toml?
+[streaming response, tool calls...]
+
+> /usage
+session research: 5 turns, 4682 input + 1294 output tokens
+
+> /exit
+[caliban: saved session 'research']
+```
+
+Slash commands: `/help`, `/exit`, `/quit`, `/clear`, `/sessions`,
+`/save [<name>]`, `/usage`.
+
+Ctrl-C during a turn cancels that turn and returns to the prompt.
+Ctrl-C or Ctrl-D at the prompt exits cleanly.
+
 ## Provider matrix
 
 | Schema family | Direct | AWS Bedrock | Google Vertex | Azure |
@@ -124,6 +170,7 @@ crates/              # libraries
   caliban-provider-google/     # Gemini (AI Studio + Vertex)
   caliban-agent-core/          # agent loop, tools, session
   caliban-tools-builtin/       # built-in tools (Read/Write/Edit/Bash/Glob/Grep)
+  caliban-sessions/            # session persistence + REPL
 adrs/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans
 .github/workflows/   # CI
