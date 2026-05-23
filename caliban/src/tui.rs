@@ -57,7 +57,8 @@ use caliban_sessions::{PersistedSession, SessionStore};
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -89,6 +90,18 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut out = stdout();
         execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+        // Best-effort: kitty keyboard protocol lets us distinguish
+        // Shift+Enter from plain Enter on supporting terminals (kitty,
+        // iTerm2 with modifier reporting, Ghostty, foot, WezTerm).
+        // Legacy terminals ignore the push silently — Alt+Enter is the
+        // documented portable fallback for inserting a newline.
+        let _ = execute!(
+            out,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            ),
+        );
         let backend = CrosstermBackend::new(out);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -102,9 +115,15 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // Restore in reverse order of acquisition. DisableMouseCapture is best-
-        // effort: if it fails, the terminal eventually clears state on its own.
-        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        // Restore in reverse order of acquisition. DisableMouseCapture and
+        // PopKeyboardEnhancementFlags are best-effort: if they fail the
+        // terminal eventually clears state on its own.
+        let _ = execute!(
+            stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -320,14 +339,18 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     const INPUT_MAX_ROWS: u16 = 10;
     let area = frame.area();
     let avail_width = area.width as usize;
-    let total_input_chars = PROMPT_CHARS + app.input.buffer.chars().count();
+    // Count visible rows: each '\n' starts a new logical line, then each
+    // logical line wraps at avail_width. First logical line carries the
+    // "> " prompt; subsequent ones (after Shift+Enter) do not.
     let input_rows: u16 = if avail_width == 0 {
         1
     } else {
-        let rows = total_input_chars.div_ceil(avail_width).max(1);
-        u16::try_from(rows)
-            .unwrap_or(INPUT_MAX_ROWS)
-            .min(INPUT_MAX_ROWS)
+        let mut total: usize = 0;
+        for (i, segment) in app.input.buffer.split('\n').enumerate() {
+            let chars = segment.chars().count() + if i == 0 { PROMPT_CHARS } else { 0 };
+            total += chars.div_ceil(avail_width).max(1);
+        }
+        u16::try_from(total.clamp(1, INPUT_MAX_ROWS as usize)).unwrap_or(INPUT_MAX_ROWS)
     };
 
     let chunks = Layout::default()
@@ -374,22 +397,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     frame.render_widget(hrule_top, chunks[1]);
 
     // chunks[2] = input — character-wrapped manually so cursor math stays aligned.
+    // We split on '\n' first so multi-line composition (Shift+Enter) gets one
+    // logical row per segment, each then char-wrapped at chunk width.
     let input_chunk_width = chunks[2].width as usize;
     if input_chunk_width > 0 {
-        let combined: String = {
-            let mut s = String::with_capacity(PROMPT_CHARS + app.input.buffer.len());
-            s.push_str("> ");
-            s.push_str(&app.input.buffer);
-            s
-        };
-        let chars: Vec<char> = combined.chars().collect();
         let mut input_lines: Vec<Line<'_>> = Vec::new();
-        let mut idx = 0;
-        while idx < chars.len() {
-            let end = (idx + input_chunk_width).min(chars.len());
-            let chunk: String = chars[idx..end].iter().collect();
-            input_lines.push(Line::raw(chunk));
-            idx = end;
+        for (seg_idx, segment) in app.input.buffer.split('\n').enumerate() {
+            let mut s = String::new();
+            if seg_idx == 0 {
+                s.push_str("> ");
+            }
+            s.push_str(segment);
+            let chars: Vec<char> = s.chars().collect();
+            if chars.is_empty() {
+                input_lines.push(Line::raw(""));
+                continue;
+            }
+            let mut idx = 0;
+            while idx < chars.len() {
+                let end = (idx + input_chunk_width).min(chars.len());
+                let chunk: String = chars[idx..end].iter().collect();
+                input_lines.push(Line::raw(chunk));
+                idx = end;
+            }
         }
         if input_lines.is_empty() {
             input_lines.push(Line::raw("> "));
@@ -407,13 +437,31 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let status = render_status(app);
     frame.render_widget(Paragraph::new(status), chunks[4]);
 
-    // Cursor position — in chunks[2], accounting for character-wrap.
+    // Cursor position — in chunks[2], accounting for char-wrap AND newlines.
     if let Some(width_nz) = std::num::NonZeroUsize::new(input_chunk_width) {
-        let prefix_chars = PROMPT_CHARS + app.input.buffer[..app.input.cursor].chars().count();
-        let cursor_row = u16::try_from(prefix_chars / width_nz)
+        let width = width_nz.get();
+        let before = &app.input.buffer[..app.input.cursor];
+        let segments: Vec<&str> = before.split('\n').collect();
+        // Each '\n' before the cursor starts a fresh logical line. Char-wrap
+        // each completed segment to count its visual rows; the last (active)
+        // segment determines the cursor's row/col within it.
+        let mut row: usize = 0;
+        let last_idx = segments.len() - 1;
+        for (i, seg) in segments.iter().enumerate() {
+            let chars = seg.chars().count() + if i == 0 { PROMPT_CHARS } else { 0 };
+            if i < last_idx {
+                row += chars.div_ceil(width).max(1);
+            } else {
+                row += chars / width;
+            }
+        }
+        let last_seg_chars =
+            segments[last_idx].chars().count() + if last_idx == 0 { PROMPT_CHARS } else { 0 };
+        let col = last_seg_chars % width;
+        let cursor_row = u16::try_from(row)
             .unwrap_or(INPUT_MAX_ROWS)
             .min(input_rows.saturating_sub(1));
-        let cursor_col = u16::try_from(prefix_chars % width_nz).unwrap_or(0);
+        let cursor_col = u16::try_from(col).unwrap_or(0);
         frame.set_cursor_position((chunks[2].x + cursor_col, chunks[2].y + cursor_row));
     }
 
@@ -1431,6 +1479,11 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             } else {
                 app.scroll = next;
             }
+        }
+        (KeyCode::Enter, m)
+            if m.contains(KeyModifiers::SHIFT) || m.contains(KeyModifiers::ALT) =>
+        {
+            app.input.insert_newline();
         }
         (KeyCode::Enter, _) => {
             let prompt = app.input.buffer.trim().to_string();

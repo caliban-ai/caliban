@@ -80,6 +80,11 @@ impl Input {
         self.cursor = self.buffer.len();
     }
 
+    pub(crate) fn insert_newline(&mut self) {
+        self.buffer.insert(self.cursor, '\n');
+        self.cursor += 1;
+    }
+
     pub(crate) fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
@@ -163,6 +168,17 @@ mod tests {
         assert_eq!(out, "x");
         assert_eq!(i.buffer, "");
         assert_eq!(i.history, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn insert_newline_inserts_lf_at_cursor() {
+        let mut i = Input::new();
+        i.insert_char('a');
+        i.insert_char('b');
+        i.cursor_left();
+        i.insert_newline();
+        assert_eq!(i.buffer, "a\nb");
+        assert_eq!(i.cursor, 2);
     }
 
     #[test]
