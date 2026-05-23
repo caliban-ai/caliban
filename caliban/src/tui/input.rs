@@ -261,9 +261,7 @@ impl Input {
             }
         }
         let after_at = &self.buffer[at_pos + 1..];
-        let end_in_after = after_at
-            .find(char::is_whitespace)
-            .unwrap_or(after_at.len());
+        let end_in_after = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
         let token = &self.buffer[at_pos + 1..at_pos + 1 + end_in_after];
         Some((at_pos, token.to_string()))
     }

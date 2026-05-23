@@ -160,6 +160,21 @@ closes any overlay.
 Slash commands (typed at the prompt and submitted with Enter):
 `/help`, `/exit`, `/quit`, `/clear` (clear transcript and in-memory history; also clears session if active), `/sessions`, `/save [<name>]`, `/usage`, `/config`, `/mcp`, `/skills`, `/system`.
 
+The input area supports multi-line composition (Shift+Enter on terminals
+that speak the kitty keyboard protocol — kitty, iTerm2, Ghostty, foot,
+WezTerm — and Alt+Enter as a portable fallback). Typing `/` opens a
+fuzzy menu of slash commands; typing `@` opens a live file picker
+scoped to the directory implied by the typed prefix (workspace-relative,
+absolute, `~/`, or `../`). On submit each `@<path>` is read from disk
+and inlined into the outgoing message as a `--- attached: ... ---`
+block, so the model sees the content without a separate Read tool
+round-trip. The transcript shows a single 📎 line per attachment.
+
+Files over `--max-attach-bytes` (default 256 KB) or that exceed the
+per-message `--attach-budget-bytes` (default 1 MB) cause an inline
+error and abort the send; both flags also honor `CALIBAN_MAX_ATTACH_BYTES`
+and `CALIBAN_ATTACH_BUDGET_BYTES` env vars.
+
 Ctrl-C during a turn cancels it and returns to the prompt. Ctrl-C or
 Ctrl-D at an empty prompt exits cleanly.
 

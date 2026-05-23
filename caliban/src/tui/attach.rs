@@ -182,12 +182,10 @@ pub(crate) fn resolve_attachments(
         let Ok(content) = String::from_utf8(bytes_vec) else {
             return Err(AttachError::NotUtf8 { path: candidate });
         };
-        let display_path = candidate
-            .strip_prefix(workspace_root)
-            .map_or_else(
-                |_| candidate.display().to_string(),
-                |p| p.display().to_string(),
-            );
+        let display_path = candidate.strip_prefix(workspace_root).map_or_else(
+            |_| candidate.display().to_string(),
+            |p| p.display().to_string(),
+        );
         attachments.push(Attachment {
             path: candidate,
             display_path,

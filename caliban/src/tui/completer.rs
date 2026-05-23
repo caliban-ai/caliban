@@ -47,7 +47,11 @@ pub(crate) fn rank(items: &[(&str, &str)], query: &str, limit: usize) -> Vec<Can
                 })
         })
         .collect();
-    scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.display.cmp(&b.display)));
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.display.cmp(&b.display))
+    });
     scored.truncate(limit);
     scored
 }

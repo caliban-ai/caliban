@@ -528,11 +528,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 /// Float a completion menu directly above the input area. Capped at 8 rows;
 /// the highlighted item gets a cyan background. Drawn with `Clear` so it
 /// overwrites the transcript rows it floats over.
-fn render_input_menu(
-    frame: &mut ratatui::Frame<'_>,
-    input_area: Rect,
-    menu: &input::MenuState,
-) {
+fn render_input_menu(frame: &mut ratatui::Frame<'_>, input_area: Rect, menu: &input::MenuState) {
     if menu.candidates.is_empty() {
         return;
     }
@@ -861,10 +857,20 @@ fn slash_help_lines() -> Vec<Line<'static>> {
     out.push(Line::raw(""));
     let keys = [
         ("Enter", "Submit prompt or slash command"),
+        (
+            "Shift+Enter / Alt+Enter",
+            "Insert newline (multi-line input)",
+        ),
         ("Backspace / Del", "Edit input"),
         ("Left / Right", "Move cursor"),
-        ("Up / Down", "Navigate input history"),
+        ("Up / Down", "Navigate input history (or menu selection)"),
         ("Home / End", "Jump to start / end of input"),
+        ("/", "Open slash-command menu"),
+        (
+            "@",
+            "Open path-completion menu (auto-attaches file on submit)",
+        ),
+        ("Tab / Shift+Tab", "Cycle selection in an open menu"),
         ("PageUp / PageDn", "Scroll transcript"),
         (
             "Mouse wheel",
@@ -872,7 +878,10 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ),
         ("Ctrl+C", "Cancel running turn or clear input"),
         ("Ctrl+D", "Exit (when input is empty)"),
-        ("Esc / q", "Close this overlay (or cancel a running turn)"),
+        (
+            "Esc / q",
+            "Close menu or overlay (or cancel a running turn)",
+        ),
     ];
     for (k, desc) in keys {
         out.push(Line::from(vec![
@@ -1658,9 +1667,7 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 app.scroll = next;
             }
         }
-        (KeyCode::Enter, m)
-            if m.contains(KeyModifiers::SHIFT) || m.contains(KeyModifiers::ALT) =>
-        {
+        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) || m.contains(KeyModifiers::ALT) => {
             app.input.insert_newline();
         }
         (KeyCode::Enter, _) => {
@@ -1778,11 +1785,7 @@ fn refresh_at_menu(app: &mut App) {
         return;
     };
     let cwd = app.cwd.clone();
-    let workspace_root = app
-        .args
-        .workspace
-        .clone()
-        .unwrap_or_else(|| cwd.clone());
+    let workspace_root = app.args.workspace.clone().unwrap_or_else(|| cwd.clone());
     let home = dirs::home_dir();
     let (dir, name) = split_at_token(&token, &workspace_root, &cwd, home.as_deref());
     let show_hidden = name.starts_with('.');
