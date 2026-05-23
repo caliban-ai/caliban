@@ -174,6 +174,8 @@ pub(crate) struct App {
     pub(crate) running: Option<RunningTurn>,
     /// Current view state: main view or an open overlay.
     pub(crate) view: ViewState,
+    /// In-memory message history for the current invocation (ephemeral and session modes).
+    pub(crate) messages: Vec<caliban_provider::Message>,
 }
 
 impl App {
@@ -186,6 +188,10 @@ impl App {
         system_prompt: Option<String>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let messages = session
+            .as_ref()
+            .map(|s| s.messages.clone())
+            .unwrap_or_default();
         let history = session
             .as_ref()
             .map(|s| {
@@ -229,6 +235,7 @@ impl App {
             should_exit: false,
             running: None,
             view: ViewState::Main,
+            messages,
         }
     }
 
@@ -540,7 +547,10 @@ fn slash_help_lines() -> Vec<Line<'static>> {
     let entries = [
         ("/help", "Show this help"),
         ("/exit, /quit", "Save session and exit"),
-        ("/clear", "Clear transcript"),
+        (
+            "/clear",
+            "Clear transcript AND in-memory history (session messages cleared too)",
+        ),
         ("/sessions", "List saved sessions"),
         ("/save [<name>]", "Save current session (optionally rename)"),
         ("/usage", "Show accumulated usage"),
@@ -936,7 +946,9 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                 output_tokens: total_usage.output_tokens,
                 turn_count,
             });
-            // Update session and persist.
+            // Update in-memory history (works for both ephemeral and session modes).
+            app.messages.clone_from(&final_messages);
+            // Persist to session if applicable (consumes final_messages).
             if let Some(sess) = app.session.as_mut() {
                 sess.merge_run(final_messages, total_usage);
                 if let Some(store) = app.store.as_ref() {
@@ -1066,6 +1078,11 @@ fn handle_slash_command(line: &str, app: &mut App) {
         }
         "/clear" => {
             app.transcript.clear();
+            app.messages.clear();
+            // Clear session messages too if applicable; the next save overwrites.
+            if let Some(sess) = app.session.as_mut() {
+                sess.messages.clear();
+            }
         }
         "/sessions" => match &app.store {
             Some(store) => match store.list() {
@@ -1232,12 +1249,8 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             app.transcript
                 .push(TranscriptLine::UserPrompt(prompt.clone()));
 
-            // Build message history: prior session messages + new user prompt.
-            let mut messages: Vec<caliban_provider::Message> = app
-                .session
-                .as_ref()
-                .map(|s| s.messages.clone())
-                .unwrap_or_default();
+            // Build message history: in-memory history + new user prompt.
+            let mut messages: Vec<caliban_provider::Message> = app.messages.clone();
 
             // Inject system prompt if not already present in the message list.
             let has_system = messages
