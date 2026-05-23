@@ -203,8 +203,6 @@ pub enum NativeToolChoice {
         /// The required tool name.
         name: String,
     },
-    /// The model must not use any tool.
-    None,
 }
 
 /// Extended-thinking configuration.

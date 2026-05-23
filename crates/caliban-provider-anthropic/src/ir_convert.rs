@@ -71,12 +71,13 @@ pub fn ir_to_native_request(
         })
         .collect();
 
+    let no_tools = req.tools.is_empty();
     NativeRequest {
         model: req.model,
         messages: native_messages,
         system,
         tools: req.tools.into_iter().map(ir_tool_to_native).collect(),
-        tool_choice: Some(ir_tool_choice_to_native(req.tool_choice)),
+        tool_choice: ir_tool_choice_to_native(req.tool_choice, no_tools),
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
@@ -141,12 +142,15 @@ fn ir_tool_to_native(t: IrTool) -> NativeTool {
     }
 }
 
-fn ir_tool_choice_to_native(c: IrToolChoice) -> NativeToolChoice {
+fn ir_tool_choice_to_native(c: IrToolChoice, no_tools: bool) -> Option<NativeToolChoice> {
+    if no_tools {
+        return None;
+    }
     match c {
-        IrToolChoice::Auto => NativeToolChoice::Auto,
-        IrToolChoice::Any => NativeToolChoice::Any,
-        IrToolChoice::Specific { name } => NativeToolChoice::Tool { name },
-        IrToolChoice::None => NativeToolChoice::None,
+        IrToolChoice::Auto => Some(NativeToolChoice::Auto),
+        IrToolChoice::Any => Some(NativeToolChoice::Any),
+        IrToolChoice::Specific { name } => Some(NativeToolChoice::Tool { name }),
+        IrToolChoice::None => None,
     }
 }
 

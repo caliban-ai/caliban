@@ -4,7 +4,6 @@
     {"role": "user", "content": [{"type": "text", "text": "Hi!"}]}
   ],
   "system": "Be brief.",
-  "tool_choice": {"type": "auto"},
   "max_tokens": 64,
   "metadata": {}
 }

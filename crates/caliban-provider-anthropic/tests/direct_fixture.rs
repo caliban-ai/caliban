@@ -4,7 +4,7 @@ use caliban_provider::{CompletionRequest, Provider, StopReason};
 use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
 use secrecy::SecretString;
 use url::Url;
-use wiremock::matchers::{body_json, header, header_exists, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn complete_simple_round_trip() {
         .and(path("/v1/messages"))
         .and(header("x-api-key", "key-xyz"))
         .and(header("anthropic-version", "2023-06-01"))
-        .and(header_exists("content-type"))
+        .and(header("content-type", "application/json"))
         .and(body_json(&req_json))
         .respond_with(ResponseTemplate::new(200).set_body_json(&resp_json))
         .mount(&server)

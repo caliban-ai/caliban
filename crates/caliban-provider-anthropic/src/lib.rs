@@ -33,6 +33,12 @@ pub struct AnthropicProvider<T: Transport> {
     transport: T,
 }
 
+impl<T: Transport> std::fmt::Debug for AnthropicProvider<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider").finish_non_exhaustive()
+    }
+}
+
 impl AnthropicProvider<DirectTransport> {
     /// Construct an `AnthropicProvider` using the direct HTTPS transport.
     ///
