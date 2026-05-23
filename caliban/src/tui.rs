@@ -60,7 +60,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::Args;
 
@@ -427,17 +427,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         .split(area);
 
     // chunks[0] = output region
-    let lines = render_transcript(app);
-    let total_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    //
+    // Scroll offset is measured in terminal rows, not Line indices, so we
+    // pre-wrap every Line into width-bounded sub-Lines and let lines.len()
+    // be the true row count. Doing it ourselves (instead of relying on
+    // `Paragraph::wrap`) keeps the math exact AND avoids word-reflow
+    // jitter as streaming deltas land mid-word.
+    let logical_lines = render_transcript(app);
+    let wrapped_lines = wrap_lines_to_width(logical_lines, chunks[0].width);
+    let total_rows = u16::try_from(wrapped_lines.len()).unwrap_or(u16::MAX);
     let visible = chunks[0].height;
+    let max_scroll = total_rows.saturating_sub(visible);
     let scroll = if app.auto_scroll {
-        total_lines.saturating_sub(visible)
+        max_scroll
     } else {
-        app.scroll
+        app.scroll.min(max_scroll)
     };
-    let output = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+    let output = Paragraph::new(wrapped_lines).scroll((scroll, 0));
     frame.render_widget(output, chunks[0]);
 
     // chunks[1] = top horizontal rule
@@ -536,6 +542,62 @@ fn format_tool_input(input: &str, max_chars: usize) -> String {
             }
         }
     }
+}
+
+/// Pre-wrap a vector of styled `Line`s into width-bounded visual rows,
+/// preserving each span's style.
+///
+/// We do this ourselves (rather than relying on `Paragraph::wrap`) so the
+/// resulting `Vec::len()` is the *exact* number of terminal rows the
+/// transcript occupies, which lets the auto-scroll offset stay accurate. We
+/// also avoid the word-reflow jitter that `Wrap { trim: false }` produces
+/// when streaming deltas land mid-word.
+///
+/// Wrap point is char count, not unicode-width display columns — matching
+/// the input area's hand-rolled wrap, and good enough for the predominantly
+/// ASCII transcript. Fix in a follow-up if multi-width glyphs land in
+/// output frequently.
+fn wrap_lines_to_width<'a>(lines: Vec<Line<'a>>, width: u16) -> Vec<Line<'a>> {
+    if width == 0 {
+        return lines;
+    }
+    let width = width as usize;
+    let mut out: Vec<Line<'a>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let line_style = line.style;
+        let line_align = line.alignment;
+        let mut row: Vec<Span<'a>> = Vec::new();
+        let mut row_chars: usize = 0;
+        let mut emitted_any = false;
+        for span in line.spans {
+            let style = span.style;
+            let chars: Vec<char> = span.content.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let avail = width - row_chars;
+                let take = avail.min(chars.len() - i);
+                let chunk: String = chars[i..i + take].iter().collect();
+                row.push(Span::styled(chunk, style));
+                row_chars += take;
+                i += take;
+                if row_chars == width {
+                    let mut emitted = Line::from(std::mem::take(&mut row));
+                    emitted.style = line_style;
+                    emitted.alignment = line_align;
+                    out.push(emitted);
+                    row_chars = 0;
+                    emitted_any = true;
+                }
+            }
+        }
+        if !row.is_empty() || !emitted_any {
+            let mut emitted = Line::from(std::mem::take(&mut row));
+            emitted.style = line_style;
+            emitted.alignment = line_align;
+            out.push(emitted);
+        }
+    }
+    out
 }
 
 fn render_transcript(app: &App) -> Vec<Line<'_>> {
@@ -1447,5 +1509,65 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             *agent_stream = Some(stream);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_short_line_unchanged() {
+        let input = vec![Line::raw("hello")];
+        let out = wrap_lines_to_width(input, 10);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn wrap_long_line_splits_into_correct_row_count() {
+        // 25 chars in a width-10 region => ceil(25/10) = 3 rows.
+        let input = vec![Line::raw("abcdefghijklmnopqrstuvwxy")];
+        let out = wrap_lines_to_width(input, 10);
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn wrap_preserves_empty_lines() {
+        // Important: empty separator lines must produce one visual row each.
+        let input = vec![Line::raw(""), Line::raw("x"), Line::raw("")];
+        let out = wrap_lines_to_width(input, 10);
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn wrap_preserves_span_styles_across_split() {
+        // Mixed-style Line: bold "user: " label + plain text that wraps.
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let input = vec![Line::from(vec![
+            Span::styled("user: ", bold),
+            Span::raw("abcdefghij"), // 10 chars; width=8 => spills onto row 2
+        ])];
+        let out = wrap_lines_to_width(input, 8);
+        assert_eq!(out.len(), 2);
+        // First row keeps the bold "user: " styling on its first span.
+        assert!(out[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // The plain-text spans on either row are not bold.
+        let last = out[1].spans.last().expect("row 2 has content");
+        assert!(!last.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn wrap_exact_multiple_of_width_does_not_emit_extra_blank() {
+        // 10 chars at width 5 => exactly 2 rows, not 3.
+        let input = vec![Line::raw("0123456789")];
+        let out = wrap_lines_to_width(input, 5);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn wrap_zero_width_returns_input_unchanged() {
+        let input = vec![Line::raw("hello"), Line::raw("world")];
+        let out = wrap_lines_to_width(input.clone(), 0);
+        assert_eq!(out.len(), input.len());
     }
 }
