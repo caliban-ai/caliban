@@ -448,14 +448,37 @@ async fn main() -> Result<()> {
 
     // Resolve system prompt from CLI flags (or build default).
     let tool_names: Vec<&str> = agent.tools().names().collect();
+    let cwd_for_prompt = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let default_prompt_in_effect =
+        args.system.is_none() && args.system_file.is_none() && !args.no_system;
     let system_prompt = system_prompt::resolve(
         args.system.as_deref(),
         args.system_file.as_deref(),
         args.no_system,
-        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        &cwd_for_prompt,
         &tool_names,
         args.no_tools,
     )?;
+
+    // Load memory tiers and splice into the default system prompt. The
+    // operator's --system / --system-file / --no-system always wins — those
+    // paths intentionally skip memory.
+    let system_prompt = if default_prompt_in_effect && let Some(body) = system_prompt {
+        let workspace_root = args
+            .workspace
+            .clone()
+            .unwrap_or_else(|| cwd_for_prompt.clone());
+        let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+        match caliban_memory::load(&cfg).await {
+            Ok(prefix) => Some(prefix.splice_into(&body)),
+            Err(e) => {
+                tracing::warn!(target: "caliban::memory", error = %e, "memory load failed; using default prompt without memory");
+                Some(body)
+            }
+        }
+    } else {
+        system_prompt
+    };
 
     // Snapshot todos for splicing into the system prompt for this run.
     let todo_snapshot = todos.lock().expect("todos lock poisoned").clone();

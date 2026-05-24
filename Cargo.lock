@@ -666,6 +666,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "caliban-agent-core",
+ "caliban-memory",
  "caliban-provider",
  "caliban-provider-anthropic",
  "caliban-provider-google",

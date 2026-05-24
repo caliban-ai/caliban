@@ -1,5 +1,6 @@
 //! Async tier loader + budget enforcement.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::config::MemoryConfig;
@@ -17,8 +18,7 @@ pub fn estimate_tokens(body: &str) -> usize {
 }
 
 /// Seed file written into a freshly created auto-memory directory on first run.
-const SEED_MEMORY_MD: &str =
-    "# Memory index\n\n_No memories yet. Add entries below as `- [title](slug.md) — one-line summary`._\n";
+const SEED_MEMORY_MD: &str = "# Memory index\n\n_No memories yet. Add entries below as `- [title](slug.md) — one-line summary`._\n";
 
 /// Conventions block appended to MEMORY.md (in-memory only) on every load so
 /// the agent always sees the writing rules without the operator maintaining them.
@@ -68,10 +68,7 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
     };
 
     enforce_budget(&mut prefix, config.max_tokens);
-    prefix.estimated_tokens = prefix
-        .global
-        .as_ref()
-        .map_or(0, |t| t.estimated_tokens)
+    prefix.estimated_tokens = prefix.global.as_ref().map_or(0, |t| t.estimated_tokens)
         + prefix.project.as_ref().map_or(0, |t| t.estimated_tokens)
         + prefix.auto.as_ref().map_or(0, |t| t.estimated_tokens);
 
@@ -218,9 +215,10 @@ fn truncate_tier(prefix: &mut MemoryPrefix, kind: TierKind, max_tokens: usize) {
         .map_or(target_bytes, |i| i + 1);
     let mut new_body = tier.body[..cut].to_string();
     let shed = original_len - cut;
-    new_body.push_str(&format!(
-        "\n[truncated: {shed} bytes over budget; raise CALIBAN_MEMORY_BUDGET_TOKENS or trim]\n",
-    ));
+    let _ = writeln!(
+        new_body,
+        "\n[truncated: {shed} bytes over budget; raise CALIBAN_MEMORY_BUDGET_TOKENS or trim]",
+    );
     tier.truncated_bytes = shed;
     tier.body = new_body;
     tier.estimated_tokens = estimate_tokens(&tier.body);
@@ -285,9 +283,10 @@ mod tests {
 
     #[test]
     fn truncate_cuts_on_line_boundary() {
-        let body = (0..100)
-            .map(|i| format!("line {i:03}\n"))
-            .collect::<String>();
+        let mut body = String::new();
+        for i in 0..100 {
+            writeln!(body, "line {i:03}").unwrap();
+        }
         let mut p = MemoryPrefix {
             global: None,
             project: None,
@@ -300,10 +299,7 @@ mod tests {
         // Snipped result must end on a newline (or the marker we appended).
         // Walk lines and ensure every kept body line is intact.
         for line in cut_body.lines().take_while(|l| l.starts_with("line ")) {
-            assert!(
-                line.len() == "line NNN".len(),
-                "non-boundary cut: {line:?}"
-            );
+            assert!(line.len() == "line NNN".len(), "non-boundary cut: {line:?}");
         }
         assert!(cut_body.contains("[truncated:"));
     }
@@ -326,9 +322,9 @@ mod tests {
     #[test]
     fn other_tokens_excludes_correct_tier() {
         let p = MemoryPrefix {
-            global: Some(tier(&"a".repeat(40))),   // 10 tokens
-            project: Some(tier(&"b".repeat(80))),  // 20 tokens
-            auto: Some(tier(&"c".repeat(120))),    // 30 tokens
+            global: Some(tier(&"a".repeat(40))),  // 10 tokens
+            project: Some(tier(&"b".repeat(80))), // 20 tokens
+            auto: Some(tier(&"c".repeat(120))),   // 30 tokens
             estimated_tokens: 0,
             truncated: false,
         };

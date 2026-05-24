@@ -27,7 +27,7 @@ impl MemoryConfig {
     /// - `XDG_DATA_HOME` (default `~/.local/share`) → auto-memory base.
     /// - `CALIBAN_MEMORY_DIR` overrides the auto-memory directory root
     ///   (useful for tests + isolated installs).
-    /// - `CALIBAN_MEMORY_BUDGET_TOKENS` overrides the default 8_000 budget.
+    /// - `CALIBAN_MEMORY_BUDGET_TOKENS` overrides the default `8_000` budget.
     #[must_use]
     pub fn from_env(workspace_root: &Path) -> Self {
         let config_home = xdg_dir("XDG_CONFIG_HOME", dirs::config_dir);

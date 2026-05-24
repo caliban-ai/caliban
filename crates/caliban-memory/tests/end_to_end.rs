@@ -15,7 +15,11 @@ fn write(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
 }
 
-fn config_with(global: Option<PathBuf>, project: Option<PathBuf>, auto_dir: PathBuf) -> MemoryConfig {
+fn config_with(
+    global: Option<PathBuf>,
+    project: Option<PathBuf>,
+    auto_dir: PathBuf,
+) -> MemoryConfig {
     MemoryConfig {
         global_path: global,
         project_path: project,

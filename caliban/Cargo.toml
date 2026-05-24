@@ -21,6 +21,7 @@ caliban-provider-google    = { path = "../crates/caliban-provider-google" }
 caliban-agent-core         = { path = "../crates/caliban-agent-core" }
 caliban-sessions           = { path = "../crates/caliban-sessions" }
 caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
+caliban-memory             = { path = "../crates/caliban-memory" }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
 tokio                      = { workspace = true, features = ["full"] }

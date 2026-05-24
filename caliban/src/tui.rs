@@ -21,6 +21,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "/sessions"),
     ("/save", "/save"),
     ("/usage", "/usage"),
+    ("/memory", "/memory"),
     ("/exit", "/exit"),
     ("/quit", "/quit"),
 ];
@@ -1467,6 +1468,7 @@ pub(crate) async fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_slash_command(line: &str, app: &mut App) {
     let mut parts = line.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -1560,6 +1562,37 @@ fn handle_slash_command(line: &str, app: &mut App) {
                 .transcript
                 .push(TranscriptLine::Info("no session active".into())),
         },
+        "/memory" => {
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+            // We block the event loop for one fs read; tiers are small.
+            let prefix = futures::executor::block_on(caliban_memory::load(&cfg));
+            match prefix {
+                Ok(p) => {
+                    app.transcript.push(TranscriptLine::Info(format!(
+                        "memory tiers ({} tokens / {} budget):",
+                        p.estimated_tokens, cfg.max_tokens
+                    )));
+                    for line in p.summary_lines() {
+                        app.transcript.push(TranscriptLine::Info(line));
+                    }
+                    if p.truncated {
+                        app.transcript.push(TranscriptLine::Info(
+                            "(some tiers truncated — raise CALIBAN_MEMORY_BUDGET_TOKENS or trim)"
+                                .into(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("memory load failed: {e}")));
+                }
+            }
+        }
         unknown => {
             app.transcript.push(TranscriptLine::Info(format!(
                 "unknown command: {unknown} \u{2014} type /help"
