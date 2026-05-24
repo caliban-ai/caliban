@@ -801,13 +801,19 @@ impl Agent {
                                 break;
                             }
                             dispatched_count += 1;
-                            let permit = Arc::clone(&sem)
-                                .acquire_owned()
-                                .await
-                                .expect("semaphore not closed");
+                            let sem_for_tool = Arc::clone(&sem);
                             let cancel_for_tool = cancel.clone();
                             pending.push(async move {
-                                let _permit = permit; // released on drop
+                                // Acquire inside the future so concurrent
+                                // futures actually progress. (Pre-acquiring
+                                // in the for-loop would deadlock when
+                                // permits < plans because the next acquire
+                                // would block on a future that hasn't been
+                                // polled yet.)
+                                let _permit = sem_for_tool
+                                    .acquire_owned()
+                                    .await
+                                    .expect("semaphore not closed");
                                 let res = dispatch_tool(
                                     agent_ref,
                                     turn_index,
