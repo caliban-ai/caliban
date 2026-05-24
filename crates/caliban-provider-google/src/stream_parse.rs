@@ -176,6 +176,8 @@ pub(crate) fn map_gemini_sse_to_events(
                 let usage_delta = Some(Usage {
                     input_tokens: chunk.usage_metadata.prompt_token_count,
                     output_tokens: chunk.usage_metadata.candidates_token_count,
+                    // See ir_convert.rs note: Gemini context caching is a
+                    // separate API resource; not yet implemented here.
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                 });

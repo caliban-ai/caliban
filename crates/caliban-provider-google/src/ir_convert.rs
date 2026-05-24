@@ -336,6 +336,9 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
         usage: IrUsage {
             input_tokens: r.usage_metadata.prompt_token_count,
             output_tokens: r.usage_metadata.candidates_token_count,
+            // Gemini's context caching uses a separate `cachedContents` API
+            // resource rather than per-block markers. Not yet implemented;
+            // revisit when adding a Gemini caching slice.
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         },

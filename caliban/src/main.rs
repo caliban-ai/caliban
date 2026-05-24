@@ -316,16 +316,21 @@ async fn main() -> Result<()> {
         let log_path = dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"));
         if let Some(path) = log_path {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = tokio::fs::create_dir_all(parent).await;
             }
-            if let Ok(file) = std::fs::OpenOptions::new()
+            let opened = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
-            {
+                .await;
+            if let Ok(async_file) = opened {
                 use tracing_subscriber::EnvFilter;
                 use tracing_subscriber::layer::SubscriberExt as _;
                 use tracing_subscriber::util::SubscriberInitExt as _;
+                // tracing-subscriber's fmt layer wants std::io::Write, so
+                // convert back to a std::fs::File. into_std offloads to the
+                // blocking pool; safe here since this only runs once at start.
+                let file = async_file.into_std().await;
                 // Default filter keeps caliban + caliban_* crates at DEBUG and
                 // silences noisy lower-level traces (mio, hyper, reqwest, …).
                 // Users can override via RUST_LOG env var.
