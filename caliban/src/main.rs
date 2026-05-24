@@ -131,6 +131,10 @@ pub(crate) struct Args {
     /// Aggregate size cap across all `@`-attachments in one message (default 1 MB).
     #[arg(long, default_value_t = 1_048_576, env = "CALIBAN_ATTACH_BUDGET_BYTES")]
     pub(crate) attach_budget_bytes: u64,
+
+    /// Disable Anthropic-style prompt caching (default: enabled).
+    #[arg(long, env = "CALIBAN_NO_PROMPT_CACHE")]
+    pub(crate) no_prompt_cache: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -369,7 +373,8 @@ async fn main() -> Result<()> {
         .tools(registry)
         .model(model.clone())
         .max_tokens(args.max_tokens)
-        .max_turns(args.max_turns);
+        .max_turns(args.max_turns)
+        .prompt_cache(!args.no_prompt_cache);
     if let Some(t) = args.temperature {
         builder = builder.temperature(t);
     }
