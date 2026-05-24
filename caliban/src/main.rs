@@ -17,8 +17,9 @@ use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_tools_builtin::{
-    BashTool, EditTool, EnterPlanModeTool, ExitPlanModeTool, GlobTool, GrepTool, ReadTool,
-    TodoWriteTool, WebFetchTool, WorkspaceRoot, WriteTool,
+    AgentFactory, AgentTool, AgentToolInput, BashTool, EditTool, EnterPlanModeTool,
+    ExitPlanModeTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, WebFetchTool, WorkspaceRoot,
+    WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -165,6 +166,10 @@ pub(crate) struct Args {
     /// DANGEROUS: allow the model to run any Ask-rule tool without prompting in non-interactive mode.
     #[arg(long, env = "CALIBAN_AUTO_ALLOW")]
     pub(crate) auto_allow: bool,
+
+    /// Disable the built-in `AgentTool` (the sub-agent primitive).
+    #[arg(long, env = "CALIBAN_NO_SUB_AGENT")]
+    pub(crate) no_sub_agent: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -420,12 +425,56 @@ async fn main() -> Result<()> {
     let provider = build_provider(&args)?;
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
-    let registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
+    let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
 
     let model = args
         .model
         .clone()
         .unwrap_or_else(|| default_model_for(args.provider).to_string());
+
+    // Wire AgentTool (sub-agent primitive). The factory closes over a
+    // snapshot of the parent registry (which DOES NOT include AgentTool, so
+    // sub-agents cannot recurse) + the parent's provider + chosen model.
+    // Hook inheritance is deferred to v2 — sub-agents currently use NoopHooks.
+    if !args.no_sub_agent && !args.no_tools {
+        let snapshot_names: Vec<String> = registry.names().map(str::to_string).collect();
+        let mut snapshot = ToolRegistry::new();
+        for name in &snapshot_names {
+            if let Some(t) = registry.get(name) {
+                snapshot.register(Arc::clone(t));
+            }
+        }
+        let provider_for_factory: Arc<dyn Provider + Send + Sync> = Arc::clone(&provider);
+        let parent_model = model.clone();
+        let parent_max_tokens = args.max_tokens;
+        let factory: AgentFactory = Arc::new(move |input: &AgentToolInput| {
+            let chosen_model = input.model.clone().unwrap_or_else(|| parent_model.clone());
+            let child_registry = match &input.tool_allowlist {
+                Some(names) => {
+                    let mut r = ToolRegistry::new();
+                    for n in names {
+                        if n == "AgentTool" {
+                            continue;
+                        }
+                        if let Some(t) = snapshot.get(n) {
+                            r.register(Arc::clone(t));
+                        }
+                    }
+                    r
+                }
+                None => snapshot.clone(),
+            };
+            Agent::builder()
+                .provider(Arc::clone(&provider_for_factory))
+                .tools(child_registry)
+                .model(chosen_model)
+                .max_tokens(parent_max_tokens)
+                .max_turns(20)
+                .build()
+                .expect("sub-agent builder")
+        });
+        registry.register(Arc::new(AgentTool::new(factory, None)));
+    }
 
     let permissions_hook = if args.no_permissions {
         None
