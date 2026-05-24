@@ -666,6 +666,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "caliban-agent-core",
+ "caliban-memory",
  "caliban-provider",
  "caliban-provider-anthropic",
  "caliban-provider-google",
@@ -714,6 +715,17 @@ dependencies = [
 [[package]]
 name = "caliban-core"
 version = "0.0.0"
+
+[[package]]
+name = "caliban-memory"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "caliban-provider"
