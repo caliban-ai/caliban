@@ -42,12 +42,37 @@ pub struct CompletionRequest {
     pub metadata: RequestMetadata,
 }
 
+/// Category of a request, used by the model router (when present) to pick a
+/// provider/model pair. `None` (the default) falls back to whichever route is
+/// declared as the default. Round-trips through serde; non-router providers
+/// simply ignore the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    /// Main conversational agent loop.
+    MainLoop,
+    /// Summarization / compaction.
+    Summarization,
+    /// Small fast-classifier calls (intent detection, routing).
+    FastClassifier,
+    /// Sub-agent loop (a child agent spawned by `AgentTool`).
+    SubAgent,
+    /// Embeddings.
+    Embedding,
+    /// Anything else; matches a generic "Other" route if declared.
+    Other,
+}
+
 /// Optional per-request metadata passed to providers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestMetadata {
     /// An opaque user identifier forwarded to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// Logical category of this request. Consumed by the model router; other
+    /// providers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<RequestPurpose>,
 }
 
 impl CompletionRequest {

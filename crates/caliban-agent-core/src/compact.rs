@@ -207,7 +207,10 @@ impl Compactor for SummarizingCompactor {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
-            metadata: caliban_provider::RequestMetadata { user_id: None },
+            metadata: caliban_provider::RequestMetadata {
+                user_id: None,
+                purpose: Some(caliban_provider::RequestPurpose::Summarization),
+            },
         };
 
         let resp = self
