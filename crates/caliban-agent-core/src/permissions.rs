@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::Result;
-use crate::hooks::{HookDecision, Hooks, ToolCtx};
+use crate::hooks::{HookDecision, Hooks, PermCtx, ToolCtx};
 
 // ---------------------------------------------------------------------------
 // Rule + Action
@@ -297,31 +297,81 @@ impl PermissionsHook {
         Self { rules, ask, inner }
     }
 
-    /// Find the first matching rule and return its action. `*` catch-all in
-    /// `default_rules()` guarantees a match.
+    /// Find the first matching rule and return its action + comment. `*`
+    /// catch-all in `default_rules()` guarantees a match.
     #[must_use]
     pub fn evaluate(&self, ctx: &ToolCtx<'_>) -> Action {
+        self.evaluate_with_rule(ctx).0
+    }
+
+    /// Like [`Self::evaluate`] but also returns the matched rule's comment
+    /// (when any). Used to populate [`PermCtx::rule_comment`] for downstream
+    /// hooks.
+    #[must_use]
+    pub fn evaluate_with_rule(&self, ctx: &ToolCtx<'_>) -> (Action, Option<String>) {
         for r in &self.rules {
             if rule_matches(r, ctx) {
-                return r.action;
+                return (r.action, r.comment.clone());
             }
         }
         // Should be unreachable thanks to the `*` catch-all default; if it
         // somehow happens, deny rather than implicit allow.
-        Action::Deny
+        (Action::Deny, None)
+    }
+}
+
+fn action_str(a: Action) -> &'static str {
+    match a {
+        Action::Allow => "allow",
+        Action::Deny => "deny",
+        Action::Ask => "ask",
     }
 }
 
 #[async_trait]
 impl Hooks for PermissionsHook {
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        match self.evaluate(ctx) {
+        let (action, comment) = self.evaluate_with_rule(ctx);
+        match action {
             Action::Allow => self.inner.before_tool(ctx).await,
-            Action::Deny => Ok(HookDecision::Deny(format!(
-                "permission denied for tool '{}'",
-                ctx.tool_name
-            ))),
-            Action::Ask => Ok(self.ask.prompt(ctx).await),
+            Action::Deny => {
+                let perm_ctx = PermCtx {
+                    turn_index: ctx.turn_index,
+                    tool_use_id: ctx.tool_use_id,
+                    tool_name: ctx.tool_name,
+                    input: ctx.input,
+                    rule_action: action_str(Action::Deny),
+                    rule_comment: comment.as_deref(),
+                };
+                // Fire the denied-by-rule observer hook (non-fatal on error).
+                if let Err(e) = self.inner.permission_denied(&perm_ctx).await {
+                    tracing::warn!(error = %e, "permission_denied hook error (non-fatal)");
+                }
+                Ok(HookDecision::Deny(format!(
+                    "permission denied for tool '{}'",
+                    ctx.tool_name
+                )))
+            }
+            Action::Ask => {
+                let perm_ctx = PermCtx {
+                    turn_index: ctx.turn_index,
+                    tool_use_id: ctx.tool_use_id,
+                    tool_name: ctx.tool_name,
+                    input: ctx.input,
+                    rule_action: action_str(Action::Ask),
+                    rule_comment: comment.as_deref(),
+                };
+                if let Err(e) = self.inner.permission_request(&perm_ctx).await {
+                    tracing::warn!(error = %e, "permission_request hook error (non-fatal)");
+                }
+                let decision = self.ask.prompt(ctx).await;
+                if matches!(decision, HookDecision::Deny(_))
+                    && let Err(e) = self.inner.permission_denied(&perm_ctx).await
+                {
+                    tracing::warn!(error = %e, "permission_denied hook error (non-fatal)");
+                }
+                Ok(decision)
+            }
         }
     }
 
@@ -343,6 +393,82 @@ impl Hooks for PermissionsHook {
         outcome: &crate::TurnOutcome,
     ) -> Result<()> {
         self.inner.after_turn(ctx, outcome).await
+    }
+
+    async fn session_start(&self, ctx: &crate::hooks::SessionCtx<'_>) -> Result<()> {
+        self.inner.session_start(ctx).await
+    }
+
+    async fn session_end(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+        outcome: &crate::hooks::SessionOutcome,
+    ) -> Result<()> {
+        self.inner.session_end(ctx, outcome).await
+    }
+
+    async fn user_prompt_submit(&self, ctx: &crate::hooks::PromptCtx<'_>) -> Result<HookDecision> {
+        self.inner.user_prompt_submit(ctx).await
+    }
+
+    async fn pre_compact(&self, ctx: &crate::hooks::CompactCtx<'_>) -> Result<()> {
+        self.inner.pre_compact(ctx).await
+    }
+
+    async fn post_compact(
+        &self,
+        ctx: &crate::hooks::CompactCtx<'_>,
+        outcome: &crate::hooks::CompactOutcome,
+    ) -> Result<()> {
+        self.inner.post_compact(ctx, outcome).await
+    }
+
+    async fn config_change(&self, ctx: &crate::hooks::ConfigChangeCtx<'_>) -> Result<()> {
+        self.inner.config_change(ctx).await
+    }
+
+    async fn cwd_changed(&self, ctx: &crate::hooks::CwdChangedCtx<'_>) -> Result<()> {
+        self.inner.cwd_changed(ctx).await
+    }
+
+    async fn file_changed(&self, ctx: &crate::hooks::FileChangedCtx<'_>) -> Result<()> {
+        self.inner.file_changed(ctx).await
+    }
+
+    async fn permission_request(&self, ctx: &PermCtx<'_>) -> Result<()> {
+        self.inner.permission_request(ctx).await
+    }
+
+    async fn permission_denied(&self, ctx: &PermCtx<'_>) -> Result<()> {
+        self.inner.permission_denied(ctx).await
+    }
+
+    async fn notification(&self, ctx: &crate::hooks::NotificationCtx<'_>) -> Result<()> {
+        self.inner.notification(ctx).await
+    }
+
+    async fn subagent_start(&self, ctx: &crate::hooks::SubagentCtx<'_>) -> Result<()> {
+        self.inner.subagent_start(ctx).await
+    }
+
+    async fn subagent_stop(
+        &self,
+        ctx: &crate::hooks::SubagentCtx<'_>,
+        outcome: &crate::hooks::SubagentOutcome,
+    ) -> Result<()> {
+        self.inner.subagent_stop(ctx, outcome).await
+    }
+
+    async fn task_created(&self, ctx: &crate::hooks::TaskCtx<'_>) -> Result<()> {
+        self.inner.task_created(ctx).await
+    }
+
+    async fn task_completed(
+        &self,
+        ctx: &crate::hooks::TaskCtx<'_>,
+        outcome: &crate::hooks::TaskOutcome,
+    ) -> Result<()> {
+        self.inner.task_completed(ctx, outcome).await
     }
 }
 

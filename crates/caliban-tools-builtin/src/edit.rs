@@ -72,7 +72,7 @@ impl Tool for EditTool {
     /// the path is empty. Returns [`ToolError::Execution`] if the file cannot
     /// be read or written, if `old_string` is not found, or if `replace_all`
     /// is false and more than one occurrence is found.
-    async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
+    async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: EditInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
 
@@ -106,6 +106,18 @@ impl Tool for EditTool {
             .await
             .map_err(ToolError::execution)?;
 
+        // Fire FileChanged on success (best-effort).
+        if let Some(hooks) = cx.hooks.as_ref() {
+            let fc_ctx = caliban_agent_core::FileChangedCtx {
+                path: &path,
+                kind: caliban_agent_core::FileChangeKind::Modified,
+                tool: "Edit",
+            };
+            if let Err(e) = hooks.file_changed(&fc_ctx).await {
+                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
+            }
+        }
+
         Ok(vec![ContentBlock::Text(TextBlock {
             text: format!(
                 "→ Edited {} ({} replacement{})",
@@ -128,6 +140,8 @@ mod tests {
         ToolContext {
             tool_use_id: "t1".into(),
             cancel: CancellationToken::new(),
+            hooks: None,
+            turn_index: 0,
         }
     }
 

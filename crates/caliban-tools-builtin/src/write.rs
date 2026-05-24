@@ -66,7 +66,7 @@ impl Tool for WriteTool {
     /// Returns [`ToolError::InvalidInput`] if the JSON input is malformed or
     /// the path is empty. Returns [`ToolError::Execution`] if the file cannot
     /// be written (e.g., permission denied).
-    async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
+    async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: WriteInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
 
@@ -78,9 +78,28 @@ impl Tool for WriteTool {
                 .map_err(ToolError::execution)?;
         }
 
+        let existed_before = tokio::fs::metadata(&path).await.is_ok();
+
         tokio::fs::write(&path, &parsed.content)
             .await
             .map_err(ToolError::execution)?;
+
+        // Fire FileChanged on success (best-effort).
+        if let Some(hooks) = cx.hooks.as_ref() {
+            let kind = if existed_before {
+                caliban_agent_core::FileChangeKind::Modified
+            } else {
+                caliban_agent_core::FileChangeKind::Created
+            };
+            let fc_ctx = caliban_agent_core::FileChangedCtx {
+                path: &path,
+                kind,
+                tool: "Write",
+            };
+            if let Err(e) = hooks.file_changed(&fc_ctx).await {
+                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
+            }
+        }
 
         Ok(vec![ContentBlock::Text(TextBlock {
             text: format!(
@@ -103,6 +122,8 @@ mod tests {
         ToolContext {
             tool_use_id: "t1".into(),
             cancel: CancellationToken::new(),
+            hooks: None,
+            turn_index: 0,
         }
     }
 

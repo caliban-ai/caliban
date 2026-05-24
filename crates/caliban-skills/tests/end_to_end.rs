@@ -23,6 +23,8 @@ fn ctx() -> ToolContext {
     ToolContext {
         tool_use_id: "t1".into(),
         cancel: CancellationToken::new(),
+        hooks: None,
+        turn_index: 0,
     }
 }
 

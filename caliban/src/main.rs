@@ -179,6 +179,12 @@ pub(crate) struct Args {
     /// Disable the built-in `AgentTool` (the sub-agent primitive).
     #[arg(long, env = "CALIBAN_NO_SUB_AGENT")]
     pub(crate) no_sub_agent: bool,
+
+    /// Bypass every external hook handler (debugging escape hatch). Mirrors
+    /// the `disable_all_hooks` field in `hooks.toml` but applies one-off.
+    /// In-process hooks (`PermissionsHook`, audit) still run.
+    #[arg(long, env = "CALIBAN_NO_HOOKS")]
+    pub(crate) no_hooks: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -520,6 +526,27 @@ async fn main() -> Result<()> {
         registry.register(Arc::new(AgentTool::new(factory, None)));
     }
 
+    // Load hooks.toml (project + user scope). Empty config when missing or
+    // when --no-hooks is set; the in-process PermissionsHook still runs.
+    let workspace_root_for_hooks = args.workspace.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    let hooks_cfg = if args.no_hooks {
+        caliban_agent_core::HooksConfig::default()
+    } else {
+        match caliban_agent_core::HooksConfig::load(&workspace_root_for_hooks) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(target: "caliban::hooks", error = %e, "hooks.toml load failed; continuing with empty hooks config");
+                caliban_agent_core::HooksConfig::default()
+            }
+        }
+    };
+    let hooks_cfg_summary = (
+        hooks_cfg.total_handler_count(),
+        hooks_cfg.disable_all_hooks || args.no_hooks,
+    );
+
     let permissions_hook = if args.no_permissions {
         None
     } else {
@@ -579,6 +606,22 @@ async fn main() -> Result<()> {
         builder = builder.temperature(t);
     }
     let agent = Arc::new(builder.build()?);
+
+    // Fire SessionStart hook (best-effort).
+    {
+        let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_id = args.session.clone().unwrap_or_else(|| "ephemeral".into());
+        let session_ctx = caliban_agent_core::SessionCtx {
+            session_id: &session_id,
+            cwd: &cwd_now,
+            provider: provider_name(args.provider),
+            model: &model,
+        };
+        if let Err(e) = agent.hooks().session_start(&session_ctx).await {
+            tracing::warn!(target: "caliban::hooks", error = %e, "session_start hook error (non-fatal)");
+        }
+        let _ = hooks_cfg_summary; // silence unused when not later consumed
+    }
 
     // Resolve session store (only when --session is given)
     let store = match (&args.sessions_dir, &args.session) {
@@ -712,6 +755,26 @@ async fn main() -> Result<()> {
 
     let (final_messages, total_usage) =
         run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
+
+    // Fire SessionEnd hook (best-effort).
+    {
+        let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_id = args.session.clone().unwrap_or_else(|| "ephemeral".into());
+        let session_ctx = caliban_agent_core::SessionCtx {
+            session_id: &session_id,
+            cwd: &cwd_now,
+            provider: provider_name(args.provider),
+            model: &model,
+        };
+        let outcome = caliban_agent_core::SessionOutcome {
+            turn_count: 0, // not tracked at this layer; populated from final_messages by callers.
+            input_tokens: total_usage.input_tokens,
+            output_tokens: total_usage.output_tokens,
+        };
+        if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome).await {
+            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+        }
+    }
 
     // Save session back if requested
     if let (Some(store), Some(ref mut s)) = (store.as_ref(), session.as_mut())

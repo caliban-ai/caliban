@@ -261,6 +261,8 @@ mod tests {
         ToolContext {
             tool_use_id: "t1".into(),
             cancel: CancellationToken::new(),
+            hooks: None,
+            turn_index: 0,
         }
     }
 
@@ -351,6 +353,8 @@ mod tests {
         let cx = ToolContext {
             tool_use_id: "t1".into(),
             cancel,
+            hooks: None,
+            turn_index: 0,
         };
         let start = std::time::Instant::now();
         let err = tool
@@ -396,6 +400,8 @@ mod tests {
         let cx = ToolContext {
             tool_use_id: "t1".into(),
             cancel,
+            hooks: None,
+            turn_index: 0,
         };
         let err = tool.invoke(json!({"command": cmd}), cx).await.unwrap_err();
         assert!(matches!(err, ToolError::Cancelled));
