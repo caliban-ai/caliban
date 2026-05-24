@@ -31,12 +31,13 @@ url                = { workspace = true }
 bytes              = { workspace = true }
 futures            = { workspace = true }
 htmd               = "0.5"
+uuid               = { workspace = true }
+tempfile           = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile         = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock         = { workspace = true }
 caliban-provider = { path = "../caliban-provider", features = ["mock"] }

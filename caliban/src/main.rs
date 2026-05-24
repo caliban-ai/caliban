@@ -20,9 +20,10 @@ use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_skills::{SkillTool, load_skills, register_builtins};
 use caliban_tools_builtin::{
-    AgentFactory, AgentTool, AgentToolInput, BashTool, EditTool, EnterPlanModeTool,
-    ExitPlanModeTool, GlobTool, GrepTool, ReadMemoryTopicTool, ReadTool, TodoWriteTool,
-    WebFetchTool, WorkspaceRoot, WriteMemoryTopicTool, WriteTool,
+    AgentFactory, AgentTool, AgentToolInput, BashOutputTool, BashTool, EditTool, EnterPlanModeTool,
+    ExitPlanModeTool, GlobTool, GrepTool, KillShellTool, MultiEditTool, NotebookEditTool,
+    ReadMemoryTopicTool, ReadTool, TodoWriteTool, WebFetchTool, WebSearchTool, WorkspaceRoot,
+    WriteMemoryTopicTool, WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -348,10 +349,15 @@ fn build_registry(
     r.register(Arc::new(ReadTool::new(root.clone())));
     r.register(Arc::new(WriteTool::new(root.clone())));
     r.register(Arc::new(EditTool::new(root.clone())));
+    r.register(Arc::new(MultiEditTool::new(root.clone())));
+    r.register(Arc::new(NotebookEditTool::new(root.clone())));
     r.register(Arc::new(BashTool::new(root.clone())));
     r.register(Arc::new(GlobTool::new(root.clone())));
     r.register(Arc::new(GrepTool::new(root)));
     r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
+    r.register(Arc::new(WebSearchTool::new(web_fetch_client())));
+    r.register(Arc::new(BashOutputTool::with_global_registry()));
+    r.register(Arc::new(KillShellTool::with_global_registry()));
     r.register(Arc::new(TodoWriteTool::new(todos)));
     r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
     r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));

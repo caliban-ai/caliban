@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
+use crate::bash_bg::{BashBgRegistry, global_registry, spawn_background};
 use crate::workspace::WorkspaceRoot;
 
 const STDOUT_CAP: usize = 30 * 1024;
@@ -24,6 +25,7 @@ pub struct BashTool {
     root: Arc<WorkspaceRoot>,
     schema: OnceLock<Value>,
     sandbox: Option<Arc<SandboxedShim>>,
+    bg_registry: Arc<BashBgRegistry>,
 }
 
 impl BashTool {
@@ -35,6 +37,7 @@ impl BashTool {
             root: Arc::new(root),
             schema: OnceLock::new(),
             sandbox: None,
+            bg_registry: global_registry(),
         }
     }
 
@@ -47,7 +50,16 @@ impl BashTool {
             root: Arc::new(root),
             schema: OnceLock::new(),
             sandbox,
+            bg_registry: global_registry(),
         }
+    }
+
+    /// Attach a custom background registry (tests use this to avoid the
+    /// process singleton).
+    #[must_use]
+    pub fn with_bg_registry(mut self, registry: Arc<BashBgRegistry>) -> Self {
+        self.bg_registry = registry;
+        self
     }
 
     /// Whether this tool currently wraps invocations through a sandbox.
@@ -66,6 +78,8 @@ struct BashInput {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    background: bool,
 }
 
 /// Read up to `cap` bytes from an async reader, returning lossy UTF-8.
@@ -150,6 +164,10 @@ impl Tool for BashTool {
                 "cwd": {
                     "type": "string",
                     "description": "Working directory for the command, relative to workspace root (default: workspace root)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "When true, runs the command in the background; the call returns immediately with a shell_id usable with BashOutput and KillShell."
                 }
             },
             "required": ["command"]
@@ -160,13 +178,25 @@ impl Tool for BashTool {
         let parsed: BashInput =
             serde_json::from_value(input).map_err(|e| ToolError::invalid_input(format!("{e}")))?;
 
-        let timeout_secs = parsed.timeout_seconds.unwrap_or(60).clamp(1, 600);
-        let timeout = Duration::from_secs(timeout_secs);
-
         let cwd = match parsed.cwd {
             Some(ref c) => self.root.resolve(c)?,
             None => self.root.root().to_path_buf(),
         };
+
+        // Background path: enroll and return immediately.
+        if parsed.background {
+            let id = spawn_background(&self.bg_registry, parsed.command.clone(), &cwd)?;
+            return Ok(vec![ContentBlock::Text(TextBlock {
+                text: format!(
+                    "Started background shell {id}: {} (use BashOutput/KillShell with shell_id={id})",
+                    parsed.command,
+                ),
+                cache_control: None,
+            })]);
+        }
+
+        let timeout_secs = parsed.timeout_seconds.unwrap_or(60).clamp(1, 600);
+        let timeout = Duration::from_secs(timeout_secs);
 
         let mut shell = tokio::process::Command::new("/bin/sh");
         shell
@@ -407,6 +437,34 @@ mod tests {
             matches!(err, ToolError::Cancelled),
             "expected Cancelled, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn background_true_returns_immediately_with_shell_id() {
+        let tmp = TempDir::new().unwrap();
+        let reg = crate::bash_bg::BashBgRegistry::new_for_test(1024 * 1024);
+        let tool = BashTool::new(WorkspaceRoot::new(tmp.path())).with_bg_registry(reg.clone());
+        let start = std::time::Instant::now();
+        let out = tool
+            .invoke(json!({"command": "sleep 30", "background": true}), ctx())
+            .await
+            .unwrap();
+        // Returns immediately.
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "background invoke blocked: {:?}",
+            start.elapsed()
+        );
+        let ContentBlock::Text(t) = &out[0] else {
+            panic!("expected Text")
+        };
+        assert!(
+            t.text.contains("Started background shell"),
+            "out: {}",
+            t.text
+        );
+        assert_eq!(reg.running_count(), 1);
+        reg.kill_all();
     }
 
     /// Regression test for the orphan-shell bug: when a shell command spawns
