@@ -294,6 +294,10 @@ pub(crate) struct App {
     /// each `TurnEvent::TurnEnd` (wired in TTFT slice); consumed by `RunEnd`
     /// when building the `UsageSummary` transcript line, then reset.
     pub(crate) last_turn_ttft_ms: Option<u64>,
+    /// Shared handle to the canonical todo list. Mutated by `TodoWriteTool`;
+    /// snapshotted into `session.todos` on save; spliced into the system
+    /// prompt at the start of every user-driven turn.
+    pub(crate) todos: caliban_agent_core::SharedTodos,
 }
 
 impl App {
@@ -304,6 +308,7 @@ impl App {
         store: Option<SessionStore>,
         args: Args,
         system_prompt: Option<String>,
+        todos: caliban_agent_core::SharedTodos,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let messages = session
@@ -354,6 +359,7 @@ impl App {
             messages,
             toast: None,
             last_turn_ttft_ms: None,
+            todos,
         }
     }
 
@@ -1351,6 +1357,9 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             // Persist to session if applicable (consumes final_messages).
             if let Some(sess) = app.session.as_mut() {
                 sess.merge_run(final_messages, total_usage);
+                // Snapshot the live todo handle into the session for persistence.
+                sess.todos
+                    .clone_from(&*app.todos.lock().expect("todos lock poisoned"));
                 if let Some(store) = app.store.as_ref()
                     && !app.args.no_save
                 {
@@ -1393,9 +1402,10 @@ pub(crate) async fn run(
     store: Option<SessionStore>,
     session: Option<PersistedSession>,
     system_prompt: Option<String>,
+    todos: caliban_agent_core::SharedTodos,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(agent, session, store, args, system_prompt);
+    let mut app = App::new(agent, session, store, args, system_prompt, todos);
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
 
@@ -1799,12 +1809,19 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             // Build message history: in-memory history + new user prompt.
             let mut messages: Vec<caliban_provider::Message> = app.messages.clone();
 
-            // Inject system prompt if not already present in the message list.
-            let has_system = messages
-                .first()
-                .is_some_and(|m| m.role == caliban_provider::Role::System);
-            if !has_system && let Some(ref sp) = app.system_prompt {
-                messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
+            // Snapshot the current todos and rebuild message[0] so the model
+            // sees the up-to-date task list at the start of every turn.
+            let todo_snapshot = app.todos.lock().expect("todos lock poisoned").clone();
+            if let Some(ref sp) = app.system_prompt {
+                let with_todos = crate::system_prompt::append_todo_block(sp, &todo_snapshot);
+                let has_system = messages
+                    .first()
+                    .is_some_and(|m| m.role == caliban_provider::Role::System);
+                if has_system {
+                    messages[0] = caliban_provider::Message::system_text(with_todos);
+                } else {
+                    messages.insert(0, caliban_provider::Message::system_text(with_todos));
+                }
             }
 
             messages.push(caliban_provider::Message::user_text(outgoing_text));

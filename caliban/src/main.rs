@@ -17,7 +17,8 @@ use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_tools_builtin::{
-    BashTool, EditTool, GlobTool, GrepTool, ReadTool, WebFetchTool, WorkspaceRoot, WriteTool,
+    BashTool, EditTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, WebFetchTool, WorkspaceRoot,
+    WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -192,7 +193,11 @@ fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sync>> {
     })
 }
 
-fn build_registry(args: &Args, workspace: WorkspaceRoot) -> ToolRegistry {
+fn build_registry(
+    args: &Args,
+    workspace: WorkspaceRoot,
+    todos: caliban_agent_core::SharedTodos,
+) -> ToolRegistry {
     if args.no_tools {
         return ToolRegistry::new();
     }
@@ -209,6 +214,7 @@ fn build_registry(args: &Args, workspace: WorkspaceRoot) -> ToolRegistry {
     r.register(Arc::new(GlobTool::new(root.clone())));
     r.register(Arc::new(GrepTool::new(root)));
     r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
+    r.register(Arc::new(TodoWriteTool::new(todos)));
     r
 }
 
@@ -389,7 +395,8 @@ async fn main() -> Result<()> {
     };
 
     let provider = build_provider(&args)?;
-    let registry = build_registry(&args, workspace);
+    let todos = caliban_agent_core::new_shared_todos();
+    let registry = build_registry(&args, workspace, Arc::clone(&todos));
 
     let model = args
         .model
@@ -431,6 +438,14 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Seed the shared todos handle from the persisted session, if any.
+    if let Some(sess) = session.as_ref() {
+        todos
+            .lock()
+            .expect("todos lock poisoned")
+            .clone_from(&sess.todos);
+    }
+
     // Resolve system prompt from CLI flags (or build default).
     let tool_names: Vec<&str> = agent.tools().names().collect();
     let system_prompt = system_prompt::resolve(
@@ -442,22 +457,35 @@ async fn main() -> Result<()> {
         args.no_tools,
     )?;
 
-    // For fresh sessions (no prior messages), insert the system prompt at position 0.
+    // Snapshot todos for splicing into the system prompt for this run.
+    let todo_snapshot = todos.lock().expect("todos lock poisoned").clone();
+
+    // For fresh sessions (no prior messages), insert the system prompt at position 0
+    // with the current todos appended.
     if let Some(sess) = session.as_mut()
         && sess.messages.is_empty()
         && let Some(ref prompt) = system_prompt
     {
+        let with_todos = system_prompt::append_todo_block(prompt, &todo_snapshot);
         sess.messages
-            .push(caliban_provider::Message::system_text(prompt.clone()));
+            .push(caliban_provider::Message::system_text(with_todos));
+    } else if let Some(sess) = session.as_mut()
+        && !sess.messages.is_empty()
+        && sess.messages[0].role == caliban_provider::Role::System
+        && let Some(ref prompt) = system_prompt
+    {
+        // Existing session with a system message at position 0: rebuild it so
+        // the latest todo snapshot is reflected.
+        let with_todos = system_prompt::append_todo_block(prompt, &todo_snapshot);
+        sess.messages[0] = caliban_provider::Message::system_text(with_todos);
     }
-    // Existing sessions: leave the persisted system as-is (don't overwrite).
 
     // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {
-            return tui::run(args, agent, store, session, system_prompt).await;
+            return tui::run(args, agent, store, session, system_prompt, todos).await;
         }
         anyhow::bail!(
             "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
@@ -485,12 +513,14 @@ async fn main() -> Result<()> {
         .map(|s| s.messages.clone())
         .unwrap_or_default();
 
-    // Ephemeral mode (no session): prepend system prompt if not already present.
+    // Ephemeral mode (no session): prepend system prompt (with todos) if not
+    // already present.
     let has_system = messages
         .first()
         .is_some_and(|m| m.role == caliban_provider::Role::System);
     if !has_system && let Some(ref sp) = system_prompt {
-        messages.insert(0, caliban_provider::Message::system_text(sp.clone()));
+        let with_todos = system_prompt::append_todo_block(sp, &todo_snapshot);
+        messages.insert(0, caliban_provider::Message::system_text(with_todos));
     }
 
     messages.push(Message::user_text(prompt));
@@ -503,6 +533,9 @@ async fn main() -> Result<()> {
         && !args.no_save
     {
         s.merge_run(final_messages, total_usage);
+        // Snapshot the shared todo handle back into the persisted session.
+        s.todos
+            .clone_from(&*todos.lock().expect("todos lock poisoned"));
         store.save(s)?;
         if !args.quiet {
             let cache_extra = match (

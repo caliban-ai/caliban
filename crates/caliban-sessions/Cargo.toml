@@ -9,13 +9,14 @@ rust-version.workspace = true
 publish     = false
 
 [dependencies]
-caliban-provider = { path = "../caliban-provider" }
-serde            = { workspace = true }
-serde_json       = { workspace = true }
-thiserror        = { workspace = true }
-chrono           = { workspace = true }
-tempfile         = { workspace = true }
-dirs             = { workspace = true }
+caliban-provider   = { path = "../caliban-provider" }
+caliban-agent-core = { path = "../caliban-agent-core" }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+chrono             = { workspace = true }
+tempfile           = { workspace = true }
+dirs               = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

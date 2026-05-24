@@ -1,5 +1,6 @@
 //! `PersistedSession` — a saveable conversation.
 
+use caliban_agent_core::Todo;
 use caliban_provider::{Message, Role, Usage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,10 @@ pub struct PersistedSession {
     pub messages: Vec<Message>,
     /// Accumulated token usage across all turns.
     pub total_usage: Usage,
+    /// Structured task list maintained by the model via `TodoWrite`.
+    /// Pre-todo sessions on disk deserialize with an empty vec.
+    #[serde(default)]
+    pub todos: Vec<Todo>,
 }
 
 impl PersistedSession {
@@ -40,6 +45,7 @@ impl PersistedSession {
             model: model.into(),
             messages: Vec::new(),
             total_usage: Usage::default(),
+            todos: Vec::new(),
         }
     }
 
@@ -66,5 +72,54 @@ impl PersistedSession {
                 .count(),
         )
         .unwrap_or(u32::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caliban_agent_core::TodoStatus;
+
+    #[test]
+    fn persisted_session_roundtrips_todos() {
+        let mut s = PersistedSession::new("t", "anthropic", "claude-3-5-sonnet");
+        s.todos = vec![
+            Todo {
+                id: "1".into(),
+                content: "first".into(),
+                status: TodoStatus::Pending,
+            },
+            Todo {
+                id: "2".into(),
+                content: "second".into(),
+                status: TodoStatus::InProgress,
+            },
+        ];
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: PersistedSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.todos, s.todos);
+    }
+
+    #[test]
+    fn legacy_session_without_todos_loads_with_empty_vec() {
+        // Construct a JSON value missing the `todos` field — emulates an
+        // on-disk session from before this change.
+        let now = Utc::now();
+        let json = serde_json::json!({
+            "name": "legacy",
+            "created_at": now,
+            "updated_at": now,
+            "provider": "anthropic",
+            "model": "claude-3-5-sonnet",
+            "messages": [],
+            "total_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": null,
+                "cache_read_input_tokens": null
+            }
+        });
+        let parsed: PersistedSession = serde_json::from_value(json).unwrap();
+        assert!(parsed.todos.is_empty());
     }
 }

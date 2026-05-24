@@ -11,6 +11,7 @@ pub mod registry;
 pub mod retry;
 pub mod session;
 pub mod stream;
+pub mod todos;
 pub mod tool;
 pub mod turn;
 
@@ -22,6 +23,7 @@ pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
 pub use stream::{RunOutcome, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
+pub use todos::{SharedTodos, Todo, TodoStatus, new_shared_todos};
 pub use tool::{Tool, ToolContext, ToolError};
 
 // Re-export from caliban-provider so callers can construct messages without

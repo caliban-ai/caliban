@@ -1,8 +1,10 @@
 //! Default system prompt + override resolution.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
+use caliban_agent_core::{Todo, TodoStatus};
 
 /// Build the default system prompt from current state.
 #[must_use]
@@ -75,4 +77,89 @@ pub(crate) fn resolve(
         return Ok(Some(text));
     }
     Ok(Some(build_default(cwd, tool_names, no_tools)))
+}
+
+/// Append a `--- Current todos ---` block to the system prompt when the list
+/// is non-empty. Returns the original prompt unchanged when `todos` is empty.
+///
+/// Status glyphs: `[ ]` pending, `[~]` in-progress, `[x]` completed,
+/// `[-]` cancelled.
+#[must_use]
+pub(crate) fn append_todo_block(prompt: &str, todos: &[Todo]) -> String {
+    if todos.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::with_capacity(prompt.len() + 64 + todos.len() * 40);
+    out.push_str(prompt);
+    if !prompt.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n--- Current todos ---\n");
+    for t in todos {
+        let glyph = match t.status {
+            TodoStatus::Pending => "[ ]",
+            TodoStatus::InProgress => "[~]",
+            TodoStatus::Completed => "[x]",
+            TodoStatus::Cancelled => "[-]",
+        };
+        let _ = writeln!(out, "{glyph} ({}) {}", t.id, t.content);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_omits_todo_block_when_empty() {
+        let base = "You are caliban.\n";
+        let out = append_todo_block(base, &[]);
+        assert_eq!(out, base);
+    }
+
+    #[test]
+    fn system_prompt_appends_todo_block_when_non_empty() {
+        let base = "You are caliban.\n";
+        let todos = vec![
+            Todo {
+                id: "1".into(),
+                content: "first".into(),
+                status: TodoStatus::Pending,
+            },
+            Todo {
+                id: "2".into(),
+                content: "second".into(),
+                status: TodoStatus::InProgress,
+            },
+            Todo {
+                id: "3".into(),
+                content: "third".into(),
+                status: TodoStatus::Completed,
+            },
+            Todo {
+                id: "4".into(),
+                content: "fourth".into(),
+                status: TodoStatus::Cancelled,
+            },
+        ];
+        let out = append_todo_block(base, &todos);
+        assert!(out.contains("--- Current todos ---"));
+        assert!(out.contains("[ ] (1) first"));
+        assert!(out.contains("[~] (2) second"));
+        assert!(out.contains("[x] (3) third"));
+        assert!(out.contains("[-] (4) fourth"));
+    }
+
+    #[test]
+    fn appends_newline_if_prompt_missing_trailing_nl() {
+        let base = "no trailing nl";
+        let todos = vec![Todo {
+            id: "1".into(),
+            content: "x".into(),
+            status: TodoStatus::Pending,
+        }];
+        let out = append_todo_block(base, &todos);
+        assert!(out.starts_with("no trailing nl\n\n--- Current todos ---\n"));
+    }
 }
