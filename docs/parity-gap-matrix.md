@@ -175,16 +175,16 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| `-p` / `--print` mode | 🔴 | |
-| `--output-format text` / `json` / `stream-json` | 🔴 | |
-| `--input-format text` / `stream-json` | 🔴 | |
-| `--max-turns`, `--max-budget-usd` | 🔴 | |
-| `--bare` (skip discovery; default in CI) | 🔴 | |
-| `--json-schema` + structured output | 🔴 | |
-| `--include-partial-messages` / `--include-hook-events` | 🔴 | |
-| GitHub Actions workflow | 🔴 | |
-| Devcontainer feature | 🔴 | |
-| `claude doctor` from shell | 🔴 | |
+| `-p` / `--print` mode | ✅ | ADR-0025; `caliban/src/headless/`, dispatches via `run_headless` in `caliban/src/main.rs` |
+| `--output-format text` / `json` / `stream-json` | ✅ | ADR-0025; NDJSON frames with `system/init`, `message`, `tool_use`, `tool_result`, `text`, `hook_event`, `result` |
+| `--input-format text` / `stream-json` | ✅ | ADR-0025; `parse_stream_json_payload` handles `user` and `control/interrupt` frames; 10 MiB stdin cap |
+| `--max-turns`, `--max-budget-usd` | ✅ | `--max-turns` enforced by agent loop; `--max-budget-usd` parsed and persisted, placeholder cost (0.0) until ADR 0033 wires real pricing — flag warns when no-op |
+| `--bare` (skip discovery; default in CI) | ✅ | Opt-in per ADR-0025; gates hooks/skills/MCP/auto-memory/CLAUDE.md loaders |
+| `--json-schema` + structured output | ✅ | Best-effort local validation (top-level type, required fields, per-field types); native structured-output via router lands with ADR 0032 |
+| `--include-partial-messages` / `--include-hook-events` | ✅ | Partial-messages emit `text` delta frames; hook events flow through outer `CompositeHooks` layer (`HeadlessHookSink`) |
+| GitHub Actions workflow | 🔴 | Separate sub-project; gated on this landing |
+| Devcontainer feature | 🔴 | Separate sub-project; gated on this landing |
+| `claude doctor` from shell | 🔴 | Separate diagnostic command (K. Observability) |
 
 ## K. Observability / cost
 
