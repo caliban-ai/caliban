@@ -1314,7 +1314,11 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                 }
             }
         }
-        TurnEvent::TurnEnd { .. } => {
+        TurnEvent::TurnEnd { ttft, .. } => {
+            if let Some(t) = ttft {
+                let millis = u64::try_from(t.as_millis()).unwrap_or(u64::MAX);
+                app.last_turn_ttft_ms = Some(millis);
+            }
             // Tool dispatch (sequential) and the next turn's provider call are
             // about to happen — show "waiting for model" until the next event.
             if let Some(running) = app.running.as_mut() {
@@ -1479,6 +1483,7 @@ fn handle_slash_command(line: &str, app: &mut App) {
         "/clear" => {
             app.transcript.clear();
             app.messages.clear();
+            app.last_turn_ttft_ms = None;
             // Clear session messages too if applicable; the next save overwrites.
             if let Some(sess) = app.session.as_mut() {
                 sess.messages.clear();
