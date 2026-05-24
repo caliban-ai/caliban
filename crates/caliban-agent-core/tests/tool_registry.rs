@@ -86,6 +86,8 @@ async fn invoke_returns_text_block() {
     let cx = ToolContext {
         tool_use_id: "toolu_1".into(),
         cancel: tokio_util::sync::CancellationToken::new(),
+        hooks: None,
+        turn_index: 0,
     };
     let out = tool.invoke(json!({"text": "hi"}), cx).await.unwrap();
     assert_eq!(out.len(), 1);
@@ -97,6 +99,8 @@ async fn invoke_invalid_input_errors() {
     let cx = ToolContext {
         tool_use_id: "toolu_1".into(),
         cancel: tokio_util::sync::CancellationToken::new(),
+        hooks: None,
+        turn_index: 0,
     };
     let err = tool.invoke(json!({}), cx).await.unwrap_err();
     assert!(matches!(err, ToolError::InvalidInput(_)));

@@ -19,6 +19,12 @@ pub trait Compactor: Send + Sync {
         messages: &[Message],
         capabilities: &Capabilities,
     ) -> Result<Option<Vec<Message>>>;
+
+    /// Strategy identifier surfaced to `PreCompact` / `PostCompact` hooks.
+    /// Defaults to the type's short Rust name; impls override as desired.
+    fn strategy_name(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 /// Estimate token count using a chars/4 heuristic.
@@ -61,6 +67,10 @@ impl Compactor for NoopCompactor {
         _capabilities: &Capabilities,
     ) -> Result<Option<Vec<Message>>> {
         Ok(None)
+    }
+
+    fn strategy_name(&self) -> &'static str {
+        "Noop"
     }
 }
 
@@ -121,6 +131,10 @@ impl Compactor for DropOldestCompactor {
             ));
         }
         Ok(Some(new_messages))
+    }
+
+    fn strategy_name(&self) -> &'static str {
+        "DropOldest"
     }
 }
 
@@ -242,5 +256,9 @@ impl Compactor for SummarizingCompactor {
             ));
         }
         Ok(Some(new_messages))
+    }
+
+    fn strategy_name(&self) -> &'static str {
+        "Summarizing"
     }
 }

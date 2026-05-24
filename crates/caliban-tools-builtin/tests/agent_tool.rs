@@ -89,6 +89,8 @@ fn ctx() -> ToolContext {
     ToolContext {
         tool_use_id: "t1".into(),
         cancel: CancellationToken::new(),
+        hooks: None,
+        turn_index: 0,
     }
 }
 
@@ -186,6 +188,8 @@ async fn cancellation_propagates() {
     let cx = ToolContext {
         tool_use_id: "t1".into(),
         cancel: cancel.clone(),
+        hooks: None,
+        turn_index: 0,
     };
 
     let tool = AgentTool::new(factory_from(mp), None);

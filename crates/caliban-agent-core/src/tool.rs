@@ -1,16 +1,35 @@
 //! Tool trait — implementations live in caliban-tools-builtin (D) and downstream.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use caliban_provider::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
 /// Context passed to a Tool's `invoke` method.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     /// The model-assigned `tool_use_id` this invocation corresponds to.
     pub tool_use_id: String,
     /// Cancellation token; tools must honor this for long-running work.
     pub cancel: CancellationToken,
+    /// Hooks handle so tools can fire `FileChanged`, `Notification`, etc. on
+    /// successful side effects. Falls back to a no-op when unset (which is the
+    /// case in unit tests that don't construct an `Agent`).
+    pub hooks: Option<Arc<dyn crate::hooks::Hooks + Send + Sync>>,
+    /// Zero-based turn index — surfaced to hooks for correlation with the
+    /// surrounding turn.
+    pub turn_index: u32,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("tool_use_id", &self.tool_use_id)
+            .field("turn_index", &self.turn_index)
+            .field("hooks", &self.hooks.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Errors a `Tool::invoke` can return.

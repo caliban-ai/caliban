@@ -1,0 +1,83 @@
+# Example hooks.toml — covers every supported handler type (ADR 0024).
+#
+# Drop this file at one of:
+#   <workspace>/.caliban/hooks.toml   (project scope)
+#   ~/.config/caliban/hooks.toml      (user scope)
+#
+# Both forms merge: project entries take priority but user entries append.
+
+# --- Top-level kill switch + scoping flags -----------------------------------
+
+# Emergency escape hatch — bypasses ALL external handlers
+# (in-process PermissionsHook still runs).
+disable_all_hooks = false
+
+# Org-policy mode — only handlers from the managed settings scope run.
+# Settings hierarchy lands with ADR 0026; the flag is read today but not yet
+# enforced.
+allow_managed_hooks_only = false
+
+# --- HTTP handler safety -----------------------------------------------------
+
+allowed_http_hook_urls = [
+  "https://hooks.example.com/*",
+  "https://my-org.tail-scale.ts.net:9000/*",
+]
+http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
+
+# --- Session lifecycle -------------------------------------------------------
+
+[[hooks.SessionStart]]
+matcher = "*"
+[[hooks.SessionStart.handlers]]
+type    = "command"
+command = "/usr/local/bin/caliban-audit"
+args    = ["session-start"]
+timeout = "5s"
+
+# --- Per-tool gating ---------------------------------------------------------
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+if      = "Bash:rm *"
+[[hooks.PreToolUse.handlers]]
+type    = "command"
+command = "${CALIBAN_PROJECT_DIR}/.caliban/hooks/guard-rm.sh"
+async   = false
+
+[[hooks.PreToolUse]]
+matcher = "WebFetch"
+[[hooks.PreToolUse.handlers]]
+type    = "http"
+url     = "https://hooks.example.com/preflight"
+headers = { Authorization = "Bearer ${AUDIT_TOKEN}" }
+timeout = "3s"
+
+# --- Observer-only audit hook (async, decisions ignored) ---------------------
+
+[[hooks.PostToolUse]]
+matcher = "*"
+[[hooks.PostToolUse.handlers]]
+type  = "mcp"
+mcp   = "audit-server"
+tool  = "log_tool_call"
+async = true
+
+# --- LLM-driven prompt classifier --------------------------------------------
+
+[[hooks.UserPromptSubmit]]
+matcher = "*"
+[[hooks.UserPromptSubmit.handlers]]
+type   = "prompt"
+prompt = "Classify the user's request: safe|sensitive|off-topic. Reply JSON only."
+model  = "fast"
+schema = '{ "type": "object", "properties": { "label": { "enum": ["safe","sensitive","off-topic"] } } }'
+
+# --- Subagent code-review on FileChanged -------------------------------------
+
+[[hooks.FileChanged]]
+matcher = "*.rs"
+[[hooks.FileChanged.handlers]]
+type  = "agent"
+agent = "code-review"
+async = true

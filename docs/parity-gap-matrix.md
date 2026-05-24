@@ -68,15 +68,15 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | `before_tool` / `after_tool` (in-process) | ✅ | |
-| `SessionStart` / `SessionEnd` / `UserPromptSubmit` | 🔴 | |
-| `PreCompact` / `PostCompact` | 🔴 | |
-| `ConfigChange` / `CwdChanged` / `FileChanged` | 🔴 | |
-| Subagent lifecycle events (`SubagentStart`/`Stop`, `TaskCreated`/`Completed`) | 🔴 | |
-| `PermissionRequest` / `PermissionDenied` | 🔴 | |
-| Hook decision protocol (JSON stdout / exit codes) | 🔴 | shell-command handler type |
-| Handler types: `command` / `http` / `mcp` / `prompt` / `agent` | 🔴 | |
-| Hook inheritance for subagents | 🔴 | *(deferred PR #9)* |
-| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | 🔴 | |
+| `SessionStart` / `SessionEnd` / `UserPromptSubmit` | ✅ | ADR-0024 |
+| `PreCompact` / `PostCompact` | ✅ | ADR-0024 |
+| `ConfigChange` / `CwdChanged` / `FileChanged` | ✅ | ADR-0024 |
+| Subagent lifecycle events (`SubagentStart`/`Stop`, `TaskCreated`/`Completed`) | ✅ | ADR-0024 |
+| `PermissionRequest` / `PermissionDenied` | ✅ | ADR-0024 |
+| Hook decision protocol (JSON stdout / exit codes) | ✅ | ADR-0024 |
+| Handler types: `command` / `http` / `mcp` / `prompt` / `agent` | ✅ | `command`+`http` fully wired; `mcp`/`prompt`/`agent` are v1 stubs that wire in ADRs 0023 / 0037 |
+| Hook inheritance for subagents | 🟡 | `SubagentStart`/`Stop` fire from parent; per-subagent inheritance lands with ADR 0037 |
+| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | 🔴 | gated on ADR 0030 |
 
 ## C. Memory & checkpointing
 

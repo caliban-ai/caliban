@@ -23,6 +23,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/usage", "/usage"),
     ("/memory", "/memory"),
     ("/plan", "/plan"),
+    ("/hooks", "/hooks"),
     ("/exit", "/exit"),
     ("/quit", "/quit"),
 ];
@@ -909,6 +910,7 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ("/mcp", "MCP server configuration (stub)"),
         ("/skills", "Skills configuration (stub)"),
         ("/system", "View current system prompt"),
+        ("/hooks", "Configured hooks summary (stub)"),
     ];
 
     let mut out = vec![Line::raw("")];
@@ -1483,6 +1485,43 @@ pub(crate) async fn run(
         let _ = store.save(sess);
     }
 
+    // Fire SessionEnd (best-effort).
+    {
+        let session_id = app
+            .args
+            .session
+            .clone()
+            .unwrap_or_else(|| "tui-ephemeral".into());
+        let cwd = app.cwd.clone();
+        let provider = "tui";
+        let model = app.args.model.clone().unwrap_or_default();
+        let session_ctx = caliban_agent_core::SessionCtx {
+            session_id: &session_id,
+            cwd: &cwd,
+            provider,
+            model: &model,
+        };
+        let total_in = app
+            .session
+            .as_ref()
+            .map_or(0, |s| s.total_usage.input_tokens);
+        let total_out = app
+            .session
+            .as_ref()
+            .map_or(0, |s| s.total_usage.output_tokens);
+        let outcome = caliban_agent_core::SessionOutcome {
+            turn_count: app
+                .session
+                .as_ref()
+                .map_or(0, caliban_sessions::PersistedSession::turn_count),
+            input_tokens: total_in,
+            output_tokens: total_out,
+        };
+        if let Err(e) = app.agent.hooks().session_end(&session_ctx, &outcome).await {
+            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+        }
+    }
+
     Ok(())
 }
 
@@ -1527,6 +1566,39 @@ fn handle_slash_command(line: &str, app: &mut App) {
         }
         "/system" => {
             app.view = ViewState::Overlay(Overlay::System);
+        }
+        "/hooks" => {
+            // Stub overlay (the proper /hooks UI lands with ADR 0040).
+            // For v1, we render a one-line summary line per configured event.
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let cfg = caliban_agent_core::HooksConfig::load(&workspace_root).unwrap_or_default();
+            if cfg.total_handler_count() == 0 {
+                app.transcript.push(TranscriptLine::Info(
+                    "no hooks configured (drop a hooks.toml under .caliban/ or ~/.config/caliban/)"
+                        .into(),
+                ));
+            } else {
+                app.transcript.push(TranscriptLine::Info(format!(
+                    "{} hook handler(s) loaded across {} event(s):",
+                    cfg.total_handler_count(),
+                    cfg.events.len()
+                )));
+                for (event, handlers) in &cfg.events {
+                    app.transcript.push(TranscriptLine::Info(format!(
+                        "  {event} → {} handler(s)",
+                        handlers.len()
+                    )));
+                }
+                if cfg.disable_all_hooks {
+                    app.transcript.push(TranscriptLine::Info(
+                        "kill switch active (disable_all_hooks = true)".into(),
+                    ));
+                }
+            }
         }
         "/exit" | "/quit" => {
             app.should_exit = true;
@@ -1846,6 +1918,43 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 handle_slash_command(&prompt, app);
                 return;
             }
+
+            // Fire UserPromptSubmit (best-effort, sync over the current
+            // runtime). Hooks may rewrite the prompt via `UpdatedInput`.
+            let prompt_for_hook = prompt.clone();
+            let cwd_for_hook = app.cwd.clone();
+            let hooks = app.agent.hooks();
+            let hook_decision = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let ctx = caliban_agent_core::PromptCtx {
+                        session_id: "tui",
+                        cwd: &cwd_for_hook,
+                        turn_index: 0,
+                        prompt: &prompt_for_hook,
+                        attachments: &[],
+                    };
+                    hooks.user_prompt_submit(&ctx).await
+                })
+            });
+            let prompt = match hook_decision {
+                Ok(caliban_agent_core::HookDecision::Allow) => prompt,
+                Ok(caliban_agent_core::HookDecision::Deny(msg)) => {
+                    app.toast = Some(toast::Toast::error(format!(
+                        "prompt rejected by hook: {msg}"
+                    )));
+                    app.input.buffer = line;
+                    app.input.cursor = app.input.buffer.len();
+                    return;
+                }
+                Ok(caliban_agent_core::HookDecision::UpdatedInput(v)) => match v.as_str() {
+                    Some(s) => s.to_string(),
+                    None => prompt,
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "user_prompt_submit hook error (non-fatal)");
+                    prompt
+                }
+            };
 
             // Resolve any @-attachments before we send. On failure, restore
             // the buffer and surface the error as a toast — no roundtrip.

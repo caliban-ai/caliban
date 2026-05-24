@@ -124,6 +124,14 @@ impl Agent {
     pub fn tools(&self) -> &ToolRegistry {
         &self.tools
     }
+
+    /// Return a clone of the agent's hooks handle. Useful for binary code
+    /// that needs to fire session/cwd/notification events from outside the
+    /// turn loop.
+    #[must_use]
+    pub fn hooks(&self) -> Arc<dyn Hooks + Send + Sync> {
+        Arc::clone(&self.hooks)
+    }
 }
 
 /// Fluent builder for [`Agent`].

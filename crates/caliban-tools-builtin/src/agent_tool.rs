@@ -114,8 +114,23 @@ impl Tool for AgentTool {
         let parsed: AgentToolInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
 
+        let agent_name_for_hook = parsed.model.clone().unwrap_or_default();
+        let task_id_for_hook = cx.tool_use_id.clone();
+        let parent_turn_index = cx.turn_index;
         let sub_agent = (self.factory)(&parsed);
         let sub_agent = Arc::new(sub_agent);
+
+        // Fire SubagentStart (best-effort).
+        if let Some(hooks) = cx.hooks.as_ref() {
+            let sub_ctx = caliban_agent_core::SubagentCtx {
+                parent_turn_index,
+                agent_name: &agent_name_for_hook,
+                task_id: &task_id_for_hook,
+            };
+            if let Err(e) = hooks.subagent_start(&sub_ctx).await {
+                tracing::warn!(error = %e, "subagent_start hook error (non-fatal)");
+            }
+        }
 
         let mut initial: Vec<Message> = Vec::with_capacity(2);
         if let Some(sp) = &self.parent_system_prompt {
@@ -173,6 +188,22 @@ impl Tool for AgentTool {
         if output.chars().count() > MAX_OUTPUT_CHARS {
             let truncated: String = output.chars().take(MAX_OUTPUT_CHARS).collect();
             output = format!("{truncated}\n\n[sub-agent output truncated]");
+        }
+
+        // Fire SubagentStop (best-effort).
+        if let Some(hooks) = cx.hooks.as_ref() {
+            let sub_ctx = caliban_agent_core::SubagentCtx {
+                parent_turn_index,
+                agent_name: &agent_name_for_hook,
+                task_id: &task_id_for_hook,
+            };
+            let outcome = caliban_agent_core::SubagentOutcome {
+                success: !hit_max,
+                final_text: output.clone(),
+            };
+            if let Err(e) = hooks.subagent_stop(&sub_ctx, &outcome).await {
+                tracing::warn!(error = %e, "subagent_stop hook error (non-fatal)");
+            }
         }
 
         Ok(vec![ContentBlock::Text(TextBlock {

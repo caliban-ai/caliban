@@ -91,7 +91,7 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
+    async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: TodoWriteInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
 
@@ -136,17 +136,87 @@ impl Tool for TodoWriteTool {
 
         let header = format_header(&todos);
 
+        // Snapshot the previous list to compute status transitions.
+        let prev: Vec<Todo> = {
+            let guard = self.handle.lock().map_err(|e| {
+                ToolError::execution(std::io::Error::other(format!("lock poisoned: {e}")))
+            })?;
+            guard.clone()
+        };
+
         {
             let mut guard = self.handle.lock().map_err(|e| {
                 ToolError::execution(std::io::Error::other(format!("lock poisoned: {e}")))
             })?;
-            *guard = todos;
+            guard.clone_from(&todos);
+        }
+
+        // Fire TaskCreated / TaskCompleted on transitions (best-effort).
+        if let Some(hooks) = cx.hooks.as_ref() {
+            fire_task_hooks(&prev, &todos, hooks.as_ref()).await;
         }
 
         Ok(vec![ContentBlock::Text(TextBlock {
             text: header,
             cache_control: None,
         })])
+    }
+}
+
+fn status_str(s: TodoStatus) -> &'static str {
+    match s {
+        TodoStatus::Pending => "pending",
+        TodoStatus::InProgress => "in_progress",
+        TodoStatus::Completed => "completed",
+        TodoStatus::Cancelled => "cancelled",
+    }
+}
+
+fn is_terminal(s: TodoStatus) -> bool {
+    matches!(s, TodoStatus::Completed | TodoStatus::Cancelled)
+}
+
+async fn fire_task_hooks(
+    prev: &[Todo],
+    new: &[Todo],
+    hooks: &(dyn caliban_agent_core::Hooks + Send + Sync),
+) {
+    use std::collections::HashMap;
+    let prev_map: HashMap<&str, TodoStatus> =
+        prev.iter().map(|t| (t.id.as_str(), t.status)).collect();
+    for t in new {
+        let was = prev_map.get(t.id.as_str()).copied();
+        // TaskCreated fires when a new task appears or transitions from
+        // pending to in_progress.
+        let appearing = was.is_none();
+        let activated =
+            matches!(was, Some(TodoStatus::Pending)) && matches!(t.status, TodoStatus::InProgress);
+        if appearing || activated {
+            let task_ctx = caliban_agent_core::TaskCtx {
+                task_id: &t.id,
+                content: &t.content,
+                status: status_str(t.status),
+            };
+            if let Err(e) = hooks.task_created(&task_ctx).await {
+                tracing::warn!(error = %e, "task_created hook error (non-fatal)");
+            }
+        }
+        // TaskCompleted fires when the status transitions to a terminal
+        // state (completed / cancelled) from a non-terminal state.
+        let was_non_terminal = was.is_none_or(|s| !is_terminal(s));
+        if was_non_terminal && is_terminal(t.status) {
+            let task_ctx = caliban_agent_core::TaskCtx {
+                task_id: &t.id,
+                content: &t.content,
+                status: status_str(t.status),
+            };
+            let outcome = caliban_agent_core::TaskOutcome {
+                terminal_status: status_str(t.status).to_string(),
+            };
+            if let Err(e) = hooks.task_completed(&task_ctx, &outcome).await {
+                tracing::warn!(error = %e, "task_completed hook error (non-fatal)");
+            }
+        }
     }
 }
 
@@ -187,6 +257,8 @@ mod tests {
         ToolContext {
             tool_use_id: "t1".into(),
             cancel: CancellationToken::new(),
+            hooks: None,
+            turn_index: 0,
         }
     }
 

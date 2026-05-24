@@ -18,7 +18,7 @@ use tracing::instrument;
 
 use crate::agent::Agent;
 use crate::error::Result;
-use crate::hooks::{HookDecision, ToolCtx, TurnCtx};
+use crate::hooks::{CompactCtx, CompactOutcome, HookDecision, ToolCtx, TurnCtx};
 use crate::retry::with_retry;
 use crate::tool::{ToolContext, ToolError};
 
@@ -408,6 +408,8 @@ async fn dispatch_tool(
         .await
         .map_err(|e| StopCondition::HookDenied(format!("before_tool hook failed: {e}")))?;
 
+    // Choose the effective input: `UpdatedInput` overrides the original.
+    let mut effective_input = input.clone();
     let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> = match decision {
         HookDecision::Deny(msg) => {
             let content = vec![ContentBlock::Text(TextBlock {
@@ -425,6 +427,28 @@ async fn dispatch_tool(
                 is_error: true,
             });
         }
+        HookDecision::UpdatedInput(new_input) => {
+            tracing::info!(
+                tool = tool_name,
+                tool_use_id,
+                "hook.updated_input: tool input rewritten by before_tool hook"
+            );
+            effective_input = new_input;
+            match agent.tools.get(tool_name) {
+                None => Err(ToolError::invalid_input(format!(
+                    "tool not found: {tool_name}"
+                ))),
+                Some(tool) => {
+                    let cx = ToolContext {
+                        tool_use_id: tool_use_id.to_string(),
+                        cancel: cancel.clone(),
+                        hooks: Some(Arc::clone(&agent.hooks)),
+                        turn_index,
+                    };
+                    tool.invoke(effective_input.clone(), cx).await
+                }
+            }
+        }
         HookDecision::Allow => match agent.tools.get(tool_name) {
             None => Err(ToolError::invalid_input(format!(
                 "tool not found: {tool_name}"
@@ -433,12 +457,16 @@ async fn dispatch_tool(
                 let cx = ToolContext {
                     tool_use_id: tool_use_id.to_string(),
                     cancel: cancel.clone(),
+                    hooks: Some(Arc::clone(&agent.hooks)),
+                    turn_index,
                 };
                 // Clone `input` so the borrow on `tool_ctx` remains valid for after_tool.
                 tool.invoke(input.clone(), cx).await
             }
         },
     };
+    // Reference effective_input to silence dead-code in the Deny arm.
+    let _ = &effective_input;
 
     // after_tool hook (non-fatal; errors are logged by tracing, not propagated)
     if let Err(e) = agent.hooks.after_tool(&tool_ctx, &invoke_result).await {
@@ -522,13 +550,51 @@ impl Agent {
                 // ---- Compaction ----
                 {
                     let caps = self.provider.capabilities(&self.config.model);
+                    let token_count_before = crate::compact::estimate_tokens(&history);
+                    let strategy = self.compactor.strategy_name();
+                    let compact_ctx = CompactCtx {
+                        session_id: "",
+                        token_count_before,
+                        strategy,
+                    };
+                    if let Err(e) = self.hooks.pre_compact(&compact_ctx).await {
+                        tracing::warn!(error = %e, "pre_compact hook error (non-fatal)");
+                    }
                     match self.compactor.compact(&history, &caps).await {
                         Err(e) => {
                             stopped_for = StopCondition::CompactionFailed(e.to_string());
                             break 'outer;
                         }
-                        Ok(Some(new)) => history = new,
-                        Ok(None) => {}
+                        Ok(Some(new)) => {
+                            let token_count_after = crate::compact::estimate_tokens(&new);
+                            history = new;
+                            let outcome = CompactOutcome {
+                                token_count_after,
+                                compacted: true,
+                            };
+                            if let Err(e) =
+                                self.hooks.post_compact(&compact_ctx, &outcome).await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "post_compact hook error (non-fatal)"
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            let outcome = CompactOutcome {
+                                token_count_after: token_count_before,
+                                compacted: false,
+                            };
+                            if let Err(e) =
+                                self.hooks.post_compact(&compact_ctx, &outcome).await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "post_compact hook error (non-fatal)"
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -810,6 +876,19 @@ impl Agent {
                                 id: tu.id.clone(),
                                 name: tu.name.clone(),
                                 input: tu.input.clone(),
+                            });
+                        }
+                        HookDecision::UpdatedInput(new_input) => {
+                            tracing::info!(
+                                tool = %tu.name,
+                                tool_use_id = %tu.id,
+                                "hook.updated_input: tool input rewritten by before_tool hook"
+                            );
+                            plans.push(DispatchPlan::Allowed {
+                                original_index: idx,
+                                id: tu.id.clone(),
+                                name: tu.name.clone(),
+                                input: new_input,
                             });
                         }
                     }

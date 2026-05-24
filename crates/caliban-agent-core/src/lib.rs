@@ -7,6 +7,8 @@ pub(crate) mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
+pub mod hooks_config;
+pub mod hooks_router;
 pub mod permissions;
 pub mod plan_mode;
 pub mod registry;
@@ -20,7 +22,14 @@ pub mod turn;
 pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
 pub use error::{Error, Result};
-pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
+pub use hooks::{
+    CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,
+    FileChangedCtx, HookDecision, Hooks, NoopHooks, NotificationCtx, NotificationLevel, PermCtx,
+    PromptCtx, SessionCtx, SessionOutcome, SubagentCtx, SubagentOutcome, TaskCtx, TaskOutcome,
+    ToolCtx, TurnCtx, build_envelope, envelope_with_cwd,
+};
+pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
+pub use hooks_router::{AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook};
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
     default_rules, load_rules, load_rules_file,
