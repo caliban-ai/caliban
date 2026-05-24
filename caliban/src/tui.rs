@@ -173,6 +173,16 @@ pub(crate) enum TranscriptLine {
         input_tokens: u32,
         /// Total output tokens generated in the run.
         output_tokens: u32,
+        /// Total tokens read from the prompt cache (`Anthropic` from turn 2
+        /// onward; `OpenAI` on prompts >=1024 tokens). `None` when no cache
+        /// info was returned by the provider.
+        cache_read: Option<u32>,
+        /// Total tokens written to the prompt cache (`Anthropic` only, first
+        /// turn surcharge). `None` for providers that don't report it.
+        cache_creation: Option<u32>,
+        /// Most recent turn's time-to-first-token in milliseconds. Wired in
+        /// the TTFT slice.
+        last_turn_ttft_ms: Option<u64>,
         /// Number of agent turns taken.
         turn_count: u32,
     },
@@ -280,6 +290,10 @@ pub(crate) struct App {
     pub(crate) messages: Vec<caliban_provider::Message>,
     /// Ephemeral toast shown above the input area (5s TTL or until next key).
     pub(crate) toast: Option<toast::Toast>,
+    /// Most recent turn's time-to-first-token in milliseconds. Populated on
+    /// each `TurnEvent::TurnEnd` (wired in TTFT slice); consumed by `RunEnd`
+    /// when building the `UsageSummary` transcript line, then reset.
+    pub(crate) last_turn_ttft_ms: Option<u64>,
 }
 
 impl App {
@@ -339,6 +353,7 @@ impl App {
             view: ViewState::Main,
             messages,
             toast: None,
+            last_turn_ttft_ms: None,
         }
     }
 
@@ -665,6 +680,7 @@ fn wrap_lines_to_width<'a>(lines: Vec<Line<'a>>, width: u16) -> Vec<Line<'a>> {
     out
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_transcript(app: &App) -> Vec<Line<'_>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
     for entry in &app.transcript {
@@ -729,13 +745,22 @@ fn render_transcript(app: &App) -> Vec<Line<'_>> {
             TranscriptLine::UsageSummary {
                 input_tokens,
                 output_tokens,
+                cache_read,
+                cache_creation,
+                last_turn_ttft_ms,
                 turn_count,
             } => {
+                let mut parts: Vec<String> = Vec::new();
+                parts.push(format!("{turn_count} turns"));
+                let cache_suffix = format_cache_suffix(*cache_read, *cache_creation);
+                parts.push(format!(
+                    "{input_tokens}\u{2191}{cache_suffix} {output_tokens}\u{2193} tokens"
+                ));
+                if let Some(ttft) = last_turn_ttft_ms {
+                    parts.push(format!("TTFT {ttft}ms"));
+                }
                 lines.push(Line::styled(
-                    format!(
-                        "[caliban: {turn_count} turns \u{00B7} \
-                         {input_tokens}\u{2191} {output_tokens}\u{2193} tokens]"
-                    ),
+                    format!("[caliban: {}]", parts.join(" \u{00B7} ")),
                     Style::default().add_modifier(Modifier::DIM),
                 ));
                 lines.push(Line::raw(""));
@@ -778,6 +803,23 @@ fn format_bytes(n: u64) -> String {
         format!("{:.1} KB", n as f64 / 1024.0)
     } else {
         format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Suffix appended to the input-token count in the `UsageSummary` line when
+/// prompt-cache stats are present. Empty string when both counters are zero
+/// or absent. Format:
+/// - read only:    ` (42 cached)`
+/// - write only:   ` (100 cache write)`
+/// - both:         ` (42 cached, 100 write)`
+fn format_cache_suffix(cache_read: Option<u32>, cache_creation: Option<u32>) -> String {
+    let r = cache_read.unwrap_or(0);
+    let c = cache_creation.unwrap_or(0);
+    match (r, c) {
+        (0, 0) => String::new(),
+        (r, 0) => format!(" ({r} cached)"),
+        (0, c) => format!(" ({c} cache write)"),
+        (r, c) => format!(" ({r} cached, {c} write)"),
     }
 }
 
@@ -1293,8 +1335,13 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             app.transcript.push(TranscriptLine::UsageSummary {
                 input_tokens: total_usage.input_tokens,
                 output_tokens: total_usage.output_tokens,
+                cache_read: total_usage.cache_read_input_tokens,
+                cache_creation: total_usage.cache_creation_input_tokens,
+                last_turn_ttft_ms: app.last_turn_ttft_ms,
                 turn_count,
             });
+            // Reset for the next run (a /clear + new prompt should start fresh).
+            app.last_turn_ttft_ms = None;
             // Update in-memory history (works for both ephemeral and session modes).
             app.messages.clone_from(&final_messages);
             // Persist to session if applicable (consumes final_messages).
@@ -1823,6 +1870,37 @@ fn refresh_at_menu(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_suffix_omitted_when_no_cache() {
+        assert_eq!(format_cache_suffix(None, None), "");
+        assert_eq!(format_cache_suffix(Some(0), Some(0)), "");
+        assert_eq!(format_cache_suffix(Some(0), None), "");
+        assert_eq!(format_cache_suffix(None, Some(0)), "");
+    }
+
+    #[test]
+    fn cache_suffix_read_only() {
+        assert_eq!(format_cache_suffix(Some(42), None), " (42 cached)");
+        assert_eq!(format_cache_suffix(Some(42), Some(0)), " (42 cached)");
+    }
+
+    #[test]
+    fn cache_suffix_write_only() {
+        assert_eq!(format_cache_suffix(None, Some(100)), " (100 cache write)");
+        assert_eq!(
+            format_cache_suffix(Some(0), Some(100)),
+            " (100 cache write)"
+        );
+    }
+
+    #[test]
+    fn cache_suffix_both() {
+        assert_eq!(
+            format_cache_suffix(Some(42), Some(100)),
+            " (42 cached, 100 write)"
+        );
+    }
 
     #[test]
     fn wrap_short_line_unchanged() {

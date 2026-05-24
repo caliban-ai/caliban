@@ -676,6 +676,18 @@ impl Agent {
                     usage: turn_usage,
                 };
 
+                let cache_read = turn_usage.cache_read_input_tokens.unwrap_or(0);
+                let cache_creation = turn_usage.cache_creation_input_tokens.unwrap_or(0);
+                if cache_read > 0 || cache_creation > 0 {
+                    tracing::info!(
+                        target: "caliban::cache",
+                        cache_read,
+                        cache_creation,
+                        turn = turn_index,
+                        "prompt cache stats",
+                    );
+                }
+
                 total_usage.merge(turn_usage);
                 turns_completed += 1;
 

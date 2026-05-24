@@ -473,11 +473,21 @@ async fn main() -> Result<()> {
         s.merge_run(final_messages, total_usage);
         store.save(s)?;
         if !args.quiet {
+            let cache_extra = match (
+                s.total_usage.cache_read_input_tokens.unwrap_or(0),
+                s.total_usage.cache_creation_input_tokens.unwrap_or(0),
+            ) {
+                (0, 0) => String::new(),
+                (r, 0) => format!(", {r} cached"),
+                (0, c) => format!(", {c} cache write"),
+                (r, c) => format!(", {r} cached, {c} write"),
+            };
             eprintln!(
-                "[caliban: saved session '{}' ({} turns, {} tokens)]",
+                "[caliban: saved session '{}' ({} turns, {} tokens{})]",
                 s.name,
                 s.turn_count(),
                 s.total_usage.input_tokens + s.total_usage.output_tokens,
+                cache_extra,
             );
         }
     }
