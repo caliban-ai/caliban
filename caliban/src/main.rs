@@ -137,7 +137,7 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_PROMPT_CACHE")]
     pub(crate) no_prompt_cache: bool,
 
-    /// Disable parallel tool execution (run tool_use blocks serially).
+    /// Disable parallel tool execution (run `tool_use` blocks serially).
     #[arg(long, env = "CALIBAN_NO_PARALLEL_TOOLS")]
     pub(crate) no_parallel_tools: bool,
 

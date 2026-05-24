@@ -478,6 +478,12 @@ impl Agent {
     ///
     /// Each stream item is `Result<TurnEvent>`. Fatal errors cause a
     /// `RunEnd` with the appropriate [`StopCondition`] before the stream closes.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic in practice. The `acquire_owned` `.expect` is unreachable
+    /// because the dispatch semaphore is owned by the same task and not closed
+    /// until after the futures complete.
     #[allow(clippy::too_many_lines)]
     #[instrument(skip(self, messages, cancel), fields(model = %self.config.model))]
     pub fn stream_until_done(

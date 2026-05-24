@@ -47,7 +47,7 @@ impl Tool for SleepyTool {
     fn name(&self) -> &str {
         &self.name
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "sleepy test tool"
     }
     fn input_schema(&self) -> &serde_json::Value {
@@ -94,7 +94,7 @@ impl Tool for TrackingTool {
     fn name(&self) -> &str {
         &self.name
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "tracking test tool"
     }
     fn input_schema(&self) -> &serde_json::Value {

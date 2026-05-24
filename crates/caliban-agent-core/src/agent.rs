@@ -14,11 +14,15 @@ use crate::registry::ToolRegistry;
 /// Returns `available_parallelism().get() - 1`, clamped to at least 1, so that
 /// the agent loop, streaming, and the renderer can keep a core to themselves.
 /// Falls back to 1 when `available_parallelism()` is unavailable.
+///
+/// # Panics
+///
+/// Cannot panic in practice: the value is clamped to `>= 1` via `.max(1)`
+/// before being passed to `NonZeroUsize::new`.
 #[must_use]
 pub fn default_parallel_tool_limit() -> NonZeroUsize {
     let n = std::thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(2)
+        .map_or(2, NonZeroUsize::get)
         .saturating_sub(1)
         .max(1);
     NonZeroUsize::new(n).expect("max(1) guarantees nonzero")
@@ -295,8 +299,7 @@ mod parallel_tools_config_tests {
     #[test]
     fn default_limit_matches_cores_minus_one() {
         let cores = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(2);
+            .map_or(2, std::num::NonZeroUsize::get);
         let expected = cores.saturating_sub(1).max(1);
         assert_eq!(default_parallel_tool_limit().get(), expected);
     }
