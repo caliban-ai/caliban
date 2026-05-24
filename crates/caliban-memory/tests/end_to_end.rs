@@ -85,10 +85,54 @@ async fn end_to_end_seeds_empty_memory_md_on_first_run() {
     );
 
     // The in-memory auto tier should also be Some(…) with the seed content +
-    // conventions block appended.
+    // conventions block appended. The convention sentinel itself is wrapped
+    // in an HTML comment that the loader strips before splicing, so we
+    // assert on the visible body text instead.
     let auto = prefix.auto.as_ref().expect("auto loaded after seed");
     assert!(auto.body.contains("# Memory index"));
-    assert!(auto.body.contains("auto-memory conventions follow"));
+    assert!(
+        auto.body
+            .contains("Write to this index when you learn something durable"),
+        "conventions body should be present (HTML-comment sentinel is stripped pre-splice). got: {}",
+        auto.body
+    );
+    // The HTML sentinel must NOT survive into the spliced body.
+    assert!(!auto.body.contains("<!--"));
+}
+
+#[tokio::test]
+async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
+    use caliban_memory::{TopicDraft, TopicKind, TopicLoader};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auto_dir = tmp.path().join("auto");
+    let cfg = config_with(None, None, auto_dir.clone());
+
+    // Seed first to populate MEMORY.md.
+    load(&cfg).await.unwrap();
+
+    // Programmatic write of a user topic via the public API.
+    let loader = TopicLoader::new(auto_dir.clone());
+    loader
+        .write(&TopicDraft {
+            name: "user-role".into(),
+            description: "senior platform engineer".into(),
+            kind: TopicKind::User,
+            body: "Senior platform engineer at Amplio.\n".into(),
+        })
+        .unwrap();
+
+    // Reload should pick up the new MEMORY.md index entry.
+    let prefix = load(&cfg).await.unwrap();
+    let auto = prefix.auto.as_ref().unwrap();
+    assert!(
+        auto.body.contains("[user-role](user-role.md)"),
+        "auto body should mention the new index line: {}",
+        auto.body
+    );
+    // Topic file round-trips.
+    let topic = loader.read("user-role").unwrap();
+    assert!(topic.body.contains("Senior platform engineer"));
 }
 
 #[tokio::test]

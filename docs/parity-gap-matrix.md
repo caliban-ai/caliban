@@ -85,7 +85,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Three-tier prompt prefix (global / project / auto) | ✅ | ADR-0018 |
 | CLAUDE.md ancestor walk + nested-on-demand | 🟡 | |
 | `@path/file` imports inside CLAUDE.md (recursion-bounded) | 🔴 | |
-| Auto-memory (model-written notes per project) | 🔴 | |
+| Auto-memory (model-written notes per project) | ✅ | ADR-0035 |
 | `claudeMdExcludes` for monorepos | 🔴 | |
 | Auto-checkpoint per prompt + `/rewind` | 🔴 | |
 | Esc-Esc / fork-from-checkpoint | 🔴 | |
