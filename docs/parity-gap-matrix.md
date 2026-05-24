@@ -76,7 +76,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Hook decision protocol (JSON stdout / exit codes) | ✅ | ADR-0024 |
 | Handler types: `command` / `http` / `mcp` / `prompt` / `agent` | ✅ | `command`+`http` fully wired; `mcp`/`prompt`/`agent` are v1 stubs that wire in ADRs 0023 / 0037 |
 | Hook inheritance for subagents | 🟡 | `SubagentStart`/`Stop` fire from parent; per-subagent inheritance lands with ADR 0037 |
-| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | 🔴 | gated on ADR 0030 |
+| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | ✅ | ADR-0030; `caliban-plugins` orchestrator parses `plugin.json`, expands `${CALIBAN_PLUGIN_ROOT}` (+ `${CLAUDE_PLUGIN_ROOT}` alias), namespaces items, and feeds existing loaders. Marketplace install + trust gating + `caliban plugin {install,list,enable,disable,remove,info,update}`. settings.json keys land with ADR 0026 (env-only for now). |
 
 ## C. Memory & checkpointing
 
@@ -216,6 +216,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Command | Caliban | Notes |
 |---|---|---|
 | `/plan`, `/memory`, `/skills`, `/quit` | ✅ | |
+| `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with ADR 0040. |
 | `/clear`, `/help`, `/init` | 🔴 | |
 | `/context`, `/usage`, `/compact` | 🔴 | |
 | `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🔴 | |
