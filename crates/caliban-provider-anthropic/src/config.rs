@@ -122,7 +122,7 @@ mod vertex_cfg {
                 token_provider,
                 project: project.into(),
                 region: region.into(),
-                timeout: Duration::from_secs(60),
+                timeout: Duration::from_mins(1),
                 anthropic_version: "vertex-2023-10-16".to_string(),
             })
         }
@@ -161,7 +161,7 @@ mod bedrock_cfg {
                 .await;
             Ok(Self {
                 sdk_config,
-                timeout: Duration::from_secs(60),
+                timeout: Duration::from_mins(1),
                 anthropic_version: "bedrock-2023-05-31".to_string(),
             })
         }
@@ -172,7 +172,7 @@ mod bedrock_cfg {
         pub fn from_sdk_config(sdk_config: SdkConfig) -> Self {
             Self {
                 sdk_config,
-                timeout: Duration::from_secs(60),
+                timeout: Duration::from_mins(1),
                 anthropic_version: "bedrock-2023-05-31".to_string(),
             }
         }
