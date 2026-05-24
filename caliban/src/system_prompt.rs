@@ -1,5 +1,6 @@
 //! Default system prompt + override resolution.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
@@ -88,7 +89,6 @@ pub(crate) fn append_todo_block(prompt: &str, todos: &[Todo]) -> String {
     if todos.is_empty() {
         return prompt.to_string();
     }
-    use std::fmt::Write as _;
     let mut out = String::with_capacity(prompt.len() + 64 + todos.len() * 40);
     out.push_str(prompt);
     if !prompt.ends_with('\n') {

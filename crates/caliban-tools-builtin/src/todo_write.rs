@@ -91,11 +91,7 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn invoke(
-        &self,
-        input: Value,
-        _cx: ToolContext,
-    ) -> Result<Vec<ContentBlock>, ToolError> {
+    async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: TodoWriteInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
 
@@ -253,7 +249,12 @@ mod tests {
             ]
         });
         tool.invoke(payload, ctx()).await.unwrap();
-        let ids: Vec<_> = handle.lock().unwrap().iter().map(|t| t.id.clone()).collect();
+        let ids: Vec<_> = handle
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
         assert_eq!(ids, vec!["3", "1", "2"]);
     }
 

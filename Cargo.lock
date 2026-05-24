@@ -819,6 +819,7 @@ dependencies = [
 name = "caliban-sessions"
 version = "0.0.0"
 dependencies = [
+ "caliban-agent-core",
  "caliban-provider",
  "chrono",
  "dirs",
