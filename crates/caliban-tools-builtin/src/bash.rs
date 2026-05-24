@@ -144,8 +144,9 @@ impl Tool for BashTool {
             None => self.root.root().to_path_buf(),
         };
 
-        let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.arg("-c")
+        let mut shell = tokio::process::Command::new("/bin/sh");
+        shell
+            .arg("-c")
             .arg(&parsed.command)
             .current_dir(&cwd)
             .stdin(Stdio::null())
@@ -160,9 +161,9 @@ impl Tool for BashTool {
         // shell dies and its descendants get reparented to init,
         // leaving orphans.
         #[cfg(unix)]
-        cmd.process_group(0);
+        shell.process_group(0);
 
-        let mut child = cmd.spawn().map_err(ToolError::execution)?;
+        let mut child = shell.spawn().map_err(ToolError::execution)?;
         // Capture the PID now while we still have access to the Child.
         // On Unix the child's PID equals its PGID (because of process_group(0)).
         let child_pid = child.id();
