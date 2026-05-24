@@ -33,7 +33,7 @@ the reasoning.
 ## Building
 
 Requires the toolchain pinned in `rust-toolchain.toml` (currently Rust
-1.90.0). `rustup` will install it automatically on first `cargo`
+1.95.0). `rustup` will install it automatically on first `cargo`
 invocation.
 
 ```bash

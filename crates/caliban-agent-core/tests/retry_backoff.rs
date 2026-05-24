@@ -45,7 +45,7 @@ fn backoff_math_no_jitter() {
     let p = RetryPolicy {
         initial_backoff: Duration::from_millis(100),
         backoff_multiplier: 2.0,
-        max_backoff: Duration::from_secs(60),
+        max_backoff: Duration::from_mins(1),
         jitter: false,
         ..Default::default()
     };
