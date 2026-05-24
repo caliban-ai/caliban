@@ -11,6 +11,7 @@ members = [
     "crates/caliban-tools-builtin",
     "crates/caliban-sessions",
     "crates/caliban-memory",
+    "crates/caliban-skills",
     "caliban",
 ]
 

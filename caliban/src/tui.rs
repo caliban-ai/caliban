@@ -45,6 +45,10 @@ pub(crate) enum Overlay {
     SlashHelp,
     Config,
     Mcp,
+    #[allow(
+        dead_code,
+        reason = "Overlay::Skills retained for slash menu enum parity; /skills now prints to transcript"
+    )]
     Skills,
     System,
 }
@@ -1498,7 +1502,28 @@ fn handle_slash_command(line: &str, app: &mut App) {
             app.view = ViewState::Overlay(Overlay::Mcp);
         }
         "/skills" => {
-            app.view = ViewState::Overlay(Overlay::Skills);
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let roots = caliban_skills::default_roots(&workspace_root);
+            let skills = caliban_skills::load_skills(&roots);
+            if skills.is_empty() {
+                app.transcript.push(TranscriptLine::Info(
+                    "no skills loaded (drop a SKILL.md under .caliban/skills/<name>/)".into(),
+                ));
+            } else {
+                app.transcript.push(TranscriptLine::Info(format!(
+                    "{} skill(s) loaded:",
+                    skills.len()
+                )));
+                for s in &skills {
+                    let first = s.description.lines().next().unwrap_or("");
+                    app.transcript
+                        .push(TranscriptLine::Info(format!("  {} — {}", s.name, first)));
+                }
+            }
         }
         "/system" => {
             app.view = ViewState::Overlay(Overlay::System);

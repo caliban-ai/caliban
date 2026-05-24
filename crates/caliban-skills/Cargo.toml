@@ -1,0 +1,29 @@
+[package]
+name        = "caliban-skills"
+version     = "0.0.0"
+description = "Skill loader + Skill tool for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-provider   = { path = "../caliban-provider" }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_yaml         = "0.9"
+serde_json         = { workspace = true }
+ignore             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+dirs               = { workspace = true }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tokio              = { workspace = true, features = ["macros", "rt"] }
+tokio-util         = { workspace = true }
+
+[lints]
+workspace = true
