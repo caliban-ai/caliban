@@ -12,6 +12,7 @@ members = [
     "crates/caliban-sessions",
     "crates/caliban-memory",
     "crates/caliban-skills",
+    "crates/caliban-mcp-client",
     "caliban",
 ]
 

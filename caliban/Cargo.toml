@@ -23,6 +23,7 @@ caliban-sessions           = { path = "../crates/caliban-sessions" }
 caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
 caliban-memory             = { path = "../crates/caliban-memory" }
 caliban-skills             = { path = "../crates/caliban-skills" }
+caliban-mcp-client         = { path = "../crates/caliban-mcp-client" }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
 tokio                      = { workspace = true, features = ["full"] }

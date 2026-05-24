@@ -152,6 +152,10 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_SKILLS")]
     pub(crate) no_skills: bool,
 
+    /// Disable MCP server discovery (skip loading `mcp.toml`).
+    #[arg(long, env = "CALIBAN_NO_MCP")]
+    pub(crate) no_mcp: bool,
+
     /// Disable permission gating entirely (all tool calls allowed).
     #[arg(long, env = "CALIBAN_NO_PERMISSIONS", conflicts_with_all = ["allow", "deny", "ask", "auto_allow"])]
     pub(crate) no_permissions: bool,
@@ -437,6 +441,35 @@ async fn main() -> Result<()> {
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
     let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
+
+    // MCP servers (v1: config-only scaffold; spawn + tool wiring lands in a
+    // follow-up PR).
+    if !args.no_mcp {
+        let ws_root_for_mcp = args.workspace.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+        match caliban_mcp_client::load_config(&ws_root_for_mcp) {
+            Ok(cfg) => match caliban_mcp_client::McpClientManager::start(&cfg) {
+                Ok(mgr) => {
+                    mgr.register_into(&mut registry);
+                    if mgr.enabled_count() > 0 || mgr.skipped_disabled() > 0 {
+                        tracing::info!(
+                            target: "caliban::mcp",
+                            enabled = mgr.enabled_count(),
+                            disabled = mgr.skipped_disabled(),
+                            "mcp config loaded",
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(target: "caliban::mcp", error = %e, "mcp manager start failed; continuing without MCP");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(target: "caliban::mcp", error = %e, "mcp config load failed; continuing without MCP");
+            }
+        }
+    }
 
     let model = args
         .model
