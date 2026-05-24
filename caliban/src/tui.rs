@@ -309,10 +309,15 @@ pub(crate) struct App {
     /// Shared plan-mode flag. Toggled by `/plan` and by the
     /// `EnterPlanMode`/`ExitPlanMode` tools.
     pub(crate) plan_mode: caliban_agent_core::SharedPlanMode,
+    /// Snapshot of per-server MCP lifecycle status at startup. Surfaces in the
+    /// `/mcp` overlay. Empty when `--no-mcp` is set or no servers are
+    /// configured.
+    pub(crate) mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
 }
 
 impl App {
     /// Construct initial `App` state from CLI args and an optional loaded session.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         agent: Arc<Agent>,
         session: Option<PersistedSession>,
@@ -321,6 +326,7 @@ impl App {
         system_prompt: Option<String>,
         todos: caliban_agent_core::SharedTodos,
         plan_mode: caliban_agent_core::SharedPlanMode,
+        mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let messages = session
@@ -373,6 +379,7 @@ impl App {
             last_turn_ttft_ms: None,
             todos,
             plan_mode,
+            mcp_servers,
         }
     }
 
@@ -887,7 +894,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     let content_lines = match overlay {
         Overlay::SlashHelp => slash_help_lines(),
         Overlay::Config => config_lines(app),
-        Overlay::Mcp => mcp_lines(),
+        Overlay::Mcp => mcp_lines(app),
         Overlay::Skills => skills_lines(),
         Overlay::System => system_lines(app),
     };
@@ -908,7 +915,7 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ("/save [<name>]", "Save current session (optionally rename)"),
         ("/usage", "Show accumulated usage"),
         ("/config", "Show active configuration"),
-        ("/mcp", "MCP server configuration (stub)"),
+        ("/mcp", "Live MCP server status (connected/failed/disabled)"),
         ("/skills", "Skills configuration (stub)"),
         ("/system", "View current system prompt"),
         ("/hooks", "Configured hooks summary (stub)"),
@@ -1059,44 +1066,70 @@ fn config_lines(app: &App) -> Vec<Line<'_>> {
     out
 }
 
-fn mcp_lines() -> Vec<Line<'static>> {
+fn mcp_lines(app: &App) -> Vec<Line<'static>> {
+    use caliban_mcp_client::ServerStatus;
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut out = vec![Line::raw("")];
-    out.push(Line::raw("   No MCP servers configured."));
+
+    if app.mcp_servers.is_empty() {
+        out.push(Line::raw("   No MCP servers configured."));
+        out.push(Line::raw(""));
+        out.push(Line::raw(
+            "   Configure servers in ~/.config/caliban/mcp.toml or",
+        ));
+        out.push(Line::raw(
+            "   <workspace>/.caliban/mcp.toml. Minimal stdio example:",
+        ));
+        out.push(Line::raw(""));
+        out.push(Line::raw("     [server.silverbullet]"));
+        out.push(Line::raw("     command = \"sb-mcp\""));
+        out.push(Line::raw("     args = [\"--vault\", \"~/notes\"]"));
+        out.push(Line::raw(""));
+        out.push(Line::styled(
+            "   See `caliban-mcp-client` and ADR 0023 (Phase A: stdio).",
+            dim,
+        ));
+        out.push(Line::raw(""));
+        out.push(Line::styled("  Press q or Esc to close.", dim));
+        return out;
+    }
+
+    out.push(Line::raw("   MCP servers:"));
     out.push(Line::raw(""));
-    out.push(Line::raw(
-        "   MCP (Model Context Protocol) lets caliban consume external",
-    ));
-    out.push(Line::raw(
-        "   tool servers — for example, a SilverBullet notebook, a",
-    ));
-    out.push(Line::raw(
-        "   Linear ticket browser, or a custom in-house server.",
-    ));
+
+    for summary in &app.mcp_servers {
+        let (glyph, glyph_style, status_text, status_style) = match &summary.status {
+            ServerStatus::Connected { tools } => (
+                "●",
+                Style::default().fg(Color::Green),
+                format!(
+                    "connected — {tools} tool{}",
+                    if *tools == 1 { "" } else { "s" }
+                ),
+                Style::default(),
+            ),
+            ServerStatus::Failed { reason } => (
+                "○",
+                Style::default().fg(Color::Red),
+                format!("failed: {reason}"),
+                Style::default().fg(Color::Red),
+            ),
+            ServerStatus::Disabled => ("○", dim, "disabled by mcp.toml".to_string(), dim),
+        };
+        let line = Line::from(vec![
+            Span::raw("   "),
+            Span::styled(glyph.to_string(), glyph_style),
+            Span::raw(" "),
+            Span::raw(format!("{:<12}", summary.name)),
+            Span::raw(" "),
+            Span::styled(status_text, status_style),
+        ]);
+        out.push(line);
+    }
+
     out.push(Line::raw(""));
     out.push(Line::styled(
-        "   Planned configuration:",
-        Style::default().fg(Color::Yellow),
-    ));
-    out.push(Line::raw("     ~/.config/caliban/mcp.toml"));
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "   Example (future):",
-        Style::default().fg(Color::Yellow),
-    ));
-    out.push(Line::raw("     [[server]]"));
-    out.push(Line::raw("     name = \"silverbullet\""));
-    out.push(Line::raw("     transport = \"stdio\""));
-    out.push(Line::raw("     command = \"sb-mcp\""));
-    out.push(Line::raw("     args = [\"--vault\", \"~/notes\"]"));
-    out.push(Line::raw(""));
-    out.push(Line::raw("     [[server]]"));
-    out.push(Line::raw("     name = \"linear\""));
-    out.push(Line::raw("     transport = \"http\""));
-    out.push(Line::raw("     url = \"https://mcp.example.com/linear\""));
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "   See caliban-mcp-client (Layer 2 sub-project) — not yet shipped.",
+        "   Phase A: stdio only. HTTP / SSE / OAuth come in Phases B + C.",
         dim,
     ));
     out.push(Line::raw(""));
@@ -1421,6 +1454,7 @@ fn handle_agent_error(e: &caliban_agent_core::Error, app: &mut App) {
 ///
 /// Saves the session on clean exit if `--no-save` was not set.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     args: Args,
     agent: Arc<Agent>,
@@ -1429,9 +1463,19 @@ pub(crate) async fn run(
     system_prompt: Option<String>,
     todos: caliban_agent_core::SharedTodos,
     plan_mode: caliban_agent_core::SharedPlanMode,
+    mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(agent, session, store, args, system_prompt, todos, plan_mode);
+    let mut app = App::new(
+        agent,
+        session,
+        store,
+        args,
+        system_prompt,
+        todos,
+        plan_mode,
+        mcp_servers,
+    );
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
 

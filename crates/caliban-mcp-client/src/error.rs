@@ -1,9 +1,11 @@
 //! Errors emitted by the MCP client crate.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Errors emitted by the MCP client crate.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum McpError {
     /// IO failure reading a config file (other than `NotFound`, which is
     /// silently treated as "no config").
@@ -46,7 +48,7 @@ pub enum McpError {
         /// Env-table key whose value was malformed.
         key: String,
     },
-    /// Spawning a server's command failed (v2: real-runtime errors).
+    /// Spawning a server's command failed.
     #[error("mcp: server '{server}' failed to spawn: {source}")]
     Spawn {
         /// Server that failed.
@@ -54,6 +56,59 @@ pub enum McpError {
         /// Underlying IO error.
         #[source]
         source: std::io::Error,
+    },
+    /// `initialize` handshake did not complete within `timeout`.
+    #[error("mcp: server '{server}' handshake timed out after {timeout:?}")]
+    HandshakeTimeout {
+        /// Server that timed out.
+        server: String,
+        /// Configured timeout.
+        timeout: Duration,
+    },
+    /// rmcp's initialize handshake returned an error (transport closed, peer
+    /// returned a JSON-RPC error, malformed init response, etc.).
+    #[error("mcp: server '{server}' handshake failed: {message}")]
+    Handshake {
+        /// Server that failed.
+        server: String,
+        /// Stringified rmcp error.
+        message: String,
+    },
+    /// rmcp `Peer::list_tools` / `call_tool` returned an error.
+    #[error("mcp: server '{server}' rpc error: {message}")]
+    Rpc {
+        /// Server name.
+        server: String,
+        /// Stringified rmcp service error.
+        message: String,
+    },
+    /// An in-flight tool call was cancelled by the agent's cancellation token.
+    #[error("mcp: server '{server}' tool '{tool}' cancelled")]
+    Cancelled {
+        /// Server name.
+        server: String,
+        /// Tool name.
+        tool: String,
+    },
+    /// Tool result exceeded the per-server output cap.
+    #[error("mcp: server '{server}' tool '{tool}' output {bytes}B exceeds limit {limit}B")]
+    OutputTooLarge {
+        /// Server name.
+        server: String,
+        /// Tool name.
+        tool: String,
+        /// Actual size in bytes.
+        bytes: usize,
+        /// Configured cap.
+        limit: usize,
+    },
+    /// Selected `Transport` variant is not wired yet (Phase B for HTTP/SSE).
+    #[error("mcp: server '{server}' transport '{kind}' not yet implemented")]
+    TransportNotYetImplemented {
+        /// Server name.
+        server: String,
+        /// Transport kind (`"http"`, `"sse"`).
+        kind: &'static str,
     },
 }
 

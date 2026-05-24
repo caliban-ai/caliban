@@ -60,6 +60,8 @@ nucleo-matcher = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 dirs   = "5"
 toml   = "0.8"
+rmcp   = { version = "1.7", features = ["client", "transport-child-process"] }
+schemars = "1"
 
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)

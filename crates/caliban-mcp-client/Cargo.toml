@@ -17,12 +17,26 @@ serde_json         = { workspace = true }
 toml               = { workspace = true }
 thiserror          = { workspace = true }
 tracing            = { workspace = true }
-tokio              = { workspace = true, features = ["process", "sync", "rt"] }
+tokio              = { workspace = true, features = ["process", "sync", "rt", "time", "io-util", "macros"] }
+tokio-util         = { workspace = true }
 dirs               = { workspace = true }
+# Server features are pulled in too so the in-tree test_server binary
+# (`src/bin/test_server.rs`) can build without a separate manifest. The release
+# footprint of `server` + `transport-io` is small and a `cargo nextest` style
+# build pulls them via dev-dependencies anyway.
+rmcp               = { workspace = true, features = ["server", "transport-io", "macros", "schemars"] }
+futures            = { workspace = true }
+schemars           = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile           = { workspace = true }
+tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing-subscriber = { workspace = true }
+
+# In-tree test server binary used by integration tests via CARGO_BIN_EXE_test_server.
+[[bin]]
+name             = "test_server"
+path             = "src/bin/test_server.rs"
 
 [lints]
 workspace = true
