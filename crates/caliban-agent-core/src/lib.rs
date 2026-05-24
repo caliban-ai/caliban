@@ -14,7 +14,7 @@ pub mod stream;
 pub mod tool;
 pub mod turn;
 
-pub use agent::{Agent, AgentBuilder, AgentConfig};
+pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
 pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
