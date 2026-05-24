@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
+use caliban_skills::{SkillTool, load_skills};
 use caliban_tools_builtin::{
     AgentFactory, AgentTool, AgentToolInput, BashTool, EditTool, EnterPlanModeTool,
     ExitPlanModeTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, WebFetchTool, WorkspaceRoot,
@@ -147,6 +148,10 @@ pub(crate) struct Args {
     #[arg(long, value_name = "N", env = "CALIBAN_PARALLEL_TOOL_LIMIT")]
     pub(crate) parallel_tool_limit: Option<NonZeroUsize>,
 
+    /// Disable the Skill tool (no skill discovery at startup).
+    #[arg(long, env = "CALIBAN_NO_SKILLS")]
+    pub(crate) no_skills: bool,
+
     /// Disable permission gating entirely (all tool calls allowed).
     #[arg(long, env = "CALIBAN_NO_PERMISSIONS", conflicts_with_all = ["allow", "deny", "ask", "auto_allow"])]
     pub(crate) no_permissions: bool,
@@ -227,6 +232,7 @@ fn build_registry(
     if args.no_tools {
         return ToolRegistry::new();
     }
+    let workspace_root = workspace.root().to_path_buf();
     let root = if args.restrict_paths {
         workspace.restricted()
     } else {
@@ -243,6 +249,11 @@ fn build_registry(
     r.register(Arc::new(TodoWriteTool::new(todos)));
     r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
     r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));
+    if !args.no_skills {
+        let roots = caliban_skills::default_roots(&workspace_root);
+        let skills = load_skills(&roots);
+        r.register(Arc::new(SkillTool::new(skills)));
+    }
     r
 }
 
