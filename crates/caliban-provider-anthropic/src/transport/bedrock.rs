@@ -89,17 +89,17 @@ impl Transport for BedrockTransport {
                     AnthropicError::Transport(Box::new(e.into_service_error()))
                 })?;
                 let Some(event) = event else { break };
-                if let ResponseStream::Chunk(part) = event {
-                    if let Some(blob) = part.bytes {
-                        let json_bytes = blob.into_inner();
-                        // Reframe each Bedrock chunk as an SSE data line so the
-                        // existing `stream_parse::map_sse_to_events` handles it.
-                        let mut reframed = Vec::with_capacity(json_bytes.len() + 8);
-                        reframed.extend_from_slice(b"data: ");
-                        reframed.extend_from_slice(&json_bytes);
-                        reframed.extend_from_slice(b"\n\n");
-                        yield Bytes::from(reframed);
-                    }
+                if let ResponseStream::Chunk(part) = event
+                    && let Some(blob) = part.bytes
+                {
+                    let json_bytes = blob.into_inner();
+                    // Reframe each Bedrock chunk as an SSE data line so the
+                    // existing `stream_parse::map_sse_to_events` handles it.
+                    let mut reframed = Vec::with_capacity(json_bytes.len() + 8);
+                    reframed.extend_from_slice(b"data: ");
+                    reframed.extend_from_slice(&json_bytes);
+                    reframed.extend_from_slice(b"\n\n");
+                    yield Bytes::from(reframed);
                 }
                 // Unknown or future variant types are skipped so the stream
                 // remains usable when the SDK adds new event kinds.

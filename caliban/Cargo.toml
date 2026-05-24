@@ -40,6 +40,11 @@ thiserror                = { workspace = true }
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }
 tempfile         = { workspace = true }
 tokio-util       = { workspace = true }
+wiremock         = { workspace = true }
+async-trait      = { workspace = true }
+secrecy          = { workspace = true }
+url              = { workspace = true }
+serde_json       = { workspace = true }
 
 [lints]
 workspace = true

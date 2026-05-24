@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use caliban_provider::{
@@ -19,6 +20,92 @@ use crate::error::Result;
 use crate::hooks::{HookDecision, ToolCtx, TurnCtx};
 use crate::retry::with_retry;
 use crate::tool::{ToolContext, ToolError};
+
+// ---------------------------------------------------------------------------
+// Per-turn timing (TTFT/TBT)
+// ---------------------------------------------------------------------------
+
+/// Captures per-turn wall-clock latency markers:
+/// - **TTFT** (time-to-first-token): request-sent → first delta arrived.
+/// - **TBT** (time-between-tokens): mean inter-delta interval.
+#[derive(Debug)]
+pub(crate) struct TurnTiming {
+    request_sent_at: Instant,
+    first_delta_at: Option<Instant>,
+    last_delta_at: Option<Instant>,
+    delta_count: u32,
+}
+
+impl TurnTiming {
+    pub(crate) fn start() -> Self {
+        Self {
+            request_sent_at: Instant::now(),
+            first_delta_at: None,
+            last_delta_at: None,
+            delta_count: 0,
+        }
+    }
+
+    pub(crate) fn observe_delta(&mut self) {
+        let now = Instant::now();
+        self.first_delta_at.get_or_insert(now);
+        self.last_delta_at = Some(now);
+        self.delta_count += 1;
+    }
+
+    pub(crate) fn ttft(&self) -> Option<Duration> {
+        self.first_delta_at
+            .map(|t| t.saturating_duration_since(self.request_sent_at))
+    }
+
+    pub(crate) fn tbt(&self) -> Option<Duration> {
+        match (self.first_delta_at, self.last_delta_at, self.delta_count) {
+            (Some(f), Some(l), n) if n >= 2 => Some(l.saturating_duration_since(f) / (n - 1)),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_timing_tests {
+    use super::TurnTiming;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn no_delta_means_no_ttft_and_no_tbt() {
+        let t = TurnTiming::start();
+        assert!(t.ttft().is_none());
+        assert!(t.tbt().is_none());
+    }
+
+    #[test]
+    fn single_delta_gives_ttft_but_no_tbt() {
+        let mut t = TurnTiming::start();
+        sleep(Duration::from_millis(5));
+        t.observe_delta();
+        assert!(t.ttft().unwrap() >= Duration::from_millis(4));
+        assert!(t.tbt().is_none(), "TBT needs >= 2 deltas");
+    }
+
+    #[test]
+    fn multi_delta_gives_ttft_and_tbt() {
+        let mut t = TurnTiming::start();
+        sleep(Duration::from_millis(5));
+        t.observe_delta();
+        sleep(Duration::from_millis(10));
+        t.observe_delta();
+        sleep(Duration::from_millis(10));
+        t.observe_delta();
+        assert!(t.ttft().unwrap() >= Duration::from_millis(4));
+        // Two intervals of ~10ms each → mean ~10ms. Wide tolerance for CI.
+        let tbt = t.tbt().unwrap();
+        assert!(
+            tbt >= Duration::from_millis(5) && tbt <= Duration::from_millis(50),
+            "tbt was {tbt:?}"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -97,6 +184,11 @@ pub enum TurnEvent {
         stop_reason: StopReason,
         /// Token usage for this turn.
         usage: Usage,
+        /// Time-to-first-token for this turn. `None` when no deltas arrived.
+        ttft: Option<Duration>,
+        /// Mean time-between-tokens (across all deltas for this turn).
+        /// `None` when fewer than two deltas arrived.
+        tbt: Option<Duration>,
     },
     /// The entire run is complete.
     RunEnd {
@@ -409,10 +501,15 @@ impl Agent {
                 }
 
                 // ---- Build completion request ----
+                let mut req_messages = history.clone();
+                let mut req_tools = self.tools.to_caliban_tools();
+                if self.prompt_cache {
+                    crate::cache::apply_prompt_cache(&mut req_messages, &mut req_tools);
+                }
                 let req = CompletionRequest {
                     model: self.config.model.clone(),
-                    messages: history.clone(),
-                    tools: self.tools.to_caliban_tools(),
+                    messages: req_messages,
+                    tools: req_tools,
                     tool_choice: self.config.tool_choice.clone(),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
@@ -426,6 +523,10 @@ impl Agent {
                 };
 
                 // ---- Stream from provider (with retry) ----
+                // Begin per-turn timing here so TTFT reflects user-observed
+                // latency including any backoff sleeps (typically 0 on the
+                // first attempt).
+                let mut timing = TurnTiming::start();
                 let provider = Arc::clone(&self.provider);
                 let req_clone = req.clone();
                 let cancel_for_retry = cancel.clone();
@@ -507,6 +608,7 @@ impl Agent {
                             }
                         }
                         StreamEvent::Delta { index, delta } => {
+                            timing.observe_delta();
                             let i = index as usize;
                             if i >= acc.active.len() {
                                 continue;
@@ -656,6 +758,8 @@ impl Agent {
                             tool_results,
                             stop_reason: turn_stop_reason,
                             usage: turn_usage,
+                            ttft: timing.ttft(),
+                            tbt: timing.tbt(),
                         };
                         total_usage.merge(turn_usage);
                         turns_completed += 1;
@@ -663,13 +767,41 @@ impl Agent {
                     }
                 }
 
+                let ttft = timing.ttft();
+                let tbt = timing.tbt();
+
                 yield TurnEvent::TurnEnd {
                     turn_index,
                     assistant_message,
                     tool_results,
                     stop_reason: turn_stop_reason,
                     usage: turn_usage,
+                    ttft,
+                    tbt,
                 };
+
+                if let Some(t) = ttft {
+                    tracing::info!(
+                        target: "caliban::timing",
+                        ttft_ms = u64::try_from(t.as_millis()).unwrap_or(u64::MAX),
+                        tbt_ms = tbt.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                        delta_count = timing.delta_count,
+                        turn = turn_index,
+                        "turn timing",
+                    );
+                }
+
+                let cache_read = turn_usage.cache_read_input_tokens.unwrap_or(0);
+                let cache_creation = turn_usage.cache_creation_input_tokens.unwrap_or(0);
+                if cache_read > 0 || cache_creation > 0 {
+                    tracing::info!(
+                        target: "caliban::cache",
+                        cache_read,
+                        cache_creation,
+                        turn = turn_index,
+                        "prompt cache stats",
+                    );
+                }
 
                 total_usage.merge(turn_usage);
                 turns_completed += 1;

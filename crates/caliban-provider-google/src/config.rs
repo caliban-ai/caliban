@@ -53,7 +53,7 @@ mod vertex_cfg {
                 token_provider,
                 project: project.into(),
                 region: region.into(),
-                timeout: Duration::from_secs(60),
+                timeout: Duration::from_mins(1),
             })
         }
     }

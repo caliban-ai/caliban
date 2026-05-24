@@ -131,6 +131,10 @@ pub(crate) struct Args {
     /// Aggregate size cap across all `@`-attachments in one message (default 1 MB).
     #[arg(long, default_value_t = 1_048_576, env = "CALIBAN_ATTACH_BUDGET_BYTES")]
     pub(crate) attach_budget_bytes: u64,
+
+    /// Disable Anthropic-style prompt caching (default: enabled).
+    #[arg(long, env = "CALIBAN_NO_PROMPT_CACHE")]
+    pub(crate) no_prompt_cache: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -316,16 +320,21 @@ async fn main() -> Result<()> {
         let log_path = dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"));
         if let Some(path) = log_path {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = tokio::fs::create_dir_all(parent).await;
             }
-            if let Ok(file) = std::fs::OpenOptions::new()
+            let opened = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
-            {
+                .await;
+            if let Ok(async_file) = opened {
                 use tracing_subscriber::EnvFilter;
                 use tracing_subscriber::layer::SubscriberExt as _;
                 use tracing_subscriber::util::SubscriberInitExt as _;
+                // tracing-subscriber's fmt layer wants std::io::Write, so
+                // convert back to a std::fs::File. into_std offloads to the
+                // blocking pool; safe here since this only runs once at start.
+                let file = async_file.into_std().await;
                 // Default filter keeps caliban + caliban_* crates at DEBUG and
                 // silences noisy lower-level traces (mio, hyper, reqwest, …).
                 // Users can override via RUST_LOG env var.
@@ -364,7 +373,8 @@ async fn main() -> Result<()> {
         .tools(registry)
         .model(model.clone())
         .max_tokens(args.max_tokens)
-        .max_turns(args.max_turns);
+        .max_turns(args.max_turns)
+        .prompt_cache(!args.no_prompt_cache);
     if let Some(t) = args.temperature {
         builder = builder.temperature(t);
     }
@@ -463,11 +473,21 @@ async fn main() -> Result<()> {
         s.merge_run(final_messages, total_usage);
         store.save(s)?;
         if !args.quiet {
+            let cache_extra = match (
+                s.total_usage.cache_read_input_tokens.unwrap_or(0),
+                s.total_usage.cache_creation_input_tokens.unwrap_or(0),
+            ) {
+                (0, 0) => String::new(),
+                (r, 0) => format!(", {r} cached"),
+                (0, c) => format!(", {c} cache write"),
+                (r, c) => format!(", {r} cached, {c} write"),
+            };
             eprintln!(
-                "[caliban: saved session '{}' ({} turns, {} tokens)]",
+                "[caliban: saved session '{}' ({} turns, {} tokens{})]",
                 s.name,
                 s.turn_count(),
                 s.total_usage.input_tokens + s.total_usage.output_tokens,
+                cache_extra,
             );
         }
     }

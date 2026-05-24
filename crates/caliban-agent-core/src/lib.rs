@@ -3,6 +3,7 @@
 //! `caliban-provider`.
 
 pub mod agent;
+pub(crate) mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
