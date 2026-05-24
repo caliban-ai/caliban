@@ -8,6 +8,7 @@ pub mod edit;
 pub mod glob_;
 pub mod grep;
 pub mod read;
+pub mod web_fetch;
 pub mod workspace;
 pub mod write;
 
@@ -16,5 +17,6 @@ pub use edit::EditTool;
 pub use glob_::GlobTool;
 pub use grep::GrepTool;
 pub use read::ReadTool;
+pub use web_fetch::WebFetchTool;
 pub use workspace::WorkspaceRoot;
 pub use write::WriteTool;

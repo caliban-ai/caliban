@@ -16,7 +16,7 @@ use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_tools_builtin::{
-    BashTool, EditTool, GlobTool, GrepTool, ReadTool, WorkspaceRoot, WriteTool,
+    BashTool, EditTool, GlobTool, GrepTool, ReadTool, WebFetchTool, WorkspaceRoot, WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -199,7 +199,26 @@ fn build_registry(args: &Args, workspace: WorkspaceRoot) -> ToolRegistry {
     r.register(Arc::new(BashTool::new(root.clone())));
     r.register(Arc::new(GlobTool::new(root.clone())));
     r.register(Arc::new(GrepTool::new(root)));
+    r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
     r
+}
+
+/// Build the shared `reqwest::Client` used by [`WebFetchTool`].
+///
+/// Manual redirect handling is required (the tool applies its own same-host
+/// policy and surfaces cross-host redirects), so `Policy::none()` is set
+/// here. A separate client is intentional — provider transports configure
+/// their own clients and have different timeout/keep-alive needs.
+fn web_fetch_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!(
+            "caliban/",
+            env!("CARGO_PKG_VERSION"),
+            " (+https://github.com/johnford2002/caliban)",
+        ))
+        .build()
+        .expect("reqwest::Client default builder succeeds")
 }
 
 pub(crate) fn summarize(s: &str, max: usize) -> String {

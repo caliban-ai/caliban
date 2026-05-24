@@ -35,6 +35,7 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 nucleo-matcher           = { workspace = true }
 ignore                   = { workspace = true }
 thiserror                = { workspace = true }
+reqwest                  = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

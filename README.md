@@ -205,7 +205,7 @@ crates/              # libraries
   caliban-provider-ollama/     # Ollama (direct)
   caliban-provider-google/     # Gemini (AI Studio + Vertex)
   caliban-agent-core/          # agent loop, tools, session
-  caliban-tools-builtin/       # built-in tools (Read/Write/Edit/Bash/Glob/Grep)
+  caliban-tools-builtin/       # built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebFetch)
   caliban-sessions/            # session persistence + REPL
 adrs/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans

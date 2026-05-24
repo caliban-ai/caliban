@@ -1,7 +1,7 @@
 [package]
 name        = "caliban-tools-builtin"
 version     = "0.0.0"
-description = "Built-in tools (Read/Write/Edit/Bash/Glob/Grep) for the caliban agent harness"
+description = "Built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebFetch) for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true
 authors.workspace      = true
@@ -24,13 +24,20 @@ grep-regex         = { workspace = true }
 grep-searcher      = { workspace = true }
 grep-matcher       = { workspace = true }
 dirs               = { workspace = true }
+reqwest            = { workspace = true }
+url                = { workspace = true }
+bytes              = { workspace = true }
+futures            = { workspace = true }
+htmd               = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock         = { workspace = true }
+caliban-provider = { path = "../caliban-provider", features = ["mock"] }
 
 [lints]
 workspace = true
