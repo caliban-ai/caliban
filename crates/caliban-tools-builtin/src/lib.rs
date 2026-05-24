@@ -3,6 +3,7 @@
 //! Each tool implements `caliban_agent_core::Tool` with a JSON Schema for its
 //! input. All tools share a `WorkspaceRoot` for path resolution.
 
+pub mod agent_tool;
 pub mod bash;
 pub mod edit;
 pub mod glob_;
@@ -14,6 +15,7 @@ pub mod web_fetch;
 pub mod workspace;
 pub mod write;
 
+pub use agent_tool::{AgentFactory, AgentTool, AgentToolInput};
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob_::GlobTool;
