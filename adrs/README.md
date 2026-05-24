@@ -37,6 +37,24 @@ decision with context, the decision itself, and consequences.
 | [0020](0020-permission-rules.md) | Permission rules layered on Hooks (TOML rule sources; interactive Ask) | proposed |
 | [0021](0021-sub-agent-primitive.md) | Sub-agent primitive (`AgentTool`; synchronous in-process; allowlist-filtered registry) | proposed |
 | [0022](0022-model-routing-architecture.md) | Model routing architecture (Layer 3 `caliban-model-router`; router-impl-Provider) | accepted |
+| [0023](0023-mcp-v2-transports-and-oauth.md) | MCP v2 — transports, OAuth, elicitation, resources | proposed |
+| [0024](0024-hook-event-taxonomy.md) | Hook event taxonomy (expanded events + handler types) | proposed |
+| [0025](0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | proposed |
+| [0026](0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | proposed |
+| [0027](0027-tui-ergonomics.md) | TUI ergonomics (@file, !, Ctrl+G, Ask modal, transcript viewer) | proposed |
+| [0028](0028-checkpointing-rewind.md) | Auto-checkpointing + `/rewind` | proposed |
+| [0029](0029-permission-modes-and-auto-mode.md) | Permission modes (acceptEdits / auto / dontAsk / bypassPermissions) + auto-mode classifier | proposed |
+| [0030](0030-plugin-packaging.md) | Plugin packaging (skills + hooks + agents + MCP + output-styles bundles) | proposed |
+| [0031](0031-output-styles.md) | Output styles (Default / Proactive / Explanatory / Learning + custom) | proposed |
+| [0032](0032-os-sandbox.md) | OS-level sandbox (macOS Seatbelt + Linux bubblewrap) | proposed |
+| [0033](0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | proposed |
+| [0034](0034-bedrock-and-vertex-providers.md) | Bedrock + Vertex providers | proposed |
+| [0035](0035-auto-memory.md) | Auto-memory (model-written notes per project) | proposed |
+| [0036](0036-claudemd-ancestry-and-imports.md) | CLAUDE.md ancestor walk + `@`-imports | proposed |
+| [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | proposed |
+| [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | proposed |
+| [0039](0039-image-and-vision-input.md) | Image / vision input | proposed |
+| [0040](0040-slash-command-registry.md) | Slash command registry (extensible `SlashCommand` trait) | proposed |
 
 ## Adding a new ADR
 
