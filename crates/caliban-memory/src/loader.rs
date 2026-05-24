@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::auto::strip_html_comments;
 use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::prefix::{MemoryPrefix, TierFile, TierKind};
@@ -10,6 +11,13 @@ use crate::prefix::{MemoryPrefix, TierFile, TierKind};
 /// Cap per-file disk read at 256 KB so a runaway memory file cannot wedge the
 /// startup path.
 const MAX_FILE_BYTES: usize = 256 * 1024;
+
+/// Maximum number of `MEMORY.md` lines spliced into the prompt.
+const AUTO_MAX_LINES: usize = 200;
+
+/// Maximum bytes of `MEMORY.md` spliced into the prompt. Whichever cap is
+/// reached first wins.
+const AUTO_MAX_BYTES: usize = 25 * 1024;
 
 /// Approximate-token estimator (chars / 4). Provider-agnostic, deterministic.
 #[must_use]
@@ -29,6 +37,18 @@ const CONVENTIONS_BLOCK: &str = concat!(
     "facts already in the repo. Keep this file ≤ 200 lines.\n",
 );
 
+/// Environment kill-switch. When set to a truthy value, the auto tier is
+/// dropped from the prefix entirely (and the auto-memory skill is hidden by
+/// the binary, which checks the same flag).
+const DISABLE_ENV: &str = "CALIBAN_DISABLE_AUTO_MEMORY";
+
+fn auto_memory_disabled() -> bool {
+    matches!(
+        std::env::var(DISABLE_ENV).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "True" | "yes")
+    )
+}
+
 /// Load all three memory tiers from disk, enforce the token budget, and return
 /// the assembled [`MemoryPrefix`].
 ///
@@ -40,14 +60,28 @@ const CONVENTIONS_BLOCK: &str = concat!(
 /// (permissions, etc.), or [`MemoryError::AutoMemorySeed`] if the auto-memory
 /// directory exists check / seed write fails.
 pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
-    // Seed the auto-memory dir if it doesn't exist yet.
-    let auto_md = ensure_auto_memory(&config.auto_memory_dir).await?;
+    let auto_disabled = auto_memory_disabled();
+
+    // Seed the auto-memory dir if it doesn't exist yet (skip when disabled —
+    // we don't want a CI run to create a project dir).
+    let auto_md = if auto_disabled {
+        None
+    } else {
+        Some(ensure_auto_memory(&config.auto_memory_dir).await?)
+    };
 
     let global = read_optional(config.global_path.as_deref()).await?;
     let project = read_optional(config.project_path.as_deref()).await?;
-    let auto_raw = read_optional(Some(&auto_md)).await?;
+    let auto_raw = if let Some(p) = auto_md.as_deref() {
+        read_optional_with_caps(Some(p), AUTO_MAX_LINES, AUTO_MAX_BYTES).await?
+    } else {
+        None
+    };
 
-    // Inject conventions into the auto-memory body (in-memory only).
+    let global = global.map(post_process_static);
+    let project = project.map(post_process_static);
+    // Inject conventions into the auto-memory body (in-memory only), then
+    // strip HTML comments so the splice stays clean.
     let auto = auto_raw.map(|mut t| {
         if !t.body.contains("caliban: auto-memory conventions follow") {
             if !t.body.ends_with('\n') {
@@ -55,6 +89,7 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
             }
             t.body.push_str(CONVENTIONS_BLOCK);
         }
+        t.body = strip_html_comments(&t.body);
         t.estimated_tokens = estimate_tokens(&t.body);
         t
     });
@@ -73,6 +108,15 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
         + prefix.auto.as_ref().map_or(0, |t| t.estimated_tokens);
 
     Ok(prefix)
+}
+
+/// Post-process a tier file that's not the auto tier: strip HTML comments and
+/// re-estimate tokens. Applied to global + project so that conventions /
+/// internal notes the operator hides in comments don't bloat the splice.
+fn post_process_static(mut t: TierFile) -> TierFile {
+    t.body = strip_html_comments(&t.body);
+    t.estimated_tokens = estimate_tokens(&t.body);
+    t
 }
 
 async fn read_optional(path: Option<&Path>) -> Result<Option<TierFile>> {
@@ -102,6 +146,54 @@ async fn read_optional(path: Option<&Path>) -> Result<Option<TierFile>> {
         path: path.to_path_buf(),
         estimated_tokens: estimate_tokens(&body),
         body,
+        truncated_bytes,
+    }))
+}
+
+/// Read with cap-by-lines-or-bytes (whichever wins first). Used for the auto
+/// tier where the spec mandates a strict 200-line / 25 KB ceiling on the
+/// spliced body.
+async fn read_optional_with_caps(
+    path: Option<&Path>,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Result<Option<TierFile>> {
+    let Some(path) = path else { return Ok(None) };
+    match tokio::fs::metadata(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(MemoryError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+        Ok(_) => {}
+    }
+    let raw_bytes = tokio::fs::read(path).await.map_err(|e| MemoryError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
+    let total_bytes = raw.len();
+
+    // Apply caps. We walk lines and accumulate, stopping when either ceiling
+    // would be exceeded.
+    let mut kept = String::new();
+    for (lines_used, line) in raw.split_inclusive('\n').enumerate() {
+        if lines_used >= max_lines {
+            break;
+        }
+        if kept.len() + line.len() > max_bytes {
+            break;
+        }
+        kept.push_str(line);
+    }
+    let truncated_bytes = total_bytes.saturating_sub(kept.len());
+
+    Ok(Some(TierFile {
+        path: path.to_path_buf(),
+        estimated_tokens: estimate_tokens(&kept),
+        body: kept,
         truncated_bytes,
     }))
 }
@@ -331,5 +423,160 @@ mod tests {
         assert_eq!(other_tokens(&p, TierKind::Auto), 30);
         assert_eq!(other_tokens(&p, TierKind::Project), 40);
         assert_eq!(other_tokens(&p, TierKind::Global), 50);
+    }
+
+    #[tokio::test]
+    async fn auto_load_caps_at_two_hundred_lines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = String::new();
+        for i in 0..400 {
+            writeln!(body, "line-{i:04}").unwrap();
+        }
+        std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
+
+        let cfg = MemoryConfig {
+            global_path: None,
+            project_path: None,
+            auto_memory_dir: dir.clone(),
+            max_tokens: 100_000,
+        };
+        let p = load(&cfg).await.unwrap();
+        let auto = p.auto.as_ref().expect("auto loaded");
+        // Strip the conventions block we add before counting.
+        let kept_lines = auto.body.lines().filter(|l| l.starts_with("line-")).count();
+        assert_eq!(kept_lines, AUTO_MAX_LINES);
+        assert!(auto.truncated_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn auto_load_caps_at_byte_ceiling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 10 lines but each line is ~5 KB → cap on bytes hits before the line cap.
+        let mut body = String::new();
+        for i in 0..10 {
+            let chunk = "x".repeat(5_000);
+            writeln!(body, "{i}-{chunk}").unwrap();
+        }
+        std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
+
+        let cfg = MemoryConfig {
+            global_path: None,
+            project_path: None,
+            auto_memory_dir: dir.clone(),
+            max_tokens: 100_000,
+        };
+        let p = load(&cfg).await.unwrap();
+        let auto = p.auto.as_ref().expect("auto loaded");
+        // Body kept ≤ 25 KB before we appended conventions.
+        // We can't assert exact byte length post-conventions, but truncated_bytes
+        // must be set and the kept body shouldn't contain every line.
+        assert!(auto.truncated_bytes > 0);
+        let lines_with_x = auto.body.lines().filter(|l| l.contains("xxxx")).count();
+        assert!(
+            lines_with_x < 10,
+            "expected truncation, got {lines_with_x} lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn html_comments_stripped_from_auto_splice() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("MEMORY.md"),
+            "# Memory index\n<!-- secret comment -->\n- [foo](foo.md) — user: visible\n",
+        )
+        .unwrap();
+        let cfg = MemoryConfig {
+            global_path: None,
+            project_path: None,
+            auto_memory_dir: dir.clone(),
+            max_tokens: 100_000,
+        };
+        let p = load(&cfg).await.unwrap();
+        let auto = p.auto.as_ref().unwrap();
+        assert!(!auto.body.contains("secret comment"));
+        assert!(auto.body.contains("[foo](foo.md)"));
+    }
+
+    // ----- env-var driven tests -----
+    //
+    // `std::env::set_var` / `remove_var` were marked `unsafe` in Rust 2024
+    // because mutating the process environment is racy with other threads
+    // (especially `getenv` in libc). The workspace lint denies `unsafe_code`
+    // — we localize the `#[allow]` to the env-guard helper which is only
+    // reachable from `#[cfg(test)]` and runs single-threaded under
+    // `cargo test -p caliban-memory` (no other crate in the workspace mutates
+    // these vars). The guard restores the previous value on drop so leakage
+    // across tests is contained.
+    //
+    // SAFETY: see comment above. We accept the documented race in test-only
+    // code in exchange for being able to assert the env-driven branches.
+    #[allow(unsafe_code)]
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            // SAFETY: see module-level comment above the env tests.
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            // SAFETY: see module-level comment above the env tests.
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            set_env(self.key, self.prior.as_ref().and_then(|s| s.to_str()));
+        }
+    }
+
+    fn env_guard(key: &'static str) -> EnvGuard {
+        EnvGuard {
+            key,
+            prior: std::env::var_os(key),
+        }
+    }
+
+    #[tokio::test]
+    async fn disable_env_skips_auto_tier() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("memory");
+        // Pre-populate so we *would* load if the env weren't set.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "# Memory index\n").unwrap();
+
+        let _guard = env_guard("CALIBAN_DISABLE_AUTO_MEMORY");
+        set_env("CALIBAN_DISABLE_AUTO_MEMORY", Some("1"));
+
+        let cfg = MemoryConfig {
+            global_path: None,
+            project_path: None,
+            auto_memory_dir: dir.clone(),
+            max_tokens: 100_000,
+        };
+        let p = load(&cfg).await.unwrap();
+        assert!(p.auto.is_none(), "auto tier should be dropped");
+    }
+
+    #[test]
+    fn config_honors_auto_memory_directory_override() {
+        let _g1 = env_guard("CALIBAN_AUTO_MEMORY_DIRECTORY");
+        set_env(
+            "CALIBAN_AUTO_MEMORY_DIRECTORY",
+            Some("/tmp/custom-auto-mem-xyz"),
+        );
+        let cfg = MemoryConfig::from_env(std::path::Path::new("/tmp/whatever"));
+        assert_eq!(
+            cfg.auto_memory_dir,
+            std::path::PathBuf::from("/tmp/custom-auto-mem-xyz")
+        );
     }
 }

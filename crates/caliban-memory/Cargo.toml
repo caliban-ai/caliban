@@ -9,10 +9,12 @@ rust-version.workspace = true
 publish     = false
 
 [dependencies]
-tokio     = { workspace = true, features = ["fs", "io-util"] }
-tracing   = { workspace = true }
-thiserror = { workspace = true }
-dirs      = { workspace = true }
+tokio       = { workspace = true, features = ["fs", "io-util"] }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+dirs        = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }

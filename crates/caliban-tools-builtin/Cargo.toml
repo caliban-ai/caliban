@@ -10,6 +10,7 @@ publish     = false
 
 [dependencies]
 caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-memory     = { path = "../caliban-memory" }
 caliban-provider   = { path = "../caliban-provider" }
 async-trait        = { workspace = true }
 serde              = { workspace = true }

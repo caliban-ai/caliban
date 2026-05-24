@@ -752,6 +752,8 @@ name = "caliban-memory"
 version = "0.0.0"
 dependencies = [
  "dirs",
+ "serde",
+ "serde_yaml",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -958,6 +960,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "caliban-agent-core",
+ "caliban-memory",
  "caliban-provider",
  "dirs",
  "futures",

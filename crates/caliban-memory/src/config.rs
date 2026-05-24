@@ -27,6 +27,9 @@ impl MemoryConfig {
     /// - `XDG_DATA_HOME` (default `~/.local/share`) → auto-memory base.
     /// - `CALIBAN_MEMORY_DIR` overrides the auto-memory directory root
     ///   (useful for tests + isolated installs).
+    /// - `CALIBAN_AUTO_MEMORY_DIRECTORY` overrides the *full* per-project
+    ///   auto-memory directory (skips workspace-sanitization + the
+    ///   `<root>/<slug>/memory` join). Takes precedence over `CALIBAN_MEMORY_DIR`.
     /// - `CALIBAN_MEMORY_BUDGET_TOKENS` overrides the default `8_000` budget.
     #[must_use]
     pub fn from_env(workspace_root: &Path) -> Self {
@@ -36,14 +39,19 @@ impl MemoryConfig {
         let global_path = config_home.map(|d| d.join("caliban").join("CLAUDE.md"));
         let project_path = Some(workspace_root.join("CLAUDE.md"));
 
-        let auto_memory_root = std::env::var_os("CALIBAN_MEMORY_DIR")
-            .map(PathBuf::from)
-            .or_else(|| data_home.map(|d| d.join("caliban").join("projects")));
-        let slug = sanitize_workspace(workspace_root);
-        let auto_memory_dir = auto_memory_root
-            .unwrap_or_else(|| PathBuf::from("./.caliban/projects"))
-            .join(slug)
-            .join("memory");
+        // Full-directory override wins.
+        let auto_memory_dir = if let Some(dir) = std::env::var_os("CALIBAN_AUTO_MEMORY_DIRECTORY") {
+            PathBuf::from(dir)
+        } else {
+            let auto_memory_root = std::env::var_os("CALIBAN_MEMORY_DIR")
+                .map(PathBuf::from)
+                .or_else(|| data_home.map(|d| d.join("caliban").join("projects")));
+            let slug = sanitize_workspace(workspace_root);
+            auto_memory_root
+                .unwrap_or_else(|| PathBuf::from("./.caliban/projects"))
+                .join(slug)
+                .join("memory")
+        };
 
         let max_tokens = std::env::var("CALIBAN_MEMORY_BUDGET_TOKENS")
             .ok()

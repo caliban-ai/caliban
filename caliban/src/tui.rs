@@ -1769,15 +1769,36 @@ fn handle_slash_command(line: &str, app: &mut App) {
             ));
         }
         "/memory" => {
-            let workspace_root = app
-                .args
-                .workspace
-                .clone()
-                .unwrap_or_else(|| app.cwd.clone());
-            let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
-            // We block the event loop for one fs read; tiers are small.
-            let prefix = futures::executor::block_on(caliban_memory::load(&cfg));
-            match prefix {
+            handle_memory_command(app, arg);
+        }
+        unknown => {
+            app.transcript.push(TranscriptLine::Info(format!(
+                "unknown command: {unknown} \u{2014} type /help"
+            )));
+        }
+    }
+}
+
+/// `/memory` subcommands. With no argument, prints the three-tier summary
+/// (legacy behavior). Otherwise dispatches `list`, `show <slug>`,
+/// `edit <slug>`, `delete <slug>` per ADR 0035. The full slash registry
+/// arrives with ADR 0040; for now we route everything through this handler.
+#[allow(clippy::too_many_lines)]
+fn handle_memory_command(app: &mut App, arg: &str) {
+    let workspace_root = app
+        .args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| app.cwd.clone());
+    let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match sub {
+        "" => {
+            // Legacy: show tiers summary.
+            match futures::executor::block_on(caliban_memory::load(&cfg)) {
                 Ok(p) => {
                     app.transcript.push(TranscriptLine::Info(format!(
                         "memory tiers ({} tokens / {} budget):",
@@ -1792,6 +1813,10 @@ fn handle_slash_command(line: &str, app: &mut App) {
                                 .into(),
                         ));
                     }
+                    app.transcript.push(TranscriptLine::Info(
+                        "subcommands: /memory list | show <slug> | edit <slug> | delete <slug>"
+                            .into(),
+                    ));
                 }
                 Err(e) => {
                     app.transcript
@@ -1799,9 +1824,118 @@ fn handle_slash_command(line: &str, app: &mut App) {
                 }
             }
         }
-        unknown => {
+        "list" => {
+            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
+            match loader.list() {
+                Ok(topics) if topics.is_empty() => {
+                    app.transcript
+                        .push(TranscriptLine::Info("no topic files yet".into()));
+                }
+                Ok(topics) => {
+                    app.transcript.push(TranscriptLine::Info(format!(
+                        "{} topic file(s) in {}:",
+                        topics.len(),
+                        cfg.auto_memory_dir.display()
+                    )));
+                    for t in topics {
+                        app.transcript.push(TranscriptLine::Info(format!(
+                            "  {} [{}] — {}",
+                            t.name,
+                            t.kind.as_str(),
+                            t.description
+                        )));
+                    }
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("list failed: {e}")));
+                }
+            }
+        }
+        "show" => {
+            if rest.is_empty() {
+                app.transcript
+                    .push(TranscriptLine::Info("usage: /memory show <slug>".into()));
+                return;
+            }
+            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
+            match loader.read(rest) {
+                Ok(topic) => {
+                    app.transcript.push(TranscriptLine::Info(format!(
+                        "{} [{}] — {}",
+                        topic.name,
+                        topic.kind.as_str(),
+                        topic.description,
+                    )));
+                    for line in topic.body.lines() {
+                        app.transcript.push(TranscriptLine::Info(line.to_string()));
+                    }
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("show failed: {e}")));
+                }
+            }
+        }
+        "edit" => {
+            if rest.is_empty() {
+                app.transcript
+                    .push(TranscriptLine::Info("usage: /memory edit <slug>".into()));
+                return;
+            }
+            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
+            if let Err(e) = caliban_memory::auto::validate_slug(rest) {
+                app.transcript
+                    .push(TranscriptLine::Error(format!("bad slug: {e}")));
+                return;
+            }
+            let path = loader.dir().join(format!("{rest}.md"));
+            if !path.exists() {
+                app.transcript.push(TranscriptLine::Error(format!(
+                    "no such topic: {}",
+                    path.display()
+                )));
+                return;
+            }
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
             app.transcript.push(TranscriptLine::Info(format!(
-                "unknown command: {unknown} \u{2014} type /help"
+                "opening {} in {} (Ctrl-Z and `fg` to return, or run from outside the TUI)",
+                path.display(),
+                editor
+            )));
+            // Spawning an interactive editor under the alternate screen leads
+            // to a corrupt-looking terminal. We surface the canonical command
+            // for the operator to run themselves; the proper integration
+            // arrives with ADR 0040's slash-command registry.
+            app.transcript.push(TranscriptLine::Info(format!(
+                "→ run: {editor} {}",
+                path.display()
+            )));
+        }
+        "delete" | "rm" => {
+            if rest.is_empty() {
+                app.transcript.push(TranscriptLine::Info(
+                    "usage: /memory delete <slug>  (also: /memory rm <slug>)".into(),
+                ));
+                return;
+            }
+            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
+            match loader.delete(rest) {
+                Ok(()) => {
+                    app.transcript
+                        .push(TranscriptLine::Info(format!("deleted topic '{rest}'")));
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("delete failed: {e}")));
+                }
+            }
+        }
+        other => {
+            app.transcript.push(TranscriptLine::Info(format!(
+                "unknown /memory subcommand: {other} — try /memory list"
             )));
         }
     }

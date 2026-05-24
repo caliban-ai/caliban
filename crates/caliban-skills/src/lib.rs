@@ -5,10 +5,12 @@
 
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod builtins;
 pub mod loader;
 pub mod skill;
 pub mod tool;
 
+pub use builtins::{builtin_skills, register as register_builtins};
 pub use loader::{default_roots, load_one, load_skills};
 pub use skill::Skill;
 pub use tool::SkillTool;

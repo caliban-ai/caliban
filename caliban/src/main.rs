@@ -17,11 +17,11 @@ use anyhow::{Context, Result};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
-use caliban_skills::{SkillTool, load_skills};
+use caliban_skills::{SkillTool, load_skills, register_builtins};
 use caliban_tools_builtin::{
     AgentFactory, AgentTool, AgentToolInput, BashTool, EditTool, EnterPlanModeTool,
-    ExitPlanModeTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, WebFetchTool, WorkspaceRoot,
-    WriteTool,
+    ExitPlanModeTool, GlobTool, GrepTool, ReadMemoryTopicTool, ReadTool, TodoWriteTool,
+    WebFetchTool, WorkspaceRoot, WriteMemoryTopicTool, WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -326,12 +326,41 @@ fn build_registry(
     r.register(Arc::new(TodoWriteTool::new(todos)));
     r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
     r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));
+    // Auto-memory tools — kill switch via env per ADR 0035. The skill body
+    // documents how to use the tools; without the skill, the model has no
+    // protocol manual, so we gate both together. Skipped in bare mode.
+    if !auto_memory_disabled() && !args.bare {
+        let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+        let topic_loader = Arc::new(caliban_memory::TopicLoader::new(cfg.auto_memory_dir));
+        r.register(Arc::new(ReadMemoryTopicTool::new(Arc::clone(
+            &topic_loader,
+        ))));
+        r.register(Arc::new(WriteMemoryTopicTool::new(topic_loader)));
+    }
+
     if !args.no_skills && !args.bare {
         let roots = caliban_skills::default_roots(&workspace_root);
-        let skills = load_skills(&roots);
+        let mut skills = load_skills(&roots);
+        // Built-in skills register *before* user-dir scan results win — except
+        // that the loader already shadows duplicates, so `register_builtins`
+        // is a no-op if the user shipped their own `auto-memory` skill.
+        // We hide the built-in entirely when the kill switch is set, matching
+        // the tool gating above.
+        if !auto_memory_disabled() {
+            register_builtins(&mut skills);
+        }
         r.register(Arc::new(SkillTool::new(skills)));
     }
     r
+}
+
+/// Returns true if the user has opted out of the auto-memory feature.
+/// Matches the loader-side check in `caliban_memory::loader`.
+fn auto_memory_disabled() -> bool {
+    matches!(
+        std::env::var("CALIBAN_DISABLE_AUTO_MEMORY").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "True" | "yes")
+    )
 }
 
 /// Build the shared `reqwest::Client` used by [`WebFetchTool`].

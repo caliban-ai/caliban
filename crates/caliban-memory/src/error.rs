@@ -23,6 +23,23 @@ pub enum MemoryError {
         #[source]
         source: std::io::Error,
     },
+    /// A topic file's frontmatter was missing, malformed, or contained an
+    /// invalid `metadata.type` value.
+    #[error("invalid topic frontmatter at {path}: {reason}")]
+    InvalidTopic {
+        /// The topic file path.
+        path: PathBuf,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// A topic slug failed validation (path traversal, illegal characters, or empty).
+    #[error("invalid topic slug '{slug}': {reason}")]
+    InvalidSlug {
+        /// The offending slug.
+        slug: String,
+        /// Reason it was rejected.
+        reason: String,
+    },
 }
 
 /// Convenience `Result` alias for this crate.
