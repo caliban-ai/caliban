@@ -686,6 +686,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

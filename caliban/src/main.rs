@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::multiple_crate_versions)]
 
+mod headless;
 mod system_prompt;
 mod tui;
 
@@ -61,8 +62,74 @@ pub(crate) struct Args {
     pub(crate) prompt: Option<String>,
 
     /// Alternative way to specify the prompt
-    #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
+    #[arg(long = "prompt", value_name = "PROMPT")]
     pub(crate) prompt_flag: Option<String>,
+
+    /// Headless / print mode (ADR 0025). When set, drives the agent
+    /// non-interactively and emits text / JSON / NDJSON output. Accepts an
+    /// optional prompt argument; otherwise reads from `--prompt`, the
+    /// positional `PROMPT`, or stdin (capped at 10 MiB).
+    #[arg(short = 'p', long = "print", value_name = "PROMPT", num_args = 0..=1, default_missing_value = "")]
+    pub(crate) print: Option<String>,
+
+    /// Stream-output format (headless mode only).
+    #[arg(long = "output-format", value_enum, value_name = "FMT")]
+    pub(crate) output_format: Option<headless::OutputFormat>,
+
+    /// Stdin format (headless mode only).
+    #[arg(
+        long = "input-format",
+        value_enum,
+        value_name = "FMT",
+        default_value = "text"
+    )]
+    pub(crate) input_format: headless::InputFormat,
+
+    /// Maximum cumulative cost in USD before the run aborts (exit 137).
+    /// Placeholder enforcement until ADR 0033 wires real cost.
+    #[arg(long = "max-budget-usd", value_name = "USD")]
+    pub(crate) max_budget_usd: Option<f64>,
+
+    /// Skip hooks/skills/plugins/MCP/auto-memory/CLAUDE.md discovery
+    /// (deterministic CI mode; ADR 0025).
+    #[arg(long = "bare")]
+    pub(crate) bare: bool,
+
+    /// Force structured final output matching the given JSON Schema. Value
+    /// can be inline JSON or a path to a `.json` file.
+    #[arg(long = "json-schema", value_name = "FILE_OR_JSON")]
+    pub(crate) json_schema: Option<String>,
+
+    /// Emit assistant text deltas as separate `text` frames in
+    /// stream-json mode (default: aggregate into one `message` frame).
+    #[arg(long = "include-partial-messages")]
+    pub(crate) include_partial_messages: bool,
+
+    /// Emit a `hook_event` frame per fired hook event in stream-json mode.
+    #[arg(long = "include-hook-events")]
+    pub(crate) include_hook_events: bool,
+
+    /// Echo each user prompt as a `user` frame in stream-json mode.
+    #[arg(long = "replay-user-messages")]
+    pub(crate) replay_user_messages: bool,
+
+    /// Resume the most recently updated session.
+    #[arg(short = 'c', long = "continue")]
+    pub(crate) continue_latest: bool,
+
+    /// Resume a named session.
+    #[arg(short = 'r', long = "resume", value_name = "NAME")]
+    pub(crate) resume: Option<String>,
+
+    /// Fallback model to use when the primary model errors. Router v2
+    /// wires this end-to-end; v1 records and surfaces it in init frames.
+    #[arg(long = "fallback-model", value_name = "MODEL")]
+    pub(crate) fallback_model: Option<String>,
+
+    /// Route permission `Ask` events to the named MCP tool. Parsed for
+    /// forward-compat; MCP elicitation lands with Phase C (ADR 0023).
+    #[arg(long = "permission-prompt-tool", value_name = "MCP_TOOL")]
+    pub(crate) permission_prompt_tool: Option<String>,
 
     /// Which provider to use
     #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
@@ -259,7 +326,7 @@ fn build_registry(
     r.register(Arc::new(TodoWriteTool::new(todos)));
     r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
     r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));
-    if !args.no_skills {
+    if !args.no_skills && !args.bare {
         let roots = caliban_skills::default_roots(&workspace_root);
         let skills = load_skills(&roots);
         r.register(Arc::new(SkillTool::new(skills)));
@@ -390,6 +457,293 @@ async fn run_and_render(
     Ok((final_messages, total_usage))
 }
 
+/// Drive the agent loop in headless (`-p` / `--print`) mode and exit with
+/// the appropriate process exit code (ADR 0025).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_headless(
+    args: &Args,
+    agent: Arc<Agent>,
+    system_prompt: Option<String>,
+    todo_snapshot: Vec<caliban_agent_core::Todo>,
+    session: Option<PersistedSession>,
+    store: Option<SessionStore>,
+    todos: caliban_agent_core::SharedTodos,
+    plan_mode: caliban_agent_core::SharedPlanMode,
+    model: String,
+    cancel: CancellationToken,
+    hook_event_buffer: Option<headless::HookEventBuffer>,
+) -> i32 {
+    let output_format = args.output_format.unwrap_or(headless::OutputFormat::Text);
+
+    // Resolve --continue / --resume. They override the in-memory `session`
+    // computed by the legacy `--session` flag when both are present.
+    let mut session = session;
+    if args.continue_latest || args.resume.is_some() {
+        let store_for_resume = match store.as_ref() {
+            Some(s) => s.clone(),
+            None => match SessionStore::default_root() {
+                Ok(root) => SessionStore::new(root),
+                Err(e) => {
+                    eprintln!("[caliban] could not resolve sessions dir: {e}");
+                    return 1;
+                }
+            },
+        };
+        match headless::session_loader::resolve_session(
+            &store_for_resume,
+            args.continue_latest,
+            args.resume.as_deref(),
+        ) {
+            Ok(Some(s)) => {
+                // Replay todos / plan-mode from the resumed session.
+                todos.lock().expect("todos lock").clone_from(&s.todos);
+                plan_mode.store(s.plan_mode, std::sync::atomic::Ordering::Relaxed);
+                session = Some(s);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[caliban] {e}");
+                return headless::exit_code_for(&e);
+            }
+        }
+    }
+
+    // Resolve the prompt: --print "x" wins, then --prompt, then positional,
+    // then stdin (when --print was used with no value).
+    let print_value = args.print.as_deref().filter(|s| !s.is_empty());
+    let prompt_text = match (
+        print_value,
+        args.prompt_flag.as_deref(),
+        args.prompt.as_deref(),
+    ) {
+        (Some(p), _, _) | (_, Some(p), _) | (_, _, Some(p)) => p.to_string(),
+        (None, None, None) => {
+            // No explicit prompt — read stdin (text or stream-json).
+            let stdin_input = match headless::input::read_stdin_capped(&mut std::io::stdin()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[caliban] {e}");
+                    return headless::exit_code_for(&e);
+                }
+            };
+            if matches!(args.input_format, headless::InputFormat::StreamJson) {
+                // Pick the first user frame as the prompt; emit a warning
+                // to stderr if there are control frames (best-effort).
+                match headless::input::parse_stream_json_payload(&stdin_input) {
+                    Ok(frames) => {
+                        let mut prompt = String::new();
+                        for frame in frames {
+                            if let headless::events::InputFrame::User { content } = frame {
+                                prompt = headless::events::InputFrame::extract_text(&content);
+                                break;
+                            }
+                        }
+                        if prompt.is_empty() {
+                            eprintln!("[caliban] no `user` frame found in stream-json stdin input");
+                            return 66;
+                        }
+                        prompt
+                    }
+                    Err(e) => {
+                        eprintln!("[caliban] {e}");
+                        return headless::exit_code_for(&e);
+                    }
+                }
+            } else {
+                stdin_input.trim_end_matches('\n').to_string()
+            }
+        }
+    };
+
+    // Permission-prompt-tool: parsed-and-ignored with a warning (ADR 0023
+    // Phase C will wire this).
+    if let Some(tool) = &args.permission_prompt_tool {
+        eprintln!(
+            "[caliban] --permission-prompt-tool='{tool}' is accepted but inert; MCP elicitation lands with Phase C (ADR 0023)"
+        );
+    }
+
+    // Budget warning: until OTel/cost lands, cost is always 0.0 — surface
+    // a one-time warning when the operator passes --max-budget-usd.
+    if args.max_budget_usd.is_some() {
+        eprintln!(
+            "[caliban] --max-budget-usd is in placeholder mode: every request contributes \
+             0.0 USD until ADR 0033 wires real pricing"
+        );
+    }
+
+    // Optional JSON schema.
+    let json_schema = match args.json_schema.as_deref() {
+        Some(arg) => match headless::JsonSchema::from_cli_arg(arg) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("[caliban] {e}");
+                return headless::exit_code_for(&e);
+            }
+        },
+        None => None,
+    };
+
+    // System prompt: install (possibly empty) on a fresh session.
+    let mut messages = session
+        .as_ref()
+        .map(|s| s.messages.clone())
+        .unwrap_or_default();
+    let has_system = messages
+        .first()
+        .is_some_and(|m| m.role == caliban_provider::Role::System);
+    if !has_system && let Some(ref sp) = system_prompt {
+        let with_todos = system_prompt::append_todo_block(sp, &todo_snapshot);
+        messages.insert(0, caliban_provider::Message::system_text(with_todos));
+    }
+    messages.push(Message::user_text(prompt_text));
+
+    // Setting source-chain — for now we synthesize a static chain that
+    // mirrors what the binary loads. ADR 0026 (`settings.json` precedence)
+    // will replace this with a real source list.
+    let mut setting_sources = vec!["builtin".to_string()];
+    if !args.bare {
+        if !args.no_hooks {
+            setting_sources.push("hooks.toml".into());
+        }
+        if !args.no_skills {
+            setting_sources.push("skills".into());
+        }
+        if !args.no_mcp {
+            setting_sources.push("mcp.toml".into());
+        }
+        setting_sources.push("memory".into());
+    }
+
+    let cwd = std::env::current_dir().map_or_else(|_| ".".to_string(), |p| p.display().to_string());
+
+    let tools: Vec<String> = {
+        let mut v: Vec<String> = agent.tools().names().map(str::to_string).collect();
+        v.sort();
+        v
+    };
+
+    let model_summary = format!("{}/{}", provider_name(args.provider), model);
+    let session_id = args
+        .session
+        .clone()
+        .or_else(|| args.resume.clone())
+        .unwrap_or_else(|| "ephemeral".into());
+
+    let budget = headless::BudgetTracker::new(args.max_budget_usd);
+
+    let config = headless::HeadlessRunConfig {
+        output_format,
+        input_format: args.input_format,
+        // Translate `--max-turns 0` into "short-circuit and return 130".
+        max_turns: if args.print.is_some() || args.output_format.is_some() {
+            Some(args.max_turns)
+        } else {
+            None
+        },
+        budget: Arc::clone(&budget),
+        json_schema,
+        include_partial_messages: args.include_partial_messages,
+        include_hook_events: args.include_hook_events,
+        replay_user_messages: args.replay_user_messages,
+        bare_mode: args.bare,
+        fallback_model: args.fallback_model.clone(),
+        session_id,
+        setting_sources,
+        tools,
+        model_summary,
+        cwd,
+        hook_buffer: hook_event_buffer,
+    };
+
+    let stdout = std::io::stdout().lock();
+    let writer = std::io::BufWriter::new(stdout);
+    let mut driver = headless::HeadlessDriver::new(writer, config);
+
+    // Fire SessionStart hook explicitly so --include-hook-events sees it.
+    {
+        let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_ctx = caliban_agent_core::SessionCtx {
+            session_id: args
+                .session
+                .as_deref()
+                .or(args.resume.as_deref())
+                .unwrap_or("ephemeral"),
+            cwd: &cwd_now,
+            provider: provider_name(args.provider),
+            model: &model,
+        };
+        if let Err(e) = agent.hooks().session_start(&session_ctx).await {
+            tracing::warn!(target: "caliban::hooks", error = %e, "session_start hook error (non-fatal)");
+        }
+        // Flush any hook frames the sink captured before the run begins.
+        let _ = driver.emit_init();
+        let _ = driver.flush_hook_events();
+    }
+
+    let outcome = driver.run(Arc::clone(&agent), messages, cancel).await;
+
+    // Fire SessionEnd hook (best-effort).
+    {
+        let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (i_tok, o_tok) = budget.total_tokens();
+        let outcome_ctx = caliban_agent_core::SessionOutcome {
+            turn_count: 0,
+            input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+        };
+        let session_ctx = caliban_agent_core::SessionCtx {
+            session_id: args
+                .session
+                .as_deref()
+                .or(args.resume.as_deref())
+                .unwrap_or("ephemeral"),
+            cwd: &cwd_now,
+            provider: provider_name(args.provider),
+            model: &model,
+        };
+        if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome_ctx).await {
+            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+        }
+        let _ = driver.flush_hook_events();
+    }
+
+    // Save session back if requested.
+    if let (Some(store), Some(mut s)) = (store.as_ref(), session)
+        && !args.no_save
+    {
+        // For headless mode we don't have the agent's `final_messages`
+        // (the driver consumed them). Approximate by snapshotting todos
+        // and bumping updated_at.
+        s.touch();
+        s.todos
+            .clone_from(&*todos.lock().expect("todos lock poisoned"));
+        s.plan_mode = plan_mode.load(std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = store.save(&s) {
+            tracing::warn!(target: "caliban::sessions", error = %e, "session save failed");
+        }
+    }
+
+    match outcome {
+        Ok(_) => 0,
+        Err(e) => {
+            // The driver already emitted the result frame for terminal
+            // conditions; for non-terminal errors we surface to stderr.
+            let code = headless::exit_code_for(&e);
+            if !matches!(
+                e,
+                headless::HeadlessError::MaxTurnsExceeded(_)
+                    | headless::HeadlessError::BudgetExceeded { .. }
+                    | headless::HeadlessError::Cancelled
+                    | headless::HeadlessError::SchemaValidation(_)
+            ) {
+                eprintln!("[caliban] {e}");
+            }
+            code
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -449,7 +803,8 @@ async fn main() -> Result<()> {
     let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
 
     // MCP servers — Phase A: real spawn / handshake / list_tools (ADR 0023).
-    let mcp_summaries: Vec<caliban_mcp_client::ServerSummary> = if args.no_mcp {
+    // --bare (ADR 0025) suppresses MCP discovery entirely for reproducible CI.
+    let mcp_summaries: Vec<caliban_mcp_client::ServerSummary> = if args.no_mcp || args.bare {
         Vec::new()
     } else {
         let ws_root_for_mcp = args.workspace.clone().unwrap_or_else(|| {
@@ -539,7 +894,8 @@ async fn main() -> Result<()> {
     let workspace_root_for_hooks = args.workspace.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
-    let hooks_cfg = if args.no_hooks {
+    // --bare (ADR 0025) suppresses hooks.toml load entirely.
+    let hooks_cfg = if args.no_hooks || args.bare {
         caliban_agent_core::HooksConfig::default()
     } else {
         match caliban_agent_core::HooksConfig::load(&workspace_root_for_hooks) {
@@ -624,8 +980,30 @@ async fn main() -> Result<()> {
             builder = builder.post_processor(pp);
         }
     }
-    if let Some(hook) = permissions_hook {
-        builder = builder.hooks(hook);
+    // Compose hooks. When `--include-hook-events` is set, attach a
+    // `HeadlessHookSink` at the outermost position so every event becomes
+    // an observable frame (ADR 0025). Headless-only — TUI mode ignores it.
+    let hook_event_buffer = if args.include_hook_events {
+        Some(headless::new_event_buffer())
+    } else {
+        None
+    };
+    {
+        let mut layers: Vec<Arc<dyn caliban_agent_core::Hooks>> = Vec::new();
+        if let Some(buf) = &hook_event_buffer {
+            layers.push(Arc::new(headless::HeadlessHookSink::new(Arc::clone(buf))));
+        }
+        if let Some(p) = permissions_hook {
+            // PermissionsHook is `Send + Sync` but CompositeHooks accepts
+            // `Arc<dyn Hooks>` (the trait bound is `Send + Sync` on the
+            // supertrait), so coerce.
+            layers.push(p as Arc<dyn caliban_agent_core::Hooks>);
+        }
+        if !layers.is_empty() {
+            let composite: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+                Arc::new(caliban_agent_core::CompositeHooks::new(layers));
+            builder = builder.hooks(composite);
+        }
     }
     if let Some(limit) = args.parallel_tool_limit {
         builder = builder.parallel_tool_limit(limit);
@@ -733,12 +1111,17 @@ async fn main() -> Result<()> {
         // inside out — wrap the base body with the style prefix, then wrap
         // that with the memory prefix.
         let with_style = style_prefix.splice_into(&base_body);
-        let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
-        let final_prompt = match caliban_memory::load(&cfg).await {
-            Ok(prefix) => prefix.splice_into(&with_style),
-            Err(e) => {
-                tracing::warn!(target: "caliban::memory", error = %e, "memory load failed; using default prompt without memory");
-                with_style
+        // --bare (ADR 0025) skips auto-memory load entirely.
+        let final_prompt = if args.bare {
+            with_style
+        } else {
+            let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+            match caliban_memory::load(&cfg).await {
+                Ok(prefix) => prefix.splice_into(&with_style),
+                Err(e) => {
+                    tracing::warn!(target: "caliban::memory", error = %e, "memory load failed; using default prompt without memory");
+                    with_style
+                }
             }
         };
         Some(final_prompt)
@@ -768,6 +1151,44 @@ async fn main() -> Result<()> {
         let with_todos = system_prompt::append_todo_block(prompt, &todo_snapshot);
         sess.messages[0] = caliban_provider::Message::system_text(with_todos);
     }
+
+    // --- Headless / print-mode dispatch (ADR 0025).
+    // Triggered explicitly by -p / --print, or by --output-format. Other
+    // flags (--max-budget-usd, --bare, --json-schema, --include-…, etc.)
+    // are only meaningful in headless mode but do not by themselves switch
+    // drivers — operators must opt in via -p / --output-format.
+    let headless_active = args.print.is_some() || args.output_format.is_some();
+    if headless_active {
+        let cancel = CancellationToken::new();
+        {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                cancel.cancel();
+                let _ = tokio::signal::ctrl_c().await;
+                std::process::exit(130);
+            });
+        }
+        let exit = run_headless(
+            &args,
+            agent,
+            system_prompt,
+            todo_snapshot,
+            session,
+            store,
+            todos,
+            plan_mode,
+            model,
+            cancel,
+            hook_event_buffer,
+        )
+        .await;
+        std::process::exit(exit);
+    }
+    // hook_event_buffer is consumed by headless mode; for the TUI/interactive
+    // path the buffer is dropped here (the sink still runs but its frames
+    // are unused — informational).
+    drop(hook_event_buffer);
 
     // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
