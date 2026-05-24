@@ -298,8 +298,7 @@ mod parallel_tools_config_tests {
 
     #[test]
     fn default_limit_matches_cores_minus_one() {
-        let cores = std::thread::available_parallelism()
-            .map_or(2, std::num::NonZeroUsize::get);
+        let cores = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
         let expected = cores.saturating_sub(1).max(1);
         assert_eq!(default_parallel_tool_limit().get(), expected);
     }

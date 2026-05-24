@@ -126,10 +126,7 @@ struct DenyingHooks {
 
 #[async_trait]
 impl Hooks for DenyingHooks {
-    async fn before_tool(
-        &self,
-        ctx: &ToolCtx<'_>,
-    ) -> caliban_agent_core::Result<HookDecision> {
+    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> caliban_agent_core::Result<HookDecision> {
         if self.deny_names.iter().any(|n| n == ctx.tool_name) {
             Ok(HookDecision::Deny(format!("denied: {}", ctx.tool_name)))
         } else {
@@ -145,9 +142,7 @@ impl Hooks for DenyingHooks {
 /// Stream events for an assistant turn that emits `tool_use` blocks for each
 /// `(tool_use_id, name)` pair, all at distinct content-block indices, then
 /// stops with `StopReason::ToolUse`.
-fn parallel_tool_turn(
-    tools: &[(&str, &str)],
-) -> Vec<caliban_provider::error::Result<StreamEvent>> {
+fn parallel_tool_turn(tools: &[(&str, &str)]) -> Vec<caliban_provider::error::Result<StreamEvent>> {
     let mut events = Vec::new();
     events.push(Ok(StreamEvent::MessageStart {
         id: "msg_par".into(),
@@ -203,7 +198,10 @@ async fn one_tool_one_turn_still_works() {
     mp.enqueue_stream(end_turn_events());
 
     let mut registry = ToolRegistry::default();
-    registry.register(Arc::new(SleepyTool::new("sleepy_a", Duration::from_millis(5))));
+    registry.register(Arc::new(SleepyTool::new(
+        "sleepy_a",
+        Duration::from_millis(5),
+    )));
 
     let agent = Agent::builder()
         .provider(mp as Arc<dyn Provider + Send + Sync>)
@@ -254,10 +252,8 @@ async fn parallel_is_faster_than_serial() {
             .build()
             .unwrap();
         let start = Instant::now();
-        let mut s = Arc::new(agent).stream_until_done(
-            vec![Message::user_text("hi")],
-            CancellationToken::new(),
-        );
+        let mut s = Arc::new(agent)
+            .stream_until_done(vec![Message::user_text("hi")], CancellationToken::new());
         while let Some(ev) = s.next().await {
             ev.unwrap();
         }
@@ -284,11 +280,7 @@ async fn parallel_is_faster_than_serial() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn history_in_assistant_order_events_in_completion_order() {
     let mp = Arc::new(MockProvider::new());
-    mp.enqueue_stream(parallel_tool_turn(&[
-        ("ta", "a"),
-        ("tb", "b"),
-        ("tc", "c"),
-    ]));
+    mp.enqueue_stream(parallel_tool_turn(&[("ta", "a"), ("tb", "b"), ("tc", "c")]));
     mp.enqueue_stream(end_turn_events());
 
     let mut registry = ToolRegistry::default();
@@ -353,11 +345,7 @@ async fn history_in_assistant_order_events_in_completion_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn denied_tool_keeps_its_history_slot() {
     let mp = Arc::new(MockProvider::new());
-    mp.enqueue_stream(parallel_tool_turn(&[
-        ("ta", "a"),
-        ("tb", "b"),
-        ("tc", "c"),
-    ]));
+    mp.enqueue_stream(parallel_tool_turn(&[("ta", "a"), ("tb", "b"), ("tc", "c")]));
     mp.enqueue_stream(end_turn_events());
 
     let mut registry = ToolRegistry::default();
@@ -394,7 +382,10 @@ async fn denied_tool_keeps_its_history_slot() {
                 ..
             } if tool_use_id == "tb" => {
                 denied_seen = true;
-                assert!(is_error, "denied tool's ToolCallEnd must have is_error=true");
+                assert!(
+                    is_error,
+                    "denied tool's ToolCallEnd must have is_error=true"
+                );
                 let text = match &content[0] {
                     ContentBlock::Text(t) => t.text.clone(),
                     _ => panic!("expected text block in denial"),
@@ -521,10 +512,8 @@ async fn semaphore_limit_caps_concurrency() {
         .build()
         .unwrap();
 
-    let mut s = Arc::new(agent).stream_until_done(
-        vec![Message::user_text("hi")],
-        CancellationToken::new(),
-    );
+    let mut s =
+        Arc::new(agent).stream_until_done(vec![Message::user_text("hi")], CancellationToken::new());
     while let Some(ev) = s.next().await {
         ev.unwrap();
     }
@@ -564,10 +553,8 @@ async fn parallel_tools_false_is_serial() {
         .build()
         .unwrap();
 
-    let mut s = Arc::new(agent).stream_until_done(
-        vec![Message::user_text("hi")],
-        CancellationToken::new(),
-    );
+    let mut s =
+        Arc::new(agent).stream_until_done(vec![Message::user_text("hi")], CancellationToken::new());
     let mut event_order: Vec<String> = Vec::new();
     while let Some(ev) = s.next().await {
         if let TurnEvent::ToolCallEnd { tool_use_id, .. } = ev.unwrap() {
@@ -576,6 +563,9 @@ async fn parallel_tools_false_is_serial() {
     }
 
     let peak = state.lock().unwrap().1;
-    assert_eq!(peak, 1, "with parallel_tools=false, peak concurrent must be 1");
+    assert_eq!(
+        peak, 1,
+        "with parallel_tools=false, peak concurrent must be 1"
+    );
     assert_eq!(event_order, vec!["t1", "t2", "t3"]);
 }
