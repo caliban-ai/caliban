@@ -1,0 +1,41 @@
+# Example permissions.toml for caliban.
+#
+# Drop a copy at `<workspace>/.caliban/permissions.toml` (project-scoped) or
+# `$XDG_CONFIG_HOME/caliban/permissions.toml` (user-scoped, default
+# `~/.config/caliban/permissions.toml`). Project rules win over user rules.
+# CLI flags `--allow`, `--deny`, `--ask` are applied at the top with first-
+# match-wins. Built-in defaults sit at the bottom.
+
+# Allow common, safe git invocations without prompting.
+[[rule]]
+tool = "Bash:git status*"
+action = "allow"
+
+[[rule]]
+tool = "Bash:git diff*"
+action = "allow"
+
+[[rule]]
+tool = "Bash:git log*"
+action = "allow"
+
+# Refuse rm; the agent should use the Write tool or git revert.
+[[rule]]
+tool = "Bash:rm *"
+action = "deny"
+comment = "Use Write or git revert instead of rm"
+
+# Anything else bash-related needs a human in the loop.
+[[rule]]
+tool = "Bash"
+action = "ask"
+
+# Network egress: ask before fetching arbitrary URLs.
+[[rule]]
+tool = "WebFetch"
+action = "ask"
+
+# Catch-all (this is also the built-in default).
+[[rule]]
+tool = "*"
+action = "ask"
