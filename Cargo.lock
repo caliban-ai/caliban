@@ -823,6 +823,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-provider-bedrock"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "caliban-provider",
+ "caliban-provider-anthropic",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "caliban-provider-google"
 version = "0.0.0"
 dependencies = [
@@ -881,6 +896,24 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "url",
+ "wiremock",
+]
+
+[[package]]
+name = "caliban-provider-vertex"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "caliban-provider",
+ "caliban-provider-anthropic",
+ "gcp_auth",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "wiremock",
 ]
 

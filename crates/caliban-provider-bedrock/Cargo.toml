@@ -1,0 +1,30 @@
+[package]
+name        = "caliban-provider-bedrock"
+version     = "0.0.0"
+description = "AWS Bedrock provider (Claude on Bedrock) for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default     = []
+live-tests  = []
+
+[dependencies]
+caliban-provider           = { path = "../caliban-provider" }
+caliban-provider-anthropic = { path = "../caliban-provider-anthropic", features = ["bedrock"] }
+async-trait                = { workspace = true }
+aws-config                 = { workspace = true }
+aws-sdk-bedrockruntime     = { workspace = true }
+tokio                      = { workspace = true }
+tokio-util                 = { workspace = true }
+thiserror                  = { workspace = true }
+tracing                    = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,33 @@
+[package]
+name        = "caliban-provider-vertex"
+version     = "0.0.0"
+description = "Google Vertex AI provider (Claude on Vertex) for the caliban agent harness"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[features]
+default     = []
+live-tests  = []
+
+[dependencies]
+caliban-provider           = { path = "../caliban-provider" }
+caliban-provider-anthropic = { path = "../caliban-provider-anthropic", features = ["vertex"] }
+async-trait                = { workspace = true }
+gcp_auth                   = { workspace = true }
+reqwest                    = { workspace = true }
+serde                      = { workspace = true }
+serde_json                 = { workspace = true }
+tokio                      = { workspace = true }
+tokio-util                 = { workspace = true }
+thiserror                  = { workspace = true }
+tracing                    = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

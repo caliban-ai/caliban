@@ -165,8 +165,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability-based filtering (vision / thinking / tool_use) | 🔴 | |
 | `caliban.toml` binary wiring | 🔴 | |
 | Anthropic / OpenAI / Ollama / Google providers | ✅ | |
-| Bedrock | 🔴 | |
-| Vertex | 🔴 | |
+| Bedrock | ✅ | ADR-0034; `caliban-provider-bedrock` |
+| Vertex | ✅ | ADR-0034; `caliban-provider-vertex` |
 | Foundry | 🔴 | |
 | Effort levels (`low`/`medium`/`high`) | 🔴 | |
 | Extended-thinking toggle wiring | 🟡 | |
