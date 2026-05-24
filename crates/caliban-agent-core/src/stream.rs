@@ -772,7 +772,20 @@ impl Agent {
 
                 let turn_stop_reason = acc.stop_reason.unwrap_or(StopReason::EndTurn);
                 let turn_usage = acc.usage;
-                let assistant_message = acc.into_message();
+                let mut assistant_message = acc.into_message();
+
+                // Apply the assistant-text post-processor (set via
+                // `AgentBuilder::post_processor`; defaults to identity). The
+                // canonical use today is the `Learning` output style, which
+                // inserts `TODO(human)` markers at inflection points.
+                for block in &mut assistant_message.content {
+                    if let ContentBlock::Text(t) = block {
+                        let processed = self.post_processor.process(&t.text);
+                        if let std::borrow::Cow::Owned(new_text) = processed {
+                            t.text = new_text;
+                        }
+                    }
+                }
 
                 // ---- Phase 1: plan (serial before_tool gate) ----
                 let mut plans: Vec<DispatchPlan> = Vec::new();

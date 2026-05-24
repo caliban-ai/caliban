@@ -7,6 +7,7 @@ use caliban_provider::{Provider, ThinkingConfig, ToolChoice};
 
 use crate::error::{Error, Result};
 use crate::hooks::{Hooks, NoopHooks};
+use crate::post_process::{AssistantPostProcessor, NoopPostProcessor};
 use crate::registry::ToolRegistry;
 
 /// Default per-turn parallel tool dispatch limit.
@@ -93,6 +94,10 @@ pub struct Agent {
     /// dispatcher rejects tools not in [`crate::plan_mode::PLAN_MODE_ALLOWLIST`].
     /// `None` means plan-mode gating is disabled entirely.
     pub(crate) plan_mode: Option<crate::plan_mode::SharedPlanMode>,
+    /// Post-processor applied to each assistant message's text blocks
+    /// before the message is appended to the conversation history.
+    /// Defaults to [`NoopPostProcessor`], which is a zero-cost identity.
+    pub(crate) post_processor: Arc<dyn AssistantPostProcessor>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -150,6 +155,7 @@ pub struct AgentBuilder {
     parallel_tools: bool,
     parallel_tool_limit: NonZeroUsize,
     plan_mode: Option<crate::plan_mode::SharedPlanMode>,
+    post_processor: Option<Arc<dyn AssistantPostProcessor>>,
 }
 
 impl Default for AgentBuilder {
@@ -167,6 +173,7 @@ impl Default for AgentBuilder {
             parallel_tools: true,
             parallel_tool_limit: default_parallel_tool_limit(),
             plan_mode: None,
+            post_processor: None,
         }
     }
 }
@@ -278,6 +285,19 @@ impl AgentBuilder {
         self
     }
 
+    /// Install a post-processor that mutates the text of each assistant
+    /// message before it is appended to the conversation history. Defaults
+    /// to [`NoopPostProcessor`] (identity).
+    ///
+    /// The canonical use today is the `Learning` output style, which
+    /// inserts `TODO(human)` markers at function-definition inflection
+    /// points.
+    #[must_use]
+    pub fn post_processor(mut self, p: Arc<dyn AssistantPostProcessor>) -> Self {
+        self.post_processor = Some(p);
+        self
+    }
+
     /// Finalise the builder, validating required fields.
     ///
     /// # Errors
@@ -306,6 +326,9 @@ impl AgentBuilder {
             parallel_tools: self.parallel_tools,
             parallel_tool_limit: self.parallel_tool_limit,
             plan_mode: self.plan_mode,
+            post_processor: self
+                .post_processor
+                .unwrap_or_else(|| Arc::new(NoopPostProcessor)),
         })
     }
 }
@@ -345,5 +368,21 @@ mod parallel_tools_config_tests {
         let limit = std::num::NonZeroUsize::new(3).unwrap();
         let b = AgentBuilder::default().parallel_tool_limit(limit);
         assert_eq!(b.parallel_tool_limit.get(), 3);
+    }
+
+    #[test]
+    fn builder_defaults_post_processor_to_none_until_built() {
+        let b = AgentBuilder::default();
+        assert!(
+            b.post_processor.is_none(),
+            "builder field is None until build() defaults it to NoopPostProcessor",
+        );
+    }
+
+    #[test]
+    fn builder_post_processor_setter_accepts_arc_trait_object() {
+        let pp: Arc<dyn AssistantPostProcessor> = Arc::new(NoopPostProcessor);
+        let b = AgentBuilder::default().post_processor(pp);
+        assert!(b.post_processor.is_some());
     }
 }

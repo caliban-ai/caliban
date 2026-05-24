@@ -668,6 +668,7 @@ dependencies = [
  "caliban-agent-core",
  "caliban-mcp-client",
  "caliban-memory",
+ "caliban-output-styles",
  "caliban-provider",
  "caliban-provider-anthropic",
  "caliban-provider-google",
@@ -761,6 +762,20 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "caliban-output-styles"
+version = "0.0.0"
+dependencies = [
+ "caliban-agent-core",
+ "dirs",
+ "ignore",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

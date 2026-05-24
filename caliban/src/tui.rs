@@ -22,6 +22,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/save", "/save"),
     ("/usage", "/usage"),
     ("/memory", "/memory"),
+    ("/output-style", "/output-style"),
     ("/plan", "/plan"),
     ("/hooks", "/hooks"),
     ("/exit", "/exit"),
@@ -911,6 +912,10 @@ fn slash_help_lines() -> Vec<Line<'static>> {
         ("/skills", "Skills configuration (stub)"),
         ("/system", "View current system prompt"),
         ("/hooks", "Configured hooks summary (stub)"),
+        (
+            "/output-style",
+            "Active output style + available list (stub)",
+        ),
     ];
 
     let mut out = vec![Line::raw("")];
@@ -1686,6 +1691,38 @@ fn handle_slash_command(line: &str, app: &mut App) {
                 "plan mode: OFF — mutating tools available"
             };
             app.transcript.push(TranscriptLine::Info(msg.into()));
+        }
+        "/output-style" => {
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let reg = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
+            let requested = caliban_output_styles::requested_from_env();
+            app.transcript.push(TranscriptLine::Info(format!(
+                "active output style: {requested} (set via {} env var; full UI ships with ADR 0040)",
+                caliban_output_styles::ACTIVE_STYLE_ENV,
+            )));
+            app.transcript.push(TranscriptLine::Info(format!(
+                "{} style(s) available:",
+                reg.len()
+            )));
+            for s in reg.available() {
+                let marker = if s.name == requested { "*" } else { " " };
+                let badge = if s.force_for_plugin {
+                    " [force_for_plugin — inert until ADR 0030]"
+                } else {
+                    ""
+                };
+                app.transcript.push(TranscriptLine::Info(format!(
+                    "  {marker} {} — {}{badge}",
+                    s.name, s.description
+                )));
+            }
+            app.transcript.push(TranscriptLine::Info(
+                "note: applies after /clear or restart (system prompts are cached)".into(),
+            ));
         }
         "/memory" => {
             let workspace_root = app

@@ -11,6 +11,7 @@ pub mod hooks_config;
 pub mod hooks_router;
 pub mod permissions;
 pub mod plan_mode;
+pub mod post_process;
 pub mod registry;
 pub mod retry;
 pub mod session;
@@ -37,6 +38,7 @@ pub use permissions::{
 pub use plan_mode::{
     PLAN_MODE_ALLOWLIST, SharedPlanMode, is_allowed_in_plan_mode, new_shared_plan_mode,
 };
+pub use post_process::{AssistantPostProcessor, NoopPostProcessor};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
