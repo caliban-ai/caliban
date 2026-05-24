@@ -26,6 +26,10 @@ pub struct PersistedSession {
     /// Pre-todo sessions on disk deserialize with an empty vec.
     #[serde(default)]
     pub todos: Vec<Todo>,
+    /// Plan-mode flag — when `true`, the dispatcher rejects mutating tools.
+    /// Pre-plan-mode sessions on disk deserialize with `false`.
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 impl PersistedSession {
@@ -46,6 +50,7 @@ impl PersistedSession {
             messages: Vec::new(),
             total_usage: Usage::default(),
             todos: Vec::new(),
+            plan_mode: false,
         }
     }
 

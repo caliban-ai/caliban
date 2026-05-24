@@ -89,6 +89,10 @@ pub struct Agent {
     /// Maximum concurrent tool invocations per turn. Ignored when
     /// `parallel_tools` is false (equivalent to `1`).
     pub(crate) parallel_tool_limit: NonZeroUsize,
+    /// Shared plan-mode flag. When `Some` and the inner flag is set, the
+    /// dispatcher rejects tools not in [`crate::plan_mode::PLAN_MODE_ALLOWLIST`].
+    /// `None` means plan-mode gating is disabled entirely.
+    pub(crate) plan_mode: Option<crate::plan_mode::SharedPlanMode>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -137,6 +141,7 @@ pub struct AgentBuilder {
     prompt_cache: bool,
     parallel_tools: bool,
     parallel_tool_limit: NonZeroUsize,
+    plan_mode: Option<crate::plan_mode::SharedPlanMode>,
 }
 
 impl Default for AgentBuilder {
@@ -153,6 +158,7 @@ impl Default for AgentBuilder {
             prompt_cache: true,
             parallel_tools: true,
             parallel_tool_limit: default_parallel_tool_limit(),
+            plan_mode: None,
         }
     }
 }
@@ -255,6 +261,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Attach a shared plan-mode flag. When set and the inner flag is `true`,
+    /// the dispatcher rejects tools not in
+    /// [`crate::plan_mode::PLAN_MODE_ALLOWLIST`]. Default: `None` (gating off).
+    #[must_use]
+    pub fn plan_mode(mut self, handle: crate::plan_mode::SharedPlanMode) -> Self {
+        self.plan_mode = Some(handle);
+        self
+    }
+
     /// Finalise the builder, validating required fields.
     ///
     /// # Errors
@@ -282,6 +297,7 @@ impl AgentBuilder {
             prompt_cache: self.prompt_cache,
             parallel_tools: self.parallel_tools,
             parallel_tool_limit: self.parallel_tool_limit,
+            plan_mode: self.plan_mode,
         })
     }
 }

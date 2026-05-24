@@ -17,8 +17,8 @@ use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{ContentBlock, Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_tools_builtin::{
-    BashTool, EditTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, WebFetchTool, WorkspaceRoot,
-    WriteTool,
+    BashTool, EditTool, EnterPlanModeTool, ExitPlanModeTool, GlobTool, GrepTool, ReadTool,
+    TodoWriteTool, WebFetchTool, WorkspaceRoot, WriteTool,
 };
 use clap::{Parser, ValueEnum};
 use futures::StreamExt as _;
@@ -197,6 +197,7 @@ fn build_registry(
     args: &Args,
     workspace: WorkspaceRoot,
     todos: caliban_agent_core::SharedTodos,
+    plan_mode: caliban_agent_core::SharedPlanMode,
 ) -> ToolRegistry {
     if args.no_tools {
         return ToolRegistry::new();
@@ -215,6 +216,8 @@ fn build_registry(
     r.register(Arc::new(GrepTool::new(root)));
     r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
     r.register(Arc::new(TodoWriteTool::new(todos)));
+    r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
+    r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));
     r
 }
 
@@ -396,7 +399,8 @@ async fn main() -> Result<()> {
 
     let provider = build_provider(&args)?;
     let todos = caliban_agent_core::new_shared_todos();
-    let registry = build_registry(&args, workspace, Arc::clone(&todos));
+    let plan_mode = caliban_agent_core::new_shared_plan_mode();
+    let registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
 
     let model = args
         .model
@@ -410,7 +414,8 @@ async fn main() -> Result<()> {
         .max_tokens(args.max_tokens)
         .max_turns(args.max_turns)
         .prompt_cache(!args.no_prompt_cache)
-        .parallel_tools(!args.no_parallel_tools);
+        .parallel_tools(!args.no_parallel_tools)
+        .plan_mode(Arc::clone(&plan_mode));
     if let Some(limit) = args.parallel_tool_limit {
         builder = builder.parallel_tool_limit(limit);
     }
@@ -444,6 +449,7 @@ async fn main() -> Result<()> {
             .lock()
             .expect("todos lock poisoned")
             .clone_from(&sess.todos);
+        plan_mode.store(sess.plan_mode, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Resolve system prompt from CLI flags (or build default).
@@ -508,7 +514,7 @@ async fn main() -> Result<()> {
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {
-            return tui::run(args, agent, store, session, system_prompt, todos).await;
+            return tui::run(args, agent, store, session, system_prompt, todos, plan_mode).await;
         }
         anyhow::bail!(
             "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
@@ -559,6 +565,7 @@ async fn main() -> Result<()> {
         // Snapshot the shared todo handle back into the persisted session.
         s.todos
             .clone_from(&*todos.lock().expect("todos lock poisoned"));
+        s.plan_mode = plan_mode.load(std::sync::atomic::Ordering::Relaxed);
         store.save(s)?;
         if !args.quiet {
             let cache_extra = match (

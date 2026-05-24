@@ -22,6 +22,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/save", "/save"),
     ("/usage", "/usage"),
     ("/memory", "/memory"),
+    ("/plan", "/plan"),
     ("/exit", "/exit"),
     ("/quit", "/quit"),
 ];
@@ -299,6 +300,9 @@ pub(crate) struct App {
     /// snapshotted into `session.todos` on save; spliced into the system
     /// prompt at the start of every user-driven turn.
     pub(crate) todos: caliban_agent_core::SharedTodos,
+    /// Shared plan-mode flag. Toggled by `/plan` and by the
+    /// `EnterPlanMode`/`ExitPlanMode` tools.
+    pub(crate) plan_mode: caliban_agent_core::SharedPlanMode,
 }
 
 impl App {
@@ -310,6 +314,7 @@ impl App {
         args: Args,
         system_prompt: Option<String>,
         todos: caliban_agent_core::SharedTodos,
+        plan_mode: caliban_agent_core::SharedPlanMode,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let messages = session
@@ -361,6 +366,7 @@ impl App {
             toast: None,
             last_turn_ttft_ms: None,
             todos,
+            plan_mode,
         }
     }
 
@@ -1204,9 +1210,15 @@ fn render_status(app: &App) -> Line<'static> {
         ViewState::Overlay(o) => format!(" \u{00B7} [{} \u{2014} q to close]", o.short_name()),
         ViewState::Main => String::new(),
     };
+    let plan_part = if app.plan_mode.load(std::sync::atomic::Ordering::Relaxed) {
+        " \u{00B7} [\u{1F4CB} plan]"
+    } else {
+        ""
+    };
 
-    let text =
-        format!(" {cwd} \u{00B7} {provider} {model}{session_part}{overlay_part}{running_part}");
+    let text = format!(
+        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{overlay_part}{running_part}"
+    );
     Line::from(Span::styled(
         text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
@@ -1361,6 +1373,7 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                 // Snapshot the live todo handle into the session for persistence.
                 sess.todos
                     .clone_from(&*app.todos.lock().expect("todos lock poisoned"));
+                sess.plan_mode = app.plan_mode.load(std::sync::atomic::Ordering::Relaxed);
                 if let Some(store) = app.store.as_ref()
                     && !app.args.no_save
                 {
@@ -1404,9 +1417,10 @@ pub(crate) async fn run(
     session: Option<PersistedSession>,
     system_prompt: Option<String>,
     todos: caliban_agent_core::SharedTodos,
+    plan_mode: caliban_agent_core::SharedPlanMode,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(agent, session, store, args, system_prompt, todos);
+    let mut app = App::new(agent, session, store, args, system_prompt, todos, plan_mode);
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
 
@@ -1562,6 +1576,20 @@ fn handle_slash_command(line: &str, app: &mut App) {
                 .transcript
                 .push(TranscriptLine::Info("no session active".into())),
         },
+        "/plan" => {
+            use std::sync::atomic::Ordering;
+            let now = !app.plan_mode.load(Ordering::Relaxed);
+            app.plan_mode.store(now, Ordering::Relaxed);
+            if let Some(sess) = app.session.as_mut() {
+                sess.plan_mode = now;
+            }
+            let msg = if now {
+                "plan mode: ON — mutating tools blocked until /plan toggles off"
+            } else {
+                "plan mode: OFF — mutating tools available"
+            };
+            app.transcript.push(TranscriptLine::Info(msg.into()));
+        }
         "/memory" => {
             let workspace_root = app
                 .args

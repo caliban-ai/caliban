@@ -716,6 +716,41 @@ impl Agent {
                     }
                     let ContentBlock::ToolUse(tu) = block else { continue };
 
+                    // Plan-mode gating: when active, reject tools not on the
+                    // allowlist BEFORE running hooks (cheaper, and the
+                    // rejection still goes back to the model as a normal
+                    // ToolResult so it can adapt).
+                    let plan_mode_active = self
+                        .plan_mode
+                        .as_ref()
+                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+                    if plan_mode_active && !crate::plan_mode::is_allowed_in_plan_mode(&tu.name) {
+                        let msg = format!(
+                            "Tool '{}' is not available in plan mode. Use ExitPlanMode to proceed.",
+                            tu.name
+                        );
+                        let content = vec![ContentBlock::Text(TextBlock {
+                            text: msg.clone(),
+                            cache_control: None,
+                        })];
+                        let result = ToolResultBlock {
+                            tool_use_id: tu.id.clone(),
+                            content,
+                            is_error: true,
+                        };
+                        yield TurnEvent::ToolCallEnd {
+                            turn_index,
+                            tool_use_id: result.tool_use_id.clone(),
+                            is_error: true,
+                            content: result.content.clone(),
+                        };
+                        plans.push(DispatchPlan::Denied {
+                            original_index: idx,
+                            result,
+                        });
+                        continue;
+                    }
+
                     let tool_ctx = ToolCtx {
                         turn_index,
                         tool_use_id: &tu.id,
