@@ -161,14 +161,14 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | Purpose-keyed routing | ✅ | ADR-0022 |
-| Fallback chain, hedging, circuit breakers | 🔴 | *(deferred PR #12 v2)* |
-| Capability-based filtering (vision / thinking / tool_use) | 🔴 | |
-| `caliban.toml` binary wiring | 🔴 | |
+| Fallback chain, hedging, circuit breakers | ✅ | ADR-0038; `caliban-model-router` v2 (`fallback.rs`, `hedging.rs`, `breaker.rs`) |
+| Capability-based filtering (vision / thinking / tool_use) | ✅ | ADR-0038; `capabilities.rs` derives needs + route requires |
+| `caliban.toml` binary wiring | ✅ | ADR-0038; `discovery.rs` walk-up + binary `router::try_load` |
 | Anthropic / OpenAI / Ollama / Google providers | ✅ | |
 | Bedrock | ✅ | ADR-0034; `caliban-provider-bedrock` |
 | Vertex | ✅ | ADR-0034; `caliban-provider-vertex` |
 | Foundry | 🔴 | |
-| Effort levels (`low`/`medium`/`high`) | 🔴 | |
+| Effort levels (`low`/`medium`/`high`) | ✅ | ADR-0038; per-route `effort` + `effort_map` |
 | Extended-thinking toggle wiring | 🟡 | |
 
 ## J. Headless / CI

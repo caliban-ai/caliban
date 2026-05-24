@@ -13,6 +13,7 @@ pub mod error;
 pub mod loader;
 pub mod prefix;
 pub mod sanitize;
+pub mod walk;
 
 pub use auto::{TopicDraft, TopicFile, TopicKind, TopicLoader, TopicSummary, strip_html_comments};
 pub use config::MemoryConfig;
@@ -20,3 +21,4 @@ pub use error::{MemoryError, Result};
 pub use loader::{estimate_tokens, load};
 pub use prefix::{MemoryPrefix, TierFile, TierKind};
 pub use sanitize::sanitize_workspace;
+pub use walk::walk_up_for_file;

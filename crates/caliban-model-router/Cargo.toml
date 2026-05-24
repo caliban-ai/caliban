@@ -10,15 +10,23 @@ publish     = false
 
 [dependencies]
 caliban-provider = { path = "../caliban-provider" }
+caliban-memory   = { path = "../caliban-memory" }
 async-trait      = { workspace = true }
 serde            = { workspace = true }
 toml             = { workspace = true }
 tracing          = { workspace = true }
 thiserror        = { workspace = true }
+arc-swap         = { workspace = true }
+tokio            = { workspace = true, features = ["time", "macros", "sync", "rt"] }
+tokio-util       = { workspace = true }
+futures          = { workspace = true }
+dirs             = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../caliban-provider", features = ["mock"] }
-tokio            = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tempfile         = { workspace = true }
+serde_json       = { workspace = true }
 
 [lints]
 workspace = true

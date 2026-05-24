@@ -4,6 +4,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 mod headless;
+mod router;
 mod system_prompt;
 mod tui;
 
@@ -252,6 +253,34 @@ pub(crate) struct Args {
     /// In-process hooks (`PermissionsHook`, audit) still run.
     #[arg(long, env = "CALIBAN_NO_HOOKS")]
     pub(crate) no_hooks: bool,
+
+    /// Explicit path to `caliban.toml` (overrides walk-up discovery).
+    /// When the file exists and declares `[router]`, the binary wires a
+    /// model router instead of the single-provider fallback (ADR 0038).
+    #[arg(long = "config", value_name = "PATH", env = "CALIBAN_ROUTER_CONFIG")]
+    pub(crate) config_path: Option<PathBuf>,
+
+    /// Diagnostic / management subcommands.
+    #[command(subcommand)]
+    pub(crate) command: Option<CalibanCommand>,
+}
+
+/// `caliban router debug ...` subcommand family.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum CalibanCommand {
+    /// Router diagnostics (resolution, breaker state, effort table).
+    Router {
+        #[command(subcommand)]
+        inner: RouterCommand,
+    },
+}
+
+/// `caliban router <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum RouterCommand {
+    /// Print the candidate list the router would resolve for a synthetic
+    /// request, plus breaker state and effort knobs.
+    Debug(router::RouterDebugArgs),
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -780,6 +809,19 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Diagnostic subcommands run before any provider construction or hook
+    // wiring — they only need to read config.
+    if let Some(CalibanCommand::Router { inner }) = &args.command {
+        match inner {
+            RouterCommand::Debug(dbg) => {
+                let cwd = std::env::current_dir().context("could not get cwd")?;
+                let out = router::run_debug(dbg, args.config_path.as_deref(), &cwd)?;
+                print!("{out}");
+                return Ok(());
+            }
+        }
+    }
+
     // Install file-backed tracing subscriber when --debug or CALIBAN_DEBUG is set.
     let debug = args.debug || std::env::var("CALIBAN_DEBUG").is_ok();
     if debug {
@@ -826,7 +868,23 @@ async fn main() -> Result<()> {
         None => WorkspaceRoot::current_dir().context("could not get cwd")?,
     };
 
-    let provider = build_provider(&args)?;
+    // Router v2: try caliban.toml first (--config flag or discovery), fall
+    // back to the single-provider construction when no router config is
+    // present (preserving v1 behavior). ADR 0038.
+    let cwd_for_router = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let provider: Arc<dyn Provider + Send + Sync> =
+        match router::try_load(args.config_path.as_deref(), &cwd_for_router)? {
+            Some(wiring) => {
+                tracing::info!(
+                    target: "caliban::router",
+                    path = %wiring.config_path.display(),
+                    routes = wiring.router.routes().len(),
+                    "model router wired from caliban.toml",
+                );
+                wiring.router
+            }
+            None => build_provider(&args)?,
+        };
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
     let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));

@@ -1,6 +1,6 @@
 # ADR 0038 · Model router v2 — fallback, hedging, breakers, capabilities, binary wiring
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-model-router-v2-design.md`
 - **Supersedes scope of:** ADR 0022 deferred items
