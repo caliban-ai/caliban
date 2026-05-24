@@ -551,6 +551,7 @@ impl Agent {
                     thinking: self.config.thinking,
                     metadata: RequestMetadata {
                         user_id: self.config.user_id.clone(),
+                        purpose: Some(caliban_provider::RequestPurpose::MainLoop),
                     },
                 };
 

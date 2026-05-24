@@ -1,0 +1,24 @@
+[package]
+name        = "caliban-model-router"
+version     = "0.0.0"
+description = "Provider-impl router that dispatches completion requests to different (provider, model) pairs by RequestPurpose"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-provider = { path = "../caliban-provider" }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+toml             = { workspace = true }
+tracing          = { workspace = true }
+thiserror        = { workspace = true }
+
+[dev-dependencies]
+caliban-provider = { path = "../caliban-provider", features = ["mock"] }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

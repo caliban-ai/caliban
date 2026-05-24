@@ -23,7 +23,7 @@ pub use capabilities::{
 pub use error::{Error, Result};
 pub use message::{ContentBlock, ImageBlock, ImageSource, Message, Role, TextBlock};
 pub use provider::Provider;
-pub use request::{CompletionRequest, CompletionRequestBuilder, RequestMetadata};
+pub use request::{CompletionRequest, CompletionRequestBuilder, RequestMetadata, RequestPurpose};
 pub use response::{CompletionResponse, StopReason, Usage};
 pub use stream::{
     MessageStream, StreamEvent, StreamingContentType, StreamingDelta, collect_message,
