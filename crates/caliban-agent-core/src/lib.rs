@@ -7,6 +7,7 @@ pub(crate) mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
+pub mod plan_mode;
 pub mod registry;
 pub mod retry;
 pub mod session;
@@ -19,6 +20,9 @@ pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
 pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
+pub use plan_mode::{
+    PLAN_MODE_ALLOWLIST, SharedPlanMode, is_allowed_in_plan_mode, new_shared_plan_mode,
+};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
