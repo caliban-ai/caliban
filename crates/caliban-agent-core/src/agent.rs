@@ -1,5 +1,6 @@
 //! Agent struct + builder + config.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use caliban_provider::{Provider, ThinkingConfig, ToolChoice};
@@ -7,6 +8,21 @@ use caliban_provider::{Provider, ThinkingConfig, ToolChoice};
 use crate::error::{Error, Result};
 use crate::hooks::{Hooks, NoopHooks};
 use crate::registry::ToolRegistry;
+
+/// Default per-turn parallel tool dispatch limit.
+///
+/// Returns `available_parallelism().get() - 1`, clamped to at least 1, so that
+/// the agent loop, streaming, and the renderer can keep a core to themselves.
+/// Falls back to 1 when `available_parallelism()` is unavailable.
+#[must_use]
+pub fn default_parallel_tool_limit() -> NonZeroUsize {
+    let n = std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(2)
+        .saturating_sub(1)
+        .max(1);
+    NonZeroUsize::new(n).expect("max(1) guarantees nonzero")
+}
 
 /// Per-turn settings that control how the agent interacts with the provider.
 #[derive(Debug, Clone)]
@@ -62,6 +78,15 @@ pub struct Agent {
     /// When true, mark the last system text block + last tool def with
     /// Anthropic-style `cache_control: Ephemeral`. No-op for other providers.
     pub(crate) prompt_cache: bool,
+    /// When true, multiple `tool_use` blocks in one assistant turn run
+    /// concurrently (bounded by `parallel_tool_limit`). When false, they
+    /// run serially.
+    #[allow(dead_code, reason = "consumed by stream.rs dispatch loop in next commit")]
+    pub(crate) parallel_tools: bool,
+    /// Maximum concurrent tool invocations per turn. Ignored when
+    /// `parallel_tools` is false (equivalent to `1`).
+    #[allow(dead_code, reason = "consumed by stream.rs dispatch loop in next commit")]
+    pub(crate) parallel_tool_limit: NonZeroUsize,
 }
 
 impl std::fmt::Debug for Agent {
@@ -108,6 +133,8 @@ pub struct AgentBuilder {
     retry: Option<crate::retry::RetryPolicy>,
     hooks: Option<Arc<dyn Hooks + Send + Sync>>,
     prompt_cache: bool,
+    parallel_tools: bool,
+    parallel_tool_limit: NonZeroUsize,
 }
 
 impl Default for AgentBuilder {
@@ -122,6 +149,8 @@ impl Default for AgentBuilder {
             // Prompt caching is default-on. Anthropic users get cache hits
             // from turn 2 onward; non-Anthropic providers ignore the markers.
             prompt_cache: true,
+            parallel_tools: true,
+            parallel_tool_limit: default_parallel_tool_limit(),
         }
     }
 }
@@ -205,6 +234,25 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable or disable parallel tool dispatch. Default: enabled.
+    ///
+    /// When `false`, all `tool_use` blocks in a single assistant turn run
+    /// serially in assistant-message order. When `true`, they run
+    /// concurrently bounded by [`Self::parallel_tool_limit`].
+    #[must_use]
+    pub fn parallel_tools(mut self, on: bool) -> Self {
+        self.parallel_tools = on;
+        self
+    }
+
+    /// Set the maximum concurrent tool invocations per turn. Default:
+    /// [`default_parallel_tool_limit()`] (typically `cores - 1`).
+    #[must_use]
+    pub fn parallel_tool_limit(mut self, limit: NonZeroUsize) -> Self {
+        self.parallel_tool_limit = limit;
+        self
+    }
+
     /// Finalise the builder, validating required fields.
     ///
     /// # Errors
@@ -230,6 +278,48 @@ impl AgentBuilder {
             retry: self.retry.unwrap_or_default(),
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoopHooks)),
             prompt_cache: self.prompt_cache,
+            parallel_tools: self.parallel_tools,
+            parallel_tool_limit: self.parallel_tool_limit,
         })
+    }
+}
+
+#[cfg(test)]
+mod parallel_tools_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_limit_is_at_least_one() {
+        let n = default_parallel_tool_limit();
+        assert!(n.get() >= 1, "default cap must be >= 1");
+    }
+
+    #[test]
+    fn default_limit_matches_cores_minus_one() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(2);
+        let expected = cores.saturating_sub(1).max(1);
+        assert_eq!(default_parallel_tool_limit().get(), expected);
+    }
+
+    #[test]
+    fn builder_defaults_parallel_tools_on() {
+        let b = AgentBuilder::default();
+        assert!(b.parallel_tools, "parallel_tools should default to true");
+        assert!(b.parallel_tool_limit.get() >= 1);
+    }
+
+    #[test]
+    fn builder_parallel_tools_setter() {
+        let b = AgentBuilder::default().parallel_tools(false);
+        assert!(!b.parallel_tools);
+    }
+
+    #[test]
+    fn builder_parallel_tool_limit_setter() {
+        let limit = std::num::NonZeroUsize::new(3).unwrap();
+        let b = AgentBuilder::default().parallel_tool_limit(limit);
+        assert_eq!(b.parallel_tool_limit.get(), 3);
     }
 }
