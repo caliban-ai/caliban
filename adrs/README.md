@@ -23,13 +23,20 @@ decision with context, the decision itself, and consequences.
 | [0006](0006-message-schema-ir.md) | Message schema → provider-neutral IR | accepted |
 | [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
 | [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
-| [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted |
+| [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted (sequential-tools clause superseded by [0016](0016-parallel-tool-dispatch.md)) |
 | [0010](0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted |
 | [0011](0011-sessions-and-repl.md) | Sessions persisted to disk + interactive REPL | accepted |
 | [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
 | [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted |
 | [0015](0015-context-and-path-fixes.md) | Context preservation + path conventions (~ expansion) | accepted |
+| [0016](0016-parallel-tool-dispatch.md) | Parallel tool dispatch (semaphore-bounded; supersedes 0009 sequential clause) | accepted |
+| [0017](0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted |
+| [0018](0018-memory-tier-model.md) | Memory tier model (global / project / auto-memory; spliced into system prompt) | accepted |
+| [0019](0019-skills-loading.md) | Skills loading & invocation (frontmatter + body; `SkillTool` on-demand load) | proposed |
+| [0020](0020-permission-rules.md) | Permission rules layered on Hooks (TOML rule sources; interactive Ask) | proposed |
+| [0021](0021-sub-agent-primitive.md) | Sub-agent primitive (`AgentTool`; synchronous in-process; allowlist-filtered registry) | proposed |
+| [0022](0022-model-routing-architecture.md) | Model routing architecture (Layer 3 `caliban-model-router`; router-impl-Provider) | accepted |
 
 ## Adding a new ADR
 
