@@ -11,7 +11,8 @@ use caliban_provider::{
     Usage,
 };
 use futures::StreamExt as _;
-use futures::stream::Stream;
+use futures::stream::{FuturesUnordered, Stream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
@@ -105,6 +106,31 @@ mod turn_timing_tests {
             "tbt was {tbt:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn dispatch plan
+// ---------------------------------------------------------------------------
+
+/// A single tool dispatch plan, produced by the serial `before_tool` gate.
+///
+/// `original_index` is the position of the corresponding `ContentBlock::ToolUse`
+/// within the assistant message; it's used to reorder results back into
+/// assistant-message order for history.
+enum DispatchPlan {
+    /// `before_tool` returned `Allow`; the invoke will run.
+    Allowed {
+        original_index: usize,
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// `before_tool` returned `Deny`; the synthesized denial `ToolResult`
+    /// stands in for the invoke.
+    Denied {
+        original_index: usize,
+        result: ToolResultBlock,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -675,46 +701,173 @@ impl Agent {
                 let turn_usage = acc.usage;
                 let assistant_message = acc.into_message();
 
-                // ---- Dispatch tools sequentially ----
-                let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+                // ---- Phase 1: plan (serial before_tool gate) ----
+                let mut plans: Vec<DispatchPlan> = Vec::new();
+                for (idx, block) in assistant_message.content.iter().enumerate() {
+                    if cancel.is_cancelled() {
+                        stopped_for = StopCondition::Cancelled;
+                        break 'outer;
+                    }
+                    let ContentBlock::ToolUse(tu) = block else { continue };
 
-                for block in &assistant_message.content {
-                    if let ContentBlock::ToolUse(tu) = block {
-                        if cancel.is_cancelled() {
-                            stopped_for = StopCondition::Cancelled;
+                    let tool_ctx = ToolCtx {
+                        turn_index,
+                        tool_use_id: &tu.id,
+                        tool_name: &tu.name,
+                        input: &tu.input,
+                    };
+                    let decision = match self.hooks.before_tool(&tool_ctx).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            stopped_for = StopCondition::HookDenied(
+                                format!("before_tool hook failed: {e}"),
+                            );
                             break 'outer;
                         }
+                    };
 
-                        let dispatch = dispatch_tool(
-                            &self,
-                            turn_index,
-                            &tu.id,
-                            &tu.name,
-                            tu.input.clone(),
-                            &cancel,
-                        )
-                        .await;
-
-                        match dispatch {
-                            Err(stop) => {
-                                stopped_for = stop;
-                                break 'outer;
+                    match decision {
+                        HookDecision::Deny(msg) => {
+                            let content = vec![ContentBlock::Text(TextBlock {
+                                text: format!("Tool call denied: {msg}"),
+                                cache_control: None,
+                            })];
+                            // Mirror dispatch_tool: notify after_tool of the denial.
+                            let denial_err = ToolError::execution(std::io::Error::other(
+                                format!("denied: {msg}"),
+                            ));
+                            if let Err(e) =
+                                self.hooks.after_tool(&tool_ctx, &Err(denial_err)).await
+                            {
+                                tracing::warn!(
+                                    tool = %tu.name, error = %e,
+                                    "after_tool hook error (non-fatal)"
+                                );
                             }
-                            Ok(tool_result) => {
-                                let is_error = tool_result.is_error;
-                                let content = tool_result.content.clone();
-                                let id = tool_result.tool_use_id.clone();
-                                yield TurnEvent::ToolCallEnd {
-                                    turn_index,
-                                    tool_use_id: id,
-                                    is_error,
-                                    content,
-                                };
-                                tool_result_blocks
-                                    .push(ContentBlock::ToolResult(tool_result));
-                            }
+                            let result = ToolResultBlock {
+                                tool_use_id: tu.id.clone(),
+                                content,
+                                is_error: true,
+                            };
+                            // Emit the denied ToolCallEnd up front, in
+                            // assistant-message order.
+                            yield TurnEvent::ToolCallEnd {
+                                turn_index,
+                                tool_use_id: result.tool_use_id.clone(),
+                                is_error: true,
+                                content: result.content.clone(),
+                            };
+                            plans.push(DispatchPlan::Denied {
+                                original_index: idx,
+                                result,
+                            });
+                        }
+                        HookDecision::Allow => {
+                            plans.push(DispatchPlan::Allowed {
+                                original_index: idx,
+                                id: tu.id.clone(),
+                                name: tu.name.clone(),
+                                input: tu.input.clone(),
+                            });
                         }
                     }
+                }
+
+                // ---- Phase 2: dispatch (parallel invoke + after_tool) ----
+                let permits = if self.parallel_tools {
+                    self.parallel_tool_limit.get()
+                } else {
+                    1
+                };
+                let sem = Arc::new(Semaphore::new(permits));
+                let dispatch_started_at = Instant::now();
+                let agent_ref = &self;
+
+                let mut ordered_results: Vec<Option<ToolResultBlock>> =
+                    vec![None; assistant_message.content.len()];
+                let mut denied_count: usize = 0;
+                let mut dispatched_count: usize = 0;
+
+                let mut pending = FuturesUnordered::new();
+                for plan in plans {
+                    match plan {
+                        DispatchPlan::Denied { original_index, result } => {
+                            denied_count += 1;
+                            ordered_results[original_index] = Some(result);
+                        }
+                        DispatchPlan::Allowed { original_index, id, name, input } => {
+                            if cancel.is_cancelled() {
+                                stopped_for = StopCondition::Cancelled;
+                                break;
+                            }
+                            dispatched_count += 1;
+                            let permit = Arc::clone(&sem)
+                                .acquire_owned()
+                                .await
+                                .expect("semaphore not closed");
+                            let cancel_for_tool = cancel.clone();
+                            pending.push(async move {
+                                let _permit = permit; // released on drop
+                                let res = dispatch_tool(
+                                    agent_ref,
+                                    turn_index,
+                                    &id,
+                                    &name,
+                                    input,
+                                    &cancel_for_tool,
+                                )
+                                .await;
+                                (original_index, id, res)
+                            });
+                        }
+                    }
+                }
+
+                // Drive the pending set. ToolCallEnd events fire in
+                // completion order; ordered_results preserves history order.
+                let mut fatal_stop: Option<StopCondition> = None;
+                while let Some((idx, id, dispatch_res)) = pending.next().await {
+                    match dispatch_res {
+                        Err(stop) => {
+                            fatal_stop = Some(stop);
+                            // Continue draining the loop so no future escapes.
+                        }
+                        Ok(tool_result) => {
+                            let is_error = tool_result.is_error;
+                            let content = tool_result.content.clone();
+                            yield TurnEvent::ToolCallEnd {
+                                turn_index,
+                                tool_use_id: id,
+                                is_error,
+                                content,
+                            };
+                            ordered_results[idx] = Some(tool_result);
+                        }
+                    }
+                }
+
+                let dispatch_elapsed = dispatch_started_at.elapsed();
+                tracing::info!(
+                    target: "caliban::tools",
+                    turn = turn_index,
+                    parallel_tools = self.parallel_tools,
+                    parallel_tool_limit = self.parallel_tool_limit.get(),
+                    dispatched = dispatched_count,
+                    denied = denied_count,
+                    total_wall_ms = u64::try_from(dispatch_elapsed.as_millis())
+                        .unwrap_or(u64::MAX),
+                    "parallel tool dispatch",
+                );
+
+                if let Some(stop) = fatal_stop {
+                    stopped_for = stop;
+                    break 'outer;
+                }
+
+                // ---- Phase 3: collect results in assistant-message order ----
+                let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+                for slot in ordered_results.into_iter().flatten() {
+                    tool_result_blocks.push(ContentBlock::ToolResult(slot));
                 }
 
                 // Build the tool-results message (if any tools were called).

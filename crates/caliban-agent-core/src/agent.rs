@@ -81,11 +81,9 @@ pub struct Agent {
     /// When true, multiple `tool_use` blocks in one assistant turn run
     /// concurrently (bounded by `parallel_tool_limit`). When false, they
     /// run serially.
-    #[allow(dead_code, reason = "consumed by stream.rs dispatch loop in next commit")]
     pub(crate) parallel_tools: bool,
     /// Maximum concurrent tool invocations per turn. Ignored when
     /// `parallel_tools` is false (equivalent to `1`).
-    #[allow(dead_code, reason = "consumed by stream.rs dispatch loop in next commit")]
     pub(crate) parallel_tool_limit: NonZeroUsize,
 }
 
