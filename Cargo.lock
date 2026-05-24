@@ -716,6 +716,17 @@ name = "caliban-core"
 version = "0.0.0"
 
 [[package]]
+name = "caliban-memory"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "caliban-provider"
 version = "0.0.0"
 dependencies = [

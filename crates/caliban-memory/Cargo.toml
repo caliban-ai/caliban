@@ -1,0 +1,22 @@
+[package]
+name        = "caliban-memory"
+version     = "0.0.0"
+description = "File-backed memory tiers spliced into the caliban system prompt"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+tokio     = { workspace = true, features = ["fs", "io-util"] }
+tracing   = { workspace = true }
+thiserror = { workspace = true }
+dirs      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
