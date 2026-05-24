@@ -664,6 +664,7 @@ name = "caliban"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "caliban-agent-core",
  "caliban-provider",
  "caliban-provider-anthropic",
@@ -679,6 +680,7 @@ dependencies = [
  "ignore",
  "nucleo-matcher",
  "ratatui",
+ "secrecy",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -686,6 +688,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
