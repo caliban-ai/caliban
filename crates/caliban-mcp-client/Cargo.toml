@@ -1,0 +1,28 @@
+[package]
+name        = "caliban-mcp-client"
+version     = "0.0.0"
+description = "MCP client (stdio v1) — connects to MCP servers and surfaces their tools as caliban Tools"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-provider   = { path = "../caliban-provider" }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+toml               = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tokio              = { workspace = true, features = ["process", "sync", "rt"] }
+dirs               = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

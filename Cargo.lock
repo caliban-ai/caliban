@@ -666,6 +666,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "caliban-agent-core",
+ "caliban-mcp-client",
  "caliban-memory",
  "caliban-provider",
  "caliban-provider-anthropic",
@@ -719,6 +720,23 @@ dependencies = [
 [[package]]
 name = "caliban-core"
 version = "0.0.0"
+
+[[package]]
+name = "caliban-mcp-client"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "caliban-agent-core",
+ "caliban-provider",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "caliban-memory"
