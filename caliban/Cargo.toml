@@ -25,6 +25,7 @@ caliban-memory             = { path = "../crates/caliban-memory" }
 caliban-output-styles      = { path = "../crates/caliban-output-styles" }
 caliban-skills             = { path = "../crates/caliban-skills" }
 caliban-mcp-client         = { path = "../crates/caliban-mcp-client" }
+caliban-model-router       = { path = "../crates/caliban-model-router" }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
 tokio                      = { workspace = true, features = ["full"] }
@@ -42,6 +43,8 @@ nucleo-matcher           = { workspace = true }
 ignore                   = { workspace = true }
 thiserror                = { workspace = true }
 reqwest                  = { workspace = true }
+secrecy                  = { workspace = true }
+url                      = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

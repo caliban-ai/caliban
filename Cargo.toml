@@ -50,6 +50,7 @@ gcp_auth               = "0.12"
 wiremock = "0.6"
 proptest = "1"
 tokio-util = { version = "0.7" }
+arc-swap   = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rand       = "0.8"
