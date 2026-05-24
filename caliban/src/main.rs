@@ -8,6 +8,7 @@ mod tui;
 
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -135,6 +136,14 @@ pub(crate) struct Args {
     /// Disable Anthropic-style prompt caching (default: enabled).
     #[arg(long, env = "CALIBAN_NO_PROMPT_CACHE")]
     pub(crate) no_prompt_cache: bool,
+
+    /// Disable parallel tool execution (run tool_use blocks serially).
+    #[arg(long, env = "CALIBAN_NO_PARALLEL_TOOLS")]
+    pub(crate) no_parallel_tools: bool,
+
+    /// Max concurrent tool invocations per turn. Defaults to CPU cores - 1 (min 1).
+    #[arg(long, value_name = "N", env = "CALIBAN_PARALLEL_TOOL_LIMIT")]
+    pub(crate) parallel_tool_limit: Option<NonZeroUsize>,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -393,7 +402,11 @@ async fn main() -> Result<()> {
         .model(model.clone())
         .max_tokens(args.max_tokens)
         .max_turns(args.max_turns)
-        .prompt_cache(!args.no_prompt_cache);
+        .prompt_cache(!args.no_prompt_cache)
+        .parallel_tools(!args.no_parallel_tools);
+    if let Some(limit) = args.parallel_tool_limit {
+        builder = builder.parallel_tool_limit(limit);
+    }
     if let Some(t) = args.temperature {
         builder = builder.temperature(t);
     }
