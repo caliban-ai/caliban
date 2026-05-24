@@ -206,8 +206,10 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| Default / Proactive / Explanatory / Learning | 🔴 | |
-| Custom output-style files (frontmatter + body) | 🔴 | |
+| Default / Proactive / Explanatory / Learning | ✅ | ADR-0031; four built-ins ship in `caliban-output-styles`; selected via `CALIBAN_OUTPUT_STYLE` env until ADR 0026 settings hierarchy lands [^l-force] |
+| Custom output-style files (frontmatter + body) | ✅ | ADR-0031; project (`<ws>/.caliban/output-styles/`) > user (XDG) > plugin > built-in [^l-force] |
+
+[^l-force]: `force_for_plugin: true` is parsed from frontmatter and routed through `select_active`, but inert in v1 — no plugins ship until ADR 0030 (plugin packaging) lands.
 
 ## M. Slash command coverage
 

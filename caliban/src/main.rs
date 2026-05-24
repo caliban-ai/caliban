@@ -596,6 +596,26 @@ async fn main() -> Result<()> {
         .prompt_cache(!args.no_prompt_cache)
         .parallel_tools(!args.no_parallel_tools)
         .plan_mode(Arc::clone(&plan_mode));
+    // Install the output-style post-processor. Today only the `Learning`
+    // style mutates assistant text; everything else uses the identity
+    // post-processor (which the agent core already defaults to).
+    {
+        let workspace_root_for_style = args.workspace.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+        let style_reg =
+            caliban_output_styles::OutputStylesRegistry::load(&workspace_root_for_style);
+        let requested = caliban_output_styles::requested_from_env();
+        // v2: enabled_plugins is empty until ADR 0030 plugin system ships.
+        let active = style_reg.select(&requested, &[]);
+        if let Some(s) = active.as_ref()
+            && s.name == "learning"
+        {
+            let pp: Arc<dyn caliban_agent_core::AssistantPostProcessor> =
+                Arc::new(caliban_output_styles::LearningPostProcessor::new());
+            builder = builder.post_processor(pp);
+        }
+    }
     if let Some(hook) = permissions_hook {
         builder = builder.hooks(hook);
     }
@@ -665,22 +685,55 @@ async fn main() -> Result<()> {
         args.no_tools,
     )?;
 
-    // Load memory tiers and splice into the default system prompt. The
-    // operator's --system / --system-file / --no-system always wins — those
-    // paths intentionally skip memory.
+    // Load memory tiers and splice into the default system prompt, then
+    // wrap with the active output-style block (after memory, before the
+    // base body). The operator's --system / --system-file / --no-system
+    // always wins — those paths intentionally skip both memory and output
+    // styles.
     let system_prompt = if default_prompt_in_effect && let Some(body) = system_prompt {
         let workspace_root = args
             .workspace
             .clone()
             .unwrap_or_else(|| cwd_for_prompt.clone());
+
+        // Resolve the active output style. Selection precedence:
+        //   1. `force_for_plugin` on a plugin-supplied style (v2 — inert
+        //      until ADR 0030 plugin system lands).
+        //   2. `CALIBAN_OUTPUT_STYLE` env var (settings.json key with
+        //      ADR 0026).
+        //   3. Built-in `default` (no-op).
+        let style_registry = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
+        let requested = caliban_output_styles::requested_from_env();
+        // v2: enabled_plugins is empty until ADR 0030 ships the plugin system.
+        let enabled_plugins: Vec<String> = Vec::new();
+        let active_style = style_registry.select(&requested, &enabled_plugins);
+        let style_prefix = caliban_output_styles::OutputStylePrefix::new(active_style.clone());
+
+        // When the active style requests `keep_coding_instructions: false`,
+        // replace the default coding-assistant body with the style body so
+        // the prompt does not double up on guidance. The style body is
+        // already wrapped in `<output-style>` tags by `splice_into`, so we
+        // just feed an empty `base` to the splice.
+        let base_body = if style_prefix.drops_coding_instructions() {
+            String::new()
+        } else {
+            body
+        };
+
+        // Layering: memory tiers first (highest cache-key precedence), then
+        // the output-style block, then the base body. We construct from the
+        // inside out — wrap the base body with the style prefix, then wrap
+        // that with the memory prefix.
+        let with_style = style_prefix.splice_into(&base_body);
         let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
-        match caliban_memory::load(&cfg).await {
-            Ok(prefix) => Some(prefix.splice_into(&body)),
+        let final_prompt = match caliban_memory::load(&cfg).await {
+            Ok(prefix) => prefix.splice_into(&with_style),
             Err(e) => {
                 tracing::warn!(target: "caliban::memory", error = %e, "memory load failed; using default prompt without memory");
-                Some(body)
+                with_style
             }
-        }
+        };
+        Some(final_prompt)
     } else {
         system_prompt
     };
