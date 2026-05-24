@@ -182,7 +182,13 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
         },
         stop_sequence: r.stop_sequence,
         usage: IrUsage {
-            input_tokens: r.usage.input_tokens,
+            // Normalize to the OpenAI convention: input_tokens is the TOTAL
+            // prompt size (including any cached portion). Anthropic reports
+            // these three counters disjointly, so we sum them here. The
+            // separated cache counters are preserved unchanged.
+            input_tokens: r.usage.input_tokens
+                + r.usage.cache_creation_input_tokens.unwrap_or(0)
+                + r.usage.cache_read_input_tokens.unwrap_or(0),
             output_tokens: r.usage.output_tokens,
             cache_creation_input_tokens: r.usage.cache_creation_input_tokens,
             cache_read_input_tokens: r.usage.cache_read_input_tokens,

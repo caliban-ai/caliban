@@ -78,8 +78,7 @@ fn ok_response() -> Value {
 async fn prompt_cache_on_emits_cache_control_in_wire_json() {
     let server = MockServer::start().await;
 
-    let captured: Arc<std::sync::Mutex<Option<Value>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let captured: Arc<std::sync::Mutex<Option<Value>>> = Arc::new(std::sync::Mutex::new(None));
     let captured_clone = Arc::clone(&captured);
 
     Mock::given(method("POST"))
@@ -151,8 +150,7 @@ async fn prompt_cache_on_emits_cache_control_in_wire_json() {
 async fn prompt_cache_off_omits_cache_control() {
     let server = MockServer::start().await;
 
-    let captured: Arc<std::sync::Mutex<Option<Value>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let captured: Arc<std::sync::Mutex<Option<Value>>> = Arc::new(std::sync::Mutex::new(None));
     let captured_clone = Arc::clone(&captured);
 
     Mock::given(method("POST"))

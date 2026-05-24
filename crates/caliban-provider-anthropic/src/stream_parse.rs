@@ -94,8 +94,15 @@ fn native_event_to_ir(e: NativeEvent) -> ProviderResult<StreamEvent> {
             // token count at the time the stream ended. We pass it through as
             // a usage_delta; callers that call collect_message will merge it
             // via Usage::merge.
+            //
+            // Normalize to the OpenAI convention: input_tokens is the TOTAL
+            // prompt size (including any cached portion). Anthropic reports
+            // these three counters disjointly, so we sum them here. The
+            // separated cache counters are preserved unchanged.
             usage_delta: Some(Usage {
-                input_tokens: usage.input_tokens,
+                input_tokens: usage.input_tokens
+                    + usage.cache_creation_input_tokens.unwrap_or(0)
+                    + usage.cache_read_input_tokens.unwrap_or(0),
                 output_tokens: usage.output_tokens,
                 cache_creation_input_tokens: usage.cache_creation_input_tokens,
                 cache_read_input_tokens: usage.cache_read_input_tokens,
