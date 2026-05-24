@@ -7,6 +7,7 @@ pub(crate) mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
+pub mod permissions;
 pub mod plan_mode;
 pub mod registry;
 pub mod retry;
@@ -20,6 +21,10 @@ pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
 pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
 pub use error::{Error, Result};
 pub use hooks::{HookDecision, Hooks, NoopHooks, ToolCtx, TurnCtx};
+pub use permissions::{
+    Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
+    default_rules, load_rules, load_rules_file,
+};
 pub use plan_mode::{
     PLAN_MODE_ALLOWLIST, SharedPlanMode, is_allowed_in_plan_mode, new_shared_plan_mode,
 };

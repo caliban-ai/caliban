@@ -145,6 +145,26 @@ pub(crate) struct Args {
     /// Max concurrent tool invocations per turn. Defaults to CPU cores - 1 (min 1).
     #[arg(long, value_name = "N", env = "CALIBAN_PARALLEL_TOOL_LIMIT")]
     pub(crate) parallel_tool_limit: Option<NonZeroUsize>,
+
+    /// Disable permission gating entirely (all tool calls allowed).
+    #[arg(long, env = "CALIBAN_NO_PERMISSIONS", conflicts_with_all = ["allow", "deny", "ask", "auto_allow"])]
+    pub(crate) no_permissions: bool,
+
+    /// Add an Allow rule at top priority (repeatable). Pattern is `Tool` or `Tool:first-arg-glob`.
+    #[arg(long = "allow", value_name = "PAT")]
+    pub(crate) allow: Vec<String>,
+
+    /// Add a Deny rule at top priority (repeatable).
+    #[arg(long = "deny", value_name = "PAT")]
+    pub(crate) deny: Vec<String>,
+
+    /// Add an Ask rule at top priority (repeatable).
+    #[arg(long = "ask", value_name = "PAT")]
+    pub(crate) ask: Vec<String>,
+
+    /// DANGEROUS: allow the model to run any Ask-rule tool without prompting in non-interactive mode.
+    #[arg(long, env = "CALIBAN_AUTO_ALLOW")]
+    pub(crate) auto_allow: bool,
 }
 
 fn read_prompt(args: &Args) -> Result<String> {
@@ -407,6 +427,46 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| default_model_for(args.provider).to_string());
 
+    let permissions_hook = if args.no_permissions {
+        None
+    } else {
+        use caliban_agent_core::{
+            Action, NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, load_rules,
+        };
+        let mut cli_rules: Vec<Rule> = Vec::new();
+        for p in &args.allow {
+            cli_rules.push(Rule {
+                tool: p.clone(),
+                action: Action::Allow,
+                comment: None,
+            });
+        }
+        for p in &args.deny {
+            cli_rules.push(Rule {
+                tool: p.clone(),
+                action: Action::Deny,
+                comment: None,
+            });
+        }
+        for p in &args.ask {
+            cli_rules.push(Rule {
+                tool: p.clone(),
+                action: Action::Ask,
+                comment: None,
+            });
+        }
+        let workspace_root = args.workspace.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+        let rules = load_rules(cli_rules, &workspace_root).context("loading permissions rules")?;
+        let ask: Arc<dyn caliban_agent_core::AskHandler> = Arc::new(NonInteractiveAskHandler {
+            auto_allow: args.auto_allow,
+        });
+        let hook: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+            Arc::new(PermissionsHook::new(rules, ask, Arc::new(NoopHooks)));
+        Some(hook)
+    };
+
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(registry)
@@ -416,6 +476,9 @@ async fn main() -> Result<()> {
         .prompt_cache(!args.no_prompt_cache)
         .parallel_tools(!args.no_parallel_tools)
         .plan_mode(Arc::clone(&plan_mode));
+    if let Some(hook) = permissions_hook {
+        builder = builder.hooks(hook);
+    }
     if let Some(limit) = args.parallel_tool_limit {
         builder = builder.parallel_tool_limit(limit);
     }
