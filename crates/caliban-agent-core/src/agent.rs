@@ -59,6 +59,9 @@ pub struct Agent {
     pub(crate) compactor: Arc<dyn crate::compact::Compactor + Send + Sync>,
     pub(crate) retry: crate::retry::RetryPolicy,
     pub(crate) hooks: Arc<dyn Hooks + Send + Sync>,
+    /// When true, mark the last system text block + last tool def with
+    /// Anthropic-style `cache_control: Ephemeral`. No-op for other providers.
+    pub(crate) prompt_cache: bool,
 }
 
 impl std::fmt::Debug for Agent {
@@ -97,7 +100,6 @@ impl Agent {
 /// Call [`Agent::builder()`] to obtain one. All setter methods consume and
 /// return `self` so calls can be chained. [`AgentBuilder::build`] finalises
 /// construction with required-field validation.
-#[derive(Default)]
 pub struct AgentBuilder {
     provider: Option<Arc<dyn Provider + Send + Sync>>,
     tools: ToolRegistry,
@@ -105,6 +107,23 @@ pub struct AgentBuilder {
     compactor: Option<Arc<dyn crate::compact::Compactor + Send + Sync>>,
     retry: Option<crate::retry::RetryPolicy>,
     hooks: Option<Arc<dyn Hooks + Send + Sync>>,
+    prompt_cache: bool,
+}
+
+impl Default for AgentBuilder {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            tools: ToolRegistry::default(),
+            config: AgentConfig::default(),
+            compactor: None,
+            retry: None,
+            hooks: None,
+            // Prompt caching is default-on. Anthropic users get cache hits
+            // from turn 2 onward; non-Anthropic providers ignore the markers.
+            prompt_cache: true,
+        }
+    }
 }
 
 impl AgentBuilder {
@@ -178,6 +197,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable or disable Anthropic-style prompt cache markers on the system
+    /// prompt + last tool definition. Default: enabled.
+    #[must_use]
+    pub fn prompt_cache(mut self, on: bool) -> Self {
+        self.prompt_cache = on;
+        self
+    }
+
     /// Finalise the builder, validating required fields.
     ///
     /// # Errors
@@ -202,6 +229,7 @@ impl AgentBuilder {
                 .unwrap_or_else(|| Arc::new(crate::compact::NoopCompactor)),
             retry: self.retry.unwrap_or_default(),
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoopHooks)),
+            prompt_cache: self.prompt_cache,
         })
     }
 }

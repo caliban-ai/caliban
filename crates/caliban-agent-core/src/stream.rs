@@ -409,10 +409,15 @@ impl Agent {
                 }
 
                 // ---- Build completion request ----
+                let mut req_messages = history.clone();
+                let mut req_tools = self.tools.to_caliban_tools();
+                if self.prompt_cache {
+                    crate::cache::apply_prompt_cache(&mut req_messages, &mut req_tools);
+                }
                 let req = CompletionRequest {
                     model: self.config.model.clone(),
-                    messages: history.clone(),
-                    tools: self.tools.to_caliban_tools(),
+                    messages: req_messages,
+                    tools: req_tools,
                     tool_choice: self.config.tool_choice.clone(),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
