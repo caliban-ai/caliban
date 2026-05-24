@@ -147,7 +147,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | Config + name validation (caliban-mcp-client v1) | ✅ | ADR-0017 |
-| Real spawn / handshake / `list_tools` (rmcp 1.7) | 🔴 | *(deferred PR #11 v2)* |
+| Real spawn / handshake / `list_tools` (rmcp 1.7) | ✅ | ADR-0023 Phase A |
 | HTTP / SSE transports | 🔴 | |
 | `/mcp` slash + per-server enable/auth | 🔴 | |
 | OAuth flow + `--mcp-oauth-port` | 🔴 | |

@@ -448,34 +448,42 @@ async fn main() -> Result<()> {
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
     let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
 
-    // MCP servers (v1: config-only scaffold; spawn + tool wiring lands in a
-    // follow-up PR).
-    if !args.no_mcp {
+    // MCP servers — Phase A: real spawn / handshake / list_tools (ADR 0023).
+    let mcp_summaries: Vec<caliban_mcp_client::ServerSummary> = if args.no_mcp {
+        Vec::new()
+    } else {
         let ws_root_for_mcp = args.workspace.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
         match caliban_mcp_client::load_config(&ws_root_for_mcp) {
-            Ok(cfg) => match caliban_mcp_client::McpClientManager::start(&cfg) {
+            Ok(cfg) => match caliban_mcp_client::McpClientManager::start(&cfg).await {
                 Ok(mgr) => {
-                    mgr.register_into(&mut registry);
-                    if mgr.enabled_count() > 0 || mgr.skipped_disabled() > 0 {
+                    mgr.register_all(&mut registry);
+                    if mgr.enabled_count() > 0
+                        || mgr.skipped_disabled() > 0
+                        || mgr.failed_count() > 0
+                    {
                         tracing::info!(
                             target: "caliban::mcp",
-                            enabled = mgr.enabled_count(),
+                            connected = mgr.enabled_count(),
+                            failed = mgr.failed_count(),
                             disabled = mgr.skipped_disabled(),
-                            "mcp config loaded",
+                            "mcp manager started",
                         );
                     }
+                    mgr.summaries().to_vec()
                 }
                 Err(e) => {
                     tracing::warn!(target: "caliban::mcp", error = %e, "mcp manager start failed; continuing without MCP");
+                    Vec::new()
                 }
             },
             Err(e) => {
                 tracing::warn!(target: "caliban::mcp", error = %e, "mcp config load failed; continuing without MCP");
+                Vec::new()
             }
         }
-    }
+    };
 
     let model = args
         .model
@@ -766,7 +774,17 @@ async fn main() -> Result<()> {
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {
-            return tui::run(args, agent, store, session, system_prompt, todos, plan_mode).await;
+            return tui::run(
+                args,
+                agent,
+                store,
+                session,
+                system_prompt,
+                todos,
+                plan_mode,
+                mcp_summaries,
+            )
+            .await;
         }
         anyhow::bail!(
             "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
