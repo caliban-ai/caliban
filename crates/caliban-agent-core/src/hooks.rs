@@ -65,6 +65,13 @@ pub trait Hooks: Send + Sync {
     }
 
     /// Called after each tool invocation (or denial) with the result.
+    ///
+    /// **Ordering note:** Under parallel tool dispatch (the default), this
+    /// hook fires once per tool but **not** in assistant-message order —
+    /// it fires in completion order. Each call carries the tool's
+    /// `tool_use_id` and `tool_name` in [`ToolCtx`] so implementors can
+    /// correlate. For denials (returned by [`Hooks::before_tool`]), this
+    /// hook still fires once with `Err(ToolError::Execution(...))`.
     async fn after_tool(
         &self,
         _ctx: &ToolCtx<'_>,
