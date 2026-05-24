@@ -919,6 +919,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-sandbox"
+version = "0.0.0"
+dependencies = [
+ "globset",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "caliban-sessions"
 version = "0.0.0"
 dependencies = [
@@ -959,6 +972,7 @@ dependencies = [
  "bytes",
  "caliban-agent-core",
  "caliban-provider",
+ "caliban-sandbox",
  "dirs",
  "futures",
  "globset",
