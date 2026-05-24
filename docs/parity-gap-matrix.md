@@ -61,7 +61,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Permission modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | 🟡 | plan-mode only |
 | Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | 🔴 | |
 | TUI Ask modal | 🔴 | *(deferred PR #8)* |
-| OS-level sandbox (Seatbelt / bubblewrap) | 🔴 | big lift, security-critical |
+| OS-level sandbox (Seatbelt / bubblewrap) | ✅ | ADR-0032; v1 ships macOS + Linux/WSL; Windows native deferred |
 
 ## B. Hooks & extensibility
 

@@ -17,6 +17,7 @@ members = [
     "crates/caliban-skills",
     "crates/caliban-mcp-client",
     "crates/caliban-model-router",
+    "crates/caliban-sandbox",
     "caliban",
 ]
 

@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use caliban_agent_core::{Tool, ToolContext, ToolError};
 use caliban_provider::{ContentBlock, TextBlock};
+use caliban_sandbox::SandboxedShim;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
@@ -22,16 +23,39 @@ const STDERR_CAP: usize = 30 * 1024;
 pub struct BashTool {
     root: Arc<WorkspaceRoot>,
     schema: OnceLock<Value>,
+    sandbox: Option<Arc<SandboxedShim>>,
 }
 
 impl BashTool {
-    /// Construct a Bash tool using the given workspace root.
+    /// Construct a Bash tool using the given workspace root with no
+    /// sandbox layer.
     #[must_use]
     pub fn new(root: WorkspaceRoot) -> Self {
         Self {
             root: Arc::new(root),
             schema: OnceLock::new(),
+            sandbox: None,
         }
+    }
+
+    /// Construct a Bash tool that wraps each invocation through the
+    /// supplied [`SandboxedShim`]. Pass `None` to opt out (equivalent
+    /// to [`Self::new`]).
+    #[must_use]
+    pub fn with_sandbox(root: WorkspaceRoot, sandbox: Option<Arc<SandboxedShim>>) -> Self {
+        Self {
+            root: Arc::new(root),
+            schema: OnceLock::new(),
+            sandbox,
+        }
+    }
+
+    /// Whether this tool currently wraps invocations through a sandbox.
+    /// `false` when no sandbox was attached or the shim is inactive
+    /// (disabled / backend unavailable).
+    #[must_use]
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandbox.as_ref().is_some_and(|s| s.is_active())
     }
 }
 
@@ -162,6 +186,19 @@ impl Tool for BashTool {
         // leaving orphans.
         #[cfg(unix)]
         shell.process_group(0);
+
+        // OS-level sandbox wrap (ADR 0032). No-op when no sandbox is
+        // attached, when the policy is disabled, when the backend is
+        // unavailable, or when the command is on the bypass list. The
+        // shim preserves cwd / env / stdio / process_group(0) / kill_on_drop
+        // so the existing kill_process_tree logic continues to work — the
+        // wrapper (sandbox-exec / bwrap) propagates SIGKILL to its child.
+        if let Some(shim) = self.sandbox.as_ref() {
+            shim.wrap_command(&mut shell, &parsed.command)
+                .map_err(|e| {
+                    ToolError::execution(std::io::Error::other(format!("sandbox: {e}")))
+                })?;
+        }
 
         let mut child = shell.spawn().map_err(ToolError::execution)?;
         // Capture the PID now while we still have access to the Child.
