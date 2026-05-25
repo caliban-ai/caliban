@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 use crate::auto::strip_html_comments;
 use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
-use crate::prefix::{MemoryPrefix, TierFile, TierKind};
+use crate::prefix::{MemoryPrefix, ProjectTier, TierFile, TierKind};
+use crate::project_imports::{
+    ApprovalMode, ImportAllowlist, ImportState, canonical_or, resolve_imports,
+};
+use crate::project_walk::walk_ancestors;
+use crate::rules::scan_caliban_rules;
 
 /// Cap per-file disk read at 256 KB so a runaway memory file cannot wedge the
 /// startup path.
@@ -71,7 +76,6 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
     };
 
     let global = read_optional(config.global_path.as_deref()).await?;
-    let project = read_optional(config.project_path.as_deref()).await?;
     let auto_raw = if let Some(p) = auto_md.as_deref() {
         read_optional_with_caps(Some(p), AUTO_MAX_LINES, AUTO_MAX_BYTES).await?
     } else {
@@ -79,7 +83,6 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
     };
 
     let global = global.map(post_process_static);
-    let project = project.map(post_process_static);
     // Inject conventions into the auto-memory body (in-memory only), then
     // strip HTML comments so the splice stays clean.
     let auto = auto_raw.map(|mut t| {
@@ -94,9 +97,23 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
         t
     });
 
+    // Build the project tier — either the legacy single-file load (regression
+    // escape) or the new ancestor walk + imports + rules.
+    let (project_legacy, project_tier) = if config.disable_walk {
+        let legacy = read_optional(config.project_path.as_deref())
+            .await?
+            .map(post_process_static);
+        (legacy, None)
+    } else {
+        let project_tier = build_project_tier(config).await?;
+        let legacy = project_tier.to_legacy_tier();
+        (legacy, Some(project_tier))
+    };
+
     let mut prefix = MemoryPrefix {
         global,
-        project,
+        project: project_legacy,
+        project_tier,
         auto,
         estimated_tokens: 0,
         truncated: false,
@@ -108,6 +125,126 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
         + prefix.auto.as_ref().map_or(0, |t| t.estimated_tokens);
 
     Ok(prefix)
+}
+
+/// Build the rich project tier: ancestor walk + `@`-imports per file + rules.
+async fn build_project_tier(config: &MemoryConfig) -> Result<ProjectTier> {
+    let mut tier = ProjectTier::default();
+
+    let mut walked = walk_ancestors(
+        &config.project_walk_root,
+        config.project_walk_stop,
+        &config.claude_md_excludes,
+    );
+    if config.additional_directories_claude_md {
+        for dir in &config.additional_dirs {
+            let extra = walk_ancestors(dir, config.project_walk_stop, &config.claude_md_excludes);
+            walked.extend(extra);
+        }
+    }
+
+    // Effective workspace root for approval is the highest dir reached during
+    // the walk (typically the git root). This means any `@`-import that
+    // resolves *inside* the walked tree never needs approval, even when the
+    // walk started in a deeply-nested subdirectory.
+    let approval_root = walked
+        .first()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| config.project_walk_root.clone());
+
+    // Load the import allowlist once.
+    let allowlist = ImportAllowlist::load(&config.imports_allowlist_path).unwrap_or_default();
+    let approval = approval_mode_for(config);
+    let mut state = ImportState::new(approval_root, approval)
+        .with_allowlist(allowlist, Some(config.imports_allowlist_path.clone()));
+
+    for path in walked {
+        let Some(body) = read_capped(&path).await? else {
+            continue;
+        };
+        let resolved = resolve_imports(&body, &path, &mut state);
+        let stripped = strip_html_comments(&resolved);
+        let estimated_tokens = estimate_tokens(&stripped);
+        // Record which canonical paths the import resolver had pulled in for
+        // this file — they're shown in `/memory` for provenance.
+        for imp in &state.loaded {
+            if tier.imports.iter().any(|f| canonical_or(&f.path) == *imp) {
+                continue;
+            }
+            if imp == &canonical_or(&path) {
+                continue;
+            }
+            // Imports are inlined into `resolved` already; we record their
+            // paths via a small stub TierFile (the body is empty since the
+            // real content is in the parent tier file).
+            tier.imports.push(TierFile {
+                path: imp.clone(),
+                body: String::new(),
+                estimated_tokens: 0,
+                truncated_bytes: 0,
+            });
+        }
+        tier.base_files.push(TierFile {
+            path,
+            body: stripped,
+            estimated_tokens,
+            truncated_bytes: 0,
+        });
+    }
+
+    // Rules: always-active ones load into the prompt now; path-scoped rules
+    // wait for a path-touch via AncestryAddendum / RulesActivator.
+    let rule_set = scan_caliban_rules(&config.project_walk_root);
+    for rule in rule_set.always_active() {
+        let resolved = resolve_imports(&rule.body, &rule.path, &mut state);
+        let stripped = strip_html_comments(&resolved);
+        let estimated_tokens = estimate_tokens(&stripped);
+        tier.active_rules.push(TierFile {
+            path: rule.path.clone(),
+            body: stripped,
+            estimated_tokens,
+            truncated_bytes: 0,
+        });
+    }
+
+    Ok(tier)
+}
+
+fn approval_mode_for(config: &MemoryConfig) -> ApprovalMode<'static> {
+    if config.approve_imports {
+        ApprovalMode::AutoAllow
+    } else if config.non_interactive {
+        ApprovalMode::AutoDeny
+    } else {
+        // Default for the library: no interactive prompt available — auto-deny.
+        // Binaries hook a real TUI prompt by replacing this mode at config time
+        // (planned wiring; for v1 we deny silently and log).
+        ApprovalMode::AutoDeny
+    }
+}
+
+async fn read_capped(path: &Path) -> Result<Option<String>> {
+    match tokio::fs::metadata(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(MemoryError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+        Ok(md) if !md.is_file() => return Ok(None),
+        Ok(_) => {}
+    }
+    let raw = tokio::fs::read(path).await.map_err(|e| MemoryError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let clamped = if raw.len() > MAX_FILE_BYTES {
+        &raw[..MAX_FILE_BYTES]
+    } else {
+        &raw[..]
+    };
+    Ok(Some(String::from_utf8_lossy(clamped).into_owned()))
 }
 
 /// Post-process a tier file that's not the auto tier: strip HTML comments and
@@ -344,8 +481,7 @@ mod tests {
             global: Some(tier("hi")),
             project: Some(tier("there")),
             auto: Some(tier("again")),
-            estimated_tokens: 0,
-            truncated: false,
+            ..MemoryPrefix::default()
         };
         enforce_budget(&mut p, 8_000);
         assert!(!p.truncated);
@@ -362,8 +498,7 @@ mod tests {
             global: Some(tier(&small)),
             project: Some(tier(&small)),
             auto: Some(tier(&big_auto)),
-            estimated_tokens: 0,
-            truncated: false,
+            ..MemoryPrefix::default()
         };
         enforce_budget(&mut p, 200);
         assert!(p.truncated);
@@ -383,8 +518,7 @@ mod tests {
             global: None,
             project: None,
             auto: Some(tier(&body)),
-            estimated_tokens: 0,
-            truncated: false,
+            ..MemoryPrefix::default()
         };
         enforce_budget(&mut p, 20);
         let cut_body = &p.auto.as_ref().unwrap().body;
@@ -403,8 +537,7 @@ mod tests {
             global: Some(tier(&big)),
             project: None,
             auto: None,
-            estimated_tokens: 0,
-            truncated: false,
+            ..MemoryPrefix::default()
         };
         enforce_budget(&mut p, 500);
         assert!(p.truncated);
@@ -417,8 +550,7 @@ mod tests {
             global: Some(tier(&"a".repeat(40))),  // 10 tokens
             project: Some(tier(&"b".repeat(80))), // 20 tokens
             auto: Some(tier(&"c".repeat(120))),   // 30 tokens
-            estimated_tokens: 0,
-            truncated: false,
+            ..MemoryPrefix::default()
         };
         assert_eq!(other_tokens(&p, TierKind::Auto), 30);
         assert_eq!(other_tokens(&p, TierKind::Project), 40);
@@ -436,12 +568,7 @@ mod tests {
         }
         std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
 
-        let cfg = MemoryConfig {
-            global_path: None,
-            project_path: None,
-            auto_memory_dir: dir.clone(),
-            max_tokens: 100_000,
-        };
+        let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
         // Strip the conventions block we add before counting.
@@ -463,12 +590,7 @@ mod tests {
         }
         std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
 
-        let cfg = MemoryConfig {
-            global_path: None,
-            project_path: None,
-            auto_memory_dir: dir.clone(),
-            max_tokens: 100_000,
-        };
+        let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
         // Body kept ≤ 25 KB before we appended conventions.
@@ -492,12 +614,7 @@ mod tests {
             "# Memory index\n<!-- secret comment -->\n- [foo](foo.md) — user: visible\n",
         )
         .unwrap();
-        let cfg = MemoryConfig {
-            global_path: None,
-            project_path: None,
-            auto_memory_dir: dir.clone(),
-            max_tokens: 100_000,
-        };
+        let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         let auto = p.auto.as_ref().unwrap();
         assert!(!auto.body.contains("secret comment"));
@@ -556,12 +673,7 @@ mod tests {
         let _guard = env_guard("CALIBAN_DISABLE_AUTO_MEMORY");
         set_env("CALIBAN_DISABLE_AUTO_MEMORY", Some("1"));
 
-        let cfg = MemoryConfig {
-            global_path: None,
-            project_path: None,
-            auto_memory_dir: dir.clone(),
-            max_tokens: 100_000,
-        };
+        let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         assert!(p.auto.is_none(), "auto tier should be dropped");
     }

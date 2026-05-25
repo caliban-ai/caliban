@@ -20,12 +20,12 @@ fn config_with(
     project: Option<PathBuf>,
     auto_dir: PathBuf,
 ) -> MemoryConfig {
-    MemoryConfig {
-        global_path: global,
-        project_path: project,
-        auto_memory_dir: auto_dir,
-        max_tokens: 8_000,
-    }
+    let mut cfg = MemoryConfig::for_test(auto_dir);
+    cfg.global_path = global;
+    cfg.project_path = project;
+    cfg.max_tokens = 8_000;
+    cfg.disable_walk = true; // legacy single-file project tier
+    cfg
 }
 
 #[tokio::test]
