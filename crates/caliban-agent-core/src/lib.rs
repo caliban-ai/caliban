@@ -21,7 +21,9 @@ pub mod tool;
 pub mod turn;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
-pub use compact::{Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor};
+pub use compact::{
+    Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor, estimate_tokens,
+};
 pub use error::{Error, Result};
 pub use hooks::{
     CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,

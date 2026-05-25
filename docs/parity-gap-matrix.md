@@ -192,12 +192,12 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 |---|---|---|
 | `tracing` instrumentation under `caliban::*` targets | ✅ | |
 | `--debug` + `--debug-file` | 🟡 | |
-| `/context` slash | 🔴 | |
-| `/usage` slash + per-session token + $ | 🔴 | |
-| `/compact` slash + manual trigger | 🔴 | |
-| Cost ($) tracking | 🔴 | |
-| OpenTelemetry export (OTLP metrics / logs / traces) | 🔴 | |
-| Metric set (`session.count`, `lines_of_code.count`, `cost.usage`, `token.usage`, etc.) | 🔴 | |
+| `/context` slash | ✅ | ADR-0033; per-message-kind breakdown + 80% warning |
+| `/usage` slash + per-session token + $ | ✅ | ADR-0033; per-model breakdown + cache savings |
+| `/compact` slash + manual trigger | ✅ | ADR-0033; routes through configured `Compactor` |
+| Cost ($) tracking | ✅ | ADR-0033; `rust_decimal` math against vendored `rates.yaml` |
+| OpenTelemetry export (OTLP metrics / logs / traces) | ✅ | ADR-0033; gated by `CALIBAN_ENABLE_TELEMETRY=1`, `OTEL_*` env contract honored; OTLP transport behind the `otlp` cargo feature |
+| Metric set (`session.count`, `lines_of_code.count`, `cost.usage`, `token.usage`, etc.) | ✅ | ADR-0033; `caliban-telemetry::MetricEmitter` mirrors Claude Code's `claude_code.*` names |
 | `/doctor`, `/heapdump` diagnostics | 🔴 | |
 | Status line (custom script) | 🔴 | |
 | `feedbackSurveyRate` + `/feedback` | 🔴 | |
@@ -218,7 +218,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `/plan`, `/memory`, `/skills`, `/quit` | ✅ | |
 | `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with ADR 0040. |
 | `/clear`, `/help`, `/init` | 🔴 | |
-| `/context`, `/usage`, `/compact` | 🔴 | |
+| `/context`, `/usage`, `/compact` | ✅ | ADR-0033; stub overlays via the existing slash handler (full registry lands with ADR 0040) |
 | `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🔴 | |
 | `/resume`, `/recap`, `/btw`, `/loop` | 🔴 | |
 | `/rewind` | 🔴 | |

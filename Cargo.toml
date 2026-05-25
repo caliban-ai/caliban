@@ -19,6 +19,7 @@ members = [
     "crates/caliban-model-router",
     "crates/caliban-sandbox",
     "crates/caliban-plugins",
+    "crates/caliban-telemetry",
     "caliban",
 ]
 

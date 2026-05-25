@@ -1,0 +1,62 @@
+# Caliban vendored model price card (ADR 0033).
+#
+# Per-1M-token prices in USD. `effective_from` is included for audit purposes;
+# the loader picks the entry whose `effective_from` is the latest date <= now.
+# Unknown (provider, model) pairs match no entry, cost $0.00, and emit a single
+# debounced `tracing::warn!` per session under target `caliban::cost`.
+#
+# Operators can override the bundled file via the `CALIBAN_RATES_YAML=/path`
+# env var.
+
+version: 1
+providers:
+  anthropic:
+    - model_glob: "claude-opus-4-7*"
+      effective_from: 2026-04-01
+      input_per_mtok: 15.00
+      output_per_mtok: 75.00
+      cache_read_per_mtok: 1.50
+      cache_creation_per_mtok: 18.75
+    - model_glob: "claude-sonnet-4-7*"
+      effective_from: 2026-04-01
+      input_per_mtok: 3.00
+      output_per_mtok: 15.00
+      cache_read_per_mtok: 0.30
+      cache_creation_per_mtok: 3.75
+    - model_glob: "claude-haiku-*"
+      effective_from: 2026-01-01
+      input_per_mtok: 0.80
+      output_per_mtok: 4.00
+      cache_read_per_mtok: 0.08
+      cache_creation_per_mtok: 1.00
+  openai:
+    - model_glob: "gpt-5*"
+      effective_from: 2026-03-01
+      input_per_mtok: 5.00
+      output_per_mtok: 20.00
+    - model_glob: "gpt-4o*"
+      effective_from: 2025-11-01
+      input_per_mtok: 2.50
+      output_per_mtok: 10.00
+  google:
+    - model_glob: "gemini-2.5-pro*"
+      effective_from: 2026-02-01
+      input_per_mtok: 1.25
+      output_per_mtok: 10.00
+  bedrock:
+    - model_glob: "anthropic.claude-opus-4-7*"
+      effective_from: 2026-04-01
+      input_per_mtok: 15.00
+      output_per_mtok: 75.00
+      cache_read_per_mtok: 1.50
+      cache_creation_per_mtok: 18.75
+  vertex:
+    - model_glob: "claude-opus-4-7@*"
+      effective_from: 2026-04-01
+      input_per_mtok: 15.00
+      output_per_mtok: 75.00
+  ollama:
+    - model_glob: "*"
+      effective_from: 2026-01-01
+      input_per_mtok: 0.00
+      output_per_mtok: 0.00
