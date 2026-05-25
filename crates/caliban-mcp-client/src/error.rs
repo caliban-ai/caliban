@@ -102,13 +102,100 @@ pub enum McpError {
         /// Configured cap.
         limit: usize,
     },
-    /// Selected `Transport` variant is not wired yet (Phase B for HTTP/SSE).
+    /// Selected `Transport` variant is not wired yet. Phase B retains this
+    /// variant in the public surface for forward compatibility with Phase C
+    /// (which lights up resources/elicitation transports), but Phase B itself
+    /// wires `Transport::Http` and `Transport::Sse`.
     #[error("mcp: server '{server}' transport '{kind}' not yet implemented")]
     TransportNotYetImplemented {
         /// Server name.
         server: String,
-        /// Transport kind (`"http"`, `"sse"`).
+        /// Transport kind.
         kind: &'static str,
+    },
+    /// HTTP/SSE transport error from rmcp's streamable-http client.
+    #[error("mcp: server '{server}' http transport error: {message}")]
+    Transport {
+        /// Server name.
+        server: String,
+        /// Stringified rmcp error.
+        message: String,
+    },
+    /// `${VAR}` substitution requires a variable that isn't set.
+    #[error("mcp: server '{server}' field '{field}' references unset env var '{var}'")]
+    MissingEnvField {
+        /// Server name.
+        server: String,
+        /// Field whose value referenced the missing variable.
+        field: String,
+        /// Variable name.
+        var: String,
+    },
+    /// `url` was missing, not an absolute http/https URL, or unparseable.
+    #[error("mcp: server '{server}' invalid url '{url}': {reason}")]
+    InvalidUrl {
+        /// Server name.
+        server: String,
+        /// Raw URL value as provided.
+        url: String,
+        /// Human-readable reason (parse error / non-absolute / wrong scheme / etc.).
+        reason: String,
+    },
+    /// HTTP/SSE transport requires `url`.
+    #[error("mcp: server '{server}' transport='{transport}' requires a 'url' field; none provided")]
+    MissingUrl {
+        /// Server name.
+        server: String,
+        /// Transport kind that was selected (`"http"` or `"sse"`).
+        transport: &'static str,
+    },
+    /// stdio transport doesn't accept `url`/`headers`/`oauth` fields.
+    #[error("mcp: server '{server}' field '{field}' is not valid for transport='stdio'")]
+    StdioFieldMismatch {
+        /// Server name.
+        server: String,
+        /// Field that was misplaced.
+        field: &'static str,
+    },
+    /// `oauth = "auto"` or `"manual"` configured in Phase B.
+    #[error(
+        "mcp: server '{server}' oauth='{mode}' is not yet supported (Phase C). Phase B only accepts oauth='off'."
+    )]
+    OauthPhaseC {
+        /// Server name.
+        server: String,
+        /// Mode the operator requested.
+        mode: String,
+    },
+    /// `oauth = "<garbage>"` — not one of `"off"|"auto"|"manual"`.
+    #[error(
+        "mcp: server '{server}' oauth='{value}' is invalid; expected 'off', 'auto', or 'manual'"
+    )]
+    InvalidOauthMode {
+        /// Server name.
+        server: String,
+        /// Value the operator wrote.
+        value: String,
+    },
+    /// `transport = "<garbage>"` — not one of the recognized variants.
+    #[error(
+        "mcp: server '{server}' transport='{value}' is invalid; expected 'stdio', 'http', or 'sse'"
+    )]
+    InvalidTransport {
+        /// Server name.
+        server: String,
+        /// Value the operator wrote.
+        value: String,
+    },
+    /// A static HTTP header name or value isn't legal HTTP.
+    #[error("mcp: server '{server}' header '{name}' is invalid: {reason}")]
+    InvalidHeader {
+        /// Server name.
+        server: String,
+        /// Header name as written.
+        name: String,
+        /// Reason from `http::HeaderName`/`HeaderValue` parsing.
+        reason: String,
     },
 }
 

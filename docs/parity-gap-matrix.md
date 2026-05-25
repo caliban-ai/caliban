@@ -148,7 +148,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 |---|---|---|
 | Config + name validation (caliban-mcp-client v1) | ✅ | ADR-0017 |
 | Real spawn / handshake / `list_tools` (rmcp 1.7) | ✅ | ADR-0023 Phase A |
-| HTTP / SSE transports | 🔴 | |
+| HTTP / SSE transports | ✅ | ADR-0023 Phase B (rmcp streamable-http client; legacy SSE folded in) |
+| Per-server permission scoping | ✅ | ADR-0023 Phase B (`[server.X.permissions]` composes with global rules) |
 | `/mcp` slash + per-server enable/auth | 🔴 | |
 | OAuth flow + `--mcp-oauth-port` | 🔴 | |
 | Elicitation (server-initiated input) | 🔴 | |

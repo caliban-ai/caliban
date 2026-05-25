@@ -1394,6 +1394,11 @@ fn mcp_lines(app: &App) -> Vec<Line<'static>> {
             Span::raw(" "),
             Span::raw(format!("{:<12}", summary.name)),
             Span::raw(" "),
+            Span::styled(
+                format!("{:<6}", summary.transport),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(" "),
             Span::styled(status_text, status_style),
         ]);
         out.push(line);
@@ -1401,7 +1406,7 @@ fn mcp_lines(app: &App) -> Vec<Line<'static>> {
 
     out.push(Line::raw(""));
     out.push(Line::styled(
-        "   Phase A: stdio only. HTTP / SSE / OAuth come in Phases B + C.",
+        "   Phase B: stdio + http + sse. OAuth / elicitation / resources land in Phase C.",
         dim,
     ));
     out.push(Line::raw(""));

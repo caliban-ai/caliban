@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use caliban_agent_core::{ToolContext, ToolError, ToolRegistry};
 use caliban_mcp_client::{
-    Conn, DEFAULT_TOOL_TIMEOUT, McpClientManager, McpConfig, McpError, ServerConfig, ServerStatus,
-    StartOptions, Transport,
+    Conn, DEFAULT_TOOL_TIMEOUT, McpClientManager, McpConfig, McpError, OauthMode, ServerConfig,
+    ServerPermissions, ServerStatus, StartOptions, Transport, TransportKind,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -29,11 +29,16 @@ fn server_config(extra_args: &[&str], env: BTreeMap<String, String>) -> ServerCo
         args.push((*a).to_string());
     }
     ServerConfig {
+        transport: TransportKind::Stdio,
         command: test_server_path().to_string_lossy().into_owned(),
         args,
         env,
         cwd: None,
+        url: None,
+        headers: BTreeMap::new(),
+        oauth: OauthMode::Off,
         disabled: false,
+        permissions: ServerPermissions::default(),
     }
 }
 
@@ -173,11 +178,16 @@ async fn failed_server_does_not_abort_startup() {
     servers.insert(
         "ghost".to_string(),
         ServerConfig {
+            transport: TransportKind::Stdio,
             command: "/this/definitely/does/not/exist".to_string(),
             args: vec![],
             env: BTreeMap::new(),
             cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            oauth: OauthMode::Off,
             disabled: false,
+            permissions: ServerPermissions::default(),
         },
     );
     servers.insert("real".to_string(), server_config(&[], BTreeMap::new()));
@@ -227,11 +237,16 @@ async fn handshake_timeout_marks_server_failed() {
     let cfg = single_server_config(
         "hung",
         ServerConfig {
+            transport: TransportKind::Stdio,
             command: test_server_path().to_string_lossy().into_owned(),
             args: vec!["--hang-init".to_string()],
             env: BTreeMap::new(),
             cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            oauth: OauthMode::Off,
             disabled: false,
+            permissions: ServerPermissions::default(),
         },
     );
     let mgr = McpClientManager::start_with_options(&cfg, opts)
@@ -370,22 +385,13 @@ async fn conn_exposes_child_pid() {
     assert!(conn.pid().is_some());
 }
 
-/// 13. Non-stdio transports return `TransportNotYetImplemented` — Phase B.
+/// 13. Stdio summaries carry transport='stdio' for the `/mcp` overlay column.
 #[tokio::test]
-async fn http_transport_is_not_yet_implemented() {
-    let transport = Transport::Http {
-        url: "http://localhost/unused".to_string(),
-    };
-    let err = Conn::start("http-stub".to_string(), transport, Duration::from_secs(1))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            McpError::TransportNotYetImplemented { kind: "http", .. }
-        ),
-        "got: {err:?}",
-    );
+async fn stdio_summary_carries_transport_kind() {
+    let cfg = single_server_config("test", server_config(&[], BTreeMap::new()));
+    let mgr = McpClientManager::start(&cfg).await.expect("manager start");
+    assert_eq!(mgr.summaries().len(), 1);
+    assert_eq!(mgr.summaries()[0].transport, "stdio");
 }
 
 /// 14. Tool input that isn't a JSON object returns `InvalidInput`.

@@ -24,4 +24,7 @@ pub struct ServerSummary {
     pub name: String,
     /// Lifecycle state.
     pub status: ServerStatus,
+    /// Transport kind label (`"stdio"`, `"http"`, `"sse"`). Phase B adds this
+    /// so the `/mcp` overlay can render a transport column.
+    pub transport: &'static str,
 }

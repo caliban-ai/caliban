@@ -27,11 +27,15 @@ dirs               = { workspace = true }
 rmcp               = { workspace = true, features = ["server", "transport-io", "macros", "schemars"] }
 futures            = { workspace = true }
 schemars           = { workspace = true }
+http               = { workspace = true }
+url                = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
 tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber = { workspace = true }
+wiremock           = { workspace = true }
+axum               = { workspace = true }
 
 # In-tree test server binary used by integration tests via CARGO_BIN_EXE_test_server.
 [[bin]]
