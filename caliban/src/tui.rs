@@ -402,6 +402,14 @@ pub(crate) struct App {
     /// (a) the buffer is empty, (b) no overlay is open, and (c) both
     /// presses happen within `ESC_ESC_WINDOW_MS` of each other.
     pub(crate) last_esc_at: Option<std::time::Instant>,
+    /// Layered settings (ADR 0026). The handle is `Some` whenever the
+    /// loader ran (even in `--bare` mode, where it returns an empty
+    /// `Settings`).
+    pub(crate) settings_handle: Option<caliban_settings::SettingsHandle>,
+    /// `/config` provenance lines: `scope-label  path  format`. Lifted
+    /// from the loader outcome so the overlay can render the scope
+    /// chain without re-running discovery.
+    pub(crate) settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
 }
 
 impl App {
@@ -420,6 +428,8 @@ impl App {
         auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
         mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
         ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
+        settings_handle: Option<caliban_settings::SettingsHandle>,
+        settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let messages = session
@@ -520,6 +530,8 @@ impl App {
             input_history_path,
             checkpoint_store: None,
             last_esc_at: None,
+            settings_handle,
+            settings_sources,
         }
     }
 
@@ -1330,6 +1342,62 @@ fn config_lines(app: &App) -> Vec<Line<'_>> {
     out.push(kv("Active session", session_line));
     out.push(Line::raw(""));
     out.push(kv("Quiet mode", app.args.quiet.to_string()));
+
+    // Settings hierarchy section (ADR 0026). Lists the scope chain + a
+    // few merged-effective values when the loader ran.
+    if app.settings_handle.is_some() {
+        out.push(Line::raw(""));
+        out.push(Line::styled(
+            "  Settings hierarchy",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if app.settings_sources.is_empty() {
+            out.push(Line::styled(
+                "   (no scope files found — defaults in effect)",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        } else {
+            for (label, path, format) in &app.settings_sources {
+                let path_str = path
+                    .as_ref()
+                    .map_or_else(|| "(inline)".to_string(), |p| p.display().to_string());
+                let fmt_str = format.as_deref().unwrap_or("?");
+                out.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(format!("{label:<10}"), Style::default().fg(Color::Cyan)),
+                    Span::raw(format!("{path_str}  [{fmt_str}]")),
+                ]));
+            }
+        }
+        if let Some(handle) = app.settings_handle.as_ref() {
+            let snap = handle.current();
+            // Show three quick merged values + their formats.
+            if let Some(m) = snap.model.as_ref() {
+                out.push(kv("settings.model", m.display()));
+            }
+            if !snap.permissions.allow.is_empty() {
+                out.push(kv(
+                    "settings.allow",
+                    format!("[{}]", snap.permissions.allow.join(", ")),
+                ));
+            }
+            if !snap.permissions.deny.is_empty() {
+                out.push(kv(
+                    "settings.deny",
+                    format!("[{}]", snap.permissions.deny.join(", ")),
+                ));
+            }
+            if let Some(s) = snap.output_style.as_ref() {
+                out.push(kv("settings.output_style", s.clone()));
+            }
+            if let Some(s) = snap.editor_mode.as_ref() {
+                out.push(kv("settings.editor_mode", s.clone()));
+            }
+        }
+    }
+
     out.push(Line::raw(""));
     out.push(Line::styled(
         "  Press q or Esc to close.",
@@ -1859,6 +1927,8 @@ pub(crate) async fn run(
     auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
     mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
     ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
+    settings_handle: Option<caliban_settings::SettingsHandle>,
+    settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(
@@ -1874,6 +1944,8 @@ pub(crate) async fn run(
         auto_mode_classifier,
         mcp_servers,
         ask_rx,
+        settings_handle,
+        settings_sources,
     );
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;

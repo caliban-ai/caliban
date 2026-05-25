@@ -94,11 +94,11 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| Layered settings (managed / user / project / local) with merge semantics | 🔴 | currently ad-hoc TOMLs |
-| `/config` interactive editor | 🔴 | |
-| Live reload (`ConfigChange` hook) | 🔴 | |
-| `apiKeyHelper` (dynamic auth refresh) | 🔴 | |
-| Schema validation (`https://json.schemastore.org/...`) | 🔴 | |
+| Layered settings (managed / user / project / local) with merge semantics | ✅ | ADR-0026; new crate `caliban-settings` loads JSON/TOML at four canonical scopes with documented per-key merge rules + `--settings` / `--setting-sources` CLI flags + `parent_settings_behavior: "block"` lockdown. Legacy per-feature TOMLs (`permissions.toml`, `mcp.toml`, `hooks.toml`) still load when the unified file is absent. |
+| `/config` interactive editor | ✅ | ADR-0026 (Phase 1); existing `/config` overlay now surfaces the merged effective settings + scope chain (provenance per key). Tabbed write-back editor lands with ADR 0040 slash registry. |
+| Live reload (`ConfigChange` hook) | ✅ | ADR-0026; `SettingsWatcher` (notify, 250 ms debounce) fires on every scope file change; `ConfigChangeCtx` already exists in `caliban_agent_core::hooks`. `model` / `output_style` are flagged restart-required in the diff. |
+| `apiKeyHelper` (dynamic auth refresh) | ✅ | ADR-0026; `ApiKeyHelperPool` invokes the helper script without a shell, caches per `refreshIntervalMs` (default 5 min, configurable via `CALIBAN_API_KEY_HELPER_TTL_MS`), invalidates on 401, and logs slow-helper warnings at `slowHelperWarningMs` (default 10 s). |
+| Schema validation (`https://json.schemastore.org/...`) | ✅ | ADR-0026; embedded schema at `caliban-settings/src/schema.json` validated via `jsonschema` 0.17 (Draft-7); invalid documents warn but don't abort (per spec). Forward-looking public path: `https://caliban.dev/schemas/settings/v1.json`. |
 
 ## E. TUI ergonomics
 
@@ -220,7 +220,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with ADR 0040. |
 | `/clear`, `/help`, `/init` | 🔴 | |
 | `/context`, `/usage`, `/compact` | ✅ | ADR-0033; stub overlays via the existing slash handler (full registry lands with ADR 0040) |
-| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🔴 | |
+| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🟡 | `/config` overlay now surfaces the merged settings + scope chain (ADR 0026). Other commands still 🔴; full interactive registry lands with ADR 0040. |
 | `/resume`, `/recap`, `/btw`, `/loop` | 🔴 | |
 | `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay |
 | `/doctor`, `/heapdump`, `/feedback` | 🔴 | |

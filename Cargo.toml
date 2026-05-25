@@ -24,6 +24,7 @@ members = [
     "crates/caliban-images",
     "crates/caliban-worktrees",
     "crates/caliban-supervisor",
+    "crates/caliban-settings",
     "caliban",
 ]
 
@@ -92,6 +93,9 @@ git2         = { version = "0.20", default-features = false, features = ["vendor
 interprocess = { version = "2", features = ["tokio"] }
 nix          = { version = "0.30", features = ["signal", "process"] }
 bincode      = { version = "1" }
+# ADR 0026 deps (settings hierarchy).
+notify     = { version = "6", default-features = false, features = ["macos_kqueue"] }
+jsonschema = { version = "0.17", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)

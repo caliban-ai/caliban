@@ -1,6 +1,6 @@
 # ADR 0026 · Layered settings.json + `/config` editor
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-settings-hierarchy-design.md`
 
