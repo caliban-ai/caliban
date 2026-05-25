@@ -15,7 +15,7 @@ Baselines (TBD — captured by PR-T4-0):
 |---|---|---|---:|---:|---:|---:|---:|---:|
 | PR-T1-A | 1 | `caliban-common` foundation crate | **−305** (544 deleted / 239 added at consumer sites) | +629 (new `caliban-common` module is ~934 LOC incl. ~350 LOC of tests) | 7 / 8 (env-expand ×2; atomic-write ×5; sanitize_cwd ×2; walk_up ×2; matches_glob+first_arg ×1; tracing targets 61/88 sites; XDG paths consolidated into helpers awaiting next consumers — sessions/supervisor/oauth) | +34 net new (39 new in `caliban-common`; carried-over tests removed from `agent-core`/`memory`) | n/a | n/a |
 | PR-T1-B | 1 | Shared `reqwest::Client` factory | **+12** (30 added / 18 deleted at consumer sites) | +158 (new `caliban-common::http` is ~146 LOC incl. ~52 LOC of tests) | 9 / 9 (7 provider transports + vertex `list_client` + `web_fetch_client`) | +6 net new (all in `caliban-common::http`) | n/a | n/a |
-| PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | — | — | — | — | — |
+| PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | **+101** (4071 lines across 5 files / 3970 original; tests stay at root) | n/a | n/a (file split, no dup consolidation) | 0 net (existing tests unmoved) | n/a | n/a |
 | PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | — | — | — | — | — |
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | — | — | — | — | — |
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | — | — | — | — | — |
@@ -108,3 +108,71 @@ Baselines (TBD — captured by PR-T4-0):
   `reqwest::Client` parameter for test ergonomics (wiremock-friendly
   clients without TLS); docstrings now direct production callers at
   `caliban_common::http::{default_client, no_redirect_client}`.
+
+## PR-T2-A notes
+
+Pure file split of `caliban/src/tui.rs` (3970 LOC) into focused submodules.
+No semantic changes; no new tests; existing 1307-test suite passes
+unchanged.
+
+LOC after split (per `wc -l`):
+
+| File | LOC |
+|---|---:|
+| `caliban/src/tui.rs` (root + tests) | 1129 |
+| `caliban/src/tui/app.rs` | 391 |
+| `caliban/src/tui/render.rs` | 538 |
+| `caliban/src/tui/events.rs` | 1323 |
+| `caliban/src/tui/overlay.rs` | 690 |
+| **total** | **4071** |
+
+The +101 LOC delta vs. the 3970-line original is the cost of adding
+module-level docs, `use` declarations, and the test module's re-imports of
+private helpers via their new submodule paths. No source file exceeds
+1500 LOC.
+
+The root `tui.rs` is 1129 LOC because the existing `mod tests` block
+(~830 LOC) stays at the root. The non-test prelude (module decls,
+`TerminalGuard`, `run()`, re-exports) is ~295 LOC, very close to the
+spec's 200-LOC target. Moving tests into the new submodules would have
+required either making more symbols `pub(crate)` than necessary or
+duplicating fixtures across modules; keeping them centralized matches
+the "no test changes" constraint.
+
+### Symbol assignment
+
+- `tui.rs` root: `mod` decls + `is_esc_chord` + `ESC_ESC_WINDOW_MS` +
+  `TerminalGuard` (RAII) + `run()` entry + `pub(crate) use` re-exports
+  for cross-module / cross-crate callers (`App`, `TranscriptLine`,
+  `Overlay`, `ViewState`, `TuiAskHandler`, `render_usage_lines`,
+  `render_context_lines`, `handle_compact_command`). Test module
+  unchanged in place; it imports private helpers via
+  `super::{app,render,events,overlay}::*`.
+- `app.rs`: `TranscriptLine`, `RunningTurn`, `Activity` + impl,
+  `spinner_frame`, `App` struct + `App::new`, `App::with_checkpoint_store`,
+  `App::cwd_display`.
+- `render.rs`: `render`, `render_input_menu`, `format_tool_input`,
+  `wrap_lines_to_width`, `render_transcript`, `format_bytes`,
+  `format_cache_suffix`, `render_status`.
+- `events.rs`: agent-event handlers (`handle_agent_event`,
+  `handle_agent_error`), slash dispatch (`handle_slash_command`,
+  `apply_slash_outcome`), `/usage` / `/context` / `/compact` helpers,
+  the full keyboard/mouse dispatch (`handle_event`, `handle_key`,
+  `handle_mouse`, per-overlay handlers, `cycle_permission_mode`,
+  `handoff_to_supervisor`, `handle_ctrl_g`, `open_reverse_history`,
+  `dispatch_shell_escape`, `refresh_at_menu`, `MOUSE_WHEEL_ROWS`).
+- `overlay.rs`: `ViewState`, `Overlay` + `title`/`short_name`,
+  `centered_rect`, `clone_lines`, `render_overlay`, per-overlay line
+  builders (`reverse_history_lines`, `ask_modal_lines`,
+  `slash_help_lines`, `config_lines`, `mcp_lines`, `skills_lines`,
+  `system_lines`, `rewind_lines`).
+
+Existing siblings (`tui/slash.rs`, `tui/slash/`, `tui/ask.rs`,
+`tui/attach.rs`, `tui/external_editor.rs`, `tui/input.rs`,
+`tui/reverse_history.rs`, `tui/shell_escape.rs`,
+`tui/transcript_viewer.rs`, `tui/completer.rs`, `tui/toast.rs`) are
+untouched.
+
+`crate::tui::{App,TranscriptLine,Overlay,…}` import paths preserved at
+the root so external callers (`main.rs`, `tui/slash/*`) compile
+unchanged.
