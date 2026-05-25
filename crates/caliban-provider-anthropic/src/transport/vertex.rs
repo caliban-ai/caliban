@@ -40,7 +40,7 @@ impl VertexTransport {
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed.
     pub fn new(config: VertexConfig) -> Result<Self, AnthropicError> {
-        let client = reqwest::Client::builder()
+        let client = caliban_common::http::default_client_builder()
             .timeout(config.timeout)
             .build()
             .map_err(AnthropicError::Http)?;

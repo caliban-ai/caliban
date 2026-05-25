@@ -99,8 +99,7 @@ impl VertexProvider {
         let inner = AnthropicProvider::vertex(inner_cfg)
             .map_err(|e| VertexError::Transport(Box::new(e)))?;
         let auth = AuthRefresh::spawn(token_provider.clone(), cfg.auth_refresh);
-        let list_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+        let list_client = caliban_common::http::default_client_builder()
             .build()
             .map_err(VertexError::Http)?;
         Ok(Self {

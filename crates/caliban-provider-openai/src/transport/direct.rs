@@ -24,7 +24,7 @@ impl DirectTransport {
     ///
     /// Returns `Err(OpenAIError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: DirectConfig) -> Result<Self, OpenAIError> {
-        let client = reqwest::Client::builder()
+        let client = caliban_common::http::default_client_builder()
             .timeout(config.timeout)
             .build()
             .map_err(OpenAIError::Http)?;
