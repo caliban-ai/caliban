@@ -1,7 +1,9 @@
 //! `AgentTool` — spawns an in-process sub-agent with a restricted tool palette.
 //!
-//! See `docs/superpowers/specs/2026-05-23-sub-agent-design.md`.
+//! See `docs/superpowers/specs/2026-05-23-sub-agent-design.md` and
+//! ADR 0037 (worktree isolation + background fleet additions).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -18,6 +20,35 @@ const MAX_OUTPUT_CHARS: usize = 5_000;
 /// Hard turn limit for sub-agents.
 const SUB_AGENT_MAX_TURNS: u32 = 20;
 
+/// Isolation mode for a spawned sub-agent (ADR 0037).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationMode {
+    /// Run in the parent's working directory (today's behavior).
+    #[default]
+    None,
+    /// Materialize a dedicated git worktree under `.caliban/worktrees/<name>`
+    /// and run the sub-agent there.
+    Worktree,
+}
+
+/// Optional worktree settings — only consulted when `isolation =
+/// Worktree`. Mirrors `caliban_worktrees::WorktreeSpec` so it can be
+/// passed straight through.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorktreeOptions {
+    /// Base ref to root the worktree on. Defaults to `head`. Valid
+    /// values: `fresh`, `head`, or a rev-parse-able ref string.
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Sparse-checkout patterns.
+    #[serde(default)]
+    pub sparse_paths: Vec<String>,
+    /// Symlink these dirs (relative to parent repo root) into the worktree.
+    #[serde(default)]
+    pub symlink_directories: Vec<PathBuf>,
+}
+
 /// Parsed input shape for [`AgentTool`].
 #[derive(Debug, Deserialize)]
 pub struct AgentToolInput {
@@ -30,6 +61,27 @@ pub struct AgentToolInput {
     /// Optional model override. `None` inherits the parent's model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Isolation mode. Defaults to [`IsolationMode::None`].
+    #[serde(default)]
+    pub isolation: IsolationMode,
+    /// True iff the sub-agent should run detached (handed to the
+    /// supervisor daemon). Defaults to `false`.
+    #[serde(default)]
+    pub background: bool,
+    /// Inherit parent hooks. Defaults to `true`; opt-out for sub-agents
+    /// that must run with a fresh chain.
+    #[serde(default = "default_inherit_hooks")]
+    pub inherit_hooks: bool,
+    /// Optional human-readable label that appears in `/agents` and logs.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Worktree options (only honored when `isolation == Worktree`).
+    #[serde(default)]
+    pub worktree: Option<WorktreeOptions>,
+}
+
+fn default_inherit_hooks() -> bool {
+    true
 }
 
 /// Factory closure passed to [`AgentTool::new`]. Given the parsed input, it
@@ -37,12 +89,32 @@ pub struct AgentToolInput {
 /// model + parent's provider/hooks).
 pub type AgentFactory = Arc<dyn Fn(&AgentToolInput) -> Agent + Send + Sync>;
 
+/// Background-handoff hook installed by the caliban binary. When the
+/// parent receives `background: true`, the tool calls this with the
+/// parsed input + sub-agent and expects back an opaque id + per-agent
+/// socket path. Returning `Err` falls back to the foreground path.
+///
+/// We use a trait-object closure (instead of `tokio::sync::mpsc` or a
+/// dedicated trait) to keep the dependency surface tiny — the
+/// `AgentTool` doesn't need to depend on `caliban-supervisor` directly.
+pub type BackgroundSpawner = Arc<dyn Fn(&AgentToolInput) -> BackgroundSpawnResult + Send + Sync>;
+
+/// Outcome of a background-handoff attempt.
+#[derive(Debug, Clone)]
+pub struct BackgroundSpawnResult {
+    /// Newly assigned agent id.
+    pub id: String,
+    /// Per-agent socket the user can `caliban attach <id>` to.
+    pub socket_path: PathBuf,
+}
+
 /// Built-in `AgentTool` that lets the parent agent spawn a synchronous
-/// sub-agent.
+/// (or, with `background: true`, detached) sub-agent.
 pub struct AgentTool {
     factory: AgentFactory,
     parent_system_prompt: Option<String>,
     schema: OnceLock<Value>,
+    background_spawner: Option<BackgroundSpawner>,
 }
 
 impl std::fmt::Debug for AgentTool {
@@ -68,7 +140,16 @@ impl AgentTool {
             factory,
             parent_system_prompt,
             schema: OnceLock::new(),
+            background_spawner: None,
         }
+    }
+
+    /// Install a background-handoff spawner. Without one, `background:
+    /// true` falls back to foreground execution with a warning.
+    #[must_use]
+    pub fn with_background_spawner(mut self, spawner: BackgroundSpawner) -> Self {
+        self.background_spawner = Some(spawner);
+        self
     }
 }
 
@@ -103,6 +184,32 @@ impl Tool for AgentTool {
                     "model": {
                         "type": ["string", "null"],
                         "description": "Optional model id override. If null, inherits the parent's model."
+                    },
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["none", "worktree"],
+                        "description": "Isolation mode. `worktree` materializes a dedicated git worktree under .caliban/worktrees/<name> and runs the sub-agent there. Defaults to `none`."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "If true, hand the sub-agent off to the supervisor daemon and return its id immediately. Defaults to false."
+                    },
+                    "inherit_hooks": {
+                        "type": "boolean",
+                        "description": "Whether the sub-agent inherits the parent's Hooks chain. Defaults to true; closures cannot cross the process boundary for background spawns and are dropped with a warning."
+                    },
+                    "label": {
+                        "type": ["string", "null"],
+                        "description": "Optional human-readable label surfaced in `/agents` and logs."
+                    },
+                    "worktree": {
+                        "type": ["object", "null"],
+                        "description": "Worktree settings; only consulted when isolation=worktree.",
+                        "properties": {
+                            "base_ref": { "type": ["string", "null"] },
+                            "sparse_paths": { "type": "array", "items": { "type": "string" } },
+                            "symlink_directories": { "type": "array", "items": { "type": "string" } }
+                        }
                     }
                 },
                 "required": ["prompt"]
@@ -110,9 +217,47 @@ impl Tool for AgentTool {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: AgentToolInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+
+        // Background handoff path (ADR 0037). When the operator requests
+        // `background: true` and the binary installed a spawner, we
+        // delegate to the supervisor and return an opaque id. Closure
+        // hooks can't cross the process boundary; warn loudly and drop
+        // them so the daemon's reconstructed chain matches reality.
+        if parsed.background {
+            if parsed.inherit_hooks && cx.hooks.is_some() {
+                tracing::warn!(
+                    "AgentTool: dropping closure-based parent hooks for background sub-agent \
+                     (closures cannot cross the process boundary); only config-expressible \
+                     hooks survive. Pass `inherit_hooks: false` to silence this warning."
+                );
+            }
+            if let Some(spawn) = &self.background_spawner {
+                let outcome = spawn(&parsed);
+                let label = parsed
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("agent-{}", outcome.id));
+                let text = format!(
+                    "[backgrounded sub-agent {} ({}); attach via `caliban attach {}` or the /agents overlay]\nsocket: {}",
+                    outcome.id,
+                    label,
+                    outcome.id,
+                    outcome.socket_path.display(),
+                );
+                return Ok(vec![ContentBlock::Text(TextBlock {
+                    text,
+                    cache_control: None,
+                })]);
+            }
+            tracing::warn!(
+                "AgentTool: background=true requested but no supervisor spawner installed; \
+                 falling back to foreground execution."
+            );
+        }
 
         let agent_name_for_hook = parsed.model.clone().unwrap_or_default();
         let task_id_for_hook = cx.tool_use_id.clone();

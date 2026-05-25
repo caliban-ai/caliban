@@ -1,6 +1,6 @@
 # ADR 0037 · Sub-agent worktree isolation + background fleet
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-subagent-worktree-and-fleet-design.md`
 - **Builds on:** ADR 0021 (sub-agent primitive), ADR 0024 (hook taxonomy)

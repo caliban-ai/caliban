@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::multiple_crate_versions)]
 
+mod agents_cli;
 mod headless;
 mod plugin_cli;
 mod router;
@@ -284,6 +285,12 @@ pub(crate) struct Args {
     #[arg(long = "config", value_name = "PATH", env = "CALIBAN_ROUTER_CONFIG")]
     pub(crate) config_path: Option<PathBuf>,
 
+    /// Spawn a background sub-agent with the given task and return
+    /// immediately. Equivalent to `caliban agents spawn --bg --prompt
+    /// <task>`. ADR 0037.
+    #[arg(long = "bg", value_name = "TASK")]
+    pub(crate) bg: Option<String>,
+
     /// Diagnostic / management subcommands.
     #[command(subcommand)]
     pub(crate) command: Option<CalibanCommand>,
@@ -297,6 +304,102 @@ pub(crate) enum CalibanCommand {
         #[command(subcommand)]
         inner: RouterCommand,
     },
+    /// List, attach to, and manage background sub-agents (ADR 0037).
+    Agents {
+        #[command(subcommand)]
+        inner: AgentsCommand,
+    },
+    /// Supervisor daemon management (ADR 0037).
+    Daemon {
+        #[command(subcommand)]
+        inner: DaemonCommand,
+    },
+    /// Sugar for `caliban agents attach <id>`.
+    Attach {
+        /// Target agent id.
+        id: String,
+    },
+    /// Sugar for `caliban agents logs <id>`.
+    Logs {
+        /// Target agent id.
+        id: String,
+    },
+    /// Sugar for `caliban agents kill <id>`.
+    Stop {
+        /// Target agent id.
+        id: String,
+    },
+    /// Sugar for `caliban agents kill <id>`.
+    Kill {
+        /// Target agent id.
+        id: String,
+    },
+    /// Sugar for `caliban agents respawn <id>`.
+    Respawn {
+        /// Target agent id.
+        id: String,
+    },
+    /// Sugar for `caliban agents rm <id>`.
+    Rm {
+        /// Target agent id.
+        id: String,
+        /// Force-remove even if the agent is still running.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// `caliban agents <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum AgentsCommand {
+    /// List registered background agents.
+    List,
+    /// Stream a running agent's transcript live (Ctrl+D detaches).
+    Attach {
+        /// Target agent id.
+        id: String,
+    },
+    /// Print the agent's session log (`session.json`).
+    Logs {
+        /// Target agent id.
+        id: String,
+    },
+    /// Terminate an agent (SIGTERM → SIGKILL after grace).
+    Kill {
+        /// Target agent id.
+        id: String,
+    },
+    /// Restart an agent with the same spawn spec.
+    Respawn {
+        /// Target agent id.
+        id: String,
+    },
+    /// Remove an agent from the registry (must be stopped or use `--force`).
+    Rm {
+        /// Target agent id.
+        id: String,
+        /// Force-remove even if the agent is still running.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Spawn a new background agent.
+    Spawn {
+        /// Initial prompt for the new agent.
+        #[arg(long)]
+        prompt: String,
+        /// Optional human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+}
+
+/// `caliban daemon <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum DaemonCommand {
+    /// Print daemon health and the socket path.
+    Status,
+    /// Ask the daemon to shut down gracefully.
+    Stop,
 }
 
 /// `caliban router <verb>` verbs.
@@ -863,6 +966,51 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed
+    // and don't require a provider, so route them first.
+    if let Some(cmd) = &args.command {
+        let cwd = std::env::current_dir().context("could not get cwd")?;
+        let repo = agents_cli::discover_repo_root(&cwd);
+        let code = match cmd {
+            CalibanCommand::Agents { inner } => Some(agents_cli::run_agents(inner, &repo).await),
+            CalibanCommand::Daemon { inner } => Some(agents_cli::run_daemon(inner, &repo).await),
+            CalibanCommand::Attach { id } => {
+                Some(agents_cli::run_agents(&AgentsCommand::Attach { id: id.clone() }, &repo).await)
+            }
+            CalibanCommand::Logs { id } => {
+                Some(agents_cli::run_agents(&AgentsCommand::Logs { id: id.clone() }, &repo).await)
+            }
+            CalibanCommand::Stop { id } | CalibanCommand::Kill { id } => {
+                Some(agents_cli::run_agents(&AgentsCommand::Kill { id: id.clone() }, &repo).await)
+            }
+            CalibanCommand::Respawn { id } => Some(
+                agents_cli::run_agents(&AgentsCommand::Respawn { id: id.clone() }, &repo).await,
+            ),
+            CalibanCommand::Rm { id, force } => Some(
+                agents_cli::run_agents(
+                    &AgentsCommand::Rm {
+                        id: id.clone(),
+                        force: *force,
+                    },
+                    &repo,
+                )
+                .await,
+            ),
+            CalibanCommand::Router { .. } => None,
+        };
+        if let Some(c) = code {
+            std::process::exit(c);
+        }
+    }
+
+    // Top-level --bg shortcut.
+    if let Some(task) = &args.bg {
+        let cwd = std::env::current_dir().context("could not get cwd")?;
+        let repo = agents_cli::discover_repo_root(&cwd);
+        let code = agents_cli::run_bg(task, &repo).await;
+        std::process::exit(code);
+    }
+
     // Install file-backed tracing subscriber when --debug or CALIBAN_DEBUG is set.
     let debug = args.debug || std::env::var("CALIBAN_DEBUG").is_ok();
     if debug {
@@ -1076,7 +1224,53 @@ async fn main() -> Result<()> {
                 .build()
                 .expect("sub-agent builder")
         });
-        registry.register(Arc::new(AgentTool::new(factory, None)));
+        // Background-handoff spawner (ADR 0037). When the parent invokes
+        // AgentTool with `background: true`, the tool calls this closure;
+        // we ask the per-repo supervisor daemon (auto-spawned if needed)
+        // to register a new agent and return its socket. Closure-based
+        // hooks are dropped at the boundary — the parent's `Hooks` chain
+        // can't cross processes; see ADR 0037 ("Hook inheritance").
+        let cwd_for_bg = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_for_bg = agents_cli::discover_repo_root(&cwd_for_bg);
+        let bg_spawner: caliban_tools_builtin::BackgroundSpawner = {
+            let repo = repo_for_bg.clone();
+            Arc::new(move |input: &AgentToolInput| {
+                // Use a blocking handle to the current runtime so the
+                // AgentTool stays sync-callable from its async invoke.
+                let rt = tokio::runtime::Handle::current();
+                let spec = caliban_supervisor::SpawnSpec {
+                    label: input.label.clone(),
+                    frontmatter_path: None,
+                    initial_prompt: input.prompt.clone(),
+                    model: input.model.clone(),
+                    tool_allowlist: input.tool_allowlist.clone(),
+                    isolation_worktree: matches!(
+                        input.isolation,
+                        caliban_tools_builtin::IsolationMode::Worktree
+                    ),
+                    inherit_hooks: input.inherit_hooks,
+                };
+                let repo = repo.clone();
+                // We can't `await` directly inside a non-async closure;
+                // block on a fresh task instead.
+                let (id, socket_path) = rt
+                    .block_on(async move {
+                        let client = agents_cli::ensure_daemon_for_repo(&repo).await?;
+                        client.spawn(spec).await.map_err(anyhow::Error::from)
+                    })
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "background spawn failed");
+                        (
+                            format!("err-{}", uuid::Uuid::new_v4().simple()),
+                            std::path::PathBuf::from("/dev/null"),
+                        )
+                    });
+                caliban_tools_builtin::BackgroundSpawnResult { id, socket_path }
+            })
+        };
+        registry.register(Arc::new(
+            AgentTool::new(factory, None).with_background_spawner(bg_spawner),
+        ));
     }
 
     // Load hooks.toml (project + user scope). Empty config when missing or

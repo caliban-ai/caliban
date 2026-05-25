@@ -213,3 +213,197 @@ async fn invalid_input_errors() {
     let err = tool.invoke(serde_json::json!({}), ctx()).await.unwrap_err();
     assert!(matches!(err, ToolError::InvalidInput(_)));
 }
+
+// ---- ADR 0037 additions ----
+
+#[tokio::test]
+async fn isolation_field_parses_worktree() {
+    use caliban_tools_builtin::{AgentToolInput, IsolationMode};
+    let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
+        "prompt": "x",
+        "isolation": "worktree"
+    }))
+    .unwrap();
+    assert_eq!(parsed.isolation, IsolationMode::Worktree);
+}
+
+#[tokio::test]
+async fn isolation_defaults_to_none() {
+    use caliban_tools_builtin::{AgentToolInput, IsolationMode};
+    let parsed: AgentToolInput =
+        serde_json::from_value(serde_json::json!({ "prompt": "x" })).unwrap();
+    assert_eq!(parsed.isolation, IsolationMode::None);
+    assert!(!parsed.background);
+    assert!(parsed.inherit_hooks, "inherit_hooks defaults to true");
+}
+
+#[tokio::test]
+async fn inherit_hooks_false_parses() {
+    use caliban_tools_builtin::AgentToolInput;
+    let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
+        "prompt": "x",
+        "inherit_hooks": false
+    }))
+    .unwrap();
+    assert!(!parsed.inherit_hooks);
+}
+
+#[tokio::test]
+async fn worktree_options_parse() {
+    use caliban_tools_builtin::AgentToolInput;
+    let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
+        "prompt": "x",
+        "isolation": "worktree",
+        "worktree": {
+            "base_ref": "fresh",
+            "sparse_paths": ["crates/foo"],
+            "symlink_directories": ["target"]
+        }
+    }))
+    .unwrap();
+    let wt = parsed.worktree.unwrap();
+    assert_eq!(wt.base_ref.as_deref(), Some("fresh"));
+    assert_eq!(wt.sparse_paths, vec!["crates/foo".to_string()]);
+    assert_eq!(
+        wt.symlink_directories,
+        vec![std::path::PathBuf::from("target")]
+    );
+}
+
+#[tokio::test]
+async fn background_handoff_invokes_spawner_and_returns_id() {
+    use caliban_tools_builtin::{BackgroundSpawnResult, BackgroundSpawner};
+
+    let mp = Arc::new(MockProvider::new());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls2 = Arc::clone(&calls);
+    let spawner: BackgroundSpawner = Arc::new(move |_input| {
+        calls2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        BackgroundSpawnResult {
+            id: "deadbeef0000".into(),
+            socket_path: std::path::PathBuf::from("/tmp/x.sock"),
+        }
+    });
+    let tool = AgentTool::new(factory_from(mp), None).with_background_spawner(spawner);
+    let out = tool
+        .invoke(
+            serde_json::json!({ "prompt": "go", "background": true, "label": "bg" }),
+            ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let ContentBlock::Text(t) = &out[0] else {
+        panic!("expected text")
+    };
+    assert!(t.text.contains("deadbeef0000"));
+    assert!(t.text.contains("backgrounded sub-agent"));
+}
+
+#[tokio::test]
+async fn parent_hooks_fire_on_subagent_start_and_stop() {
+    use caliban_agent_core::{Hooks, SubagentCtx, SubagentOutcome};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingHooks {
+        events: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Hooks for CapturingHooks {
+        async fn subagent_start(&self, ctx: &SubagentCtx<'_>) -> caliban_agent_core::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", ctx.task_id));
+            Ok(())
+        }
+        async fn subagent_stop(
+            &self,
+            ctx: &SubagentCtx<'_>,
+            _outcome: &SubagentOutcome,
+        ) -> caliban_agent_core::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("stop:{}", ctx.task_id));
+            Ok(())
+        }
+    }
+
+    let mp = Arc::new(MockProvider::new());
+    mp.enqueue_stream(text_response("done"));
+    let tool = AgentTool::new(factory_from(mp), None);
+    let hooks = Arc::new(CapturingHooks::default());
+    let cx = ToolContext {
+        tool_use_id: "tx-99".into(),
+        cancel: CancellationToken::new(),
+        hooks: Some(hooks.clone() as Arc<dyn Hooks + Send + Sync>),
+        turn_index: 0,
+    };
+    let _ = tool
+        .invoke(serde_json::json!({ "prompt": "go" }), cx)
+        .await
+        .unwrap();
+    let evs = hooks.events.lock().unwrap();
+    assert!(
+        evs.iter().any(|e| e.starts_with("start:tx-99")),
+        "expected subagent_start; got {evs:?}"
+    );
+    assert!(
+        evs.iter().any(|e| e.starts_with("stop:tx-99")),
+        "expected subagent_stop; got {evs:?}"
+    );
+}
+
+#[tokio::test]
+async fn background_handoff_warns_when_inherit_hooks_true_and_hooks_present() {
+    use caliban_agent_core::{Hooks, NoopHooks};
+    use caliban_tools_builtin::{BackgroundSpawnResult, BackgroundSpawner};
+    let mp = Arc::new(MockProvider::new());
+    let spawner: BackgroundSpawner = Arc::new(|_input| BackgroundSpawnResult {
+        id: "abc".into(),
+        socket_path: std::path::PathBuf::from("/tmp/y.sock"),
+    });
+    let tool = AgentTool::new(factory_from(mp), None).with_background_spawner(spawner);
+    let cx = ToolContext {
+        tool_use_id: "tx".into(),
+        cancel: CancellationToken::new(),
+        hooks: Some(Arc::new(NoopHooks) as Arc<dyn Hooks + Send + Sync>),
+        turn_index: 0,
+    };
+    // Just exercises the code path that emits the warn!. The presence
+    // of the warning itself is observable in tracing; here we just
+    // confirm the spawn went through despite the warning.
+    let out = tool
+        .invoke(
+            serde_json::json!({ "prompt": "x", "background": true, "inherit_hooks": true }),
+            cx,
+        )
+        .await
+        .unwrap();
+    let ContentBlock::Text(t) = &out[0] else {
+        panic!()
+    };
+    assert!(t.text.contains("abc"));
+}
+
+#[tokio::test]
+async fn background_without_spawner_falls_back_to_foreground() {
+    let mp = Arc::new(MockProvider::new());
+    mp.enqueue_stream(text_response("foreground-OK"));
+    let tool = AgentTool::new(factory_from(mp), None);
+    let out = tool
+        .invoke(
+            serde_json::json!({ "prompt": "go", "background": true }),
+            ctx(),
+        )
+        .await
+        .unwrap();
+    let ContentBlock::Text(t) = &out[0] else {
+        panic!()
+    };
+    // Foreground path runs the mock and returns its text.
+    assert_eq!(t.text, "foreground-OK");
+}

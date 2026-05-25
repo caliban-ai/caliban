@@ -20,7 +20,10 @@ pub mod web_search;
 pub mod workspace;
 pub mod write;
 
-pub use agent_tool::{AgentFactory, AgentTool, AgentToolInput};
+pub use agent_tool::{
+    AgentFactory, AgentTool, AgentToolInput, BackgroundSpawnResult, BackgroundSpawner,
+    IsolationMode, WorktreeOptions,
+};
 pub use bash::BashTool;
 pub use bash_bg::{
     BashBgRegistry, BashJob, BashOutputTool, BashStatus, KillShellTool, RingBuffer, global_registry,
