@@ -190,7 +190,9 @@ pub(crate) struct HeadlessRunSummary {
     pub(crate) total_input_tokens: u32,
     /// Cumulative output tokens.
     pub(crate) total_output_tokens: u32,
-    /// Cumulative cost USD (placeholder until ADR 0033).
+    /// Cumulative cost USD; real now that ADR 0033 wired `caliban-telemetry`
+    /// pricing into `BudgetTracker`. Unknown (provider, model) pairs still
+    /// contribute `$0.00` with a debounced `tracing::warn!`.
     pub(crate) total_cost_usd: f64,
     /// Structured output payload (when `--json-schema` succeeded).
     pub(crate) structured_output: Option<serde_json::Value>,
@@ -441,7 +443,10 @@ impl<W: Write> HeadlessDriver<W> {
                 ..
             } => {
                 *turns += 1;
-                self.config.budget.record(&usage, 0.0);
+                let (provider, model) = split_model_summary(&self.config.model_summary);
+                self.config
+                    .budget
+                    .record_with_model(&usage, 0.0, provider, model);
                 if matches!(self.config.output_format, OutputFormat::StreamJson)
                     && !self.config.include_partial_messages
                 {
@@ -575,6 +580,13 @@ fn content_blocks_to_json(blocks: &[ContentBlock]) -> serde_json::Value {
         })
         .collect();
     serde_json::Value::Array(arr)
+}
+
+/// Split a `provider/model` summary into its parts. Falls back to empty
+/// strings if the format is unexpected (which short-circuits rate-card lookup
+/// in [`BudgetTracker::record_with_model`]).
+fn split_model_summary(summary: &str) -> (&str, &str) {
+    summary.split_once('/').unwrap_or((summary, ""))
 }
 
 fn extract_user_text(msg: &Message) -> String {

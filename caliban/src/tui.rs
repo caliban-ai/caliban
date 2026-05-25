@@ -21,6 +21,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "/sessions"),
     ("/save", "/save"),
     ("/usage", "/usage"),
+    ("/context", "/context"),
+    ("/compact", "/compact"),
     ("/memory", "/memory"),
     ("/output-style", "/output-style"),
     ("/plan", "/plan"),
@@ -315,6 +317,13 @@ pub(crate) struct App {
     /// `/mcp` overlay. Empty when `--no-mcp` is set or no servers are
     /// configured.
     pub(crate) mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
+    /// Live context-window tracker. Read by the status bar every frame to
+    /// render the `X% of N` segment; updated on every `TurnEnd` so the
+    /// percent reflects the latest history. Always present (works even with
+    /// `CALIBAN_ENABLE_TELEMETRY=0`).
+    pub(crate) context_window: Arc<caliban_telemetry::ContextWindow>,
+    /// Session-scoped cost ledger backing `/usage`. Always present.
+    pub(crate) cost_accumulator: Arc<caliban_telemetry::CostAccumulator>,
 }
 
 impl App {
@@ -361,6 +370,33 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        let context_window = Arc::new(caliban_telemetry::ContextWindow::new());
+        let cost_accumulator = Arc::new(
+            caliban_telemetry::CostAccumulator::with_embedded_card().unwrap_or_else(|e| {
+                tracing::error!(
+                    target: "caliban::cost",
+                    error = %e,
+                    "failed to parse embedded rates.yaml; pricing disabled"
+                );
+                caliban_telemetry::CostAccumulator::new(caliban_telemetry::RateCard::from_file(
+                    caliban_telemetry::RateCardFile {
+                        version: 1,
+                        providers: std::collections::BTreeMap::new(),
+                    },
+                ))
+            }),
+        );
+        // Initialize capacity from the provider's capabilities for the
+        // configured model so the status-bar segment shows up immediately.
+        let model = args
+            .model
+            .clone()
+            .unwrap_or_else(|| crate::default_model_for(args.provider).to_string());
+        let caps = agent.provider().capabilities(&model);
+        context_window.set_capacity(caps.max_input_tokens);
+        if !messages.is_empty() {
+            context_window.record_history(&messages);
+        }
         Self {
             agent,
             session,
@@ -382,6 +418,8 @@ impl App {
             todos,
             plan_mode,
             mcp_servers,
+            context_window,
+            cost_accumulator,
         }
     }
 
@@ -1262,8 +1300,14 @@ fn render_status(app: &App) -> Line<'static> {
         ""
     };
 
+    // Context-window utilization indicator. Hidden when capacity is zero
+    // (e.g. provider hasn't reported `Capabilities`).
+    let context_part = caliban_telemetry::format_status_segment(&app.context_window)
+        .map(|seg| format!(" \u{00B7} {seg}"))
+        .unwrap_or_default();
+
     let text = format!(
-        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{overlay_part}{running_part}"
+        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{overlay_part}{running_part}{context_part}"
     );
     Line::from(Span::styled(
         text,
@@ -1379,11 +1423,36 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
                 }
             }
         }
-        TurnEvent::TurnEnd { ttft, .. } => {
+        TurnEvent::TurnEnd {
+            ttft,
+            ref assistant_message,
+            usage,
+            ..
+        } => {
             if let Some(t) = ttft {
                 let millis = u64::try_from(t.as_millis()).unwrap_or(u64::MAX);
                 app.last_turn_ttft_ms = Some(millis);
             }
+            // Record cost against the rate card for this turn.
+            let provider = match app.args.provider {
+                crate::ProviderKind::Anthropic => "anthropic",
+                crate::ProviderKind::Openai => "openai",
+                crate::ProviderKind::Ollama => "ollama",
+                crate::ProviderKind::Google => "google",
+            };
+            let model = app
+                .args
+                .model
+                .clone()
+                .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+            app.cost_accumulator.record(provider, &model, &usage, None);
+            // Mirror the assistant message into context-window bookkeeping.
+            let snapshot = {
+                let mut v = app.messages.clone();
+                v.push(assistant_message.clone());
+                v
+            };
+            app.context_window.record_history(&snapshot);
             // Tool dispatch (sequential) and the next turn's provider call are
             // about to happen — show "waiting for model" until the next event.
             if let Some(running) = app.running.as_mut() {
@@ -1411,6 +1480,8 @@ fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
             });
             // Reset for the next run (a /clear + new prompt should start fresh).
             app.last_turn_ttft_ms = None;
+            // Refresh context-window bookkeeping with the run's final history.
+            app.context_window.record_history(&final_messages);
             // Update in-memory history (works for both ephemeral and session modes).
             app.messages.clone_from(&final_messages);
             // Persist to session if applicable (consumes final_messages).
@@ -1749,18 +1820,19 @@ fn handle_slash_command(line: &str, app: &mut App) {
                     .push(TranscriptLine::Info("no session to save".into()));
             }
         }
-        "/usage" => match app.session.as_ref() {
-            Some(s) => app.transcript.push(TranscriptLine::Info(format!(
-                "session {}: {} turns, {} input + {} output tokens",
-                s.name,
-                s.turn_count(),
-                s.total_usage.input_tokens,
-                s.total_usage.output_tokens,
-            ))),
-            None => app
-                .transcript
-                .push(TranscriptLine::Info("no session active".into())),
-        },
+        "/usage" => {
+            for line in render_usage_lines(app) {
+                app.transcript.push(TranscriptLine::Info(line));
+            }
+        }
+        "/context" => {
+            for line in render_context_lines(app) {
+                app.transcript.push(TranscriptLine::Info(line));
+            }
+        }
+        "/compact" => {
+            handle_compact_command(app);
+        }
         "/plan" => {
             use std::sync::atomic::Ordering;
             let now = !app.plan_mode.load(Ordering::Relaxed);
@@ -1813,6 +1885,151 @@ fn handle_slash_command(line: &str, app: &mut App) {
         unknown => {
             app.transcript.push(TranscriptLine::Info(format!(
                 "unknown command: {unknown} \u{2014} type /help"
+            )));
+        }
+    }
+}
+
+/// `/usage` overlay (ADR 0033): cumulative tokens + USD per model.
+///
+/// Returns a vector of plain-text lines for the transcript. The full
+/// bordered overlay arrives with the slash registry (ADR 0040); this stub
+/// renders the same data in-line.
+fn render_usage_lines(app: &App) -> Vec<String> {
+    let session_note = app.session.as_ref().map(|sess| {
+        format!(
+            "  session {} \u{2014} {} turns, {} input + {} output tokens",
+            sess.name,
+            sess.turn_count(),
+            sess.total_usage.input_tokens,
+            sess.total_usage.output_tokens,
+        )
+    });
+    let mut lines = format_usage_lines(&app.cost_accumulator);
+    if let Some(s) = session_note {
+        lines.push(s);
+    }
+    lines
+}
+
+/// Pure formatter for `/usage`. Split out so we can unit-test the rendering
+/// without constructing a full `App`.
+fn format_usage_lines(cost: &caliban_telemetry::CostAccumulator) -> Vec<String> {
+    let bd = cost.breakdown();
+    let mut lines = vec![format!(
+        "usage \u{2014} total ${:.4}",
+        rust_decimal::prelude::ToPrimitive::to_f64(&bd.total_usd).unwrap_or(0.0),
+    )];
+    if bd.by_model.is_empty() {
+        lines.push("  (no provider calls yet this session)".into());
+    } else {
+        lines.push("  by model:".into());
+        for mc in &bd.by_model {
+            let usd_f = rust_decimal::prelude::ToPrimitive::to_f64(&mc.usd).unwrap_or(0.0);
+            lines.push(format!(
+                "    {}/{}  in {}  out {}  cache_r {}  cache_w {}  ${:.4}",
+                mc.provider,
+                mc.model,
+                mc.input_tokens,
+                mc.output_tokens,
+                mc.cache_read_tokens,
+                mc.cache_creation_tokens,
+                usd_f,
+            ));
+        }
+    }
+    if bd.cache_savings_usd > rust_decimal::Decimal::ZERO {
+        let sav = rust_decimal::prelude::ToPrimitive::to_f64(&bd.cache_savings_usd).unwrap_or(0.0);
+        lines.push(format!("  cache savings vs no-cache: ${sav:.4}"));
+    }
+    lines
+}
+
+/// `/context` overlay (ADR 0033): per-message-kind token breakdown.
+fn render_context_lines(app: &App) -> Vec<String> {
+    format_context_lines(&app.context_window)
+}
+
+/// Pure formatter for `/context`. Split out so we can unit-test the rendering
+/// without constructing a full `App`.
+fn format_context_lines(window: &caliban_telemetry::ContextWindow) -> Vec<String> {
+    let bd = window.breakdown();
+    let pct = if bd.capacity == 0 {
+        0
+    } else {
+        // utilization_bp is 0..=10_000 (bp); convert to percent.
+        u32::from(window.utilization_bp()) / 100
+    };
+    let mut lines = Vec::new();
+    if bd.capacity == 0 {
+        lines.push(
+            "context window \u{2014} no capacity reported by provider (start a turn first)".into(),
+        );
+        return lines;
+    }
+    lines.push(format!(
+        "context window \u{2014} {}-token window, {pct}% used ({} of {})",
+        bd.capacity, bd.used, bd.capacity,
+    ));
+    let mut bins: Vec<_> = bd.bins.iter().filter(|b| b.tokens > 0).collect();
+    bins.sort_by_key(|b| std::cmp::Reverse(b.tokens));
+    for b in &bins {
+        lines.push(format!("  {:<18} {:>8}", b.kind.label(), b.tokens));
+    }
+    if bins.is_empty() {
+        lines.push("  (no messages yet)".into());
+    }
+    if pct >= 80 {
+        lines.push("  warning: \u{2265} 80% of context used \u{2014} consider /compact".into());
+    }
+    lines
+}
+
+/// `/compact` (ADR 0033): manually trigger the configured `Compactor`.
+///
+/// Reports the number of messages dropped/summarized + the post-compact
+/// token count. The full bordered overlay arrives with ADR 0040; this stub
+/// writes the result inline.
+fn handle_compact_command(app: &mut App) {
+    if app.messages.is_empty() {
+        app.transcript.push(TranscriptLine::Info(
+            "compact: no messages to compact".into(),
+        ));
+        return;
+    }
+    let model = app
+        .args
+        .model
+        .clone()
+        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+    let caps = app.agent.provider().capabilities(&model);
+    let before = caliban_agent_core::estimate_tokens(&app.messages);
+    let before_count = app.messages.len();
+    let compactor = app.agent.compactor();
+    let messages = app.messages.clone();
+    let result = futures::executor::block_on(compactor.compact(&messages, &caps));
+    match result {
+        Err(e) => app
+            .transcript
+            .push(TranscriptLine::Error(format!("compact failed: {e}"))),
+        Ok(None) => app.transcript.push(TranscriptLine::Info(format!(
+            "compact: no-op (strategy {} kept {before_count} messages, ~{before} tokens)",
+            compactor.strategy_name(),
+        ))),
+        Ok(Some(new)) => {
+            let after = caliban_agent_core::estimate_tokens(&new);
+            let after_count = new.len();
+            let dropped = before_count.saturating_sub(after_count);
+            app.messages.clone_from(&new);
+            if let Some(sess) = app.session.as_mut() {
+                sess.messages.clone_from(&new);
+            }
+            // Refresh context window from the post-compact history.
+            app.context_window.record_history(&new);
+            app.transcript.push(TranscriptLine::Info(format!(
+                "compact (strategy {}): {before_count} \u{2192} {after_count} messages \
+                 ({dropped} dropped/summarized), ~{before} \u{2192} ~{after} tokens",
+                compactor.strategy_name(),
             )));
         }
     }
@@ -2370,6 +2587,161 @@ mod tests {
         assert_eq!(
             format_cache_suffix(Some(42), Some(100)),
             " (42 cached, 100 write)"
+        );
+    }
+
+    // === ADR 0033 slash command + status-bar segment tests ===
+
+    fn usage_v(input: u32, output: u32) -> caliban_provider::Usage {
+        caliban_provider::Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+
+    #[test]
+    fn usage_lines_show_total_zero_without_calls() {
+        let cost = caliban_telemetry::CostAccumulator::with_embedded_card().unwrap();
+        let lines = format_usage_lines(&cost);
+        assert!(lines[0].contains("total $0.0000"));
+        assert!(
+            lines.iter().any(|l| l.contains("no provider calls")),
+            "empty ledger emits a friendly placeholder",
+        );
+    }
+
+    #[test]
+    fn usage_lines_show_per_model_breakdown_after_record() {
+        let cost = caliban_telemetry::CostAccumulator::with_embedded_card().unwrap();
+        cost.record(
+            "anthropic",
+            "claude-opus-4-7-20260423",
+            &usage_v(1_000_000, 0),
+            None,
+        );
+        let lines = format_usage_lines(&cost);
+        // Total = 1M × $15/M = $15.
+        assert!(
+            lines[0].contains("$15.0000"),
+            "total line was: {}",
+            lines[0]
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("claude-opus-4-7-20260423") && l.contains("$15.0000")),
+            "per-model row present",
+        );
+    }
+
+    #[test]
+    fn context_lines_show_capacity_message_when_unset() {
+        let w = caliban_telemetry::ContextWindow::new();
+        let lines = format_context_lines(&w);
+        assert!(
+            lines.iter().any(|l| l.contains("no capacity reported")),
+            "without set_capacity the helper surfaces a clear hint",
+        );
+    }
+
+    #[test]
+    fn context_lines_warn_at_80_percent() {
+        let w = caliban_telemetry::ContextWindow::new();
+        w.set_capacity(10_000);
+        // Add 8_000 tokens of summarized text → 80%.
+        w.add(caliban_telemetry::MessageKind::Summarized, 8_000);
+        let lines = format_context_lines(&w);
+        assert!(lines.iter().any(|l| l.contains("80%")));
+        assert!(
+            lines.iter().any(|l| l.contains("consider /compact")),
+            "warning fires at 80%",
+        );
+    }
+
+    #[test]
+    fn status_segment_formats_percent_of_capacity() {
+        let w = caliban_telemetry::ContextWindow::new();
+        w.set_capacity(200_000);
+        w.add(caliban_telemetry::MessageKind::UserText, 24_000);
+        // 12% utilization.
+        let seg = caliban_telemetry::format_status_segment(&w).expect("capacity is set");
+        assert_eq!(seg, "12% of 200K");
+    }
+
+    #[test]
+    fn noop_compactor_reports_no_op() {
+        // /compact must report a no-op cleanly when the strategy decides
+        // there's nothing to compact. Exercises the same Compactor path
+        // handle_compact_command consumes.
+        use caliban_agent_core::{Compactor as _, NoopCompactor};
+        let comp = NoopCompactor;
+        let caps = caliban_provider::Capabilities {
+            max_input_tokens: 200_000,
+            max_output_tokens: 8_192,
+            vision: false,
+            tool_use: caliban_provider::ToolUseCapability::Basic,
+            thinking: false,
+            prompt_caching: caliban_provider::PromptCachingCapability::None,
+            json_mode: false,
+            streaming: true,
+            stop_sequences: true,
+            top_k: false,
+            system_prompt: caliban_provider::SystemPromptCapability::SeparateField,
+            refusal_field: false,
+        };
+        let messages = vec![caliban_provider::Message::user_text("hello")];
+        let out = futures::executor::block_on(comp.compact(&messages, &caps)).unwrap();
+        assert!(out.is_none(), "noop returns None");
+        assert_eq!(comp.strategy_name(), "Noop");
+    }
+
+    #[test]
+    fn drop_oldest_compactor_reports_reduced_count() {
+        // Long history with DropOldestCompactor must drop messages until
+        // estimated tokens are below target.
+        use caliban_agent_core::{Compactor as _, DropOldestCompactor};
+        let comp = DropOldestCompactor {
+            target_fraction: 0.1,
+            keep_recent_turns: 1,
+        };
+        let caps = caliban_provider::Capabilities {
+            max_input_tokens: 1_000,
+            max_output_tokens: 256,
+            vision: false,
+            tool_use: caliban_provider::ToolUseCapability::Basic,
+            thinking: false,
+            prompt_caching: caliban_provider::PromptCachingCapability::None,
+            json_mode: false,
+            streaming: true,
+            stop_sequences: true,
+            top_k: false,
+            system_prompt: caliban_provider::SystemPromptCapability::SeparateField,
+            refusal_field: false,
+        };
+        // Build 10 user+assistant pairs of long text.
+        let body = "x".repeat(200);
+        let mut messages = Vec::new();
+        for _ in 0..10 {
+            messages.push(caliban_provider::Message::user_text(body.clone()));
+            messages.push(caliban_provider::Message {
+                role: caliban_provider::Role::Assistant,
+                content: vec![caliban_provider::ContentBlock::Text(
+                    caliban_provider::TextBlock {
+                        text: body.clone(),
+                        cache_control: None,
+                    },
+                )],
+            });
+        }
+        let before_count = messages.len();
+        let out = futures::executor::block_on(comp.compact(&messages, &caps)).unwrap();
+        let new = out.expect("must compact when over target");
+        assert!(
+            new.len() < before_count,
+            "compactor dropped messages: {before_count} → {}",
+            new.len(),
         );
     }
 

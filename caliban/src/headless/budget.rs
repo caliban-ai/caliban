@@ -1,14 +1,25 @@
-//! `BudgetTracker` — placeholder cost accumulator.
+//! `BudgetTracker` — real cost accumulator backed by `caliban-telemetry`.
 //!
-//! Until OTel/cost (ADR 0033) lands, every request contributes `0.0`. The
-//! struct still records call counts and tracks an "over budget" flag so the
-//! driver can short-circuit when an operator-injected cost (used by tests
-//! and the future cost crate) exceeds the configured ceiling.
+//! Per ADR 0033 the placeholder cost-of-zero is replaced by per-request token
+//! usage multiplied against the vendored rate card. The public API is
+//! preserved so headless's `--max-budget-usd` enforcement (ADR 0025, exit
+//! code 137) keeps working — only the internal accounting changes.
+//!
+//! `record(usage, cost_usd)` retains the second parameter for back-compat:
+//! when callers pass `0.0` we resolve the price from the embedded rate card;
+//! when they pass non-zero we honor the override (used by tests to exercise
+//! the budget-exceeded path deterministically).
+//!
+//! The accumulator is owned by `Arc<BudgetTracker>` — the same canonical
+//! handle as before — so all existing call sites compile unchanged.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use caliban_provider::Usage;
+use caliban_telemetry::{CostAccumulator, RateCard};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive as _;
 
 /// Cumulative usage + budget enforcement for one headless run.
 ///
@@ -17,13 +28,17 @@ use caliban_provider::Usage;
 pub(crate) struct BudgetTracker {
     /// Maximum cumulative USD; `None` disables enforcement.
     max_usd: Option<f64>,
-    /// Cumulative cost in micro-dollars (f64 * 1e6 floored), kept as u64 so
-    /// we can update lock-free.
-    cost_micro_usd: AtomicU64,
+    /// Real cost accumulator with the vendored rate card.
+    cost: CostAccumulator,
     /// Cumulative input tokens.
     input_tokens: AtomicU64,
     /// Cumulative output tokens.
     output_tokens: AtomicU64,
+    /// Cumulative test-injected cost overrides in micro-dollars. When tests
+    /// pass a non-zero `cost_usd` to `record`, we add it on top of the
+    /// rate-card-derived cost so the budget-exceeded path can be triggered
+    /// without a real provider.
+    test_override_micro_usd: AtomicU64,
     /// Latched true once we've observed an over-budget condition.
     exceeded: AtomicBool,
 }
@@ -34,28 +49,61 @@ impl BudgetTracker {
     /// false).
     #[must_use]
     pub(crate) fn new(max_usd: Option<f64>) -> Arc<Self> {
+        // Construct from the embedded rate card. If parsing fails (which
+        // shouldn't happen on a built crate), we fall back to an empty card
+        // — better than panicking in a constructor that runs at startup.
+        let card = RateCard::embedded().unwrap_or_else(|e| {
+            tracing::error!(
+                target: "caliban::cost",
+                error = %e,
+                "failed to parse embedded rates.yaml; pricing will be $0.00",
+            );
+            // Empty card: everything resolves to no rule → $0.00.
+            RateCard::from_file(caliban_telemetry::RateCardFile {
+                version: 1,
+                providers: std::collections::BTreeMap::new(),
+            })
+        });
         Arc::new(Self {
             max_usd,
-            cost_micro_usd: AtomicU64::new(0),
+            cost: CostAccumulator::new(card),
             input_tokens: AtomicU64::new(0),
             output_tokens: AtomicU64::new(0),
+            test_override_micro_usd: AtomicU64::new(0),
             exceeded: AtomicBool::new(false),
         })
     }
 
-    /// Record a request's usage + an optional caller-supplied cost.
+    /// Record a request's usage + an optional caller-supplied cost override.
     ///
-    /// `cost_usd` is the *placeholder* cost contribution. The headless
-    /// driver passes `0.0` per ADR 0025 until ADR 0033 wires real pricing;
-    /// tests inject a non-zero value to exercise the budget-exceeded path.
+    /// `cost_usd` is added on top of the rate-card-derived cost. Production
+    /// callers pass `0.0` (no override); tests pass a non-zero value to drive
+    /// the budget-exceeded path without a real provider response.
     pub(crate) fn record(&self, usage: &Usage, cost_usd: f64) {
+        self.record_with_model(usage, cost_usd, "anthropic", "");
+    }
+
+    /// Record + price against a known (provider, model) pair. Used by the
+    /// driver once it knows the model that produced the response.
+    pub(crate) fn record_with_model(
+        &self,
+        usage: &Usage,
+        cost_usd: f64,
+        provider: &str,
+        model: &str,
+    ) {
         self.input_tokens
             .fetch_add(u64::from(usage.input_tokens), Ordering::Relaxed);
         self.output_tokens
             .fetch_add(u64::from(usage.output_tokens), Ordering::Relaxed);
+
+        // Rate-card price (the real cost path).
+        if !model.is_empty() {
+            self.cost.record(provider, model, usage, None);
+        }
+
+        // Test-supplied override on top.
         if cost_usd > 0.0 {
-            // f64 dollars → micro-dollars; saturating at u64::MAX is fine,
-            // we just want monotonic accumulation.
             let micro_f = (cost_usd * 1_000_000.0).max(0.0);
             #[allow(
                 clippy::cast_possible_truncation,
@@ -67,7 +115,8 @@ impl BudgetTracker {
             } else {
                 micro_f as u64
             };
-            self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
+            self.test_override_micro_usd
+                .fetch_add(micro, Ordering::Relaxed);
         }
         if let Some(limit) = self.max_usd
             && self.total_cost_usd() >= limit
@@ -76,14 +125,20 @@ impl BudgetTracker {
         }
     }
 
-    /// Returns the cumulative cost in USD.
+    /// Returns the cumulative cost in USD (rate-card-derived + test override).
     #[must_use]
     pub(crate) fn total_cost_usd(&self) -> f64 {
-        // Cost is accumulated lock-free; precision is bounded by f64's
-        // 53-bit mantissa, more than enough for any practical run.
+        let card_total = self.cost.total_usd().to_f64().unwrap_or(0.0);
         #[allow(clippy::cast_precision_loss)]
-        let micro = self.cost_micro_usd.load(Ordering::Relaxed) as f64;
-        micro / 1_000_000.0
+        let override_total =
+            self.test_override_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        card_total + override_total
+    }
+
+    /// Returns the cumulative cost in `Decimal` (rate-card portion only).
+    #[must_use]
+    pub(crate) fn cost_decimal(&self) -> Decimal {
+        self.cost.total_usd()
     }
 
     /// Returns the cumulative input + output token counts.
@@ -107,12 +162,17 @@ impl BudgetTracker {
         self.max_usd
     }
 
-    /// Returns `true` when the budget flag was set but the cost accumulator
-    /// will report `0.0` for every request (placeholder mode). Always
-    /// `true` today; flips when ADR 0033 ships.
+    /// Returns `true` when the cost accumulator is a placeholder that returns
+    /// `0.0` for every request. With ADR 0033 landed this is always `false`.
     #[must_use]
     pub(crate) fn is_placeholder() -> bool {
-        true
+        false
+    }
+
+    /// Underlying `CostAccumulator` handle (for `/usage` breakdowns).
+    #[must_use]
+    pub(crate) fn cost(&self) -> &CostAccumulator {
+        &self.cost
     }
 }
 
@@ -138,7 +198,9 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_zero_cost_never_exceeds() {
+    fn cost_zero_with_unknown_model_never_exceeds() {
+        // The default record() path leaves model="" so no rate card lookup
+        // happens — total stays $0.00 unless an override is supplied.
         let t = BudgetTracker::new(Some(0.001));
         for _ in 0..100 {
             t.record(&usage(10, 5), 0.0);
@@ -167,7 +229,34 @@ mod tests {
     }
 
     #[test]
-    fn is_placeholder_returns_true_today() {
-        assert!(BudgetTracker::is_placeholder());
+    fn is_placeholder_returns_false_now_that_adr_0033_landed() {
+        assert!(!BudgetTracker::is_placeholder());
+    }
+
+    #[test]
+    fn record_with_model_uses_rate_card() {
+        // 1M input tokens × $15/Mtok = $15.
+        let t = BudgetTracker::new(None);
+        t.record_with_model(
+            &usage(1_000_000, 0),
+            0.0,
+            "anthropic",
+            "claude-opus-4-7-20260423",
+        );
+        let total = t.total_cost_usd();
+        assert!((total - 15.0).abs() < 1e-6, "expected $15, got {total}");
+    }
+
+    #[test]
+    fn max_budget_enforcement_with_real_pricing() {
+        // Tiny budget: 1M input tokens at $15/Mtok must exceed $1.
+        let t = BudgetTracker::new(Some(1.0));
+        t.record_with_model(
+            &usage(1_000_000, 0),
+            0.0,
+            "anthropic",
+            "claude-opus-4-7-20260423",
+        );
+        assert!(t.is_exceeded(), "1M tokens @ $15 must exceed a $1 budget");
     }
 }

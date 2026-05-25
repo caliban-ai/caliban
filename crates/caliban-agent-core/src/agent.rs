@@ -137,6 +137,22 @@ impl Agent {
     pub fn hooks(&self) -> Arc<dyn Hooks + Send + Sync> {
         Arc::clone(&self.hooks)
     }
+
+    /// Return a clone of the agent's provider handle. Used by the TUI to
+    /// resolve `Capabilities::max_input_tokens` for the context-window
+    /// indicator (ADR 0033) without re-instantiating a provider client.
+    #[must_use]
+    pub fn provider(&self) -> Arc<dyn Provider + Send + Sync> {
+        Arc::clone(&self.provider)
+    }
+
+    /// Return a clone of the agent's compactor handle. Used by the TUI's
+    /// `/compact` slash command (ADR 0033) to manually trigger the
+    /// configured compaction strategy.
+    #[must_use]
+    pub fn compactor(&self) -> Arc<dyn crate::compact::Compactor + Send + Sync> {
+        Arc::clone(&self.compactor)
+    }
 }
 
 /// Fluent builder for [`Agent`].

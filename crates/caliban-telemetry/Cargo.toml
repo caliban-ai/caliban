@@ -1,0 +1,43 @@
+[package]
+name        = "caliban-telemetry"
+version     = "0.0.0"
+description = "OTLP export + cost accounting + context-window tracker for caliban (ADR 0033)"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+caliban-provider = { path = "../caliban-provider" }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+serde_yaml       = "0.9"
+rust_decimal     = { version = "1", default-features = false, features = ["serde-str"] }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+uuid             = { workspace = true }
+sha2             = "0.10"
+chrono           = { workspace = true }
+tokio            = { workspace = true }
+whoami           = "1"
+
+# Optional: real OTLP exporter wiring. Off by default so a stock `cargo build
+# --workspace` works without pulling tonic/h2/etc. The `Telemetry` facade still
+# exists when the feature is off — it just routes to a no-op exporter.
+opentelemetry         = { version = "0.27", optional = true, features = ["metrics", "logs", "trace"] }
+opentelemetry_sdk     = { version = "0.27", optional = true, features = ["rt-tokio", "metrics", "logs"] }
+opentelemetry-otlp    = { version = "0.27", optional = true, features = ["http-proto", "metrics", "logs"] }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+[features]
+default = []
+otlp    = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock  = { workspace = true }
+
+[lints]
+workspace = true
