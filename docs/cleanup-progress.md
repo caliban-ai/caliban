@@ -16,7 +16,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T1-A | 1 | `caliban-common` foundation crate | **−305** (544 deleted / 239 added at consumer sites) | +629 (new `caliban-common` module is ~934 LOC incl. ~350 LOC of tests) | 7 / 8 (env-expand ×2; atomic-write ×5; sanitize_cwd ×2; walk_up ×2; matches_glob+first_arg ×1; tracing targets 61/88 sites; XDG paths consolidated into helpers awaiting next consumers — sessions/supervisor/oauth) | +34 net new (39 new in `caliban-common`; carried-over tests removed from `agent-core`/`memory`) | n/a | n/a |
 | PR-T1-B | 1 | Shared `reqwest::Client` factory | **+12** (30 added / 18 deleted at consumer sites) | +158 (new `caliban-common::http` is ~146 LOC incl. ~52 LOC of tests) | 9 / 9 (7 provider transports + vertex `list_client` + `web_fetch_client`) | +6 net new (all in `caliban-common::http`) | n/a | n/a |
 | PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | **+101** (4071 lines across 5 files / 3970 original; tests stay at root) | n/a | n/a (file split, no dup consolidation) | 0 net (existing tests unmoved) | n/a | n/a |
-| PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | — | — | — | — | — |
+| PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | **+298** (2142 total / 1844 before; pure file split — no consumer-site delta) | n/a (no new crate) | n/a (split, no dup consolidation) | +0 (no new tests) | n/a | n/a |
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | **+52** (4 files, 1271 LOC total vs. 1219 single-file) | — | — | ±0 (3 turn-timing tests carried over) | n/a | n/a |
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | — | — | — | — | — |
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | — | — | — | — | — |
@@ -111,6 +111,56 @@ Baselines (TBD — captured by PR-T4-0):
 - Public API surface unchanged. Consumers continue to import from
   `caliban_agent_core::stream::...`; the re-exports from
   `caliban-agent-core/src/lib.rs` need no edits.
+
+## PR-T2-B notes
+
+- Original `caliban/src/main.rs` was 1836 LOC, mixing clap parsing,
+  startup orchestration, and subcommand dispatch.
+- Carved into four siblings:
+  - `args.rs` (452 LOC) — `Args` struct + `CalibanCommand`/`AgentsCommand`/
+    `DaemonCommand`/`RouterCommand` enums + `ProviderKind` + CLI helpers
+    (`read_prompt`, `summarize`, `summarize_blocks`, `default_model_for`,
+    `provider_name`).
+  - `startup.rs` (1242 LOC) — every state-assembly helper:
+    `init_debug_tracing`, `build_provider`, `build_registry`,
+    `load_layered_settings`, `auto_memory_disabled`, `web_fetch_client`,
+    `load_plugin_manager`, `start_mcp`, `install_sub_agent`,
+    `load_hooks_config`, `build_permissions` (returning
+    `PermissionsSetup`), `build_agent`, `resolve_session`,
+    `resolve_system_prompt`, `fire_session_start` / `fire_session_end`,
+    `run_and_render`, `run_headless`, `run_single_prompt`.
+  - `subcommands.rs` (91 LOC) — top-level dispatchers: `run_plugin_cli`,
+    `run_router_debug`, `run_supervisor_command` (handles
+    `agents`/`daemon`/`attach`/`logs`/`stop`/`kill`/`respawn`/`rm`),
+    `run_bg_shortcut`.
+  - `main.rs` (357 LOC) — `#[tokio::main] async fn main()`: argv routing
+    (plugin proxy → router-debug → supervisor → `--bg`), debug tracing
+    init, then a linear pipeline of `startup::*` calls and the three
+    driver dispatches (headless / TUI / single-prompt).
+- The original CLI types remain reachable at `crate::Args`,
+  `crate::ProviderKind`, `crate::AgentsCommand`, etc. via a
+  `pub(crate) use crate::args::{…}` re-export in `main.rs` — keeps the
+  existing references from `tui.rs`, `agents_cli.rs`, and the
+  `headless`/`system_prompt` modules working without a global rename.
+- `tui::ask` was bumped from `mod` to `pub(crate) mod` so
+  `startup::build_permissions` can name `tui::ask::AskRequest` in the
+  return type of `PermissionsSetup`.
+- Pure file split — no semantic changes, no new tests. All 225
+  `caliban`-binary tests pass unchanged; full workspace
+  `cargo build/clippy/fmt/test` is clean (the lone occasional failure
+  in `caliban-memory` / `caliban-common` env-var tests under parallel
+  workspace `cargo test` is pre-existing flakiness unrelated to this
+  change — both crates pass cleanly in isolation).
+- `main.rs` is 357 LOC, modestly above the ~200-LOC brief target. The
+  remainder is the three driver dispatches (each takes 10–14 state
+  arguments) plus the `settings_sources_view` mapping for the TUI
+  driver — both stay inline because extracting them would only push
+  large tuples around without simplifying the code shape.
+- `startup.rs` ended up at 1242 LOC vs. the ~600-800 LOC brief
+  estimate. The extra weight is the `run_headless` driver (~270 LOC)
+  and `install_sub_agent` (~110 LOC); both are atomic units of work
+  whose internals weren't split further to keep the refactor purely
+  mechanical.
 
 ## PR-T1-B notes
 
