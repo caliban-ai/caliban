@@ -4,7 +4,6 @@
 //! edits. Atomic write via tmpfile + rename. Fires `FileChanged` after a
 //! successful write.
 
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -225,24 +224,12 @@ fn apply_action(notebook: &mut Value, input: &NotebookEditInput) -> Result<Strin
     }
 }
 
-/// Atomic write: write to `<path>.tmp` then rename to `<path>`. Returns the
+/// Atomic JSON write via [`caliban_common::fs::write_atomic`]. Returns the
 /// final byte count.
 fn atomic_write_json(path: &Path, value: &Value) -> Result<usize, ToolError> {
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| ToolError::execution(std::io::Error::other(format!("serialize: {e}"))))?;
-    let parent = path.parent().ok_or_else(|| {
-        ToolError::execution(std::io::Error::other("notebook path has no parent"))
-    })?;
-    // tempfile in the same directory so rename(2) is atomic on POSIX.
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(ToolError::execution)?;
-    tmp.write_all(&body).map_err(ToolError::execution)?;
-    tmp.flush().map_err(ToolError::execution)?;
-    tmp.persist(path).map_err(|e| {
-        ToolError::execution(std::io::Error::other(format!(
-            "atomic rename failed: {}",
-            e.error
-        )))
-    })?;
+    caliban_common::fs::write_atomic(path, &body).map_err(ToolError::execution)?;
     Ok(body.len())
 }
 

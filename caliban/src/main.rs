@@ -912,7 +912,7 @@ async fn run_headless(
             model: &model,
         };
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
-            tracing::warn!(target: "caliban::hooks", error = %e, "session_start hook error (non-fatal)");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
         }
         // Flush any hook frames the sink captured before the run begins.
         let _ = driver.emit_init();
@@ -941,7 +941,7 @@ async fn run_headless(
             model: &model,
         };
         if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome_ctx).await {
-            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_end hook error (non-fatal)");
         }
         let _ = driver.flush_hook_events();
     }
@@ -958,7 +958,7 @@ async fn run_headless(
             .clone_from(&*todos.lock().expect("todos lock poisoned"));
         s.plan_mode = plan_mode.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = store.save(&s) {
-            tracing::warn!(target: "caliban::sessions", error = %e, "session save failed");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SESSIONS, error = %e, "session save failed");
         }
     }
 
@@ -1109,7 +1109,7 @@ async fn main() -> Result<()> {
     let settings_outcome = match load_layered_settings(&args, workspace.root()) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!(target: "caliban::settings", error = %e, "settings load failed; continuing with empty settings");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, error = %e, "settings load failed; continuing with empty settings");
             caliban_settings::LoadOutcome {
                 settings: caliban_settings::Settings::default(),
                 sources: Vec::new(),
@@ -1118,7 +1118,7 @@ async fn main() -> Result<()> {
         }
     };
     for w in &settings_outcome.validation_warnings {
-        tracing::warn!(target: "caliban::settings", warning = %w, "settings schema validation");
+        tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, warning = %w, "settings schema validation");
     }
     let settings_handle = caliban_settings::SettingsHandle::new(settings_outcome.settings.clone());
     let _settings_sources = settings_outcome.sources.clone();
@@ -1129,7 +1129,7 @@ async fn main() -> Result<()> {
     if settings_snapshot.enable_telemetry == Some(true)
         && std::env::var("CALIBAN_ENABLE_TELEMETRY").is_err()
     {
-        tracing::info!(target: "caliban::settings", "telemetry enabled via settings.json");
+        tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "telemetry enabled via settings.json");
     }
 
     // Router v2: try caliban.toml first (--config flag or discovery), fall
@@ -1140,7 +1140,7 @@ async fn main() -> Result<()> {
         match router::try_load(args.config_path.as_deref(), &cwd_for_router)? {
             Some(wiring) => {
                 tracing::info!(
-                    target: "caliban::router",
+                    target: caliban_common::tracing_targets::TARGET_ROUTER,
                     path = %wiring.config_path.display(),
                     routes = wiring.router.routes().len(),
                     "model router wired from caliban.toml",
@@ -1184,14 +1184,14 @@ async fn main() -> Result<()> {
             Ok(mgr) => {
                 if !mgr.loaded().is_empty() {
                     tracing::info!(
-                        target: "caliban::plugins",
+                        target: caliban_common::tracing_targets::TARGET_PLUGINS,
                         count = mgr.loaded().len(),
                         "loaded plugins",
                     );
                 }
                 for f in mgr.failures() {
                     tracing::warn!(
-                        target: "caliban::plugins",
+                        target: caliban_common::tracing_targets::TARGET_PLUGINS,
                         path = %f.root_dir.display(),
                         error = %f.error,
                         "plugin failed to load",
@@ -1200,7 +1200,7 @@ async fn main() -> Result<()> {
                 mgr
             }
             Err(e) => {
-                tracing::warn!(target: "caliban::plugins", error = %e, "plugin discovery failed; continuing without plugins");
+                tracing::warn!(target: caliban_common::tracing_targets::TARGET_PLUGINS, error = %e, "plugin discovery failed; continuing without plugins");
                 caliban_plugins::PluginManager::default()
             }
         }
@@ -1240,7 +1240,7 @@ async fn main() -> Result<()> {
                             || mgr.failed_count() > 0
                         {
                             tracing::info!(
-                                target: "caliban::mcp",
+                                target: caliban_common::tracing_targets::TARGET_MCP,
                                 connected = mgr.enabled_count(),
                                 failed = mgr.failed_count(),
                                 disabled = mgr.skipped_disabled(),
@@ -1250,13 +1250,13 @@ async fn main() -> Result<()> {
                         (mgr.summaries().to_vec(), servers_for_perms)
                     }
                     Err(e) => {
-                        tracing::warn!(target: "caliban::mcp", error = %e, "mcp manager start failed; continuing without MCP");
+                        tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp manager start failed; continuing without MCP");
                         (Vec::new(), servers_for_perms)
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!(target: "caliban::mcp", error = %e, "mcp config load failed; continuing without MCP");
+                tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp config load failed; continuing without MCP");
                 (Vec::new(), std::collections::BTreeMap::new())
             }
         }
@@ -1369,7 +1369,7 @@ async fn main() -> Result<()> {
         match caliban_agent_core::HooksConfig::load(&workspace_root_for_hooks) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(target: "caliban::hooks", error = %e, "hooks.toml load failed; continuing with empty hooks config");
+                tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "hooks.toml load failed; continuing with empty hooks config");
                 caliban_agent_core::HooksConfig::default()
             }
         }
@@ -1547,7 +1547,7 @@ async fn main() -> Result<()> {
             model: &model,
         };
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
-            tracing::warn!(target: "caliban::hooks", error = %e, "session_start hook error (non-fatal)");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
         }
         let _ = hooks_cfg_summary; // silence unused when not later consumed
     }
@@ -1642,7 +1642,7 @@ async fn main() -> Result<()> {
             match caliban_memory::load(&cfg).await {
                 Ok(prefix) => prefix.splice_into(&with_style),
                 Err(e) => {
-                    tracing::warn!(target: "caliban::memory", error = %e, "memory load failed; using default prompt without memory");
+                    tracing::warn!(target: caliban_common::tracing_targets::TARGET_MEMORY, error = %e, "memory load failed; using default prompt without memory");
                     with_style
                 }
             }
@@ -1806,7 +1806,7 @@ async fn main() -> Result<()> {
             output_tokens: total_usage.output_tokens,
         };
         if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome).await {
-            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_end hook error (non-fatal)");
         }
     }
 

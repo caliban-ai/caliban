@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish     = false
 
 [dependencies]
+caliban-common     = { path = "../caliban-common" }
 caliban-agent-core = { path = "../caliban-agent-core" }
 caliban-provider   = { path = "../caliban-provider" }
 async-trait        = { workspace = true }

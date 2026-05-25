@@ -54,7 +54,7 @@ impl BudgetTracker {
         // — better than panicking in a constructor that runs at startup.
         let card = RateCard::embedded().unwrap_or_else(|e| {
             tracing::error!(
-                target: "caliban::cost",
+                target: caliban_common::tracing_targets::TARGET_COST,
                 error = %e,
                 "failed to parse embedded rates.yaml; pricing will be $0.00",
             );

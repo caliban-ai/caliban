@@ -35,5 +35,7 @@ pub use project_imports::{
 };
 pub use project_walk::{ANCESTRY_FILENAMES, WalkStop, walk_ancestors};
 pub use rules::{Rule, RuleScope, RuleSet, scan_caliban_rules};
+#[allow(deprecated)]
 pub use sanitize::sanitize_workspace;
+#[allow(deprecated)]
 pub use walk::walk_up_for_file;

@@ -1064,7 +1064,7 @@ impl Agent {
 
                 let dispatch_elapsed = dispatch_started_at.elapsed();
                 tracing::info!(
-                    target: "caliban::tools",
+                    target: caliban_common::tracing_targets::TARGET_TOOLS,
                     turn = turn_index,
                     parallel_tools = self.parallel_tools,
                     parallel_tool_limit = self.parallel_tool_limit.get(),
@@ -1151,7 +1151,7 @@ impl Agent {
 
                 if let Some(t) = ttft {
                     tracing::info!(
-                        target: "caliban::timing",
+                        target: caliban_common::tracing_targets::TARGET_TIMING,
                         ttft_ms = u64::try_from(t.as_millis()).unwrap_or(u64::MAX),
                         tbt_ms = tbt.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
                         delta_count = timing.delta_count,
@@ -1164,7 +1164,7 @@ impl Agent {
                 let cache_creation = turn_usage.cache_creation_input_tokens.unwrap_or(0);
                 if cache_read > 0 || cache_creation > 0 {
                     tracing::info!(
-                        target: "caliban::cache",
+                        target: caliban_common::tracing_targets::TARGET_CACHE,
                         cache_read,
                         cache_creation,
                         turn = turn_index,

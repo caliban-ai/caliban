@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish     = false
 
 [dependencies]
+caliban-common     = { path = "../caliban-common" }
 caliban-agent-core = { path = "../caliban-agent-core" }
 serde       = { workspace = true }
 serde_yaml  = "0.9"

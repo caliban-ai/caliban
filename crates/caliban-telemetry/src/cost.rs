@@ -291,7 +291,7 @@ impl CostAccumulator {
             let key = (provider.to_string(), model.to_string());
             if inner.warned_unknown.insert(key.clone()) {
                 tracing::warn!(
-                    target: "caliban::cost",
+                    target: caliban_common::tracing_targets::TARGET_COST,
                     provider = provider,
                     model = model,
                     "no rate card entry; pricing as $0.00 (set CALIBAN_RATES_YAML to override)"

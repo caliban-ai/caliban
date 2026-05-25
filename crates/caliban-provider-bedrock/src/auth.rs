@@ -98,7 +98,7 @@ async fn refresh_loop(interval: Duration, counter: Arc<AtomicU64>, cancel: Cance
             () = cancel.cancelled() => break,
             () = tokio::time::sleep(interval) => {
                 counter.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(target: "caliban::provider::bedrock", "aws credential refresh tick");
+                tracing::debug!(target: caliban_common::tracing_targets::TARGET_PROVIDER_BEDROCK, "aws credential refresh tick");
             }
         }
     }

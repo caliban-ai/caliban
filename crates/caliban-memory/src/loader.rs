@@ -381,7 +381,7 @@ fn enforce_budget(prefix: &mut MemoryPrefix, max_tokens: usize) {
         && let Some(g) = prefix.global.as_ref()
     {
         tracing::warn!(
-            target: "caliban::memory",
+            target: caliban_common::tracing_targets::TARGET_MEMORY,
             path = %g.path.display(),
             estimated_tokens = g.estimated_tokens,
             cap = max_tokens,

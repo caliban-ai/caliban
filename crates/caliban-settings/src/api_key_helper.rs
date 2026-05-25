@@ -128,7 +128,7 @@ impl ApiKeyHelperPool {
         );
         if outcome.slow {
             tracing::warn!(
-                target: "caliban::settings",
+                target: caliban_common::tracing_targets::TARGET_SETTINGS,
                 provider,
                 elapsed_ms = outcome.elapsed.as_millis(),
                 "api_key_helper exceeded slow-warning threshold",

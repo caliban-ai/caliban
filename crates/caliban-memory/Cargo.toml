@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish     = false
 
 [dependencies]
+caliban-common = { path = "../caliban-common" }
 tokio       = { workspace = true, features = ["fs", "io-util"] }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }

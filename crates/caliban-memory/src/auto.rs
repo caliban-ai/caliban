@@ -163,7 +163,7 @@ impl TopicLoader {
                 Ok(mut summary) => {
                     if summary.name != stem {
                         tracing::warn!(
-                            target: "caliban::memory::auto",
+                            target: caliban_common::tracing_targets::TARGET_MEMORY_AUTO,
                             path = %path.display(),
                             frontmatter_name = %summary.name,
                             file_stem = %stem,
@@ -175,7 +175,7 @@ impl TopicLoader {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        target: "caliban::memory::auto",
+                        target: caliban_common::tracing_targets::TARGET_MEMORY_AUTO,
                         path = %path.display(),
                         error = %e,
                         "skipping malformed topic file",
@@ -246,16 +246,12 @@ impl TopicLoader {
         })?;
 
         let path = self.dir.join(format!("{}.md", draft.name));
-        let tmp = self.dir.join(format!("{}.md.tmp", draft.name));
-
         let serialized = render_topic_file(draft);
-        std::fs::write(&tmp, serialized.as_bytes()).map_err(|source| MemoryError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, &path).map_err(|source| MemoryError::Io {
-            path: path.clone(),
-            source,
+        caliban_common::fs::write_atomic(&path, serialized.as_bytes()).map_err(|source| {
+            MemoryError::Io {
+                path: path.clone(),
+                source,
+            }
         })?;
 
         update_index_line(&self.dir, draft)?;
@@ -462,14 +458,11 @@ fn update_index_line(dir: &Path, draft: &TopicDraft) -> Result<()> {
     );
 
     let new_body = rewrite_with_index_line(&existing, &draft.name, &new_line);
-    let tmp = dir.join("MEMORY.md.tmp");
-    std::fs::write(&tmp, new_body.as_bytes()).map_err(|source| MemoryError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, &index_path).map_err(|source| MemoryError::Io {
-        path: index_path.clone(),
-        source,
+    caliban_common::fs::write_atomic(&index_path, new_body.as_bytes()).map_err(|source| {
+        MemoryError::Io {
+            path: index_path.clone(),
+            source,
+        }
     })?;
     Ok(())
 }
@@ -493,14 +486,11 @@ fn remove_index_line(dir: &Path, slug: &str) -> Result<()> {
     if existing.ends_with('\n') && !new_body.ends_with('\n') {
         new_body.push('\n');
     }
-    let tmp = dir.join("MEMORY.md.tmp");
-    std::fs::write(&tmp, new_body.as_bytes()).map_err(|source| MemoryError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, &index_path).map_err(|source| MemoryError::Io {
-        path: index_path.clone(),
-        source,
+    caliban_common::fs::write_atomic(&index_path, new_body.as_bytes()).map_err(|source| {
+        MemoryError::Io {
+            path: index_path.clone(),
+            source,
+        }
     })?;
     Ok(())
 }

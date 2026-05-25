@@ -213,7 +213,7 @@ impl Conn {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::warn!(
-                        target: "caliban::mcp::stderr",
+                        target: caliban_common::tracing_targets::TARGET_MCP_STDERR,
                         server = %server_for_log,
                         "{line}",
                     );

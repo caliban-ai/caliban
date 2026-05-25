@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
+use caliban_common::paths::sanitize_cwd_for_path;
+
 use crate::project_walk::WalkStop;
-use crate::sanitize::sanitize_workspace;
 
 const DEFAULT_BUDGET_TOKENS: usize = 8_000;
 
@@ -81,7 +82,7 @@ impl MemoryConfig {
             let auto_memory_root = std::env::var_os("CALIBAN_MEMORY_DIR")
                 .map(PathBuf::from)
                 .or_else(|| data_home.map(|d| d.join("caliban").join("projects")));
-            let slug = sanitize_workspace(workspace_root);
+            let slug = sanitize_cwd_for_path(workspace_root);
             auto_memory_root
                 .unwrap_or_else(|| PathBuf::from("./.caliban/projects"))
                 .join(slug)
@@ -170,7 +171,7 @@ fn parse_exclude_patterns(raw: Option<&str>) -> GlobSet {
                 builder.add(g);
             }
             Err(e) => tracing::warn!(
-                target: "caliban::memory",
+                target: caliban_common::tracing_targets::TARGET_MEMORY,
                 pattern = %pat,
                 error = %e,
                 "skipping invalid claude_md_excludes pattern",
@@ -179,7 +180,7 @@ fn parse_exclude_patterns(raw: Option<&str>) -> GlobSet {
     }
     builder.build().unwrap_or_else(|e| {
         tracing::warn!(
-            target: "caliban::memory",
+            target: caliban_common::tracing_targets::TARGET_MEMORY,
             error = %e,
             "claude_md_excludes globset build failed; using empty matcher",
         );

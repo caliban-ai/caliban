@@ -137,7 +137,7 @@ impl Pipeline {
                 .map_err(|e| IngestError::EncodeFailed(e.to_string()))?;
             let new_mime = format_to_mime(out_format).to_string();
             tracing::warn!(
-                target: "caliban::images",
+                target: caliban_common::tracing_targets::TARGET_IMAGES,
                 orig_bytes = bytes.len(),
                 new_bytes = buf.len(),
                 orig_dims = ?(w, h),

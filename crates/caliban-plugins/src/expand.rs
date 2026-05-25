@@ -2,44 +2,54 @@
 //!
 //! Other `${VAR}` references are passed through unchanged — downstream
 //! loaders (MCP client, hooks) own their own env-var expansion rules.
+//!
+//! This module delegates the actual parsing to
+//! [`caliban_common::expand::expand_vars`] with the plugin-root binding
+//! pre-seeded and a pass-through missing-var policy so unrelated vars
+//! survive untouched.
 
 use std::path::Path;
 
+use caliban_common::expand::{ExpandContext, MissingPolicy, expand_vars};
+
 /// Recognized aliases for the plugin root variable.
 pub const PLUGIN_ROOT_VARS: &[&str] = &["CALIBAN_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"];
+
+fn plugin_ctx(plugin_root: &Path) -> ExpandContext {
+    let root = plugin_root.to_string_lossy().into_owned();
+    let mut ctx = ExpandContext {
+        // Plugins file expansion never accepts `:-default` syntax — preserve
+        // the original behavior of pass-through-as-literal for that case.
+        allow_default: false,
+        missing_policy: MissingPolicy::PassThrough,
+        ..Default::default()
+    };
+    for v in PLUGIN_ROOT_VARS {
+        ctx.set(*v, root.clone());
+    }
+    ctx
+}
 
 /// Replace every occurrence of `${CALIBAN_PLUGIN_ROOT}` and the
 /// `${CLAUDE_PLUGIN_ROOT}` alias in `s` with the plugin's absolute path.
 /// Other `${VAR}` references are passed through untouched.
 #[must_use]
 pub fn expand(s: &str, plugin_root: &Path) -> String {
-    let root_str = plugin_root.to_string_lossy();
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        if let Some(end) = after.find('}') {
-            let var = &after[..end];
-            if PLUGIN_ROOT_VARS.contains(&var) {
-                out.push_str(&root_str);
-            } else {
-                // Pass through the literal `${VAR}` for downstream expansion.
-                out.push_str("${");
-                out.push_str(var);
-                out.push('}');
-            }
-            rest = &after[end + 1..];
+    let ctx = plugin_ctx(plugin_root);
+    // The only error case is `UnclosedBrace`. Preserve historical behavior
+    // (copy the broken tail literally) by falling back to the input.
+    expand_vars(s, &ctx).unwrap_or_else(|_| {
+        // Emit everything up to the first `${` and then the broken tail
+        // literally — matches the previous hand-rolled impl.
+        let mut out = String::with_capacity(s.len());
+        if let Some(idx) = s.find("${") {
+            out.push_str(&s[..idx]);
+            out.push_str(&s[idx..]);
         } else {
-            // No closing brace — copy the rest literally and stop.
-            out.push_str("${");
-            out.push_str(after);
-            rest = "";
-            break;
+            out.push_str(s);
         }
-    }
-    out.push_str(rest);
-    out
+        out
+    })
 }
 
 /// In-place expand every string in a `serde_json::Value` tree (objects,

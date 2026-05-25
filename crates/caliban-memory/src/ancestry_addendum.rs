@@ -72,7 +72,7 @@ impl AncestryAddendum {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     Err(e) => {
                         tracing::warn!(
-                            target: "caliban::memory",
+                            target: caliban_common::tracing_targets::TARGET_MEMORY,
                             path = %candidate.display(),
                             error = %e,
                             "failed to read nested CLAUDE.md",

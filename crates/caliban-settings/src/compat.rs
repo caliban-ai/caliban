@@ -38,12 +38,12 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
                     },
                 );
             }
-            tracing::info!(target: "caliban::settings", "loaded legacy mcp.toml as fallback (compat)");
+            tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "loaded legacy mcp.toml as fallback (compat)");
             true
         }
         Ok(_) => false,
         Err(e) => {
-            tracing::warn!(target: "caliban::settings", error = %e, "mcp.toml legacy load failed");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, error = %e, "mcp.toml legacy load failed");
             false
         }
     }
@@ -71,12 +71,12 @@ pub fn maybe_load_legacy_permissions(settings: &mut Settings, workspace_root: &P
                 found_any = true;
             }
             if found_any {
-                tracing::info!(target: "caliban::settings", "loaded legacy permissions.toml as fallback (compat)");
+                tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "loaded legacy permissions.toml as fallback (compat)");
             }
             found_any
         }
         Err(e) => {
-            tracing::warn!(target: "caliban::settings", error = %e, "permissions.toml legacy load failed");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, error = %e, "permissions.toml legacy load failed");
             false
         }
     }
@@ -112,12 +112,12 @@ pub fn maybe_load_legacy_hooks(settings: &mut Settings, workspace_root: &Path) -
             settings
                 .http_hook_allowed_env_vars
                 .extend(cfg.http_hook_allowed_env_vars);
-            tracing::info!(target: "caliban::settings", "loaded legacy hooks.toml as fallback (compat)");
+            tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "loaded legacy hooks.toml as fallback (compat)");
             true
         }
         Ok(_) => false,
         Err(e) => {
-            tracing::warn!(target: "caliban::settings", error = %e, "hooks.toml legacy load failed");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, error = %e, "hooks.toml legacy load failed");
             false
         }
     }

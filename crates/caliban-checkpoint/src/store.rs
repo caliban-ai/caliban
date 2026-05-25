@@ -142,22 +142,11 @@ impl CheckpointStore {
     ///
     /// # Errors
     /// I/O or serialization errors.
-    ///
-    /// # Panics
-    /// Panics if [`Self::prompt_dir`] returns a path without a parent (the
-    /// caller guarantees this via [`Self::ensure_prompt_dir`] which is
-    /// always called above).
     pub fn save_manifest(&self, manifest: &Manifest) -> Result<()> {
         self.ensure_prompt_dir(manifest.prompt_index)?;
         let path = self.prompt_dir(manifest.prompt_index).join("manifest.json");
         let body = serde_json::to_vec_pretty(manifest)?;
-        let parent = path
-            .parent()
-            .expect("prompt dir guaranteed by ensure_prompt_dir");
-        let tmp = tempfile::NamedTempFile::new_in(parent)?;
-        std::fs::write(tmp.path(), &body)?;
-        tmp.persist(&path)
-            .map_err(|e| CheckpointError::Io(e.error))?;
+        caliban_common::fs::write_atomic(&path, &body).map_err(CheckpointError::Io)?;
         Ok(())
     }
 
@@ -202,23 +191,12 @@ impl CheckpointStore {
     ///
     /// # Errors
     /// I/O errors creating the parent directory or persisting the tempfile.
-    ///
-    /// # Panics
-    /// Panics if [`Self::blob_path`] returns a path without a parent (the
-    /// caller guarantees this by always going through [`Self::blobs_dir`]).
     pub fn write_blob(&self, prompt_index: u32, sha: &str, bytes: &[u8]) -> Result<bool> {
         let path = self.blob_path(prompt_index, sha);
         if path.exists() {
             return Ok(false);
         }
-        std::fs::create_dir_all(self.blobs_dir(prompt_index))?;
-        let parent = path
-            .parent()
-            .expect("blobs dir created above guarantees parent");
-        let tmp = tempfile::NamedTempFile::new_in(parent)?;
-        std::fs::write(tmp.path(), bytes)?;
-        tmp.persist(&path)
-            .map_err(|e| CheckpointError::Io(e.error))?;
+        caliban_common::fs::write_atomic(&path, bytes).map_err(CheckpointError::Io)?;
         Ok(true)
     }
 

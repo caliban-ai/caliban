@@ -6,12 +6,12 @@
 //! 3. Walk up from `start` to the nearest git root or `$HOME`.
 //! 4. `~/.config/caliban/caliban.toml`.
 //!
-//! The walk-up uses `caliban_memory::walk_up_for_file` so both CLAUDE.md
-//! (ADR 0018) and `caliban.toml` (ADR 0038) share one algorithm.
+//! The walk-up uses `caliban_common::paths::walk_up_for_file` so both
+//! CLAUDE.md (ADR 0018) and `caliban.toml` (ADR 0038) share one algorithm.
 
 use std::path::{Path, PathBuf};
 
-use caliban_memory::walk_up_for_file;
+use caliban_common::paths::walk_up_for_file;
 
 use crate::config::{CalibanConfig, parse_caliban_config};
 

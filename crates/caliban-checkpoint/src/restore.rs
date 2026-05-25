@@ -1,7 +1,6 @@
 //! Restore operations — overwrite the working tree from a manifest and/or
 //! truncate the conversation at the checkpoint's `last_message_id`.
 
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -123,50 +122,14 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
     Ok(outcome)
 }
 
-/// Atomic write: write to a tempfile in the same directory, set permissions,
-/// then rename.
+/// Atomic write delegating to [`caliban_common::fs::write_atomic_with_mode`].
 fn atomic_overwrite(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| CheckpointError::AtomicRestore {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| {
+    caliban_common::fs::write_atomic_with_mode(path, bytes, mode).map_err(|source| {
         CheckpointError::AtomicRestore {
             path: path.to_path_buf(),
             source,
         }
-    })?;
-    tmp.write_all(bytes)
-        .map_err(|source| CheckpointError::AtomicRestore {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    tmp.flush()
-        .map_err(|source| CheckpointError::AtomicRestore {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let _ = mode; // unused on non-Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(mode);
-        std::fs::set_permissions(tmp.path(), perms).map_err(|source| {
-            CheckpointError::AtomicRestore {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-    tmp.persist(path)
-        .map_err(|e| CheckpointError::AtomicRestore {
-            path: path.to_path_buf(),
-            source: e.error,
-        })?;
-    Ok(())
+    })
 }
 
 /// Truncate `session.messages` so the last surviving message matches the

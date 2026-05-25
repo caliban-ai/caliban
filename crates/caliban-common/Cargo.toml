@@ -1,0 +1,21 @@
+[package]
+name        = "caliban-common"
+version     = "0.0.0"
+description = "Cross-crate plumbing (paths, env-var expansion, atomic writes, globs, tracing targets) for caliban"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+rust-version.workspace = true
+publish     = false
+
+[dependencies]
+dirs       = { workspace = true }
+tempfile   = { workspace = true }
+thiserror  = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -466,7 +466,7 @@ fn expand_manual_oauth(
 }
 
 // ---------------------------------------------------------------------------
-// Env-var expansion
+// Env-var expansion (delegates to `caliban_common::expand`)
 // ---------------------------------------------------------------------------
 
 /// Expand `${VAR}`, `${VAR:-default}`, and `${CLAUDE_PROJECT_DIR}` references
@@ -480,51 +480,27 @@ fn expand_value(
     raw: &str,
     workspace_root: &Path,
 ) -> Result<String, McpError> {
-    let project_dir = workspace_root.to_string_lossy().into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-            // Find matching `}`.
-            let start = i + 2;
-            let Some(end_off) = bytes[start..].iter().position(|&b| b == b'}') else {
-                // No closing brace — emit literal and stop trying to expand.
-                out.push_str(&raw[i..]);
-                return Ok(out);
-            };
-            let inner = &raw[start..start + end_off];
-            let (var, default) = match inner.split_once(":-") {
-                Some((v, d)) => (v, Some(d)),
-                None => (inner, None),
-            };
-            let resolved = if var == "CLAUDE_PROJECT_DIR" {
-                Some(project_dir.clone())
-            } else {
-                std::env::var(var).ok()
-            };
-            let value = match (resolved, default) {
-                (Some(v), _) => v,
-                (None, Some(d)) => d.to_string(),
-                (None, None) => {
-                    return Err(McpError::MissingEnvField {
-                        server: server.to_string(),
-                        field: field.to_string(),
-                        var: var.to_string(),
-                    });
-                }
-            };
-            out.push_str(&value);
-            i = start + end_off + 1;
-        } else {
-            // Push the byte. Safe because we're walking a valid UTF-8 string;
-            // multi-byte sequences don't contain `$` or `{` as their leading
-            // byte by UTF-8 invariants.
-            out.push(raw.as_bytes()[i] as char);
-            i += 1;
-        }
-    }
-    Ok(out)
+    let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
+    ctx.set(
+        "CLAUDE_PROJECT_DIR",
+        workspace_root.to_string_lossy().into_owned(),
+    );
+    caliban_common::expand::expand_vars(raw, &ctx).map_err(|e| match e {
+        caliban_common::expand::ExpandError::MissingVar { name } => McpError::MissingEnvField {
+            server: server.to_string(),
+            field: field.to_string(),
+            var: name,
+        },
+        // Unclosed brace and invalid syntax both surface as missing-var with
+        // a synthetic name — kept under one McpError variant to avoid
+        // churning the error enum in this PR.
+        caliban_common::expand::ExpandError::UnclosedBrace { .. }
+        | caliban_common::expand::ExpandError::InvalidSyntax { .. } => McpError::MissingEnvField {
+            server: server.to_string(),
+            field: field.to_string(),
+            var: "<expansion-error>".to_string(),
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------

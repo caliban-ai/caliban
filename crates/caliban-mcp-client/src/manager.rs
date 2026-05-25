@@ -120,7 +120,7 @@ impl McpClientManager {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
-                        target: "caliban::mcp",
+                        target: caliban_common::tracing_targets::TARGET_MCP,
                         server = %name,
                         error = %e,
                         "mcp server config invalid; skipping",
@@ -158,7 +158,7 @@ impl McpClientManager {
                                 transport: transport_label,
                             });
                             tracing::info!(
-                                target: "caliban::mcp",
+                                target: caliban_common::tracing_targets::TARGET_MCP,
                                 server = %name,
                                 transport = transport_label,
                                 tools = count,
@@ -168,7 +168,7 @@ impl McpClientManager {
                         Err(e) => {
                             let reason = format!("list_tools failed: {e}");
                             tracing::warn!(
-                                target: "caliban::mcp",
+                                target: caliban_common::tracing_targets::TARGET_MCP,
                                 server = %name,
                                 error = %e,
                                 "mcp server list_tools failed; skipping",
@@ -186,7 +186,7 @@ impl McpClientManager {
                 Err(e) => {
                     let reason = e.to_string();
                     tracing::warn!(
-                        target: "caliban::mcp",
+                        target: caliban_common::tracing_targets::TARGET_MCP,
                         server = %name,
                         error = %e,
                         "mcp server failed to start; skipping",
@@ -263,7 +263,7 @@ impl McpClientManager {
             // instances may still hold an Arc<Conn>. Either way, dropping the
             // service triggers its DropGuard which cancels the inner loop and
             // kills the child via TokioChildProcess's Drop impl.
-            tracing::debug!(target: "caliban::mcp", server = %name, "shutting down");
+            tracing::debug!(target: caliban_common::tracing_targets::TARGET_MCP, server = %name, "shutting down");
             // Try to fall through to explicit cancel if we hold the only Arc.
             if let Ok(conn) = Arc::try_unwrap(conn) {
                 let _ = conn.service.cancel().await;

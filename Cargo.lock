@@ -824,6 +824,7 @@ dependencies = [
  "async-trait",
  "caliban-agent-core",
  "caliban-checkpoint",
+ "caliban-common",
  "caliban-images",
  "caliban-mcp-client",
  "caliban-memory",
@@ -874,6 +875,7 @@ dependencies = [
  "arc-swap",
  "async-stream",
  "async-trait",
+ "caliban-common",
  "caliban-provider",
  "dirs",
  "futures",
@@ -898,6 +900,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "caliban-agent-core",
+ "caliban-common",
  "caliban-provider",
  "caliban-sessions",
  "chrono",
@@ -915,8 +918,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "caliban-core"
+name = "caliban-common"
 version = "0.0.0"
+dependencies = [
+ "dirs",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "caliban-images"
@@ -924,6 +933,7 @@ version = "0.0.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "caliban-common",
  "caliban-provider",
  "image",
  "infer",
@@ -942,6 +952,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "caliban-agent-core",
+ "caliban-common",
  "caliban-provider",
  "chrono",
  "dirs",
@@ -971,6 +982,7 @@ dependencies = [
 name = "caliban-memory"
 version = "0.0.0"
 dependencies = [
+ "caliban-common",
  "chrono",
  "dirs",
  "globset",
@@ -989,6 +1001,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "caliban-common",
  "caliban-memory",
  "caliban-provider",
  "dirs",
@@ -1008,6 +1021,7 @@ name = "caliban-output-styles"
 version = "0.0.0"
 dependencies = [
  "caliban-agent-core",
+ "caliban-common",
  "dirs",
  "ignore",
  "serde",
@@ -1021,6 +1035,7 @@ dependencies = [
 name = "caliban-plugins"
 version = "0.0.0"
 dependencies = [
+ "caliban-common",
  "chrono",
  "dirs",
  "flate2",
@@ -1083,6 +1098,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "caliban-common",
  "caliban-provider",
  "caliban-provider-anthropic",
  "thiserror 1.0.69",
@@ -1158,6 +1174,7 @@ name = "caliban-provider-vertex"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "caliban-common",
  "caliban-provider",
  "caliban-provider-anthropic",
  "gcp_auth",
@@ -1205,6 +1222,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "caliban-agent-core",
+ "caliban-common",
  "caliban-mcp-client",
  "dirs",
  "jsonschema",
@@ -1224,6 +1242,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "caliban-agent-core",
+ "caliban-common",
  "caliban-provider",
  "dirs",
  "ignore",
@@ -1261,6 +1280,7 @@ dependencies = [
 name = "caliban-telemetry"
 version = "0.0.0"
 dependencies = [
+ "caliban-common",
  "caliban-provider",
  "chrono",
  "opentelemetry",
@@ -1288,6 +1308,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "caliban-agent-core",
+ "caliban-common",
  "caliban-memory",
  "caliban-provider",
  "caliban-sandbox",

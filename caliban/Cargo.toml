@@ -13,6 +13,7 @@ name = "caliban"
 path = "src/main.rs"
 
 [dependencies]
+caliban-common             = { path = "../crates/caliban-common" }
 caliban-provider           = { path = "../crates/caliban-provider" }
 caliban-provider-anthropic = { path = "../crates/caliban-provider-anthropic" }
 caliban-provider-openai    = { path = "../crates/caliban-provider-openai" }
