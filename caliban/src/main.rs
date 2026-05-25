@@ -1069,8 +1069,17 @@ async fn main() -> Result<()> {
         hooks_cfg.disable_all_hooks || args.no_hooks,
     );
 
-    let permissions_hook = if args.no_permissions {
-        None
+    // Decide whether the TUI is the active mode (and therefore should provide
+    // the interactive Ask modal).
+    let tui_mode_active = {
+        use std::io::IsTerminal as _;
+        let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
+        let headless_active = args.print.is_some() || args.output_format.is_some();
+        !has_prompt && !headless_active && std::io::stdin().is_terminal()
+    };
+
+    let (permissions_hook, tui_ask_rx) = if args.no_permissions {
+        (None, None)
     } else {
         use caliban_agent_core::{
             Action, NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, load_rules,
@@ -1101,12 +1110,22 @@ async fn main() -> Result<()> {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
         let rules = load_rules(cli_rules, &workspace_root).context("loading permissions rules")?;
-        let ask: Arc<dyn caliban_agent_core::AskHandler> = Arc::new(NonInteractiveAskHandler {
-            auto_allow: args.auto_allow,
-        });
+        // In interactive (TUI) mode, route Ask through the modal bridge. In
+        // headless/single-prompt mode, fall back to the non-interactive handler.
+        let (ask, ask_rx): (Arc<dyn caliban_agent_core::AskHandler>, _) = if tui_mode_active {
+            let (handler, rx) = tui::TuiAskHandler::pair();
+            (Arc::new(handler), Some(rx))
+        } else {
+            (
+                Arc::new(NonInteractiveAskHandler {
+                    auto_allow: args.auto_allow,
+                }),
+                None,
+            )
+        };
         let hook: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
             Arc::new(PermissionsHook::new(rules, ask, Arc::new(NoopHooks)));
-        Some(hook)
+        (Some(hook), ask_rx)
     };
 
     let mut builder = Agent::builder()
@@ -1362,6 +1381,7 @@ async fn main() -> Result<()> {
                 todos,
                 plan_mode,
                 mcp_summaries,
+                tui_ask_rx,
             )
             .await;
         }

@@ -49,10 +49,10 @@ reqwest                  = { workspace = true }
 secrecy                  = { workspace = true }
 url                      = { workspace = true }
 chrono                   = { workspace = true }
+tempfile                 = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }
-tempfile         = { workspace = true }
 tokio-util       = { workspace = true }
 wiremock         = { workspace = true }
 async-trait      = { workspace = true }

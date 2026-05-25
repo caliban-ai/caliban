@@ -145,9 +145,20 @@ impl Input {
     pub(crate) fn submit(&mut self) -> String {
         let line = std::mem::take(&mut self.buffer);
         self.cursor = 0;
-        self.history.push(line.clone());
+        // De-dupe consecutive identical entries — bash-style.
+        if !line.is_empty() && self.history.last().is_none_or(|last| last != &line) {
+            self.history.push(line.clone());
+        }
         self.history_cursor = None;
         line
+    }
+
+    /// Replace the buffer entirely (used by `Ctrl+G` external-editor return
+    /// and reverse-history `Enter`).
+    pub(crate) fn set_buffer(&mut self, buf: String) {
+        self.buffer = buf;
+        self.cursor = self.buffer.len();
+        self.history_cursor = None;
     }
 
     pub(crate) fn history_up(&mut self) {
