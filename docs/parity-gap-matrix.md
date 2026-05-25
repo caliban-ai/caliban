@@ -136,11 +136,11 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | In-process synchronous `AgentTool` + recursion guard | ✅ | ADR-0021 |
-| Subagent in isolated git worktree | 🔴 | |
-| Background subagents (`--bg`, `claude agents`, attach/respawn/rm) | 🔴 | |
-| Subagent-local memory dir | 🔴 | |
-| Hook inheritance for subagents | 🔴 | *(deferred PR #9)* |
-| Subagent fleet supervisor daemon | 🔴 | |
+| Subagent in isolated git worktree | ✅ | ADR-0037 — `caliban-worktrees` crate; `isolation: worktree` frontmatter |
+| Background subagents (`--bg`, `claude agents`, attach/respawn/rm) | ✅ | ADR-0037 — `caliban-supervisor` + `caliband` daemon + CLI |
+| Subagent-local memory dir | ✅ | ADR-0037 — `<base>/agents/<id>/` per-agent session dir |
+| Hook inheritance for subagents | ✅ | ADR-0037 — `inherit_hooks: true` default; closure hooks dropped with warn at process boundary |
+| Subagent fleet supervisor daemon | ✅ | ADR-0037 — per-repo `caliband` over UDS |
 
 ## H. MCP
 

@@ -22,6 +22,8 @@ members = [
     "crates/caliban-plugins",
     "crates/caliban-telemetry",
     "crates/caliban-images",
+    "crates/caliban-worktrees",
+    "crates/caliban-supervisor",
     "caliban",
 ]
 
@@ -79,6 +81,11 @@ base64 = "0.22"
 image  = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 infer  = { version = "0.16", default-features = false }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+# ADR 0037 deps (sub-agent worktree isolation + supervisor daemon).
+git2         = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+interprocess = { version = "2", features = ["tokio"] }
+nix          = { version = "0.30", features = ["signal", "process"] }
+bincode      = { version = "1" }
 
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)

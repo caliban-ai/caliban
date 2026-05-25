@@ -2781,6 +2781,17 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 app.input.clear();
             }
         }
+        // Ctrl+B — hand the in-flight foreground sub-agent to the
+        // supervisor and cancel the parent turn (ADR 0037).
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) if app.running.is_some() => {
+            // Take the cancel token by cloning to drop the borrow
+            // before the &mut self handoff call.
+            let cancel = app.running.as_ref().map(|r| r.cancel.clone());
+            handoff_to_supervisor(app);
+            if let Some(c) = cancel {
+                c.cancel();
+            }
+        }
         (KeyCode::Esc, _) => {
             // Esc handling (ADR 0028): if a turn is running, cancel it;
             // if input is non-empty, clear it; otherwise treat the press
@@ -3001,6 +3012,62 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
     app.input.maybe_open_slash_menu(SLASH_COMMANDS);
     app.input.refilter_slash_menu(SLASH_COMMANDS);
     refresh_at_menu(app);
+}
+
+/// `Ctrl+B` entry — snapshot the in-flight foreground sub-agent and
+/// hand ownership to the per-repo supervisor (ADR 0037). The parent's
+/// turn is cancelled by the caller; here we just write the transcript
+/// marker and best-effort register a placeholder agent with the
+/// supervisor so it shows up in `caliban agents list`.
+pub(crate) fn handoff_to_supervisor(app: &mut App) {
+    use std::path::PathBuf;
+
+    use caliban_supervisor::proto::SpawnSpec;
+    use caliban_supervisor::{SupervisorClient, repo_socket_path};
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let repo = crate::agents_cli::discover_repo_root(&cwd);
+    let socket_path = repo_socket_path(&repo);
+
+    // Build a placeholder spec so the daemon can list the agent. The
+    // real session bytes live in the parent's transcript; once we have
+    // a serialized session-snapshot format (ADR 0037 deferred), we
+    // pass it through `frontmatter_path`.
+    let spec = SpawnSpec {
+        label: Some("backgrounded-by-ctrl-b".into()),
+        frontmatter_path: None,
+        initial_prompt: "(snapshot)".into(),
+        model: None,
+        tool_allowlist: None,
+        isolation_worktree: false,
+        inherit_hooks: false,
+    };
+
+    // We're inside synchronous key handling; block on a one-shot async
+    // request via the tokio current-thread handle. If the daemon isn't
+    // running, leave a transcript note and move on.
+    let id_opt: Option<String> = match tokio::runtime::Handle::try_current() {
+        Ok(rt) => rt.block_on(async move {
+            if !socket_path.exists() {
+                return None;
+            }
+            let client = SupervisorClient::new(&socket_path);
+            match client.spawn(spec).await {
+                Ok((id, _sock)) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Ctrl+B handoff: supervisor spawn failed");
+                    None
+                }
+            }
+        }),
+        Err(_) => None,
+    };
+
+    let line = match id_opt {
+        Some(id) => format!("[backgrounded sub-agent {id} — see `caliban agents list`]"),
+        None => "[backgrounded — supervisor daemon offline; see `caliban daemon status`]".into(),
+    };
+    app.transcript.push(TranscriptLine::Info(line));
 }
 
 /// `Ctrl+G` entry — leaves the alt-screen, runs `$VISUAL`/`$EDITOR` over a

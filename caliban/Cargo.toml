@@ -30,6 +30,8 @@ caliban-model-router       = { path = "../crates/caliban-model-router" }
 caliban-plugins            = { path = "../crates/caliban-plugins" }
 caliban-telemetry          = { path = "../crates/caliban-telemetry" }
 caliban-images             = { path = "../crates/caliban-images" }
+caliban-worktrees          = { path = "../crates/caliban-worktrees" }
+caliban-supervisor         = { path = "../crates/caliban-supervisor" }
 rust_decimal               = { version = "1", default-features = false }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
@@ -52,6 +54,7 @@ secrecy                  = { workspace = true }
 url                      = { workspace = true }
 chrono                   = { workspace = true }
 tempfile                 = { workspace = true }
+uuid                     = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

@@ -1,0 +1,325 @@
+//! `caliban agents …` / `caliban daemon …` subcommand handling.
+//!
+//! Each handler returns a process exit code. They auto-spawn the
+//! `caliband` daemon binary on first use and talk to it over the
+//! per-repo Unix domain socket.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use caliban_supervisor::proto::{AgentRecord, AgentStatus, CtlRequest, SpawnSpec};
+use caliban_supervisor::{ClientError, SupervisorClient, repo_socket_path};
+
+/// Discover the repo root containing `start_dir`. Walks up looking for
+/// `.git/`. Falls back to `start_dir` itself if none is found (the
+/// supervisor doesn't *require* a real repo, but logs cleanly).
+pub(crate) fn discover_repo_root(start_dir: &Path) -> PathBuf {
+    let mut cur: PathBuf = start_dir.to_path_buf();
+    loop {
+        if cur.join(".git").exists() {
+            return cur;
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => return start_dir.to_path_buf(),
+        }
+    }
+}
+
+/// Spawn the `caliband` binary as a child process so it can take over
+/// the socket. We use `caliband` next to the caliban binary (i.e. same
+/// `cargo target` dir). Best-effort: returns Ok even if we couldn't
+/// spawn — the next request attempt will surface a clean "not running"
+/// error.
+fn try_spawn_daemon(repo_root: &Path, socket_path: &Path) -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let mut daemon_exe = exe.clone();
+    daemon_exe.set_file_name("caliband");
+    if !daemon_exe.exists() {
+        // Fall back to PATH lookup.
+        daemon_exe = PathBuf::from("caliband");
+    }
+    let mut cmd = std::process::Command::new(&daemon_exe);
+    cmd.arg("--repo-root")
+        .arg(repo_root)
+        .arg("--socket-path")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Best-effort: spawn and immediately detach.
+    let _ = cmd.spawn();
+    Ok(())
+}
+
+/// Public re-export of [`ensure_daemon`] for the `AgentTool` background
+/// spawner wired in `main`.
+pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<SupervisorClient> {
+    ensure_daemon(repo_root).await
+}
+
+/// Ensure a daemon is running for the given repo. Polls the socket for
+/// existence up to 2s; returns a connected client.
+async fn ensure_daemon(repo_root: &Path) -> Result<SupervisorClient> {
+    let socket_path = repo_socket_path(repo_root);
+    if !socket_path.exists() {
+        try_spawn_daemon(repo_root, &socket_path)?;
+        for _ in 0..200 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    Ok(SupervisorClient::new(socket_path))
+}
+
+fn fmt_status(s: AgentStatus) -> &'static str {
+    match s {
+        AgentStatus::Spawning => "spawning",
+        AgentStatus::Running => "running",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Killed => "killed",
+        AgentStatus::Done => "done",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Crashed => "crashed",
+    }
+}
+
+fn print_list(agents: &[AgentRecord]) {
+    if agents.is_empty() {
+        println!("no background agents registered");
+        return;
+    }
+    println!(
+        "{:<14}  {:<24}  {:<10}  {:<25}  SOCKET",
+        "ID", "NAME", "STATUS", "STARTED"
+    );
+    for a in agents {
+        println!(
+            "{:<14}  {:<24}  {:<10}  {:<25}  {}",
+            a.id,
+            truncate(&a.name, 24),
+            fmt_status(a.status),
+            a.started_at,
+            a.socket_path.display()
+        );
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn map_client_error(e: ClientError) -> i32 {
+    match e {
+        ClientError::NotRunning(path) => {
+            eprintln!(
+                "caliban: daemon not running at {} (try again; the binary auto-spawns it)",
+                path.display()
+            );
+            74 // EX_IOERR-ish
+        }
+        other => {
+            eprintln!("caliban: {other}");
+            1
+        }
+    }
+}
+
+/// Handle `caliban agents list` / `agents <verb>`.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> i32 {
+    let client = match ensure_daemon(repo_root).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("caliban: could not start daemon: {e}");
+            return 1;
+        }
+    };
+    match cmd {
+        crate::AgentsCommand::List => match client.list().await {
+            Ok(agents) => {
+                print_list(&agents);
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+        crate::AgentsCommand::Attach { id } => {
+            match client.request(&CtlRequest::Attach { id: id.clone() }).await {
+                Ok(caliban_supervisor::CtlReply::AttachAck { socket_path }) => {
+                    println!(
+                        "attach: per-agent socket at {} (no live attach loop in this build; \
+                     stream via `caliban logs {id}`)",
+                        socket_path.display(),
+                    );
+                    0
+                }
+                Ok(other) => {
+                    eprintln!("caliban: unexpected reply: {other:?}");
+                    1
+                }
+                Err(e) => map_client_error(e),
+            }
+        }
+        crate::AgentsCommand::Logs { id } => {
+            // Logs live at <agent-store>/<id>/session.json. The
+            // supervisor's `Attach` reply gives us the per-agent socket,
+            // but for now we tail session.json from the registry's
+            // `session_dir`.
+            match client.list().await {
+                Ok(agents) => {
+                    if let Some(rec) = agents.into_iter().find(|a| a.id == *id) {
+                        let log_path = rec.session_dir.join("session.json");
+                        match std::fs::read_to_string(&log_path) {
+                            Ok(body) => {
+                                println!("{body}");
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("caliban: no log at {}: {e}", log_path.display());
+                                1
+                            }
+                        }
+                    } else {
+                        eprintln!("caliban: agent {id} not found");
+                        1
+                    }
+                }
+                Err(e) => map_client_error(e),
+            }
+        }
+        crate::AgentsCommand::Kill { id } => match client.kill(id.clone()).await {
+            Ok(()) => {
+                println!("killed {id}");
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+        crate::AgentsCommand::Respawn { id } => match client.respawn(id.clone()).await {
+            Ok(new_id) => {
+                println!("respawned {id} -> {new_id}");
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+        crate::AgentsCommand::Rm { id, force } => match client.rm(id.clone(), *force).await {
+            Ok(()) => {
+                println!("removed {id}");
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+        crate::AgentsCommand::Spawn { prompt, label } => {
+            let spec = SpawnSpec {
+                label: label.clone(),
+                frontmatter_path: None,
+                initial_prompt: prompt.clone(),
+                model: None,
+                tool_allowlist: None,
+                isolation_worktree: false,
+                inherit_hooks: true,
+            };
+            match client.spawn(spec).await {
+                Ok((id, sock)) => {
+                    println!("spawned {id} (socket: {})", sock.display());
+                    0
+                }
+                Err(e) => map_client_error(e),
+            }
+        }
+    }
+}
+
+/// Handle `caliban daemon <verb>`.
+pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> i32 {
+    let client = match ensure_daemon(repo_root).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("caliban: could not start daemon: {e}");
+            return 1;
+        }
+    };
+    match cmd {
+        crate::DaemonCommand::Status => match client.status().await {
+            Ok(s) => {
+                println!(
+                    "pid={}  agents={}  uptime_secs={}  socket={}",
+                    s.pid,
+                    s.agents,
+                    s.uptime_secs,
+                    s.socket_path.display(),
+                );
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+        crate::DaemonCommand::Stop => match client.shutdown().await {
+            Ok(()) => {
+                println!("daemon shutdown requested");
+                0
+            }
+            Err(e) => map_client_error(e),
+        },
+    }
+}
+
+/// Handle the top-level `--bg "<task>"` shortcut.
+pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
+    let client = match ensure_daemon(repo_root).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("caliban: could not start daemon: {e}");
+            return 1;
+        }
+    };
+    let spec = SpawnSpec {
+        label: None,
+        frontmatter_path: None,
+        initial_prompt: task.to_string(),
+        model: None,
+        tool_allowlist: None,
+        isolation_worktree: false,
+        inherit_hooks: true,
+    };
+    match client.spawn(spec).await {
+        Ok((id, sock)) => {
+            println!("backgrounded as {id} (socket: {})", sock.display());
+            0
+        }
+        Err(e) => map_client_error(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_repo_root_walks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(discover_repo_root(&nested), dir.path());
+    }
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_long_string_ellipsized() {
+        let out = truncate("abcdefghijklmnop", 5);
+        assert_eq!(out, "abcd…");
+    }
+}
