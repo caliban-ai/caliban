@@ -115,7 +115,7 @@ impl RuleSet {
                     glob_to_rule.push(idx);
                 } else {
                     tracing::warn!(
-                        target: "caliban::memory::rules",
+                        target: caliban_common::tracing_targets::TARGET_MEMORY_RULES,
                         rule = %r.name,
                         pattern = %pat,
                         "invalid glob pattern in rule",
@@ -125,7 +125,7 @@ impl RuleSet {
         }
         let matcher = builder.build().unwrap_or_else(|e| {
             tracing::warn!(
-                target: "caliban::memory::rules",
+                target: caliban_common::tracing_targets::TARGET_MEMORY_RULES,
                 error = %e,
                 "rule globset build failed; falling back to empty matcher",
             );
@@ -183,7 +183,7 @@ fn scan_dir(dir: &Path, scope: RuleScope, out: &mut Vec<Rule>) {
         match parse_rule(&p, scope, stem) {
             Ok(r) => out.push(r),
             Err(e) => tracing::warn!(
-                target: "caliban::memory::rules",
+                target: caliban_common::tracing_targets::TARGET_MEMORY_RULES,
                 path = %p.display(),
                 error = %e,
                 "skipping malformed rule file",

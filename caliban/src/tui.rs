@@ -464,7 +464,7 @@ impl App {
         let cost_accumulator = Arc::new(
             caliban_telemetry::CostAccumulator::with_embedded_card().unwrap_or_else(|e| {
                 tracing::error!(
-                    target: "caliban::cost",
+                    target: caliban_common::tracing_targets::TARGET_COST,
                     error = %e,
                     "failed to parse embedded rates.yaml; pricing disabled"
                 );
@@ -2045,7 +2045,7 @@ pub(crate) async fn run(
             output_tokens: total_out,
         };
         if let Err(e) = app.agent.hooks().session_end(&session_ctx, &outcome).await {
-            tracing::warn!(target: "caliban::hooks", error = %e, "session_end hook error (non-fatal)");
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_end hook error (non-fatal)");
         }
     }
 

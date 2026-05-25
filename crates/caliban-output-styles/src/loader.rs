@@ -140,7 +140,7 @@ pub fn load_styles(roots: &DiscoveryRoots) -> Vec<OutputStyle> {
     for (name, raw) in BUILTINS {
         if by_name.contains_key(*name) {
             tracing::debug!(
-                target: "caliban::output_styles",
+                target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                 name = name,
                 "skipping shadowed built-in (overridden by higher-priority source)",
             );
@@ -152,7 +152,7 @@ pub fn load_styles(roots: &DiscoveryRoots) -> Vec<OutputStyle> {
             }
             Err(e) => {
                 tracing::error!(
-                    target: "caliban::output_styles",
+                    target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                     name = name,
                     error = %e,
                     "embedded built-in failed to parse — this is a bug",
@@ -182,7 +182,7 @@ fn scan_flat_dir(dir: &Path, kind: &OutputStyleKind, by_name: &mut HashMap<Strin
         Ok(rd) => rd,
         Err(e) => {
             tracing::warn!(
-                target: "caliban::output_styles",
+                target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                 dir = %dir.display(),
                 error = %e,
                 "could not read output-styles directory",
@@ -215,7 +215,7 @@ fn scan_flat_dir(dir: &Path, kind: &OutputStyleKind, by_name: &mut HashMap<Strin
                 }
                 if by_name.contains_key(&style.name) {
                     tracing::debug!(
-                        target: "caliban::output_styles",
+                        target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                         name = %style.name,
                         path = %path.display(),
                         "skipping shadowed style (already loaded from higher-priority root)",
@@ -226,7 +226,7 @@ fn scan_flat_dir(dir: &Path, kind: &OutputStyleKind, by_name: &mut HashMap<Strin
             }
             Err(e) => {
                 tracing::warn!(
-                    target: "caliban::output_styles",
+                    target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                     path = %path.display(),
                     error = %e,
                     "skipping malformed output style",
@@ -367,7 +367,7 @@ pub fn select_active(
             && enabled_plugins.iter().any(|n| n == plugin_name)
         {
             tracing::debug!(
-                target: "caliban::output_styles",
+                target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                 style = %s.name,
                 plugin = %plugin_name,
                 "plugin-forced output style active (overrides operator selection)",
@@ -376,7 +376,7 @@ pub fn select_active(
         } else if !matches!(&s.source, OutputStyleSource::Plugin { .. }) {
             // Sideload (user/project/built-in) with force_for_plugin = true is ignored.
             tracing::debug!(
-                target: "caliban::output_styles",
+                target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
                 style = %s.name,
                 "ignoring force_for_plugin on non-plugin style",
             );
@@ -388,7 +388,7 @@ pub fn select_active(
     }
 
     tracing::warn!(
-        target: "caliban::output_styles",
+        target: caliban_common::tracing_targets::TARGET_OUTPUT_STYLES,
         requested = requested,
         "unknown output style; falling back to built-in default",
     );

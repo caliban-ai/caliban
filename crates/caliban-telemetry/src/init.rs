@@ -146,7 +146,7 @@ impl TelemetryConfig {
             }
             Err(e) => {
                 tracing::warn!(
-                    target: "caliban::telemetry",
+                    target: caliban_common::tracing_targets::TARGET_TELEMETRY,
                     error = %e,
                     "otel_headers_helper failed; reusing previous headers",
                 );

@@ -91,7 +91,7 @@ impl Hooks for ModeFilter {
             PermissionMode::BypassPermissions => {
                 if self.bypass_latch {
                     tracing::warn!(
-                        target: "caliban::permissions",
+                        target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
                         tool = ctx.tool_name,
                         "bypassPermissions: allowing without consulting rules",
                     );
@@ -99,7 +99,7 @@ impl Hooks for ModeFilter {
                 }
                 // No latch — degrade to default behavior, log loudly.
                 tracing::warn!(
-                    target: "caliban::permissions",
+                    target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
                     "bypassPermissions active without --allow-dangerously-skip-permissions; \
                      degrading to default-mode semantics",
                 );
@@ -125,7 +125,7 @@ impl Hooks for ModeFilter {
                     };
                     if let Err(e) = self.inner.permission_denied(&perm_ctx).await {
                         tracing::warn!(
-                            target: "caliban::permissions",
+                            target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
                             error = %e,
                             "permission_denied hook error (non-fatal)",
                         );
@@ -265,7 +265,7 @@ impl ModeFilter {
                 };
                 if let Err(e) = self.inner.permission_denied(&perm_ctx).await {
                     tracing::warn!(
-                        target: "caliban::permissions",
+                        target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
                         error = %e,
                         "permission_denied hook error (non-fatal)",
                     );
@@ -279,7 +279,7 @@ impl ModeFilter {
                 // reason is surfaced via tracing for now; ADR 0027 wires
                 // it into the modal body.
                 tracing::info!(
-                    target: "caliban::permissions",
+                    target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
                     tool = ctx.tool_name,
                     reason = decision.reason.as_str(),
                     "auto-mode soft_deny → Ask",

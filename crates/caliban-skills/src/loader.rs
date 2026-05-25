@@ -49,7 +49,7 @@ pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
                 Ok(skill) => {
                     if by_name.contains_key(&skill.name) {
                         tracing::debug!(
-                            target: "caliban::skills",
+                            target: caliban_common::tracing_targets::TARGET_SKILLS,
                             name = %skill.name,
                             path = %skill.source_path.display(),
                             "skipping shadowed skill (already loaded from earlier root)",
@@ -60,7 +60,7 @@ pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        target: "caliban::skills",
+                        target: caliban_common::tracing_targets::TARGET_SKILLS,
                         path = %path.display(),
                         error = %e,
                         "skipping malformed skill",

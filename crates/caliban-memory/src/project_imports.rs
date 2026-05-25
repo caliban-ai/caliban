@@ -92,15 +92,9 @@ impl ImportAllowlist {
     ///
     /// Returns [`std::io::Error`] on any disk failure.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        caliban_common::fs::write_atomic(path, &bytes)
     }
 
     /// True if `path` (canonicalized) is already approved.
@@ -306,7 +300,7 @@ fn resolve_imports_inner(body: &str, importer: &Path, state: &mut ImportState<'_
         // Depth cap.
         if state.depth >= MAX_IMPORT_DEPTH {
             tracing::warn!(
-                target: "caliban::memory",
+                target: caliban_common::tracing_targets::TARGET_MEMORY,
                 importer = %importer.display(),
                 token,
                 "@-import depth cap reached",
@@ -449,7 +443,7 @@ fn approval_grants(resolved: &Path, importer: &Path, state: &mut ImportState<'_>
         }
         ApprovalMode::AutoDeny => {
             tracing::warn!(
-                target: "caliban::memory",
+                target: caliban_common::tracing_targets::TARGET_MEMORY,
                 path = %canon.display(),
                 "external @-import auto-denied (non-interactive mode)",
             );

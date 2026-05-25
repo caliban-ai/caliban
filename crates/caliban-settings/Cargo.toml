@@ -23,6 +23,7 @@ dirs             = { workspace = true }
 jsonschema       = { workspace = true }
 notify           = { workspace = true }
 tokio            = { workspace = true }
+caliban-common     = { path = "../caliban-common" }
 caliban-agent-core = { path = "../caliban-agent-core" }
 caliban-mcp-client = { path = "../caliban-mcp-client" }
 

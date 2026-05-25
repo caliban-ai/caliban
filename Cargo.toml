@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/caliban-core",
+    "crates/caliban-common",
     "crates/caliban-provider",
     "crates/caliban-provider-anthropic",
     "crates/caliban-provider-bedrock",

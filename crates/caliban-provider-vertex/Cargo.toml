@@ -13,6 +13,7 @@ default     = []
 live-tests  = []
 
 [dependencies]
+caliban-common             = { path = "../caliban-common" }
 caliban-provider           = { path = "../caliban-provider" }
 caliban-provider-anthropic = { path = "../caliban-provider-anthropic", features = ["vertex"] }
 async-trait                = { workspace = true }

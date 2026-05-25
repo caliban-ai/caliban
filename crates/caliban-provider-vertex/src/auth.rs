@@ -107,11 +107,11 @@ async fn refresh_loop(
                 match provider.token(GCP_SCOPE).await {
                     Ok(_) => {
                         refreshes.fetch_add(1, Ordering::Relaxed);
-                        tracing::debug!(target: "caliban::provider::vertex", "gcp token refresh ok");
+                        tracing::debug!(target: caliban_common::tracing_targets::TARGET_PROVIDER_VERTEX, "gcp token refresh ok");
                     }
                     Err(e) => {
                         failures.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(target: "caliban::provider::vertex", error = %e, "gcp token refresh failed");
+                        tracing::warn!(target: caliban_common::tracing_targets::TARGET_PROVIDER_VERTEX, error = %e, "gcp token refresh failed");
                     }
                 }
             }

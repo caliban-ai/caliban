@@ -382,7 +382,7 @@ pub fn default_store() -> Arc<dyn TokenStore> {
         Ok(()) => Arc::new(KeyringStore),
         Err(e) => {
             tracing::warn!(
-                target: "caliban::mcp::oauth",
+                target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
                 error = %e,
                 "OS keyring unavailable; falling back to file-based token store",
             );
@@ -726,7 +726,7 @@ impl OauthFlow {
             tokio::select! {
                 res = server => {
                     if let Err(e) = res {
-                        tracing::warn!(target: "caliban::mcp::oauth", error = %e, "callback server error");
+                        tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP_OAUTH, error = %e, "callback server error");
                     }
                 }
                 _ = shutdown_rx => {}

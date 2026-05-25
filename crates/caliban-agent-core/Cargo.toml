@@ -12,6 +12,7 @@ publish     = false
 default = []
 
 [dependencies]
+caliban-common   = { path = "../caliban-common" }
 caliban-provider = { path = "../caliban-provider" }
 async-stream     = { workspace = true }
 async-trait      = { workspace = true }

@@ -37,7 +37,7 @@ pub fn scan_init_files(workspace_root: &Path) -> Vec<LegacyRulesFile> {
                 body: String::from_utf8_lossy(&bytes).into_owned(),
             }),
             Err(e) => tracing::warn!(
-                target: "caliban::memory::init",
+                target: caliban_common::tracing_targets::TARGET_MEMORY_INIT,
                 path = %path.display(),
                 error = %e,
                 "failed to read init file",

@@ -47,44 +47,27 @@ struct RulesFile {
 }
 
 // ---------------------------------------------------------------------------
-// Glob matcher (`*`, `?`)
+// Glob matcher (`*`, `?`) — implementation moved to caliban-common
 // ---------------------------------------------------------------------------
 
 /// Match `pattern` against `value`. Supports `*` (zero or more chars) and `?`
-/// (exactly one char). Intentionally narrow; if requirements grow, switch to
-/// the `globset` crate.
-#[must_use]
-pub fn matches_glob(pattern: &str, value: &str) -> bool {
-    let pattern_bytes = pattern.as_bytes();
-    let value_bytes = value.as_bytes();
-    let mut p = 0_usize;
-    let mut v = 0_usize;
-    let mut star: Option<usize> = None;
-    let mut star_v: usize = 0;
+/// (exactly one char). Re-exported from
+/// [`caliban_common::glob_match::matches_glob`] — kept here for back-compat;
+/// new consumers should depend on `caliban-common` directly.
+#[deprecated(
+    since = "0.0.0",
+    note = "use `caliban_common::glob_match::matches_glob` instead"
+)]
+pub use caliban_common::glob_match::matches_glob;
 
-    while v < value_bytes.len() {
-        if p < pattern_bytes.len()
-            && (pattern_bytes[p] == b'?' || pattern_bytes[p] == value_bytes[v])
-        {
-            p += 1;
-            v += 1;
-        } else if p < pattern_bytes.len() && pattern_bytes[p] == b'*' {
-            star = Some(p);
-            star_v = v;
-            p += 1;
-        } else if let Some(s) = star {
-            p = s + 1;
-            star_v += 1;
-            v = star_v;
-        } else {
-            return false;
-        }
-    }
-    while p < pattern_bytes.len() && pattern_bytes[p] == b'*' {
-        p += 1;
-    }
-    p == pattern_bytes.len()
-}
+/// Extract the "first arg" string for a tool input, per the permissions
+/// design spec. Re-exported from
+/// [`caliban_common::glob_match::first_arg`].
+#[deprecated(
+    since = "0.0.0",
+    note = "use `caliban_common::glob_match::first_arg` instead"
+)]
+pub use caliban_common::glob_match::first_arg;
 
 // ---------------------------------------------------------------------------
 // Pattern parsing
@@ -98,30 +81,17 @@ fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
         .map_or((pattern, None), |(name, glob)| (name, Some(glob)))
 }
 
-/// Extract the "first arg" string for a tool input, per the design spec.
-/// Returns `None` when the tool has no first-arg accessor or the JSON shape
-/// doesn't match.
-#[must_use]
-pub fn first_arg(tool_name: &str, input: &serde_json::Value) -> Option<String> {
-    let key = match tool_name {
-        "Bash" => "command",
-        "WebFetch" => "url",
-        "Read" | "Write" | "Edit" => "path",
-        _ => return None,
-    };
-    input.get(key).and_then(|v| v.as_str()).map(str::to_string)
-}
-
 fn rule_matches(rule: &Rule, ctx: &ToolCtx<'_>) -> bool {
+    use caliban_common::glob_match::{first_arg as common_first_arg, matches_glob as common_glob};
     let (tool_pat, arg_pat) = split_pattern(&rule.tool);
-    if tool_pat != "*" && !matches_glob(tool_pat, ctx.tool_name) {
+    if tool_pat != "*" && !common_glob(tool_pat, ctx.tool_name) {
         return false;
     }
     match arg_pat {
         None => true,
-        Some(glob) => first_arg(ctx.tool_name, ctx.input)
+        Some(glob) => common_first_arg(ctx.tool_name, ctx.input)
             .as_deref()
-            .is_some_and(|arg| matches_glob(glob, arg)),
+            .is_some_and(|arg| common_glob(glob, arg)),
     }
 }
 
@@ -503,35 +473,10 @@ mod tests {
     }
 
     // --- matcher tests ---
-
-    #[test]
-    fn glob_star_matches_anything() {
-        assert!(matches_glob("*", ""));
-        assert!(matches_glob("*", "anything"));
-    }
-
-    #[test]
-    fn glob_q_matches_one_char() {
-        assert!(matches_glob("a?c", "abc"));
-        assert!(!matches_glob("a?c", "abbc"));
-    }
-
-    #[test]
-    fn glob_no_special_chars_is_literal() {
-        assert!(matches_glob("hello", "hello"));
-        assert!(!matches_glob("hello", "hella"));
-    }
-
-    #[test]
-    fn glob_star_prefix() {
-        assert!(matches_glob("git *", "git status"));
-        assert!(!matches_glob("git *", "gitk"));
-    }
-
-    #[test]
-    fn glob_rm_prefix_does_not_match_sudo_rm() {
-        assert!(!matches_glob("rm *", "sudo rm -rf /"));
-    }
+    //
+    // The glob/first-arg unit tests now live in `caliban-common`. Coverage
+    // here is via the higher-level `rule_matches` paths exercised by the
+    // rule-evaluation tests below.
 
     // --- defaults ---
 

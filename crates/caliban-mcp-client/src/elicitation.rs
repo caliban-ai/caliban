@@ -132,7 +132,7 @@ impl ElicitationBridge {
         tokio::spawn(async move {
             while let Some((req, sender)) = rx.recv().await {
                 tracing::warn!(
-                    target: "caliban::mcp::elicitation",
+                    target: caliban_common::tracing_targets::TARGET_MCP_ELICITATION,
                     server = %req.server,
                     "auto-declining server elicitation (non-interactive caller)",
                 );
@@ -160,7 +160,7 @@ impl ElicitationBridge {
             Ok(r) => Ok(r),
             Err(ElicitationError::Timeout(d)) => {
                 tracing::warn!(
-                    target: "caliban::mcp::elicitation",
+                    target: caliban_common::tracing_targets::TARGET_MCP_ELICITATION,
                     timeout = ?d,
                     "elicitation timed out — auto-declined",
                 );

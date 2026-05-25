@@ -132,7 +132,7 @@ impl VertexProvider {
             Ok(models) => models,
             Err(e) => {
                 tracing::warn!(
-                    target: "caliban::provider::vertex",
+                    target: caliban_common::tracing_targets::TARGET_PROVIDER_VERTEX,
                     error = %e,
                     "list_models live fetch failed; falling back to vendored list"
                 );

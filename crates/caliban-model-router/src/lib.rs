@@ -379,7 +379,7 @@ impl Provider for ModelRouter {
                             .observe_failure();
                         if is_fatal_for_route(&e) {
                             tracing::warn!(
-                                target: "caliban::router",
+                                target: caliban_common::tracing_targets::TARGET_ROUTER,
                                 route = %route_id,
                                 err = %e,
                                 "route fatal — advancing to next candidate",

@@ -83,7 +83,7 @@ impl LoadOptions {
             if let Some(scope) = Scope::parse(part) {
                 filter.push(scope);
             } else {
-                tracing::warn!(target: "caliban::settings", entry = part, "unknown --setting-sources entry; ignoring");
+                tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, entry = part, "unknown --setting-sources entry; ignoring");
             }
         }
         self.scope_filter = Some(filter);
@@ -196,7 +196,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         for (scope, value, _) in &per_scope {
             for err in validate_value(value) {
                 warnings.push(format!("{}: {err}", scope.label()));
-                tracing::warn!(target: "caliban::settings", scope = scope.label(), error = %err, "settings schema validation warning");
+                tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, scope = scope.label(), error = %err, "settings schema validation warning");
             }
         }
     }
@@ -317,7 +317,7 @@ fn read_scope(
     let toml_exists = toml_path.exists();
     if json_exists && toml_exists {
         tracing::warn!(
-            target: "caliban::settings",
+            target: caliban_common::tracing_targets::TARGET_SETTINGS,
             scope = scope.label(),
             json_path = %json_path.display(),
             toml_path = %toml_path.display(),

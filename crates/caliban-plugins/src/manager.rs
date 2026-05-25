@@ -178,7 +178,7 @@ impl PluginManager {
                     Ok(Some(p)) => {
                         if let Some(existing) = by_name.get(&p.manifest.name) {
                             tracing::debug!(
-                                target: "caliban::plugins",
+                                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                                 name = %p.manifest.name,
                                 shadowed_by = %existing.source.as_str(),
                                 source = %p.source.as_str(),
@@ -220,7 +220,7 @@ impl PluginManager {
         // Platform gating.
         if !manifest.platform_matches() {
             tracing::info!(
-                target: "caliban::plugins",
+                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                 name = %manifest.name,
                 "skipping plugin: platform mismatch",
             );
@@ -236,7 +236,7 @@ impl PluginManager {
         ) && cur_v < min_v
         {
             tracing::info!(
-                target: "caliban::plugins",
+                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                 name = %manifest.name,
                 min = %min,
                 current = %cur,
@@ -258,7 +258,7 @@ impl PluginManager {
             && !enabled.iter().any(|n| n == &manifest.name)
         {
             tracing::debug!(
-                target: "caliban::plugins",
+                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                 name = %manifest.name,
                 "skipping plugin: not in CALIBAN_ENABLED_PLUGINS",
             );
@@ -358,7 +358,7 @@ impl PluginManager {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                target: "caliban::plugins",
+                                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                                 path = %path.display(),
                                 error = %e,
                                 "skipping malformed plugin hooks.json",
@@ -367,7 +367,7 @@ impl PluginManager {
                     },
                     Err(e) => {
                         tracing::warn!(
-                            target: "caliban::plugins",
+                            target: caliban_common::tracing_targets::TARGET_PLUGINS,
                             path = %path.display(),
                             error = %e,
                             "could not read plugin hooks.json",
@@ -391,7 +391,7 @@ impl PluginManager {
                 || p.root_dir.join("mcp").join(".mcp.json").exists();
             if has_inline && has_external {
                 tracing::warn!(
-                    target: "caliban::plugins",
+                    target: caliban_common::tracing_targets::TARGET_PLUGINS,
                     plugin = %p.namespace,
                     "both inline mcpServers and components.mcp_servers set; inline wins",
                 );
@@ -424,14 +424,14 @@ impl PluginManager {
                                 Self::flatten_mcp_json(&mut out, &p.namespace, &v, &p.root_dir);
                             }
                             Err(e) => tracing::warn!(
-                                target: "caliban::plugins",
+                                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                                 path = %path.display(),
                                 error = %e,
                                 "skipping malformed plugin .mcp.json",
                             ),
                         },
                         Err(e) => tracing::warn!(
-                            target: "caliban::plugins",
+                            target: caliban_common::tracing_targets::TARGET_PLUGINS,
                             path = %path.display(),
                             error = %e,
                             "could not read plugin .mcp.json",

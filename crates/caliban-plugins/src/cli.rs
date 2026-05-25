@@ -210,7 +210,7 @@ impl Cli {
         })?;
         if version_lte(&latest.version, &rec.version) {
             tracing::info!(
-                target: "caliban::plugins",
+                target: caliban_common::tracing_targets::TARGET_PLUGINS,
                 name = name,
                 local = %rec.version,
                 remote = %latest.version,

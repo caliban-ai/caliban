@@ -13,6 +13,7 @@ default   = ["clipboard"]
 clipboard = ["dep:arboard"]
 
 [dependencies]
+caliban-common   = { path = "../caliban-common" }
 caliban-provider = { path = "../caliban-provider" }
 serde       = { workspace = true }
 thiserror   = { workspace = true }
