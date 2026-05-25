@@ -106,16 +106,16 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 |---|---|---|
 | Status bar, plan-mode chip, spinner, elapsed | ✅ | |
 | Mouse-wheel scroll, transcript | ✅ | |
-| `@file` mention + autocomplete | 🔴 | |
-| `!` shell escape | 🔴 | |
-| External editor (`Ctrl+G` → `$VISUAL` / `$EDITOR`) | 🔴 | |
+| `@file` mention + autocomplete | ✅ | ADR-0027; gitignore-aware via `ignore` crate; submit-time attach with size cap |
+| `!` shell escape | ✅ | ADR-0027; routes through `Bash` tool + `PermissionsHook` |
+| External editor (`Ctrl+G` → `$VISUAL` / `$EDITOR`) | ✅ | ADR-0027; alt-screen suspend/resume around `$VISUAL`/`$EDITOR`/`vi` |
 | Vim editing mode | 🔴 | |
-| `Ctrl+O` transcript viewer + dump-to-scrollback | 🔴 | |
+| `Ctrl+O` transcript viewer + dump-to-scrollback | ✅ | ADR-0027; `q`/Esc close, `[` dump, `v` open-in-$VISUAL, scroll keys, `?` help |
 | Background bash (`Ctrl+B`) | ✅ | `Bash{background:true}` + `BashOutput` + `KillShell`; TUI `Ctrl+B` follow-on |
 | Image / vision input | 🔴 | |
 | Slash-menu typeahead | 🟡 | |
-| Permission Ask modal | 🔴 | *(deferred PR #8)* |
-| Reverse history search (`Ctrl+R` / `Ctrl+S`) | 🟡 | |
+| Permission Ask modal | ✅ | ADR-0027; `TuiAskHandler` + modal overlay; Esc → Deny; 10-min timeout |
+| Reverse history search (`Ctrl+R` / `Ctrl+S`) | ✅ | ADR-0027; session → project → all-projects scopes; persisted per project |
 | Multi-line input (`\`+Enter, Option+Enter, Shift+Enter native) | 🟡 | |
 | Voice dictation | 🔴 | |
 

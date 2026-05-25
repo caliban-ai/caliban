@@ -1,6 +1,6 @@
 # ADR 0027 · TUI ergonomics pack
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-tui-ergonomics-design.md`
 

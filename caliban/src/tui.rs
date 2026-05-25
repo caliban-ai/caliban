@@ -2,11 +2,17 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod ask;
 mod attach;
 mod completer;
+mod external_editor;
 mod input;
+mod reverse_history;
+mod shell_escape;
 mod toast;
+mod transcript_viewer;
 
+pub(crate) use ask::TuiAskHandler;
 use input::InputMode;
 
 /// Slash-command names + their literal insert text. Used by the slash menu
@@ -57,6 +63,12 @@ pub(crate) enum Overlay {
     )]
     Skills,
     System,
+    /// `Ctrl+O` transcript viewer overlay — drives `App.transcript_viewer`.
+    TranscriptViewer,
+    /// `Ctrl+R` reverse-history search overlay — drives `App.reverse_history`.
+    ReverseHistory,
+    /// Permission Ask modal — drives `App.ask_modal`.
+    AskModal,
 }
 
 impl Overlay {
@@ -67,6 +79,9 @@ impl Overlay {
             Self::Mcp => "MCP Servers",
             Self::Skills => "Skills",
             Self::System => "System Prompt",
+            Self::TranscriptViewer => "Transcript",
+            Self::ReverseHistory => "Reverse History",
+            Self::AskModal => "Permission Needed",
         }
     }
 
@@ -77,6 +92,9 @@ impl Overlay {
             Self::Mcp => "mcp",
             Self::Skills => "skills",
             Self::System => "system",
+            Self::TranscriptViewer => "transcript",
+            Self::ReverseHistory => "history",
+            Self::AskModal => "ask",
         }
     }
 }
@@ -324,6 +342,20 @@ pub(crate) struct App {
     pub(crate) context_window: Arc<caliban_telemetry::ContextWindow>,
     /// Session-scoped cost ledger backing `/usage`. Always present.
     pub(crate) cost_accumulator: Arc<caliban_telemetry::CostAccumulator>,
+
+    /// Receiver for permission Ask requests forwarded by `TuiAskHandler`.
+    /// Drained inside the main `select!`; each request opens the Ask modal.
+    pub(crate) ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
+    /// Currently-pending Ask request. While `Some(_)`, the input is locked
+    /// and the modal is rendered.
+    pub(crate) ask_modal: Option<ask::AskRequest>,
+    /// State for the Ctrl+O transcript viewer overlay.
+    pub(crate) transcript_viewer: transcript_viewer::TranscriptViewerState,
+    /// State for the Ctrl+R reverse-history search overlay.
+    pub(crate) reverse_history: Option<reverse_history::ReverseHistoryState>,
+    /// Path under `~/.caliban/projects/<sanitized-cwd>/` where input-history
+    /// is persisted. `None` when `dirs::home_dir()` is unavailable.
+    pub(crate) input_history_path: Option<PathBuf>,
 }
 
 impl App {
@@ -338,13 +370,21 @@ impl App {
         todos: caliban_agent_core::SharedTodos,
         plan_mode: caliban_agent_core::SharedPlanMode,
         mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
+        ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let messages = session
             .as_ref()
             .map(|s| s.messages.clone())
             .unwrap_or_default();
-        let history = session
+        // Seed input history from: persisted project history (oldest first),
+        // then current-session user prompts (newest at end).
+        let input_history_path = reverse_history::project_history_path(&cwd);
+        let mut history: Vec<String> = input_history_path
+            .as_deref()
+            .map(reverse_history::load_history_file)
+            .unwrap_or_default();
+        let session_history: Vec<String> = session
             .as_ref()
             .map(|s| {
                 s.messages
@@ -370,6 +410,7 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        history.extend(session_history);
         let context_window = Arc::new(caliban_telemetry::ContextWindow::new());
         let cost_accumulator = Arc::new(
             caliban_telemetry::CostAccumulator::with_embedded_card().unwrap_or_else(|e| {
@@ -420,6 +461,11 @@ impl App {
             mcp_servers,
             context_window,
             cost_accumulator,
+            ask_rx,
+            ask_modal: None,
+            transcript_viewer: transcript_viewer::TranscriptViewerState::default(),
+            reverse_history: None,
+            input_history_path,
         }
     }
 
@@ -918,7 +964,13 @@ fn centered_rect(
 fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     use ratatui::widgets::Wrap;
 
-    let area = centered_rect(80, 80, frame.area());
+    // The transcript viewer wants a tall overlay; the Ask modal stays compact.
+    let (px, py) = match overlay {
+        Overlay::AskModal => (60, 30),
+        Overlay::ReverseHistory => (70, 50),
+        _ => (80, 80),
+    };
+    let area = centered_rect(px, py, frame.area());
 
     // Clear the area underneath.
     frame.render_widget(Clear, area);
@@ -931,16 +983,127 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let content_lines = match overlay {
+    let scroll_offset = if overlay == Overlay::TranscriptViewer {
+        app.transcript_viewer.scroll
+    } else {
+        0
+    };
+
+    let content_lines: Vec<Line<'static>> = match overlay {
         Overlay::SlashHelp => slash_help_lines(),
-        Overlay::Config => config_lines(app),
+        Overlay::Config => clone_lines(&config_lines(app)),
         Overlay::Mcp => mcp_lines(app),
         Overlay::Skills => skills_lines(),
         Overlay::System => system_lines(app),
+        Overlay::TranscriptViewer => {
+            let mut lines =
+                transcript_viewer::format_history(&app.messages, app.transcript_viewer.show_all);
+            if app.transcript_viewer.show_help {
+                lines.push(Line::raw(""));
+                lines.extend(transcript_viewer::help_lines());
+            }
+            lines
+        }
+        Overlay::ReverseHistory => reverse_history_lines(app),
+        Overlay::AskModal => ask_modal_lines(app),
     };
 
-    let body = Paragraph::new(content_lines).wrap(Wrap { trim: false });
+    let body = Paragraph::new(content_lines)
+        .scroll((scroll_offset, 0))
+        .wrap(Wrap { trim: false });
     frame.render_widget(body, inner);
+}
+
+/// Clone `Line<'a>` to `Line<'static>` so the unified overlay renderer can
+/// own its content. Most overlay-line builders already return `'static`
+/// strings; `config_lines` is the lone holdout that borrows from `app`.
+fn clone_lines(lines: &[Line<'_>]) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .map(|l| {
+            let spans: Vec<Span<'static>> = l
+                .spans
+                .iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style))
+                .collect();
+            let mut new_line = Line::from(spans);
+            new_line.style = l.style;
+            new_line.alignment = l.alignment;
+            new_line
+        })
+        .collect()
+}
+
+fn reverse_history_lines(app: &App) -> Vec<Line<'static>> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let Some(state) = app.reverse_history.as_ref() else {
+        out.push(Line::raw("(no active search)"));
+        return out;
+    };
+    out.push(Line::from(vec![
+        Span::styled(
+            format!(" scope: {}  ", state.scope.label()),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled("(Ctrl+S to cycle)", dim),
+    ]));
+    out.push(Line::from(vec![
+        Span::raw(" query: "),
+        Span::styled(state.query.clone(), Style::default().fg(Color::Cyan)),
+    ]));
+    out.push(Line::raw(""));
+    let matches = state.matches();
+    if matches.is_empty() {
+        out.push(Line::styled("   (no matches)", dim));
+    } else {
+        for (i, m) in matches.iter().take(40).enumerate() {
+            let style = if i == state.cursor {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            out.push(Line::from(Span::styled(format!("  {m}"), style)));
+        }
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        " Enter: accept   Esc: cancel   Ctrl+S: cycle scope",
+        dim,
+    ));
+    out
+}
+
+fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let Some(req) = app.ask_modal.as_ref() else {
+        out.push(Line::raw("(no pending ask)"));
+        return out;
+    };
+    out.push(Line::raw(""));
+    out.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled("Tool: ", bold),
+        Span::raw(req.tool_name.clone()),
+    ]));
+    out.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled("Input: ", bold),
+        Span::raw(req.input_summary.clone()),
+    ]));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   [y] Allow once     [n] / [Esc] Deny",
+        Style::default().fg(Color::Cyan),
+    ));
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   Modal blocks the agent loop until you decide.",
+        dim,
+    ));
+    out
 }
 
 fn slash_help_lines() -> Vec<Line<'static>> {
@@ -1537,6 +1700,7 @@ pub(crate) async fn run(
     todos: caliban_agent_core::SharedTodos,
     plan_mode: caliban_agent_core::SharedPlanMode,
     mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
+    ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(
@@ -1548,6 +1712,7 @@ pub(crate) async fn run(
         todos,
         plan_mode,
         mcp_servers,
+        ask_rx,
     );
     let mut events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
@@ -1589,6 +1754,25 @@ pub(crate) async fn run(
                         // Stream finished cleanly — running was already cleared by RunEnd.
                         app.running = None;
                         agent_stream = None;
+                    }
+                }
+            }
+            ask_event = async {
+                match app.ask_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending::<Option<ask::AskRequest>>().await,
+                }
+            } => {
+                if let Some(req) = ask_event {
+                    // Only open the modal if none is currently active. If a
+                    // request races in mid-modal, deny it (the Bash tool will
+                    // surface the message).
+                    if app.ask_modal.is_some() {
+                        let _ = req.respond.send(ask::AskResponse::Deny);
+                    } else {
+                        app.ask_modal = Some(req);
+                        app.view = ViewState::Overlay(Overlay::AskModal);
+                        app.auto_scroll = false;
                     }
                 }
             }
@@ -2262,8 +2446,24 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         app.toast = None;
     }
 
-    // Overlay-mode key handling: intercept all keys while an overlay is open.
-    if matches!(app.view, ViewState::Overlay(_)) {
+    // Overlay-mode key handling: most overlays are read-only (Esc/q close).
+    // A few have richer dispatch — defer to per-overlay handlers first.
+    if let ViewState::Overlay(o) = app.view {
+        match o {
+            Overlay::AskModal => {
+                handle_ask_modal_key(key, app);
+                return;
+            }
+            Overlay::TranscriptViewer => {
+                handle_transcript_viewer_key(key, app);
+                return;
+            }
+            Overlay::ReverseHistory => {
+                handle_reverse_history_key(key, app);
+                return;
+            }
+            _ => {}
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 app.view = ViewState::Main;
@@ -2326,6 +2526,26 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         }
     }
 
+    // Global TUI ergonomics hotkeys (ADR 0027). Take precedence over normal
+    // input handling. Ctrl+G / Ctrl+O / Ctrl+R / Ctrl+S apply outside the
+    // overlay flow.
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+            handle_ctrl_g(app);
+            return;
+        }
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            app.view = ViewState::Overlay(Overlay::TranscriptViewer);
+            app.transcript_viewer.scroll = 0;
+            return;
+        }
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+            open_reverse_history(app);
+            return;
+        }
+        _ => {}
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
             if let Some(running) = &app.running {
@@ -2382,7 +2602,29 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 return;
             }
 
+            // `!cmd` shell escape — detect BEFORE submit so the synthesized
+            // Bash invocation isn't added to conversation history. Same parse
+            // accepts leading whitespace and rejects multi-line buffers.
+            if let shell_escape::ShellEscapeIntent::Run(cmd) =
+                shell_escape::parse_shell_escape(&app.input.buffer)
+            {
+                let line = app.input.submit();
+                // Persist to project history. The synthesized command is a
+                // user action, so it makes sense to be retrievable via
+                // Ctrl+R later.
+                if let Some(p) = app.input_history_path.as_deref() {
+                    reverse_history::append_history(p, &line);
+                }
+                app.auto_scroll = true;
+                dispatch_shell_escape(&cmd, app);
+                return;
+            }
+
             let line = app.input.submit();
+            // Persist to per-project history (best-effort; silent on IO err).
+            if let Some(p) = app.input_history_path.as_deref() {
+                reverse_history::append_history(p, &line);
+            }
             app.auto_scroll = true;
 
             if prompt.starts_with('/') {
@@ -2514,6 +2756,239 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
     app.input.maybe_open_slash_menu(SLASH_COMMANDS);
     app.input.refilter_slash_menu(SLASH_COMMANDS);
     refresh_at_menu(app);
+}
+
+/// `Ctrl+G` entry — leaves the alt-screen, runs `$VISUAL`/`$EDITOR` over a
+/// tempfile seeded with the current buffer, restores the alt-screen on
+/// return. The buffer is replaced with the file contents on success; toast
+/// on failure.
+fn handle_ctrl_g(app: &mut App) {
+    let initial = app.input.buffer.clone();
+    let suspend = match external_editor::suspend_alt_screen() {
+        Ok(g) => g,
+        Err(e) => {
+            app.toast = Some(toast::Toast::error(format!("editor suspend failed: {e}")));
+            return;
+        }
+    };
+    let launcher = external_editor::SubprocessLauncher;
+    let outcome = external_editor::run_editor_roundtrip(&initial, &launcher);
+    // Always attempt to resume — even on editor error.
+    if let Err(e) = external_editor::resume_alt_screen(suspend) {
+        // We're now in a weird state, but persist a toast for visibility.
+        app.toast = Some(toast::Toast::error(format!("editor resume failed: {e}")));
+    }
+    match outcome {
+        Ok(o) if o.success => {
+            app.input.set_buffer(o.buffer);
+        }
+        Ok(_) => {
+            app.toast = Some(toast::Toast::warn(
+                "editor exited non-zero; buffer unchanged",
+            ));
+        }
+        Err(e) => {
+            app.toast = Some(toast::Toast::error(format!("editor failed: {e}")));
+        }
+    }
+}
+
+/// `Ctrl+R` entry — populate the reverse-history state and open the overlay.
+fn open_reverse_history(app: &mut App) {
+    let session_hist = app.input.history.clone();
+    let state = reverse_history::ReverseHistoryState::new(
+        session_hist,
+        app.input_history_path.clone(),
+        reverse_history::projects_root(),
+    );
+    app.reverse_history = Some(state);
+    app.view = ViewState::Overlay(Overlay::ReverseHistory);
+}
+
+/// Synthesize a Bash invocation through the agent's hook chain (which wraps
+/// `PermissionsHook`) and render the result inline as a `TranscriptLine::Info`.
+fn dispatch_shell_escape(command: &str, app: &mut App) {
+    let command = command.to_string();
+    let registry = app.agent.tools().clone();
+    let hooks = app.agent.hooks();
+    app.transcript
+        .push(TranscriptLine::Info(format!("! {command}")));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let outcome = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            shell_escape::run_shell_escape(command.clone(), &registry, hooks, cancel).await
+        })
+    });
+    if outcome.denied {
+        let reason = outcome
+            .message
+            .clone()
+            .unwrap_or_else(|| "permission denied".into());
+        app.transcript
+            .push(TranscriptLine::Error(format!("[denied: {reason}]")));
+        return;
+    }
+    if outcome.is_error {
+        let msg = outcome
+            .message
+            .clone()
+            .unwrap_or_else(|| "shell escape failed".into());
+        app.transcript.push(TranscriptLine::Error(msg));
+        return;
+    }
+    for line in outcome.output.split('\n') {
+        app.transcript.push(TranscriptLine::Info(line.to_string()));
+    }
+}
+
+/// Key dispatch for the Permission Ask modal.
+fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
+    let response = match (key.code, key.modifiers) {
+        (KeyCode::Char('y'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
+            Some(ask::AskResponse::AllowOnce)
+        }
+        (KeyCode::Char('n'), KeyModifiers::NONE)
+        | (KeyCode::Esc, _)
+        | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(ask::AskResponse::Deny),
+        _ => None,
+    };
+    if let Some(r) = response
+        && let Some(req) = app.ask_modal.take()
+    {
+        let _ = req.respond.send(r);
+        app.view = ViewState::Main;
+    }
+}
+
+/// Key dispatch for the Ctrl+O transcript viewer overlay.
+fn handle_transcript_viewer_key(key: KeyEvent, app: &mut App) {
+    use external_editor::SubprocessLauncher;
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            app.view = ViewState::Main;
+        }
+        (KeyCode::Char('?'), _) => {
+            app.transcript_viewer.show_help = !app.transcript_viewer.show_help;
+        }
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+            app.transcript_viewer.show_all = !app.transcript_viewer.show_all;
+        }
+        (KeyCode::Char('j') | KeyCode::Down, _) => {
+            let max = u16::try_from(
+                transcript_viewer::format_history(&app.messages, app.transcript_viewer.show_all)
+                    .len()
+                    .saturating_sub(1),
+            )
+            .unwrap_or(u16::MAX);
+            app.transcript_viewer.down(1, max);
+        }
+        (KeyCode::Char('k') | KeyCode::Up, _) => {
+            app.transcript_viewer.up(1);
+        }
+        (KeyCode::PageDown, _) => {
+            let max = u16::try_from(
+                transcript_viewer::format_history(&app.messages, app.transcript_viewer.show_all)
+                    .len()
+                    .saturating_sub(1),
+            )
+            .unwrap_or(u16::MAX);
+            app.transcript_viewer.down(10, max);
+        }
+        (KeyCode::PageUp, _) => {
+            app.transcript_viewer.up(10);
+        }
+        (KeyCode::Char('g'), KeyModifiers::NONE) => {
+            app.transcript_viewer.scroll = 0;
+        }
+        (KeyCode::Char('G'), _) => {
+            let max = u16::try_from(
+                transcript_viewer::format_history(&app.messages, app.transcript_viewer.show_all)
+                    .len()
+                    .saturating_sub(1),
+            )
+            .unwrap_or(u16::MAX);
+            app.transcript_viewer.scroll = max;
+        }
+        (KeyCode::Char('['), _) => {
+            // Dump-to-scrollback: leave alt-screen, print, re-enter.
+            let messages = app.messages.clone();
+            let show_all = app.transcript_viewer.show_all;
+            let mut stdout = std::io::stdout();
+            let _ = transcript_viewer::dump_to_scrollback(
+                &mut stdout,
+                &messages,
+                show_all,
+                external_editor::suspend_alt_screen,
+                external_editor::resume_alt_screen,
+            );
+        }
+        (KeyCode::Char('v'), _) => {
+            // Open transcript in $VISUAL — suspend alt-screen first.
+            let suspend = match external_editor::suspend_alt_screen() {
+                Ok(g) => g,
+                Err(e) => {
+                    app.toast = Some(toast::Toast::error(format!("editor suspend failed: {e}")));
+                    return;
+                }
+            };
+            let _ = transcript_viewer::open_in_visual(
+                &app.messages,
+                app.transcript_viewer.show_all,
+                &SubprocessLauncher,
+            );
+            if let Err(e) = external_editor::resume_alt_screen(suspend) {
+                app.toast = Some(toast::Toast::error(format!("editor resume failed: {e}")));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Key dispatch for the Ctrl+R reverse-history overlay.
+fn handle_reverse_history_key(key: KeyEvent, app: &mut App) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => {
+            app.reverse_history = None;
+            app.view = ViewState::Main;
+        }
+        (KeyCode::Enter, _) => {
+            if let Some(state) = app.reverse_history.as_ref()
+                && let Some(sel) = state.selected()
+            {
+                app.input.set_buffer(sel);
+            }
+            app.reverse_history = None;
+            app.view = ViewState::Main;
+        }
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+            if let Some(state) = app.reverse_history.as_mut() {
+                state.cycle_scope();
+            }
+        }
+        (KeyCode::Up, _) => {
+            if let Some(state) = app.reverse_history.as_mut() {
+                state.cursor_up();
+            }
+        }
+        (KeyCode::Down, _) => {
+            if let Some(state) = app.reverse_history.as_mut() {
+                state.cursor_down();
+            }
+        }
+        (KeyCode::Backspace, _) => {
+            if let Some(state) = app.reverse_history.as_mut() {
+                state.pop_char();
+            }
+        }
+        (KeyCode::Char(c), m)
+            if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(state) = app.reverse_history.as_mut() {
+                state.push_char(c);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Open or refilter the @-completion menu, given the current buffer state.
