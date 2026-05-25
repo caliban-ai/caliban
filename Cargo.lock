@@ -769,8 +769,11 @@ dependencies = [
 name = "caliban-memory"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "dirs",
+ "globset",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror 1.0.69",

@@ -83,10 +83,10 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | Three-tier prompt prefix (global / project / auto) | ✅ | ADR-0018 |
-| CLAUDE.md ancestor walk + nested-on-demand | 🟡 | |
-| `@path/file` imports inside CLAUDE.md (recursion-bounded) | 🔴 | |
+| CLAUDE.md ancestor walk + nested-on-demand | ✅ | ADR-0036 |
+| `@path/file` imports inside CLAUDE.md (recursion-bounded) | ✅ | ADR-0036 |
 | Auto-memory (model-written notes per project) | ✅ | ADR-0035 |
-| `claudeMdExcludes` for monorepos | 🔴 | |
+| `claudeMdExcludes` for monorepos | ✅ | ADR-0036 |
 | Auto-checkpoint per prompt + `/rewind` | 🔴 | |
 | Esc-Esc / fork-from-checkpoint | 🔴 | |
 
