@@ -18,6 +18,7 @@ members = [
     "crates/caliban-mcp-client",
     "crates/caliban-model-router",
     "crates/caliban-sandbox",
+    "crates/caliban-plugins",
     "caliban",
 ]
 
@@ -67,6 +68,10 @@ dirs   = "5"
 toml   = "0.8"
 rmcp   = { version = "1.7", features = ["client", "transport-child-process"] }
 schemars = "1"
+sha2   = "0.10"
+semver = { version = "1", features = ["serde"] }
+tar    = "0.4"
+flate2 = "1"
 
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)

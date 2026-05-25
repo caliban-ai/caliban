@@ -25,6 +25,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/output-style", "/output-style"),
     ("/plan", "/plan"),
     ("/hooks", "/hooks"),
+    ("/plugins", "/plugins"),
+    ("/plugin", "/plugin"),
     ("/exit", "/exit"),
     ("/quit", "/quit"),
 ];
@@ -1646,6 +1648,43 @@ fn handle_slash_command(line: &str, app: &mut App) {
                     app.transcript.push(TranscriptLine::Info(
                         "kill switch active (disable_all_hooks = true)".into(),
                     ));
+                }
+            }
+        }
+        "/plugins" | "/plugin" => {
+            // /plugins overlay stub — full interactive UI lands with ADR 0040.
+            // For v1 we render the same text overlay used by the CLI's `list`.
+            let workspace_root = app
+                .args
+                .workspace
+                .clone()
+                .unwrap_or_else(|| app.cwd.clone());
+            let trust = caliban_plugins::TrustStore::open_default().unwrap_or_else(|_| {
+                caliban_plugins::TrustStore {
+                    trust_path: std::path::PathBuf::new(),
+                    allowlist_path: std::path::PathBuf::new(),
+                    records: caliban_plugins::TrustFile::default(),
+                    allowlist: caliban_plugins::MarketplacesAllowlist::default(),
+                }
+            });
+            let cli = caliban_plugins::Cli {
+                workspace_root,
+                user_install_dir: dirs::data_local_dir()
+                    .map(|d| d.join("caliban").join("plugins"))
+                    .unwrap_or_default(),
+                trust,
+                marketplace: caliban_plugins::MarketplaceClient::default(),
+                settings: caliban_plugins::PluginSettings::from_env(),
+            };
+            match cli.list() {
+                Ok(rows) => {
+                    for line in caliban_plugins::render_overlay(&rows) {
+                        app.transcript.push(TranscriptLine::Info(line));
+                    }
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptLine::Error(format!("/plugins: {e}")));
                 }
             }
         }

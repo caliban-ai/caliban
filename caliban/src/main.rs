@@ -4,6 +4,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 mod headless;
+mod plugin_cli;
 mod router;
 mod system_prompt;
 mod tui;
@@ -225,6 +226,11 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_MCP")]
     pub(crate) no_mcp: bool,
 
+    /// Disable plugin discovery (ADR 0030). Skips scanning all plugin roots
+    /// (project, user, managed) and treats `CALIBAN_ENABLED_PLUGINS` as empty.
+    #[arg(long, env = "CALIBAN_NO_PLUGINS")]
+    pub(crate) no_plugins: bool,
+
     /// Disable permission gating entirely (all tool calls allowed).
     #[arg(long, env = "CALIBAN_NO_PERMISSIONS", conflicts_with_all = ["allow", "deny", "ask", "auto_allow"])]
     pub(crate) no_permissions: bool,
@@ -335,6 +341,7 @@ fn build_registry(
     workspace: WorkspaceRoot,
     todos: caliban_agent_core::SharedTodos,
     plan_mode: caliban_agent_core::SharedPlanMode,
+    plugin_skill_roots: &[PathBuf],
 ) -> ToolRegistry {
     if args.no_tools {
         return ToolRegistry::new();
@@ -374,7 +381,8 @@ fn build_registry(
     }
 
     if !args.no_skills && !args.bare {
-        let roots = caliban_skills::default_roots(&workspace_root);
+        let mut roots = caliban_skills::default_roots(&workspace_root);
+        roots.extend(plugin_skill_roots.iter().cloned());
         let mut skills = load_skills(&roots);
         // Built-in skills register *before* user-dir scan results win — except
         // that the loader already shadows duplicates, so `register_builtins`
@@ -813,6 +821,16 @@ async fn run_headless(
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
+    // Early dispatch: `caliban plugin <subcommand>` runs the plugin CLI and
+    // exits, bypassing the agent loop. The dispatcher accepts the first
+    // positional arg only — `caliban --debug plugin list` is not supported
+    // (mirrors how Cargo subcommands work).
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() >= 2 && raw_args[1] == "plugin" {
+        let code = plugin_cli::run(&raw_args[2..]).await;
+        std::process::exit(code);
+    }
+
     let args = Args::parse();
 
     // Diagnostic subcommands run before any provider construction or hook
@@ -893,7 +911,54 @@ async fn main() -> Result<()> {
         };
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
-    let mut registry = build_registry(&args, workspace, Arc::clone(&todos), Arc::clone(&plan_mode));
+
+    // Discover plugins early (ADR 0030). Plugins contribute skill roots,
+    // hooks config, MCP servers, agents, and output styles, so the manager
+    // is constructed before any of those subsystems init. `--bare` and the
+    // `--no-plugins` kill switch both produce an empty manager.
+    let plugin_manager = if args.bare || args.no_plugins {
+        caliban_plugins::PluginManager::default()
+    } else {
+        let ws_for_plugins = args
+            .workspace
+            .clone()
+            .unwrap_or_else(|| workspace.root().to_path_buf());
+        let roots = caliban_plugins::PluginRoots::default_for(&ws_for_plugins);
+        let settings = caliban_plugins::PluginSettings::from_env();
+        match caliban_plugins::PluginManager::load(&roots, &settings) {
+            Ok(mgr) => {
+                if !mgr.loaded().is_empty() {
+                    tracing::info!(
+                        target: "caliban::plugins",
+                        count = mgr.loaded().len(),
+                        "loaded plugins",
+                    );
+                }
+                for f in mgr.failures() {
+                    tracing::warn!(
+                        target: "caliban::plugins",
+                        path = %f.root_dir.display(),
+                        error = %f.error,
+                        "plugin failed to load",
+                    );
+                }
+                mgr
+            }
+            Err(e) => {
+                tracing::warn!(target: "caliban::plugins", error = %e, "plugin discovery failed; continuing without plugins");
+                caliban_plugins::PluginManager::default()
+            }
+        }
+    };
+    let plugin_skill_roots = plugin_manager.skill_roots();
+
+    let mut registry = build_registry(
+        &args,
+        workspace,
+        Arc::clone(&todos),
+        Arc::clone(&plan_mode),
+        &plugin_skill_roots,
+    );
 
     // MCP servers — Phase A: real spawn / handshake / list_tools (ADR 0023).
     // --bare (ADR 0025) suppresses MCP discovery entirely for reproducible CI.
