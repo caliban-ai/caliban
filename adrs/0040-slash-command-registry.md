@@ -1,6 +1,6 @@
 # ADR 0040 · Slash command registry
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-slash-command-coverage-design.md`
 

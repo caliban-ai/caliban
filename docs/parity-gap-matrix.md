@@ -216,18 +216,19 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Command | Caliban | Notes |
 |---|---|---|
-| `/plan`, `/memory`, `/skills`, `/quit` | ✅ | |
-| `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with ADR 0040. |
-| `/clear`, `/help`, `/init` | 🔴 | |
-| `/context`, `/usage`, `/compact` | ✅ | ADR-0033; stub overlays via the existing slash handler (full registry lands with ADR 0040) |
-| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🟡 | `/config` overlay now surfaces the merged settings + scope chain (ADR 0026). Other commands still 🔴; full interactive registry lands with ADR 0040. |
-| `/resume`, `/recap`, `/btw`, `/loop` | 🔴 | |
-| `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay |
-| `/doctor`, `/heapdump`, `/feedback` | 🔴 | |
-| `/login`, `/logout`, `/status` | 🔴 | |
-| `/statusline`, `/theme`, `/tui` | 🔴 | |
-| `/code-review`, `/security-review`, `/review`, `/ultrareview` | 🔴 | (skill-level) |
-| `/run`, `/verify`, `/debug`, `/batch` | 🔴 | (bundled skills) |
+| `/plan`, `/memory`, `/skills`, `/quit` | ✅ | Ported to the `SlashCommand` trait (ADR 0040). |
+| `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with the Plugin Manager overlay spec. |
+| `/clear`, `/help`, `/init` | ✅ | ADR 0040; `/init` writes `CLAUDE.draft.md` from `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `README.md` / `git status`. |
+| `/context`, `/usage`, `/compact` | ✅ | ADR-0033 logic; surfaced through the registry as of ADR 0040. |
+| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | ✅ | ADR 0040; `/config` overlay also surfaces ADR 0026 settings scope chain; `/mcp` opens overlay; `/hooks` lists configured handlers; `/agents`/`/model`/`/effort` are registered stubs whose deeper UI lands with their respective specs. |
+| `/resume`, `/recap`, `/btw`, `/loop` | ✅ | ADR 0040; `/btw` uses `RequestPurpose::FastClassifier`, `/loop` is bounded by `--max-turns`. |
+| `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay; also reachable via `/rewind` through the ADR 0040 registry. |
+| `/doctor`, `/heapdump`, `/feedback` | ✅ | ADR 0040; `/doctor` runs health checks (skills, hooks, MCP, provider, workspace); `/heapdump`/`/feedback` are stubs naming their ETA path. |
+| `/login`, `/logout`, `/status` | ✅ | ADR 0040; stubs that name the Auth spec where each is wired. |
+| `/statusline`, `/tui` | ✅ | ADR 0040; stubs that name the Settings hierarchy + TUI ergonomics specs. |
+| `/theme` | 🔴 | Deferred per spec — TUI color customization. |
+| `/code-review`, `/security-review`, `/review`, `/ultrareview` | 🔴 | (skill-level — depends on the Skills system polish sub-project) |
+| `/run`, `/verify`, `/debug`, `/batch` | 🔴 | (bundled skills — same dependency) |
 
 ## N. Long-tail surfaces (cloud / IDE / mobile)
 

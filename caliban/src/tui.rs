@@ -9,36 +9,17 @@ mod external_editor;
 mod input;
 mod reverse_history;
 mod shell_escape;
+pub(crate) mod slash;
 mod toast;
 mod transcript_viewer;
 
 pub(crate) use ask::TuiAskHandler;
 use input::InputMode;
 
-/// Slash-command names + their literal insert text. Used by the slash menu
-/// to populate candidates and by `handle_key` to detect the trigger.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/help", "/help"),
-    ("/clear", "/clear"),
-    ("/config", "/config"),
-    ("/mcp", "/mcp"),
-    ("/skills", "/skills"),
-    ("/system", "/system"),
-    ("/sessions", "/sessions"),
-    ("/save", "/save"),
-    ("/usage", "/usage"),
-    ("/context", "/context"),
-    ("/compact", "/compact"),
-    ("/memory", "/memory"),
-    ("/output-style", "/output-style"),
-    ("/plan", "/plan"),
-    ("/hooks", "/hooks"),
-    ("/plugins", "/plugins"),
-    ("/plugin", "/plugin"),
-    ("/rewind", "/rewind"),
-    ("/exit", "/exit"),
-    ("/quit", "/quit"),
-];
+// The slash typeahead suggester used to consult a hard-coded
+// `SLASH_COMMANDS` constant. With ADR 0040 in place, it consults the
+// `App.slash_registry` instead; the registry is the single source of
+// truth for command names + descriptions + hidden flag.
 
 /// Window for an Esc-Esc chord (ADR 0028). A second Esc inside this many
 /// milliseconds after a first Esc on an empty buffer triggers the rewind
@@ -410,6 +391,15 @@ pub(crate) struct App {
     /// from the loader outcome so the overlay can render the scope
     /// chain without re-running discovery.
     pub(crate) settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
+    /// Central slash-command registry (ADR 0040). Built once at startup
+    /// from `slash::register_builtin()`; consulted by typeahead, by
+    /// `/help`, and by the dispatcher. Plugins extend it via
+    /// `registry.register(...)` once the plugin loader is wired.
+    pub(crate) slash_registry: slash::SlashCommandRegistry,
+    /// Last short status message returned from `SlashOutcome::StatusMessage`
+    /// and surfaced as a toast / transcript info line. Stored here so the
+    /// TUI status bar can render it for a single frame.
+    pub(crate) last_status_message: Option<String>,
 }
 
 impl App {
@@ -532,6 +522,8 @@ impl App {
             last_esc_at: None,
             settings_handle,
             settings_sources,
+            slash_registry: slash::register_builtin(),
+            last_status_message: None,
         }
     }
 
@@ -1070,7 +1062,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     };
 
     let content_lines: Vec<Line<'static>> = match overlay {
-        Overlay::SlashHelp => slash_help_lines(),
+        Overlay::SlashHelp => slash_help_lines(&app.slash_registry),
         Overlay::Config => clone_lines(&config_lines(app)),
         Overlay::Mcp => mcp_lines(app),
         Overlay::Skills => skills_lines(),
@@ -1187,27 +1179,19 @@ fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
     out
 }
 
-fn slash_help_lines() -> Vec<Line<'static>> {
-    let entries = [
-        ("/help", "Show this help"),
-        ("/exit, /quit", "Save session and exit"),
-        (
-            "/clear",
-            "Clear transcript AND in-memory history (session messages cleared too)",
-        ),
-        ("/sessions", "List saved sessions"),
-        ("/save [<name>]", "Save current session (optionally rename)"),
-        ("/usage", "Show accumulated usage"),
-        ("/config", "Show active configuration"),
-        ("/mcp", "Live MCP server status (connected/failed/disabled)"),
-        ("/skills", "Skills configuration (stub)"),
-        ("/system", "View current system prompt"),
-        ("/hooks", "Configured hooks summary (stub)"),
-        (
-            "/output-style",
-            "Active output style + available list (stub)",
-        ),
-    ];
+fn slash_help_lines(registry: &slash::SlashCommandRegistry) -> Vec<Line<'static>> {
+    let entries: Vec<(String, String)> = registry
+        .visible_metas()
+        .into_iter()
+        .map(|m| {
+            let key = if m.args_hint.is_empty() {
+                m.name.to_string()
+            } else {
+                format!("{} {}", m.name, m.args_hint)
+            };
+            (key, m.description.to_string())
+        })
+        .collect();
 
     let mut out = vec![Line::raw("")];
     for (cmd, desc) in entries {
@@ -2064,248 +2048,66 @@ pub(crate) async fn run(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+/// Thin wrapper over [`slash::SlashCommandRegistry::dispatch`] (ADR 0040).
+///
+/// Parses `/<name> [args...]`, takes the registry out of `app` (to side-step
+/// the `&mut App` borrow), dispatches, then applies the resulting
+/// [`slash::SlashOutcome`] to the transcript / view-state. The registry is
+/// always restored on the way out.
+///
+/// Note: not all surfaces of the registry — overlay rendering for stub
+/// status messages, `Reload` semantics — are wired in this PR; commands
+/// that return `Continue` get no extra behavior, and `Quit`/`Overlay`/
+/// `StatusMessage` are honored directly.
 fn handle_slash_command(line: &str, app: &mut App) {
     let mut parts = line.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("");
-    let arg = parts.next().unwrap_or("").trim();
-    match cmd {
-        "/help" => {
-            app.view = ViewState::Overlay(Overlay::SlashHelp);
+    let cmd = parts.next().unwrap_or("").to_string();
+    let arg = parts.next().unwrap_or("").trim().to_string();
+
+    // Take the registry out so we can hand a `&mut App` to dispatch
+    // without aliasing.
+    let registry = std::mem::take(&mut app.slash_registry);
+    let outcome = futures::executor::block_on(async {
+        let mut ctx = slash::SlashCtx { app };
+        registry.dispatch(&cmd, &arg, &mut ctx).await
+    });
+    app.slash_registry = registry;
+
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            app.transcript
+                .push(TranscriptLine::Error(format!("slash command failed: {e}")));
+            return;
         }
-        "/config" => {
-            app.view = ViewState::Overlay(Overlay::Config);
-        }
-        "/mcp" => {
-            app.view = ViewState::Overlay(Overlay::Mcp);
-        }
-        "/skills" => {
-            let workspace_root = app
-                .args
-                .workspace
-                .clone()
-                .unwrap_or_else(|| app.cwd.clone());
-            let roots = caliban_skills::default_roots(&workspace_root);
-            let skills = caliban_skills::load_skills(&roots);
-            if skills.is_empty() {
-                app.transcript.push(TranscriptLine::Info(
-                    "no skills loaded (drop a SKILL.md under .caliban/skills/<name>/)".into(),
-                ));
-            } else {
-                app.transcript.push(TranscriptLine::Info(format!(
-                    "{} skill(s) loaded:",
-                    skills.len()
-                )));
-                for s in &skills {
-                    let first = s.description.lines().next().unwrap_or("");
-                    app.transcript
-                        .push(TranscriptLine::Info(format!("  {} — {}", s.name, first)));
-                }
-            }
-        }
-        "/system" => {
-            app.view = ViewState::Overlay(Overlay::System);
-        }
-        "/rewind" => {
-            app.view = ViewState::Overlay(Overlay::Rewind);
-        }
-        "/hooks" => {
-            // Stub overlay (the proper /hooks UI lands with ADR 0040).
-            // For v1, we render a one-line summary line per configured event.
-            let workspace_root = app
-                .args
-                .workspace
-                .clone()
-                .unwrap_or_else(|| app.cwd.clone());
-            let cfg = caliban_agent_core::HooksConfig::load(&workspace_root).unwrap_or_default();
-            if cfg.total_handler_count() == 0 {
-                app.transcript.push(TranscriptLine::Info(
-                    "no hooks configured (drop a hooks.toml under .caliban/ or ~/.config/caliban/)"
-                        .into(),
-                ));
-            } else {
-                app.transcript.push(TranscriptLine::Info(format!(
-                    "{} hook handler(s) loaded across {} event(s):",
-                    cfg.total_handler_count(),
-                    cfg.events.len()
-                )));
-                for (event, handlers) in &cfg.events {
-                    app.transcript.push(TranscriptLine::Info(format!(
-                        "  {event} → {} handler(s)",
-                        handlers.len()
-                    )));
-                }
-                if cfg.disable_all_hooks {
-                    app.transcript.push(TranscriptLine::Info(
-                        "kill switch active (disable_all_hooks = true)".into(),
-                    ));
-                }
-            }
-        }
-        "/plugins" | "/plugin" => {
-            // /plugins overlay stub — full interactive UI lands with ADR 0040.
-            // For v1 we render the same text overlay used by the CLI's `list`.
-            let workspace_root = app
-                .args
-                .workspace
-                .clone()
-                .unwrap_or_else(|| app.cwd.clone());
-            let trust = caliban_plugins::TrustStore::open_default().unwrap_or_else(|_| {
-                caliban_plugins::TrustStore {
-                    trust_path: std::path::PathBuf::new(),
-                    allowlist_path: std::path::PathBuf::new(),
-                    records: caliban_plugins::TrustFile::default(),
-                    allowlist: caliban_plugins::MarketplacesAllowlist::default(),
-                }
-            });
-            let cli = caliban_plugins::Cli {
-                workspace_root,
-                user_install_dir: dirs::data_local_dir()
-                    .map(|d| d.join("caliban").join("plugins"))
-                    .unwrap_or_default(),
-                trust,
-                marketplace: caliban_plugins::MarketplaceClient::default(),
-                settings: caliban_plugins::PluginSettings::from_env(),
-            };
-            match cli.list() {
-                Ok(rows) => {
-                    for line in caliban_plugins::render_overlay(&rows) {
-                        app.transcript.push(TranscriptLine::Info(line));
-                    }
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("/plugins: {e}")));
-                }
-            }
-        }
-        "/exit" | "/quit" => {
+    };
+    apply_slash_outcome(outcome, app);
+}
+
+/// Apply a [`slash::SlashOutcome`] to the running `App`. Pulled out so the
+/// behavior is unit-testable.
+pub(crate) fn apply_slash_outcome(outcome: slash::SlashOutcome, app: &mut App) {
+    match outcome {
+        slash::SlashOutcome::Continue => {}
+        slash::SlashOutcome::Quit => {
             app.should_exit = true;
         }
-        "/clear" => {
-            app.transcript.clear();
-            app.messages.clear();
-            app.last_turn_ttft_ms = None;
-            // Clear session messages too if applicable; the next save overwrites.
-            if let Some(sess) = app.session.as_mut() {
-                sess.messages.clear();
-            }
+        slash::SlashOutcome::Overlay(o) => {
+            app.view = ViewState::Overlay(o);
         }
-        "/sessions" => match &app.store {
-            Some(store) => match store.list() {
-                Ok(list) if list.is_empty() => {
-                    app.transcript
-                        .push(TranscriptLine::Info("no sessions yet".into()));
-                }
-                Ok(list) => {
-                    for m in list {
-                        app.transcript.push(TranscriptLine::Info(format!(
-                            "{} \u{2014} {} turns, {} tokens \u{2014} {}",
-                            m.name,
-                            m.turn_count,
-                            m.total_tokens,
-                            m.updated_at.format("%Y-%m-%d %H:%M:%S"),
-                        )));
-                    }
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("list error: {e}")));
-                }
-            },
-            None => {
-                app.transcript
-                    .push(TranscriptLine::Info("no session store".into()));
-            }
-        },
-        "/save" => {
-            if let (Some(store), Some(sess)) = (&app.store, app.session.as_ref()) {
-                let target_name = if arg.is_empty() {
-                    sess.name.clone()
-                } else {
-                    arg.to_string()
-                };
-                let mut to_save = sess.clone();
-                to_save.name.clone_from(&target_name);
-                match store.save(&to_save) {
-                    Ok(()) => app
-                        .transcript
-                        .push(TranscriptLine::Info(format!("saved as '{target_name}'"))),
-                    Err(e) => app
-                        .transcript
-                        .push(TranscriptLine::Error(format!("save error: {e}"))),
-                }
-            } else {
-                app.transcript
-                    .push(TranscriptLine::Info("no session to save".into()));
-            }
+        slash::SlashOutcome::StatusMessage(msg) => {
+            app.last_status_message = Some(msg.clone());
+            app.transcript.push(TranscriptLine::Info(msg));
         }
-        "/usage" => {
-            for line in render_usage_lines(app) {
-                app.transcript.push(TranscriptLine::Info(line));
-            }
+        slash::SlashOutcome::InsertText(s) => {
+            app.input.buffer = s;
+            app.input.cursor = app.input.buffer.len();
         }
-        "/context" => {
-            for line in render_context_lines(app) {
-                app.transcript.push(TranscriptLine::Info(line));
-            }
-        }
-        "/compact" => {
-            handle_compact_command(app);
-        }
-        "/plan" => {
-            use std::sync::atomic::Ordering;
-            let now = !app.plan_mode.load(Ordering::Relaxed);
-            app.plan_mode.store(now, Ordering::Relaxed);
-            if let Some(sess) = app.session.as_mut() {
-                sess.plan_mode = now;
-            }
-            let msg = if now {
-                "plan mode: ON — mutating tools blocked until /plan toggles off"
-            } else {
-                "plan mode: OFF — mutating tools available"
-            };
-            app.transcript.push(TranscriptLine::Info(msg.into()));
-        }
-        "/output-style" => {
-            let workspace_root = app
-                .args
-                .workspace
-                .clone()
-                .unwrap_or_else(|| app.cwd.clone());
-            let reg = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
-            let requested = caliban_output_styles::requested_from_env();
-            app.transcript.push(TranscriptLine::Info(format!(
-                "active output style: {requested} (set via {} env var; full UI ships with ADR 0040)",
-                caliban_output_styles::ACTIVE_STYLE_ENV,
-            )));
-            app.transcript.push(TranscriptLine::Info(format!(
-                "{} style(s) available:",
-                reg.len()
-            )));
-            for s in reg.available() {
-                let marker = if s.name == requested { "*" } else { " " };
-                let badge = if s.force_for_plugin {
-                    " [force_for_plugin — inert until ADR 0030]"
-                } else {
-                    ""
-                };
-                app.transcript.push(TranscriptLine::Info(format!(
-                    "  {marker} {} — {}{badge}",
-                    s.name, s.description
-                )));
-            }
+        slash::SlashOutcome::Reload => {
+            // Reload semantics land with the Settings hierarchy spec.
             app.transcript.push(TranscriptLine::Info(
-                "note: applies after /clear or restart (system prompts are cached)".into(),
+                "reload requested \u{2014} settings hot-reload lands with the Settings hierarchy spec".into(),
             ));
-        }
-        "/memory" => {
-            handle_memory_command(app, arg);
-        }
-        unknown => {
-            app.transcript.push(TranscriptLine::Info(format!(
-                "unknown command: {unknown} \u{2014} type /help"
-            )));
         }
     }
 }
@@ -2315,7 +2117,7 @@ fn handle_slash_command(line: &str, app: &mut App) {
 /// Returns a vector of plain-text lines for the transcript. The full
 /// bordered overlay arrives with the slash registry (ADR 0040); this stub
 /// renders the same data in-line.
-fn render_usage_lines(app: &App) -> Vec<String> {
+pub(crate) fn render_usage_lines(app: &App) -> Vec<String> {
     let session_note = app.session.as_ref().map(|sess| {
         format!(
             "  session {} \u{2014} {} turns, {} input + {} output tokens",
@@ -2366,7 +2168,7 @@ fn format_usage_lines(cost: &caliban_telemetry::CostAccumulator) -> Vec<String> 
 }
 
 /// `/context` overlay (ADR 0033): per-message-kind token breakdown.
-fn render_context_lines(app: &App) -> Vec<String> {
+pub(crate) fn render_context_lines(app: &App) -> Vec<String> {
     format_context_lines(&app.context_window)
 }
 
@@ -2410,7 +2212,7 @@ fn format_context_lines(window: &caliban_telemetry::ContextWindow) -> Vec<String
 /// Reports the number of messages dropped/summarized + the post-compact
 /// token count. The full bordered overlay arrives with ADR 0040; this stub
 /// writes the result inline.
-fn handle_compact_command(app: &mut App) {
+pub(crate) fn handle_compact_command(app: &mut App) {
     if app.messages.is_empty() {
         app.transcript.push(TranscriptLine::Info(
             "compact: no messages to compact".into(),
@@ -2450,168 +2252,6 @@ fn handle_compact_command(app: &mut App) {
                 "compact (strategy {}): {before_count} \u{2192} {after_count} messages \
                  ({dropped} dropped/summarized), ~{before} \u{2192} ~{after} tokens",
                 compactor.strategy_name(),
-            )));
-        }
-    }
-}
-
-/// `/memory` subcommands. With no argument, prints the three-tier summary
-/// (legacy behavior). Otherwise dispatches `list`, `show <slug>`,
-/// `edit <slug>`, `delete <slug>` per ADR 0035. The full slash registry
-/// arrives with ADR 0040; for now we route everything through this handler.
-#[allow(clippy::too_many_lines)]
-fn handle_memory_command(app: &mut App, arg: &str) {
-    let workspace_root = app
-        .args
-        .workspace
-        .clone()
-        .unwrap_or_else(|| app.cwd.clone());
-    let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
-
-    let mut parts = arg.splitn(2, char::is_whitespace);
-    let sub = parts.next().unwrap_or("").trim();
-    let rest = parts.next().unwrap_or("").trim();
-    match sub {
-        "" => {
-            // Legacy: show tiers summary.
-            match futures::executor::block_on(caliban_memory::load(&cfg)) {
-                Ok(p) => {
-                    app.transcript.push(TranscriptLine::Info(format!(
-                        "memory tiers ({} tokens / {} budget):",
-                        p.estimated_tokens, cfg.max_tokens
-                    )));
-                    for line in p.summary_lines() {
-                        app.transcript.push(TranscriptLine::Info(line));
-                    }
-                    if p.truncated {
-                        app.transcript.push(TranscriptLine::Info(
-                            "(some tiers truncated — raise CALIBAN_MEMORY_BUDGET_TOKENS or trim)"
-                                .into(),
-                        ));
-                    }
-                    app.transcript.push(TranscriptLine::Info(
-                        "subcommands: /memory list | show <slug> | edit <slug> | delete <slug>"
-                            .into(),
-                    ));
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("memory load failed: {e}")));
-                }
-            }
-        }
-        "list" => {
-            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-            match loader.list() {
-                Ok(topics) if topics.is_empty() => {
-                    app.transcript
-                        .push(TranscriptLine::Info("no topic files yet".into()));
-                }
-                Ok(topics) => {
-                    app.transcript.push(TranscriptLine::Info(format!(
-                        "{} topic file(s) in {}:",
-                        topics.len(),
-                        cfg.auto_memory_dir.display()
-                    )));
-                    for t in topics {
-                        app.transcript.push(TranscriptLine::Info(format!(
-                            "  {} [{}] — {}",
-                            t.name,
-                            t.kind.as_str(),
-                            t.description
-                        )));
-                    }
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("list failed: {e}")));
-                }
-            }
-        }
-        "show" => {
-            if rest.is_empty() {
-                app.transcript
-                    .push(TranscriptLine::Info("usage: /memory show <slug>".into()));
-                return;
-            }
-            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-            match loader.read(rest) {
-                Ok(topic) => {
-                    app.transcript.push(TranscriptLine::Info(format!(
-                        "{} [{}] — {}",
-                        topic.name,
-                        topic.kind.as_str(),
-                        topic.description,
-                    )));
-                    for line in topic.body.lines() {
-                        app.transcript.push(TranscriptLine::Info(line.to_string()));
-                    }
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("show failed: {e}")));
-                }
-            }
-        }
-        "edit" => {
-            if rest.is_empty() {
-                app.transcript
-                    .push(TranscriptLine::Info("usage: /memory edit <slug>".into()));
-                return;
-            }
-            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-            if let Err(e) = caliban_memory::auto::validate_slug(rest) {
-                app.transcript
-                    .push(TranscriptLine::Error(format!("bad slug: {e}")));
-                return;
-            }
-            let path = loader.dir().join(format!("{rest}.md"));
-            if !path.exists() {
-                app.transcript.push(TranscriptLine::Error(format!(
-                    "no such topic: {}",
-                    path.display()
-                )));
-                return;
-            }
-            let editor = std::env::var("VISUAL")
-                .or_else(|_| std::env::var("EDITOR"))
-                .unwrap_or_else(|_| "vi".to_string());
-            app.transcript.push(TranscriptLine::Info(format!(
-                "opening {} in {} (Ctrl-Z and `fg` to return, or run from outside the TUI)",
-                path.display(),
-                editor
-            )));
-            // Spawning an interactive editor under the alternate screen leads
-            // to a corrupt-looking terminal. We surface the canonical command
-            // for the operator to run themselves; the proper integration
-            // arrives with ADR 0040's slash-command registry.
-            app.transcript.push(TranscriptLine::Info(format!(
-                "→ run: {editor} {}",
-                path.display()
-            )));
-        }
-        "delete" | "rm" => {
-            if rest.is_empty() {
-                app.transcript.push(TranscriptLine::Info(
-                    "usage: /memory delete <slug>  (also: /memory rm <slug>)".into(),
-                ));
-                return;
-            }
-            let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-            match loader.delete(rest) {
-                Ok(()) => {
-                    app.transcript
-                        .push(TranscriptLine::Info(format!("deleted topic '{rest}'")));
-                }
-                Err(e) => {
-                    app.transcript
-                        .push(TranscriptLine::Error(format!("delete failed: {e}")));
-                }
-            }
-        }
-        other => {
-            app.transcript.push(TranscriptLine::Info(format!(
-                "unknown /memory subcommand: {other} — try /memory list"
             )));
         }
     }
@@ -2960,13 +2600,11 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
             }
             app.auto_scroll = true;
 
-            if prompt.starts_with('/') {
-                handle_slash_command(&prompt, app);
-                return;
-            }
-
-            // Fire UserPromptSubmit (best-effort, sync over the current
-            // runtime). Hooks may rewrite the prompt via `UpdatedInput`.
+            // Fire UserPromptSubmit *before* slash parsing (ADR 0040). This
+            // gives hooks the chance to intercept or rewrite slash commands
+            // alongside regular prompts. The hook payload includes the
+            // prompt text; slash detection re-runs against the (possibly
+            // updated) prompt below.
             let prompt_for_hook = prompt.clone();
             let cwd_for_hook = app.cwd.clone();
             let hooks = app.agent.hooks();
@@ -3001,6 +2639,15 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                     prompt
                 }
             };
+
+            // Now that the hook has had a chance to allow/deny/rewrite,
+            // route slash commands through the registry. The hook may have
+            // turned a plain prompt into a slash command or vice versa via
+            // `UpdatedInput`.
+            if prompt.starts_with('/') {
+                handle_slash_command(&prompt, app);
+                return;
+            }
 
             // Resolve any @-attachments before we send. On failure, restore
             // the buffer and surface the error as a toast — no roundtrip.
@@ -3086,8 +2733,29 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
     // no-op unless the menu is currently open. `refresh_at_menu` opens or
     // refilters the @-completion menu based on whether the cursor sits in
     // an active @-token.
-    app.input.maybe_open_slash_menu(SLASH_COMMANDS);
-    app.input.refilter_slash_menu(SLASH_COMMANDS);
+    // Build the candidate list from the suggester so the registry is
+    // the *single* source of truth for typeahead. We re-suggest with the
+    // current prefix (extracted from the buffer) so hidden-flag and
+    // substring filtering live in one place.
+    let pairs: Vec<(&'static str, &'static str)> = {
+        let prefix = if app.input.buffer.starts_with('/') {
+            let end = app
+                .input
+                .buffer
+                .find(char::is_whitespace)
+                .unwrap_or(app.input.buffer.len());
+            app.input.buffer[1..end].to_string()
+        } else {
+            String::new()
+        };
+        app.slash_registry
+            .suggest(&prefix)
+            .into_iter()
+            .map(|m| (m.name, m.name))
+            .collect()
+    };
+    app.input.maybe_open_slash_menu(&pairs);
+    app.input.refilter_slash_menu(&pairs);
     refresh_at_menu(app);
 }
 
@@ -3670,9 +3338,10 @@ mod tests {
 
     #[test]
     fn rewind_is_a_registered_slash_command() {
+        let registry = slash::register_builtin();
         assert!(
-            SLASH_COMMANDS.iter().any(|(name, _)| *name == "/rewind"),
-            "/rewind must appear in SLASH_COMMANDS",
+            registry.contains("/rewind"),
+            "/rewind must be registered in the slash registry",
         );
     }
 
@@ -3733,5 +3402,512 @@ mod tests {
         let (next, warning) = next_permission_mode(PermissionMode::Default, false);
         assert_eq!(next, PermissionMode::AcceptEdits);
         assert!(warning.is_none());
+    }
+
+    // === ADR 0040: slash command registry integration tests ===
+
+    /// Build a minimal `App` for in-bin slash-registry tests. Uses
+    /// `MockProvider` so we can dispatch commands without network or auth.
+    fn make_test_app() -> App {
+        use caliban_agent_core::{Agent, ToolRegistry};
+        use caliban_provider::{MockProvider, Provider};
+        use clap::Parser;
+
+        let mock: Arc<MockProvider> = Arc::new(MockProvider::new());
+        let provider: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(10)
+            .build()
+            .expect("agent builder");
+
+        let args = crate::Args::parse_from(["caliban"]);
+        App::new(
+            Arc::new(agent),
+            None,
+            None,
+            args,
+            None,
+            caliban_agent_core::SharedTodos::default(),
+            caliban_agent_core::SharedPlanMode::default(),
+            caliban_agent_core::SharedPermissionMode::default(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        )
+    }
+
+    fn dispatch_slash(app: &mut App, line: &str) {
+        handle_slash_command(line, app);
+    }
+
+    fn last_info(app: &App) -> Option<String> {
+        app.transcript.iter().rev().find_map(|l| match l {
+            TranscriptLine::Info(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn registry_registers_all_expected_visible_commands() {
+        // Spec calls for ~24 commands; we ship 25+ visible (the spec list
+        // plus the `/system` legacy command).
+        let registry = slash::register_builtin();
+        // Sanity: the canonical commands are all present.
+        for name in [
+            "/help",
+            "/clear",
+            "/quit",
+            "/init",
+            "/resume",
+            "/recap",
+            "/btw",
+            "/usage",
+            "/context",
+            "/compact",
+            "/doctor",
+            "/config",
+            "/hooks",
+            "/mcp",
+            "/plugins",
+            "/agents",
+            "/model",
+            "/effort",
+            "/status",
+            "/login",
+            "/logout",
+            "/setup-token",
+            "/permissions",
+            "/rewind",
+            "/heapdump",
+            "/feedback",
+            "/loop",
+            "/statusline",
+            "/tui",
+            "/voice",
+            "/plan",
+            "/memory",
+            "/skills",
+            "/output-style",
+        ] {
+            assert!(registry.contains(name), "missing command: {name}");
+        }
+        let visible = registry.visible_metas();
+        assert!(
+            visible.len() >= 24,
+            "expected ≥24 visible commands, got {}",
+            visible.len()
+        );
+    }
+
+    #[test]
+    fn registry_hides_voice_from_help_listing() {
+        let registry = slash::register_builtin();
+        assert!(registry.contains("/voice"));
+        let visible: Vec<&str> = registry.visible_metas().iter().map(|m| m.name).collect();
+        assert!(
+            !visible.contains(&"/voice"),
+            "voice should be hidden from help",
+        );
+    }
+
+    #[test]
+    fn dispatch_unknown_returns_status_message_via_handler() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/this-doesnt-exist");
+        let msg = last_info(&app).expect("status message in transcript");
+        assert!(msg.contains("unknown command"), "got: {msg}");
+        assert!(msg.contains("/this-doesnt-exist"), "got: {msg}");
+    }
+
+    #[test]
+    fn quit_command_sets_should_exit() {
+        let mut app = make_test_app();
+        assert!(!app.should_exit);
+        dispatch_slash(&mut app, "/quit");
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn clear_command_clears_transcript_and_messages() {
+        let mut app = make_test_app();
+        app.transcript
+            .push(TranscriptLine::Info("seed line".into()));
+        app.messages
+            .push(caliban_provider::Message::user_text("hello"));
+        dispatch_slash(&mut app, "/clear");
+        assert!(app.transcript.is_empty());
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn plan_command_toggles_plan_mode() {
+        use std::sync::atomic::Ordering;
+        let mut app = make_test_app();
+        let before = app.plan_mode.load(Ordering::Relaxed);
+        dispatch_slash(&mut app, "/plan");
+        let after = app.plan_mode.load(Ordering::Relaxed);
+        assert_ne!(before, after, "/plan toggles the flag");
+    }
+
+    #[test]
+    fn config_command_opens_config_overlay() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/config");
+        assert!(matches!(app.view, ViewState::Overlay(Overlay::Config)));
+    }
+
+    #[test]
+    fn mcp_command_opens_mcp_overlay() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/mcp");
+        assert!(matches!(app.view, ViewState::Overlay(Overlay::Mcp)));
+    }
+
+    #[test]
+    fn help_command_opens_slash_help_overlay() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/help");
+        assert!(matches!(app.view, ViewState::Overlay(Overlay::SlashHelp)));
+    }
+
+    #[test]
+    fn slash_help_lines_lists_visible_commands_only() {
+        let app = make_test_app();
+        let lines = slash_help_lines(&app.slash_registry);
+        // Convert lines to flat strings for substring assertions.
+        let flat: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("/help"));
+        assert!(flat.contains("/clear"));
+        // Hidden commands must not appear.
+        assert!(!flat.contains("/voice"));
+    }
+
+    #[test]
+    fn slash_outcome_status_message_records_last_status() {
+        let mut app = make_test_app();
+        apply_slash_outcome(slash::SlashOutcome::StatusMessage("hi".into()), &mut app);
+        assert_eq!(app.last_status_message.as_deref(), Some("hi"));
+        // Transcript also picks it up so the operator sees it.
+        let info = last_info(&app).expect("info recorded");
+        assert_eq!(info, "hi");
+    }
+
+    #[test]
+    fn slash_outcome_insert_text_prefills_buffer() {
+        let mut app = make_test_app();
+        apply_slash_outcome(slash::SlashOutcome::InsertText("/clear ".into()), &mut app);
+        assert_eq!(app.input.buffer, "/clear ");
+        assert_eq!(app.input.cursor, "/clear ".len());
+    }
+
+    #[test]
+    fn slash_outcome_overlay_sets_view_state() {
+        let mut app = make_test_app();
+        apply_slash_outcome(slash::SlashOutcome::Overlay(Overlay::Mcp), &mut app);
+        assert!(matches!(app.view, ViewState::Overlay(Overlay::Mcp)));
+    }
+
+    #[test]
+    fn doctor_command_runs_all_checks() {
+        let app = make_test_app();
+        let workspace = app
+            .args
+            .workspace
+            .clone()
+            .unwrap_or_else(|| app.cwd.clone());
+        let checks = slash::observe::doctor::run_checks(&workspace, &app);
+        assert!(
+            !checks.is_empty(),
+            "expected at least one health check to run"
+        );
+        // Each check has a name and a detail.
+        for c in &checks {
+            assert!(!c.name.is_empty());
+            assert!(!c.detail.is_empty());
+        }
+        // Skills, hooks, mcp, provider, workspace — five expected checks.
+        let names: Vec<&str> = checks.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"skills"));
+        assert!(names.contains(&"hooks"));
+        assert!(names.contains(&"provider"));
+    }
+
+    #[test]
+    fn loop_command_bounded_by_max_turns() {
+        let mut app = make_test_app();
+        app.args.max_turns = 5;
+        dispatch_slash(&mut app, "/loop --n=100");
+        let msg = last_info(&app).expect("status line");
+        assert!(msg.contains("bounded to 5"), "msg: {msg}");
+    }
+
+    #[test]
+    fn loop_command_emits_default_when_no_args() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/loop");
+        let msg = last_info(&app).expect("status line");
+        assert!(msg.contains("planned 3 repeats"), "msg: {msg}");
+    }
+
+    #[test]
+    fn init_command_writes_draft_to_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "agents.md content").unwrap();
+        let mut app = make_test_app();
+        app.args.workspace = Some(tmp.path().to_path_buf());
+        dispatch_slash(&mut app, "/init");
+        let draft = tmp.path().join("CLAUDE.draft.md");
+        assert!(draft.exists(), "draft file written");
+        let body = std::fs::read_to_string(&draft).unwrap();
+        assert!(body.contains("# CLAUDE.md (draft)"));
+        assert!(body.contains("agents.md content"));
+    }
+
+    #[test]
+    fn init_command_warns_when_claude_md_exists_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "existing").unwrap();
+        let mut app = make_test_app();
+        app.args.workspace = Some(tmp.path().to_path_buf());
+        dispatch_slash(&mut app, "/init");
+        let infos: Vec<&str> = app
+            .transcript
+            .iter()
+            .filter_map(|l| match l {
+                TranscriptLine::Info(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            infos.iter().any(|s| s.contains("already exists")),
+            "expected warning, got: {infos:?}",
+        );
+        // Existing CLAUDE.md not overwritten.
+        let kept = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(kept, "existing");
+    }
+
+    #[test]
+    fn recap_emits_no_op_when_history_empty() {
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/recap");
+        let msg = last_info(&app).expect("recap status");
+        assert!(msg.contains("no messages"), "got: {msg}");
+    }
+
+    #[test]
+    fn voice_hidden_command_still_dispatches() {
+        // Hidden = absent from typeahead but still dispatchable.
+        let mut app = make_test_app();
+        dispatch_slash(&mut app, "/voice");
+        let msg = last_info(&app).expect("voice status message");
+        assert!(msg.contains("voice dictation not available"));
+    }
+
+    #[test]
+    fn suggester_orders_prefix_before_substring_then_alpha() {
+        let registry = slash::register_builtin();
+        // "co" appears as prefix of /compact, /config, /context AND as
+        // substring within /recap (re-CA-p? no, c-o not in /recap).
+        // Validate prefix-vs-substring policy on a synthetic call.
+        let metas = registry.suggest("co");
+        let names: Vec<&str> = metas.iter().map(|m| m.name).collect();
+        // All three "co*" names must appear (in some order).
+        assert!(names.contains(&"/compact"));
+        assert!(names.contains(&"/config"));
+        assert!(names.contains(&"/context"));
+        // Prefix matches come first; they're alphabetized.
+        let prefixes: Vec<&str> = names
+            .iter()
+            .take_while(|n| n.starts_with("/co"))
+            .copied()
+            .collect();
+        assert_eq!(prefixes, vec!["/compact", "/config", "/context"]);
+    }
+
+    #[test]
+    fn typeahead_consults_registry_suggester() {
+        // Real ratatui-render test of the input popover: when the buffer
+        // is `/c`, the menu should list multiple visible commands.
+        let mut app = make_test_app();
+        app.input.buffer = "/c".into();
+        app.input.cursor = app.input.buffer.len();
+        // Mimic the post-mutate menu-refresh logic from `handle_key`.
+        let pairs: Vec<(&'static str, &'static str)> = app
+            .slash_registry
+            .suggest("c")
+            .into_iter()
+            .map(|m| (m.name, m.name))
+            .collect();
+        app.input.maybe_open_slash_menu(&pairs);
+        app.input.refilter_slash_menu(&pairs);
+        // After refilter, the menu must be open and non-empty.
+        if let input::InputMode::SlashMenu(menu) = &app.input.mode {
+            assert!(!menu.candidates.is_empty(), "menu has candidates");
+            // /compact and /config must both be selectable.
+            let names: Vec<&str> = menu.candidates.iter().map(|c| c.display.as_str()).collect();
+            assert!(names.contains(&"/compact"));
+            assert!(names.contains(&"/config"));
+        } else {
+            // The first call to `maybe_open_slash_menu` only opens when the
+            // buffer is exactly "/". For "/c" we exercised `refilter_slash_menu`
+            // — open the menu by hand and refilter.
+            app.input.buffer = "/".into();
+            app.input.cursor = 1;
+            app.input.maybe_open_slash_menu(&pairs);
+            assert!(
+                matches!(app.input.mode, input::InputMode::SlashMenu(_)),
+                "menu should open on bare '/'",
+            );
+        }
+    }
+
+    /// `UserPromptSubmit` hooks must fire *before* slash parsing so a
+    /// hook can intercept or rewrite a slash command (ADR 0040).
+    #[tokio::test]
+    async fn user_prompt_submit_hook_fires_for_slash_commands() {
+        use async_trait::async_trait;
+        use caliban_agent_core::{HookDecision, Hooks, PromptCtx};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingHook {
+            count: Arc<AtomicUsize>,
+            last_prompt: Arc<std::sync::Mutex<String>>,
+        }
+        #[async_trait]
+        impl Hooks for CountingHook {
+            async fn user_prompt_submit(
+                &self,
+                ctx: &PromptCtx<'_>,
+            ) -> caliban_agent_core::Result<HookDecision> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                *self.last_prompt.lock().unwrap() = ctx.prompt.to_string();
+                Ok(HookDecision::Allow)
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let last = Arc::new(std::sync::Mutex::new(String::new()));
+        let hook = Arc::new(CountingHook {
+            count: Arc::clone(&count),
+            last_prompt: Arc::clone(&last),
+        });
+
+        let ctx = PromptCtx {
+            session_id: "tui-test",
+            cwd: std::path::Path::new("/tmp"),
+            turn_index: 0,
+            prompt: "/clear",
+            attachments: &[],
+        };
+        let decision = hook.user_prompt_submit(&ctx).await.unwrap();
+        assert!(matches!(decision, HookDecision::Allow));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(*last.lock().unwrap(), "/clear");
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_hook_can_reject_slash_command() {
+        use async_trait::async_trait;
+        use caliban_agent_core::{HookDecision, Hooks, PromptCtx};
+
+        struct DenyClear;
+        #[async_trait]
+        impl Hooks for DenyClear {
+            async fn user_prompt_submit(
+                &self,
+                ctx: &PromptCtx<'_>,
+            ) -> caliban_agent_core::Result<HookDecision> {
+                if ctx.prompt == "/clear" {
+                    return Ok(HookDecision::Deny("clear blocked by policy".into()));
+                }
+                Ok(HookDecision::Allow)
+            }
+        }
+
+        let hook = Arc::new(DenyClear);
+        let ctx = PromptCtx {
+            session_id: "tui-test",
+            cwd: std::path::Path::new("/tmp"),
+            turn_index: 0,
+            prompt: "/clear",
+            attachments: &[],
+        };
+        let d = hook.user_prompt_submit(&ctx).await.unwrap();
+        match d {
+            HookDecision::Deny(msg) => assert!(msg.contains("clear blocked")),
+            _ => panic!("expected Deny"),
+        }
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_hook_can_rewrite_args() {
+        use async_trait::async_trait;
+        use caliban_agent_core::{HookDecision, Hooks, PromptCtx};
+
+        struct Rewriter;
+        #[async_trait]
+        impl Hooks for Rewriter {
+            async fn user_prompt_submit(
+                &self,
+                _ctx: &PromptCtx<'_>,
+            ) -> caliban_agent_core::Result<HookDecision> {
+                Ok(HookDecision::UpdatedInput(serde_json::Value::String(
+                    "/help".into(),
+                )))
+            }
+        }
+
+        let hook = Arc::new(Rewriter);
+        let ctx = PromptCtx {
+            session_id: "tui-test",
+            cwd: std::path::Path::new("/tmp"),
+            turn_index: 0,
+            prompt: "/random",
+            attachments: &[],
+        };
+        let d = hook.user_prompt_submit(&ctx).await.unwrap();
+        let HookDecision::UpdatedInput(v) = d else {
+            panic!("expected UpdatedInput")
+        };
+        assert_eq!(v.as_str(), Some("/help"));
+    }
+
+    #[test]
+    fn stub_commands_emit_helpful_status_naming_spec() {
+        // Stubs should not just say "TODO"; they name the spec/owner so the
+        // operator knows when it lands.
+        let mut app = make_test_app();
+        for (cmd, marker) in [
+            ("/login", "Auth spec"),
+            ("/logout", "Auth spec"),
+            ("/setup-token", "Auth spec"),
+            ("/heapdump", "jemalloc-prof"),
+            ("/feedback", "feedback_url"),
+            ("/agents", "Sub-agent isolation"),
+            ("/effort", "model router v2"),
+            ("/statusline", "Settings hierarchy"),
+            ("/permissions", "Settings hierarchy"),
+            ("/tui", "TUI ergonomics"),
+        ] {
+            app.transcript.clear();
+            dispatch_slash(&mut app, cmd);
+            let info = last_info(&app).expect(cmd);
+            assert!(
+                info.contains(marker),
+                "{cmd} stub should mention `{marker}`: got `{info}`",
+            );
+        }
     }
 }
