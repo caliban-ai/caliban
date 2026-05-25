@@ -17,7 +17,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T1-B | 1 | Shared `reqwest::Client` factory | **+12** (30 added / 18 deleted at consumer sites) | +158 (new `caliban-common::http` is ~146 LOC incl. ~52 LOC of tests) | 9 / 9 (7 provider transports + vertex `list_client` + `web_fetch_client`) | +6 net new (all in `caliban-common::http`) | n/a | n/a |
 | PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | — | — | — | — | — |
 | PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | — | — | — | — | — |
-| PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | — | — | — | — | — |
+| PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | **+52** (4 files, 1271 LOC total vs. 1219 single-file) | — | — | ±0 (3 turn-timing tests carried over) | n/a | n/a |
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | — | — | — | — | — |
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | — | — | — | — | — |
 | PR-T3-B | 3 | Settings as canonical config root | — | — | — | — | — |
@@ -73,6 +73,44 @@ Baselines (TBD — captured by PR-T4-0):
   which ~350 LOC are tests) is the foundation the rest of the sprint
   builds on — the consumer-site delta is −305 lines and the headline
   net-negative goal is sprint-level, not PR-level.
+
+## PR-T2-C notes
+
+- `crates/caliban-agent-core/src/stream.rs` (1219 LOC) carved into a
+  module directory:
+  - `stream/mod.rs` (911 LOC) — imports, all public types (`TurnEvent`,
+    `TurnOutcome`, `RunOutcome`, `StopCondition`, `TurnEventStream`,
+    `RunSettings`), `impl Agent { stream_until_done* }` with the
+    `try_stream!` macro body intact, and sub-module declarations.
+  - `stream/turn.rs` (191 LOC) — `TurnTiming` (+TTFT/TBT tests),
+    `ActiveBlock`, `MessageAccumulator`.
+  - `stream/parallel.rs` (33 LOC) — `DispatchPlan` enum bridging the
+    serial-plan and parallel-dispatch phases.
+  - `stream/hook_dispatch.rs` (136 LOC) — `dispatch_tool` free async
+    helper (single-tool fan-out through `before_tool`/invoke/
+    `after_tool` including `UpdatedInput` threading).
+- Pure file split: no semantic changes. All existing tests
+  (203 in `caliban-agent-core` lib, plus crate-integration tests) pass
+  unchanged. No new tests added.
+
+### Deviations from PR-T2-C brief
+
+- Target LOC for `stream/mod.rs` was 200-300; achieved 911 LOC.
+  The brief's targets assumed extracting the per-turn loop body and
+  parallel dispatch into helper functions, but doing so requires
+  restructuring around `async_stream::try_stream!`'s `yield` (which only
+  works inside the macro). The conservative path — keep the macro body
+  intact in `mod.rs` and move only standalone items to submodules —
+  preserves "no semantic changes" exactly; a future PR can revisit the
+  loop-body split using nested `try_stream!` sub-streams (event ordering
+  is preservable but the refactor is non-trivial).
+- `parallel.rs` and `hook_dispatch.rs` likewise come in under the
+  spec-suggested LOC (33 / 136 vs. 300 / 200-300) because no free
+  helper functions outside `DispatchPlan` and `dispatch_tool` could be
+  extracted without that same refactor.
+- Public API surface unchanged. Consumers continue to import from
+  `caliban_agent_core::stream::...`; the re-exports from
+  `caliban-agent-core/src/lib.rs` need no edits.
 
 ## PR-T1-B notes
 
