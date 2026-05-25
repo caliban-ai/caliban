@@ -111,7 +111,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | External editor (`Ctrl+G` → `$VISUAL` / `$EDITOR`) | 🔴 | |
 | Vim editing mode | 🔴 | |
 | `Ctrl+O` transcript viewer + dump-to-scrollback | 🔴 | |
-| Background bash (`Ctrl+B`) | 🔴 | |
+| Background bash (`Ctrl+B`) | ✅ | `Bash{background:true}` + `BashOutput` + `KillShell`; TUI `Ctrl+B` follow-on |
 | Image / vision input | 🔴 | |
 | Slash-menu typeahead | 🟡 | |
 | Permission Ask modal | 🔴 | *(deferred PR #8)* |
@@ -124,9 +124,9 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | Bash, Edit, Glob, Grep, Read, Write, WebFetch, TodoWrite, Skill, AgentTool, EnterPlanMode/ExitPlanMode | ✅ | |
-| WebSearch | 🔴 | |
-| NotebookEdit (Jupyter) | 🔴 | |
-| MultiEdit semantics (atomic multi-replace) | 🔴 | |
+| WebSearch | ✅ | Brave/Tavily/Exa via env-toggle |
+| NotebookEdit (Jupyter) | ✅ | nbformat v4; atomic write; FileChanged |
+| MultiEdit semantics (atomic multi-replace) | ✅ | sequential + rollback-on-miss |
 | PowerShell tool | 🔴 | low priority |
 | `ToolSearch` (lazy MCP schema loading) | 🔴 | only matters once MCP is real |
 | `WaitForMcpServers` | 🔴 | same |
