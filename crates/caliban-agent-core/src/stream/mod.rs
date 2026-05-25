@@ -1,4 +1,17 @@
 //! Core agent loop driver: `stream_until_done`, `TurnEvent`, and related types.
+//!
+//! This module orchestrates the multi-turn provider/tool loop and re-exports
+//! the public surface consumed by binaries (`caliban-agent-core::stream::*`).
+//!
+//! Internal layout:
+//! - [`turn`] — per-turn accumulator state and TTFT/TBT timing helpers.
+//! - [`parallel`] — types backing the parallel tool-dispatch phase.
+//! - [`hook_dispatch`] — fan-out helpers for `Hooks` (single-tool dispatch
+//!   wrapper including `UpdatedInput` threading).
+
+mod hook_dispatch;
+mod parallel;
+mod turn;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -7,8 +20,7 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use caliban_provider::{
     CompletionRequest, ContentBlock, Message, RequestMetadata, Role, StopReason, StreamEvent,
-    StreamingContentType, StreamingDelta, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
-    Usage,
+    StreamingContentType, StreamingDelta, TextBlock, ToolResultBlock, Usage,
 };
 use futures::StreamExt as _;
 use futures::stream::{FuturesUnordered, Stream};
@@ -22,118 +34,11 @@ use crate::hooks::{
     CompactCtx, CompactOutcome, HookDecision, RunCtx, RunHookOutcome, ToolCtx, TurnCtx,
 };
 use crate::retry::with_retry;
-use crate::tool::{ToolContext, ToolError};
+use crate::tool::ToolError;
 
-// ---------------------------------------------------------------------------
-// Per-turn timing (TTFT/TBT)
-// ---------------------------------------------------------------------------
-
-/// Captures per-turn wall-clock latency markers:
-/// - **TTFT** (time-to-first-token): request-sent → first delta arrived.
-/// - **TBT** (time-between-tokens): mean inter-delta interval.
-#[derive(Debug)]
-pub(crate) struct TurnTiming {
-    request_sent_at: Instant,
-    first_delta_at: Option<Instant>,
-    last_delta_at: Option<Instant>,
-    delta_count: u32,
-}
-
-impl TurnTiming {
-    pub(crate) fn start() -> Self {
-        Self {
-            request_sent_at: Instant::now(),
-            first_delta_at: None,
-            last_delta_at: None,
-            delta_count: 0,
-        }
-    }
-
-    pub(crate) fn observe_delta(&mut self) {
-        let now = Instant::now();
-        self.first_delta_at.get_or_insert(now);
-        self.last_delta_at = Some(now);
-        self.delta_count += 1;
-    }
-
-    pub(crate) fn ttft(&self) -> Option<Duration> {
-        self.first_delta_at
-            .map(|t| t.saturating_duration_since(self.request_sent_at))
-    }
-
-    pub(crate) fn tbt(&self) -> Option<Duration> {
-        match (self.first_delta_at, self.last_delta_at, self.delta_count) {
-            (Some(f), Some(l), n) if n >= 2 => Some(l.saturating_duration_since(f) / (n - 1)),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod turn_timing_tests {
-    use super::TurnTiming;
-    use std::thread::sleep;
-    use std::time::Duration;
-
-    #[test]
-    fn no_delta_means_no_ttft_and_no_tbt() {
-        let t = TurnTiming::start();
-        assert!(t.ttft().is_none());
-        assert!(t.tbt().is_none());
-    }
-
-    #[test]
-    fn single_delta_gives_ttft_but_no_tbt() {
-        let mut t = TurnTiming::start();
-        sleep(Duration::from_millis(5));
-        t.observe_delta();
-        assert!(t.ttft().unwrap() >= Duration::from_millis(4));
-        assert!(t.tbt().is_none(), "TBT needs >= 2 deltas");
-    }
-
-    #[test]
-    fn multi_delta_gives_ttft_and_tbt() {
-        let mut t = TurnTiming::start();
-        sleep(Duration::from_millis(5));
-        t.observe_delta();
-        sleep(Duration::from_millis(10));
-        t.observe_delta();
-        sleep(Duration::from_millis(10));
-        t.observe_delta();
-        assert!(t.ttft().unwrap() >= Duration::from_millis(4));
-        // Two intervals of ~10ms each → mean ~10ms. Wide tolerance for CI.
-        let tbt = t.tbt().unwrap();
-        assert!(
-            tbt >= Duration::from_millis(5) && tbt <= Duration::from_millis(50),
-            "tbt was {tbt:?}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-turn dispatch plan
-// ---------------------------------------------------------------------------
-
-/// A single tool dispatch plan, produced by the serial `before_tool` gate.
-///
-/// `original_index` is the position of the corresponding `ContentBlock::ToolUse`
-/// within the assistant message; it's used to reorder results back into
-/// assistant-message order for history.
-enum DispatchPlan {
-    /// `before_tool` returned `Allow`; the invoke will run.
-    Allowed {
-        original_index: usize,
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    /// `before_tool` returned `Deny`; the synthesized denial `ToolResult`
-    /// stands in for the invoke.
-    Denied {
-        original_index: usize,
-        result: ToolResultBlock,
-    },
-}
+use hook_dispatch::dispatch_tool;
+use parallel::DispatchPlan;
+use turn::{ActiveBlock, MessageAccumulator, TurnTiming};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -304,219 +209,6 @@ impl Default for RunSettings {
             workspace_root: std::path::PathBuf::from("."),
             prompt_index: 0,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Internal accumulator state for one provider stream
-// ---------------------------------------------------------------------------
-
-/// In-progress content block being assembled from stream events.
-enum ActiveBlock {
-    Text {
-        accumulated: String,
-    },
-    Thinking {
-        accumulated: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-}
-
-/// State accumulated while draining one provider `MessageStream`.
-struct MessageAccumulator {
-    message_id: String,
-    model: String,
-    blocks: Vec<ContentBlock>,
-    active: Vec<Option<ActiveBlock>>,
-    stop_reason: Option<StopReason>,
-    usage: Usage,
-}
-
-impl MessageAccumulator {
-    fn new() -> Self {
-        Self {
-            message_id: String::new(),
-            model: String::new(),
-            blocks: Vec::new(),
-            active: Vec::new(),
-            stop_reason: None,
-            usage: Usage::default(),
-        }
-    }
-
-    /// Ensure the `active` and `blocks` vecs are large enough for `index`.
-    fn ensure_index(&mut self, index: usize) {
-        if self.active.len() <= index {
-            self.active.resize_with(index + 1, || None);
-            self.blocks.resize(
-                index + 1,
-                ContentBlock::Text(TextBlock {
-                    text: String::new(),
-                    cache_control: None,
-                }),
-            );
-        }
-    }
-
-    /// Finalize a block at `index` after `ContentBlockStop`.
-    fn finalize_block(&mut self, index: usize) {
-        let Some(slot) = self.active.get_mut(index) else {
-            return;
-        };
-        let Some(active) = slot.take() else {
-            return;
-        };
-        let block = match active {
-            ActiveBlock::Text { accumulated } => ContentBlock::Text(TextBlock {
-                text: accumulated,
-                cache_control: None,
-            }),
-            ActiveBlock::Thinking { accumulated } => ContentBlock::Thinking(ThinkingBlock {
-                thinking: accumulated,
-                signature: None,
-            }),
-            ActiveBlock::ToolUse { id, name, json_buf } => {
-                let input = if json_buf.is_empty() {
-                    serde_json::json!({})
-                } else {
-                    serde_json::from_str(&json_buf).unwrap_or(serde_json::json!({}))
-                };
-                ContentBlock::ToolUse(ToolUseBlock { id, name, input })
-            }
-        };
-        if index < self.blocks.len() {
-            self.blocks[index] = block;
-        }
-    }
-
-    fn into_message(self) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: self.blocks,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: dispatch a single tool call
-// ---------------------------------------------------------------------------
-
-/// Dispatch one tool call: run `before_tool` hook, invoke the tool, run
-/// `after_tool` hook. Returns the [`ToolResultBlock`] (possibly synthesized
-/// for errors / denials). Returns `Err(StopCondition)` only on cancellation
-/// or a hook failure that should abort the run.
-#[instrument(skip(agent, input, cancel), fields(tool = tool_name, id = tool_use_id))]
-async fn dispatch_tool(
-    agent: &Agent,
-    turn_index: u32,
-    tool_use_id: &str,
-    tool_name: &str,
-    input: serde_json::Value,
-    cancel: &CancellationToken,
-) -> std::result::Result<ToolResultBlock, StopCondition> {
-    if cancel.is_cancelled() {
-        return Err(StopCondition::Cancelled);
-    }
-
-    // Keep `input` alive through all hook calls by cloning for the invoke call.
-    let tool_ctx = ToolCtx {
-        turn_index,
-        tool_use_id,
-        tool_name,
-        input: &input,
-    };
-
-    // before_tool hook
-    let decision = agent
-        .hooks
-        .before_tool(&tool_ctx)
-        .await
-        .map_err(|e| StopCondition::HookDenied(format!("before_tool hook failed: {e}")))?;
-
-    // Choose the effective input: `UpdatedInput` overrides the original.
-    let mut effective_input = input.clone();
-    let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> = match decision {
-        HookDecision::Deny(msg) => {
-            let content = vec![ContentBlock::Text(TextBlock {
-                text: format!("Tool call denied: {msg}"),
-                cache_control: None,
-            })];
-            // Inform the after_tool hook about the denial.
-            let denial_err = ToolError::execution(std::io::Error::other(format!("denied: {msg}")));
-            if let Err(e) = agent.hooks.after_tool(&tool_ctx, &Err(denial_err)).await {
-                tracing::warn!(tool = tool_name, error = %e, "after_tool hook error (non-fatal)");
-            }
-            return Ok(ToolResultBlock {
-                tool_use_id: tool_use_id.to_string(),
-                content,
-                is_error: true,
-            });
-        }
-        HookDecision::UpdatedInput(new_input) => {
-            tracing::info!(
-                tool = tool_name,
-                tool_use_id,
-                "hook.updated_input: tool input rewritten by before_tool hook"
-            );
-            effective_input = new_input;
-            match agent.tools.get(tool_name) {
-                None => Err(ToolError::invalid_input(format!(
-                    "tool not found: {tool_name}"
-                ))),
-                Some(tool) => {
-                    let cx = ToolContext {
-                        tool_use_id: tool_use_id.to_string(),
-                        cancel: cancel.clone(),
-                        hooks: Some(Arc::clone(&agent.hooks)),
-                        turn_index,
-                    };
-                    tool.invoke(effective_input.clone(), cx).await
-                }
-            }
-        }
-        HookDecision::Allow => match agent.tools.get(tool_name) {
-            None => Err(ToolError::invalid_input(format!(
-                "tool not found: {tool_name}"
-            ))),
-            Some(tool) => {
-                let cx = ToolContext {
-                    tool_use_id: tool_use_id.to_string(),
-                    cancel: cancel.clone(),
-                    hooks: Some(Arc::clone(&agent.hooks)),
-                    turn_index,
-                };
-                // Clone `input` so the borrow on `tool_ctx` remains valid for after_tool.
-                tool.invoke(input.clone(), cx).await
-            }
-        },
-    };
-    // Reference effective_input to silence dead-code in the Deny arm.
-    let _ = &effective_input;
-
-    // after_tool hook (non-fatal; errors are logged by tracing, not propagated)
-    if let Err(e) = agent.hooks.after_tool(&tool_ctx, &invoke_result).await {
-        tracing::warn!(tool = tool_name, error = %e, "after_tool hook error (non-fatal)");
-    }
-
-    match invoke_result {
-        Err(ToolError::Cancelled) => Err(StopCondition::Cancelled),
-        Err(e) => Ok(ToolResultBlock {
-            tool_use_id: tool_use_id.to_string(),
-            content: vec![ContentBlock::Text(TextBlock {
-                text: format!("Error: {e}"),
-                cache_control: None,
-            })],
-            is_error: true,
-        }),
-        Ok(content) => Ok(ToolResultBlock {
-            tool_use_id: tool_use_id.to_string(),
-            content,
-            is_error: false,
-        }),
     }
 }
 
