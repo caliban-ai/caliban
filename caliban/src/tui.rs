@@ -35,9 +35,29 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/hooks", "/hooks"),
     ("/plugins", "/plugins"),
     ("/plugin", "/plugin"),
+    ("/rewind", "/rewind"),
     ("/exit", "/exit"),
     ("/quit", "/quit"),
 ];
+
+/// Window for an Esc-Esc chord (ADR 0028). A second Esc inside this many
+/// milliseconds after a first Esc on an empty buffer triggers the rewind
+/// overlay.
+const ESC_ESC_WINDOW_MS: u128 = 400;
+
+/// Returns `true` iff the (`prev_esc_at`, `now`) interval qualifies as an
+/// Esc-Esc chord under the [`ESC_ESC_WINDOW_MS`] policy.
+///
+/// Caller passes the timestamp recorded by the *previous* Esc keypress
+/// (or `None` if no previous Esc). Pulled out into a pure helper so the
+/// chord logic is unit-testable without an `App` fixture.
+#[must_use]
+pub(crate) fn is_esc_chord(
+    prev_esc_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    prev_esc_at.is_some_and(|prev| now.duration_since(prev).as_millis() <= ESC_ESC_WINDOW_MS)
+}
 
 use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
@@ -69,6 +89,11 @@ pub(crate) enum Overlay {
     ReverseHistory,
     /// Permission Ask modal — drives `App.ask_modal`.
     AskModal,
+    /// `/rewind` overlay (ADR 0028). Lists per-prompt checkpoints with
+    /// timestamps + file counts. Selectable actions: restore code /
+    /// restore conversation / restore both / summarize from here /
+    /// summarize up to here.
+    Rewind,
 }
 
 impl Overlay {
@@ -82,6 +107,7 @@ impl Overlay {
             Self::TranscriptViewer => "Transcript",
             Self::ReverseHistory => "Reverse History",
             Self::AskModal => "Permission Needed",
+            Self::Rewind => "Rewind",
         }
     }
 
@@ -95,6 +121,7 @@ impl Overlay {
             Self::TranscriptViewer => "transcript",
             Self::ReverseHistory => "history",
             Self::AskModal => "ask",
+            Self::Rewind => "rewind",
         }
     }
 }
@@ -356,6 +383,15 @@ pub(crate) struct App {
     /// Path under `~/.caliban/projects/<sanitized-cwd>/` where input-history
     /// is persisted. `None` when `dirs::home_dir()` is unavailable.
     pub(crate) input_history_path: Option<PathBuf>,
+    /// Per-session checkpoint store. `Some` when checkpointing is enabled
+    /// for this session — used by `/rewind` (ADR 0028) to list per-prompt
+    /// checkpoints.
+    pub(crate) checkpoint_store: Option<caliban_checkpoint::CheckpointStore>,
+    /// Timestamp of the most recent Esc keypress; used to detect Esc-Esc
+    /// chords for `/rewind` (ADR 0028). The chord is only accepted when
+    /// (a) the buffer is empty, (b) no overlay is open, and (c) both
+    /// presses happen within `ESC_ESC_WINDOW_MS` of each other.
+    pub(crate) last_esc_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -466,7 +502,23 @@ impl App {
             transcript_viewer: transcript_viewer::TranscriptViewerState::default(),
             reverse_history: None,
             input_history_path,
+            checkpoint_store: None,
+            last_esc_at: None,
         }
+    }
+
+    /// Attach a [`caliban_checkpoint::CheckpointStore`] for the current
+    /// session (enables `/rewind`).
+    #[allow(
+        dead_code,
+        reason = "wired by main.rs once full /rewind action plumbing lands"
+    )]
+    pub(crate) fn with_checkpoint_store(
+        mut self,
+        store: caliban_checkpoint::CheckpointStore,
+    ) -> Self {
+        self.checkpoint_store = Some(store);
+        self
     }
 
     /// Return the current working directory as a tilde-collapsed display string.
@@ -1006,6 +1058,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
         }
         Overlay::ReverseHistory => reverse_history_lines(app),
         Overlay::AskModal => ask_modal_lines(app),
+        Overlay::Rewind => rewind_lines(app),
     };
 
     let body = Paragraph::new(content_lines)
@@ -1417,6 +1470,76 @@ fn system_lines(app: &App) -> Vec<Line<'static>> {
     out.push(Line::raw(""));
     out.push(Line::styled(
         "  Press q or Esc to close. Edit via --system-file or by editing the session JSON.",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out
+}
+
+/// Render the `/rewind` overlay (ADR 0028) — listing per-prompt
+/// checkpoints, newest first, with the actions available for the
+/// currently-selected entry.
+fn rewind_lines(app: &App) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = vec![Line::raw("")];
+    let Some(store) = app.checkpoint_store.as_ref() else {
+        out.push(Line::styled(
+            "  (checkpointing not enabled for this session)",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        out.push(Line::raw(""));
+        out.push(Line::raw(
+            "  Checkpointing is opt-in. Disabled when CALIBAN_CHECKPOINT_DISABLED=1",
+        ));
+        out.push(Line::raw(
+            "  is set, or when caliban was started without a checkpoint store wired in.",
+        ));
+        return out;
+    };
+    let prompts = match store.list_prompts() {
+        Ok(p) => p,
+        Err(e) => {
+            out.push(Line::styled(
+                format!("  error listing checkpoints: {e}"),
+                Style::default().fg(Color::Red),
+            ));
+            return out;
+        }
+    };
+    if prompts.is_empty() {
+        out.push(Line::styled(
+            "  (no checkpoints yet — send a prompt to create one)",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        return out;
+    }
+    for p in &prompts {
+        let ts = p.created_at.format("%H:%M").to_string();
+        let kind_tag = match p.kind {
+            caliban_checkpoint::ManifestKind::Plan => "plan".to_string(),
+            caliban_checkpoint::ManifestKind::Cleared => "cleared".to_string(),
+            caliban_checkpoint::ManifestKind::Files => format!("{} file(s)", p.file_count),
+        };
+        let title = if p.title.is_empty() {
+            "(no title)".to_string()
+        } else {
+            p.title.clone()
+        };
+        let prefix = if p.partial { "⚠ " } else { "   " };
+        out.push(Line::from(vec![
+            Span::raw(prefix.to_string()),
+            Span::styled(
+                format!("#{:>3}  ", p.prompt_index),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(format!("{title:<40} {ts}  {kind_tag}")),
+        ]));
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "  Actions: [c] code  [v] conversation  [b] both  [s] summarize→  [S] summarize←",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out.push(Line::styled(
+        "  ℹ Bash and external writes are NOT checkpointed.",
         Style::default().add_modifier(Modifier::DIM),
     ));
     out
@@ -1872,6 +1995,9 @@ fn handle_slash_command(line: &str, app: &mut App) {
         }
         "/system" => {
             app.view = ViewState::Overlay(Overlay::System);
+        }
+        "/rewind" => {
+            app.view = ViewState::Overlay(Overlay::Rewind);
         }
         "/hooks" => {
             // Stub overlay (the proper /hooks UI lands with ADR 0040).
@@ -2547,14 +2673,34 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             if let Some(running) = &app.running {
-                // Cancel the active turn; the stream will yield Err(Cancelled).
                 running.cancel.cancel();
             } else if app.input.buffer.is_empty() {
                 app.should_exit = true;
             } else {
                 app.input.clear();
+            }
+        }
+        (KeyCode::Esc, _) => {
+            // Esc handling (ADR 0028): if a turn is running, cancel it;
+            // if input is non-empty, clear it; otherwise treat the press
+            // as half of an Esc-Esc chord. Two Esc within
+            // `ESC_ESC_WINDOW_MS` on an empty buffer opens `/rewind`.
+            if let Some(running) = &app.running {
+                running.cancel.cancel();
+                app.last_esc_at = None;
+            } else if !app.input.buffer.is_empty() {
+                app.input.clear();
+                app.last_esc_at = None;
+            } else {
+                let now = std::time::Instant::now();
+                if is_esc_chord(app.last_esc_at, now) {
+                    app.view = ViewState::Overlay(Overlay::Rewind);
+                    app.last_esc_at = None;
+                } else {
+                    app.last_esc_at = Some(now);
+                }
             }
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.input.buffer.is_empty() => {
@@ -3273,5 +3419,44 @@ mod tests {
         let input = vec![Line::raw("hello"), Line::raw("world")];
         let out = wrap_lines_to_width(input.clone(), 0);
         assert_eq!(out.len(), input.len());
+    }
+
+    // -------------------------------------------------------------------
+    // /rewind + Esc-Esc tests (ADR 0028)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rewind_is_a_registered_slash_command() {
+        assert!(
+            SLASH_COMMANDS.iter().any(|(name, _)| *name == "/rewind"),
+            "/rewind must appear in SLASH_COMMANDS",
+        );
+    }
+
+    #[test]
+    fn rewind_overlay_variant_round_trips() {
+        let o = Overlay::Rewind;
+        assert_eq!(o.title(), "Rewind");
+        assert_eq!(o.short_name(), "rewind");
+    }
+
+    #[test]
+    fn esc_chord_within_window_is_recognized() {
+        let t1 = std::time::Instant::now();
+        let t2 = t1 + std::time::Duration::from_millis(100);
+        assert!(is_esc_chord(Some(t1), t2));
+    }
+
+    #[test]
+    fn esc_chord_outside_window_is_rejected() {
+        let t1 = std::time::Instant::now();
+        let t2 = t1 + std::time::Duration::from_millis(500);
+        assert!(!is_esc_chord(Some(t1), t2));
+    }
+
+    #[test]
+    fn esc_chord_requires_a_previous_press() {
+        let t = std::time::Instant::now();
+        assert!(!is_esc_chord(None, t));
     }
 }

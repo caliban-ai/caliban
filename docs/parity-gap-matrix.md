@@ -87,8 +87,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `@path/file` imports inside CLAUDE.md (recursion-bounded) | ✅ | ADR-0036 |
 | Auto-memory (model-written notes per project) | ✅ | ADR-0035 |
 | `claudeMdExcludes` for monorepos | ✅ | ADR-0036 |
-| Auto-checkpoint per prompt + `/rewind` | 🔴 | |
-| Esc-Esc / fork-from-checkpoint | 🔴 | |
+| Auto-checkpoint per prompt + `/rewind` | ✅ | ADR-0028; new crate `caliban-checkpoint`; `before_run`/`after_run` hooks + `CheckpointHook` snapshots file-tool pre-images per prompt under `~/.caliban/projects/<cwd>/checkpoints/<session>/prompt-N/`; `/rewind` slash command opens the overlay |
+| Esc-Esc / fork-from-checkpoint | ✅ | ADR-0028 — Esc-Esc on empty input opens the rewind overlay (`is_esc_chord` policy, 400 ms window). Fork-from-checkpoint stays 🔴 (sub-agent fleet spec) |
 
 ## D. Configuration / settings
 
@@ -221,7 +221,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `/context`, `/usage`, `/compact` | ✅ | ADR-0033; stub overlays via the existing slash handler (full registry lands with ADR 0040) |
 | `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | 🔴 | |
 | `/resume`, `/recap`, `/btw`, `/loop` | 🔴 | |
-| `/rewind` | 🔴 | |
+| `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay |
 | `/doctor`, `/heapdump`, `/feedback` | 🔴 | |
 | `/login`, `/logout`, `/status` | 🔴 | |
 | `/statusline`, `/theme`, `/tui` | 🔴 | |

@@ -28,8 +28,8 @@ pub use error::{Error, Result};
 pub use hooks::{
     CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,
     FileChangedCtx, HookDecision, Hooks, NoopHooks, NotificationCtx, NotificationLevel, PermCtx,
-    PromptCtx, SessionCtx, SessionOutcome, SubagentCtx, SubagentOutcome, TaskCtx, TaskOutcome,
-    ToolCtx, TurnCtx, build_envelope, envelope_with_cwd,
+    PromptCtx, RunCtx, RunHookOutcome, SessionCtx, SessionOutcome, SubagentCtx, SubagentOutcome,
+    TaskCtx, TaskOutcome, ToolCtx, TurnCtx, build_envelope, envelope_with_cwd,
 };
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
 pub use hooks_router::{AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook};
@@ -44,7 +44,7 @@ pub use post_process::{AssistantPostProcessor, NoopPostProcessor};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
-pub use stream::{RunOutcome, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
+pub use stream::{RunOutcome, RunSettings, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
 pub use todos::{SharedTodos, Todo, TodoStatus, new_shared_todos};
 pub use tool::{Tool, ToolContext, ToolError};
 

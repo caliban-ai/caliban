@@ -12,6 +12,7 @@ members = [
     "crates/caliban-agent-core",
     "crates/caliban-tools-builtin",
     "crates/caliban-sessions",
+    "crates/caliban-checkpoint",
     "crates/caliban-memory",
     "crates/caliban-output-styles",
     "crates/caliban-skills",
