@@ -20,6 +20,7 @@ caliban-provider-ollama    = { path = "../crates/caliban-provider-ollama" }
 caliban-provider-google    = { path = "../crates/caliban-provider-google" }
 caliban-agent-core         = { path = "../crates/caliban-agent-core" }
 caliban-sessions           = { path = "../crates/caliban-sessions" }
+caliban-checkpoint         = { path = "../crates/caliban-checkpoint" }
 caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
 caliban-memory             = { path = "../crates/caliban-memory" }
 caliban-output-styles      = { path = "../crates/caliban-output-styles" }

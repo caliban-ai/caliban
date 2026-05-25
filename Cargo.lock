@@ -734,6 +734,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "caliban-agent-core",
+ "caliban-checkpoint",
  "caliban-mcp-client",
  "caliban-memory",
  "caliban-model-router",
@@ -792,6 +793,28 @@ dependencies = [
  "toml",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "caliban-checkpoint"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "caliban-agent-core",
+ "caliban-provider",
+ "caliban-sessions",
+ "chrono",
+ "dirs",
+ "filetime",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

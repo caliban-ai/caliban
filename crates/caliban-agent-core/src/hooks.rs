@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use caliban_provider::{ContentBlock, Message};
+use tokio_util::sync::CancellationToken;
 
 use crate::AgentConfig;
 use crate::error::Result;
@@ -27,6 +28,48 @@ pub enum HookDecision {
     /// `user_prompt_submit`) before dispatch. The new value is threaded through
     /// composed hooks so subsequent layers see the rewritten value.
     UpdatedInput(serde_json::Value),
+}
+
+/// Per-run context for the `before_run` / `after_run` lifecycle events
+/// (ADR 0028). Fires once at the start / end of each `Agent::run` invocation.
+#[derive(Debug)]
+pub struct RunCtx<'a> {
+    /// Opaque session identifier (the caliban binary supplies a UUID-ish
+    /// string; tests pass an arbitrary placeholder).
+    pub session_id: &'a str,
+    /// Workspace root for this run.
+    pub workspace_root: &'a Path,
+    /// Optional reference to the user message that initiated the run. `None`
+    /// when the run was triggered by a non-prompt entry-point (e.g. a
+    /// programmatic resume or session-replay path).
+    pub user_message: Option<&'a Message>,
+    /// Monotonic prompt index within the parent session — incremented by the
+    /// caller before each `before_run`. Used by `caliban-checkpoint` to name
+    /// the per-prompt checkpoint directory.
+    pub prompt_index: u32,
+    /// Cancellation token tied to the parent run; honored by long-running
+    /// hook implementations (the checkpoint hook is the canonical caller —
+    /// it aborts pre-image reads when the run is cancelled).
+    pub cancel: CancellationToken,
+}
+
+/// Outcome of a single agent run, surfaced to `after_run` hooks.
+///
+/// Distinct from [`crate::stream::RunOutcome`], which is the streaming-loop's
+/// outer return value (includes the full message history). The hook-surface
+/// variant is intentionally small — hooks should not depend on the full
+/// transcript.
+#[derive(Debug, Clone)]
+pub struct RunHookOutcome {
+    /// Number of turns the run actually executed.
+    pub turn_count: u32,
+    /// Total input tokens consumed.
+    pub input_tokens: u32,
+    /// Total output tokens generated.
+    pub output_tokens: u32,
+    /// `true` when the run terminated cleanly; `false` for cancellation,
+    /// provider error, or hook denial.
+    pub success: bool,
 }
 
 /// Per-turn context passed to turn hooks.
@@ -266,6 +309,24 @@ pub struct TaskOutcome {
 /// [`NoopHooks`].
 #[async_trait]
 pub trait Hooks: Send + Sync {
+    /// Fired once at the start of an `Agent::run` invocation (ADR 0028).
+    ///
+    /// Wraps the entire turn loop. The default no-op preserves existing
+    /// `Hooks` impls. The canonical consumer is `caliban-checkpoint`, which
+    /// uses this event to allocate a per-prompt manifest before any tool
+    /// dispatches.
+    async fn before_run(&self, _ctx: &RunCtx<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Fired once at the end of an `Agent::run` invocation (ADR 0028).
+    ///
+    /// Receives the run's accumulated [`RunHookOutcome`]. The default no-op
+    /// preserves existing `Hooks` impls.
+    async fn after_run(&self, _ctx: &RunCtx<'_>, _outcome: &RunHookOutcome) -> Result<()> {
+        Ok(())
+    }
+
     /// Called before each turn begins (before compaction and the provider call).
     async fn before_turn(&self, _ctx: &TurnCtx<'_>) -> Result<()> {
         Ok(())
@@ -443,6 +504,20 @@ impl CompositeHooks {
 
 #[async_trait]
 impl Hooks for CompositeHooks {
+    async fn before_run(&self, ctx: &RunCtx<'_>) -> Result<()> {
+        for h in &self.layers {
+            h.before_run(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn after_run(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
+        for h in self.layers.iter().rev() {
+            h.after_run(ctx, outcome).await?;
+        }
+        Ok(())
+    }
+
     async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()> {
         for h in &self.layers {
             h.before_turn(ctx).await?;

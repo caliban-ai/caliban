@@ -18,7 +18,9 @@ use tracing::instrument;
 
 use crate::agent::Agent;
 use crate::error::Result;
-use crate::hooks::{CompactCtx, CompactOutcome, HookDecision, ToolCtx, TurnCtx};
+use crate::hooks::{
+    CompactCtx, CompactOutcome, HookDecision, RunCtx, RunHookOutcome, ToolCtx, TurnCtx,
+};
 use crate::retry::with_retry;
 use crate::tool::{ToolContext, ToolError};
 
@@ -278,6 +280,33 @@ pub enum StopCondition {
 /// Boxed, pinned stream of `TurnEvent` results.
 pub type TurnEventStream = Pin<Box<dyn Stream<Item = Result<TurnEvent>> + Send + 'static>>;
 
+/// Optional per-run identity that drives [`crate::hooks::Hooks::before_run`]
+/// / [`crate::hooks::Hooks::after_run`] (ADR 0028).
+///
+/// Callers that care about checkpointing pass this via
+/// [`Agent::stream_until_done_with_settings`]. The legacy [`Agent::stream_until_done`]
+/// passes [`RunSettings::default()`], which fires the lifecycle events with
+/// an empty `session_id` and the cwd as the workspace root.
+#[derive(Debug, Clone)]
+pub struct RunSettings {
+    /// Opaque session identifier; surfaced in `RunCtx.session_id`.
+    pub session_id: String,
+    /// Workspace root; surfaced in `RunCtx.workspace_root`. Defaults to `.`.
+    pub workspace_root: std::path::PathBuf,
+    /// Monotonic prompt index within the parent session; defaults to 0.
+    pub prompt_index: u32,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            workspace_root: std::path::PathBuf::from("."),
+            prompt_index: 0,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal accumulator state for one provider stream
 // ---------------------------------------------------------------------------
@@ -512,16 +541,63 @@ impl Agent {
     /// Cannot panic in practice. The `acquire_owned` `.expect` is unreachable
     /// because the dispatch semaphore is owned by the same task and not closed
     /// until after the futures complete.
-    #[allow(clippy::too_many_lines)]
-    #[instrument(skip(self, messages, cancel), fields(model = %self.config.model))]
     pub fn stream_until_done(
         self: Arc<Self>,
         messages: Vec<Message>,
         cancel: CancellationToken,
     ) -> TurnEventStream {
+        self.stream_until_done_with_settings(messages, cancel, RunSettings::default())
+    }
+
+    /// Like [`Agent::stream_until_done`] but carries a [`RunSettings`] so the
+    /// `before_run` / `after_run` hooks (ADR 0028) receive a meaningful
+    /// session identity. Used by the caliban binary's TUI / headless front-ends.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic in practice; see [`Agent::stream_until_done`] for the
+    /// detailed safety note.
+    #[allow(clippy::too_many_lines)]
+    #[instrument(
+        skip(self, messages, cancel, settings),
+        fields(model = %self.config.model, session = %settings.session_id, prompt = settings.prompt_index)
+    )]
+    pub fn stream_until_done_with_settings(
+        self: Arc<Self>,
+        messages: Vec<Message>,
+        cancel: CancellationToken,
+        settings: RunSettings,
+    ) -> TurnEventStream {
         Box::pin(try_stream! {
             let mut history = messages;
             let mut total_usage = Usage::default();
+            // ---- before_run hook (ADR 0028) ----
+            // Capture the most recent user message (best-effort) for the
+            // run context. Used by caliban-checkpoint to label the prompt.
+            let user_msg_owned: Option<Message> = history
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .cloned();
+            {
+                let run_ctx = RunCtx {
+                    session_id: &settings.session_id,
+                    workspace_root: &settings.workspace_root,
+                    user_message: user_msg_owned.as_ref(),
+                    prompt_index: settings.prompt_index,
+                    cancel: cancel.clone(),
+                };
+                if let Err(e) = self.hooks.before_run(&run_ctx).await {
+                    // Surface as a RunEnd terminating the stream cleanly.
+                    yield TurnEvent::RunEnd {
+                        final_messages: history,
+                        total_usage,
+                        turn_count: 0,
+                        stopped_for: StopCondition::HookDenied(format!("before_run: {e}")),
+                    };
+                    return;
+                }
+            }
             // Initialise to MaxTurnsReached; overridden on any natural stop or error.
             let mut stopped_for = StopCondition::MaxTurnsReached(self.config.max_turns);
             let max_turns = self.config.max_turns;
@@ -1105,6 +1181,31 @@ impl Agent {
                     break 'outer;
                 }
                 // stop_reason == ToolUse → continue loop
+            }
+
+            // ---- after_run hook (ADR 0028) ----
+            //
+            // Best-effort: errors logged but not allowed to override an
+            // existing terminal `stopped_for` (the loop already decided why
+            // it stopped; the hook is observability for that decision).
+            {
+                let success = matches!(stopped_for, StopCondition::EndOfTurn);
+                let outcome = RunHookOutcome {
+                    turn_count: turns_completed,
+                    input_tokens: total_usage.input_tokens,
+                    output_tokens: total_usage.output_tokens,
+                    success,
+                };
+                let run_ctx = RunCtx {
+                    session_id: &settings.session_id,
+                    workspace_root: &settings.workspace_root,
+                    user_message: user_msg_owned.as_ref(),
+                    prompt_index: settings.prompt_index,
+                    cancel: cancel.clone(),
+                };
+                if let Err(e) = self.hooks.after_run(&run_ctx, &outcome).await {
+                    tracing::warn!(error = %e, "after_run hook error (non-fatal)");
+                }
             }
 
             yield TurnEvent::RunEnd {
