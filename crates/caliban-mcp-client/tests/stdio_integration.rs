@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use caliban_agent_core::{ToolContext, ToolError, ToolRegistry};
 use caliban_mcp_client::{
-    Conn, DEFAULT_TOOL_TIMEOUT, McpClientManager, McpConfig, McpError, OauthMode, ServerConfig,
-    ServerPermissions, ServerStatus, StartOptions, Transport, TransportKind,
+    Conn, DEFAULT_TOOL_TIMEOUT, ManualOauthConfig, McpClientManager, McpConfig, McpError,
+    OauthMode, ServerConfig, ServerPermissions, ServerStatus, StartOptions, Transport,
+    TransportKind,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,7 @@ fn server_config(extra_args: &[&str], env: BTreeMap<String, String>) -> ServerCo
         url: None,
         headers: BTreeMap::new(),
         oauth: OauthMode::Off,
+        manual_oauth: ManualOauthConfig::default(),
         disabled: false,
         permissions: ServerPermissions::default(),
     }
@@ -186,6 +188,7 @@ async fn failed_server_does_not_abort_startup() {
             url: None,
             headers: BTreeMap::new(),
             oauth: OauthMode::Off,
+            manual_oauth: ManualOauthConfig::default(),
             disabled: false,
             permissions: ServerPermissions::default(),
         },
@@ -245,6 +248,7 @@ async fn handshake_timeout_marks_server_failed() {
             url: None,
             headers: BTreeMap::new(),
             oauth: OauthMode::Off,
+            manual_oauth: ManualOauthConfig::default(),
             disabled: false,
             permissions: ServerPermissions::default(),
         },

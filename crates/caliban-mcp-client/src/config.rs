@@ -11,6 +11,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::error::McpError;
+use crate::oauth::ManualOauthConfig;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -58,8 +59,9 @@ pub enum OauthMode {
 }
 
 impl OauthMode {
+    /// Stringly-typed label for diagnostics + the `/mcp` overlay.
     #[must_use]
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Auto => "auto",
@@ -108,8 +110,11 @@ pub struct ServerConfig {
     pub url: Option<Url>,
     /// Static request headers (http/sse only). Values support env expansion.
     pub headers: BTreeMap<String, String>,
-    /// OAuth mode. Phase B only honors `Off`.
+    /// OAuth mode (`off`/`auto`/`manual`). Phase C wires `auto` and `manual`.
     pub oauth: OauthMode,
+    /// Manual OAuth config (`[server.X.oauth]` block) — only used when
+    /// `oauth = "manual"`.
+    pub manual_oauth: ManualOauthConfig,
     // ---- common ----
     /// Skip this server entirely.
     pub disabled: bool,
@@ -151,6 +156,12 @@ struct RawServerConfig {
     disabled: bool,
     #[serde(default)]
     permissions: ServerPermissions,
+    /// `[server.X.oauth_config]` table block. Required when `oauth = "manual"`.
+    /// (Spec calls it `[server.X.oauth]`, but `oauth = "..."` as a string
+    /// already occupies that key; we sidestep the TOML conflict by spelling
+    /// the table key `oauth_config`.)
+    #[serde(default)]
+    oauth_config: Option<ManualOauthConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -245,10 +256,11 @@ fn normalize(
 ) -> Result<ServerConfig, McpError> {
     let transport = parse_transport(server, raw.transport.as_deref())?;
     let oauth = parse_oauth(server, raw.oauth.as_deref())?;
-    if !matches!(oauth, OauthMode::Off) {
-        return Err(McpError::OauthPhaseC {
+    // stdio + oauth makes no sense — oauth is per-HTTP-call.
+    if matches!(transport, TransportKind::Stdio) && !matches!(oauth, OauthMode::Off) {
+        return Err(McpError::StdioFieldMismatch {
             server: server.to_string(),
-            mode: oauth.as_str().to_string(),
+            field: "oauth",
         });
     }
     match transport {
@@ -332,6 +344,7 @@ fn normalize_stdio(
         url: None,
         headers: BTreeMap::new(),
         oauth,
+        manual_oauth: ManualOauthConfig::default(),
         disabled: raw.disabled,
         permissions: raw.permissions,
     })
@@ -398,6 +411,19 @@ fn normalize_remote(
         let v = expand_value(server, &format!("headers[{k}]"), v, workspace_root)?;
         headers.insert(k.clone(), v);
     }
+    // Manual OAuth block — required when `oauth = "manual"`. We expand any
+    // `${VAR}` references in its string fields so operators can keep secrets
+    // out of the file.
+    let manual_oauth = match (oauth, raw.oauth_config.as_ref()) {
+        (OauthMode::Manual, None) => {
+            return Err(McpError::OauthManualIncomplete {
+                server: server.to_string(),
+                field: "oauth_config (block)",
+            });
+        }
+        (_, None) => ManualOauthConfig::default(),
+        (_, Some(cfg)) => expand_manual_oauth(server, cfg, workspace_root)?,
+    };
     Ok(ServerConfig {
         transport,
         command: String::new(),
@@ -407,8 +433,35 @@ fn normalize_remote(
         url: Some(parsed),
         headers,
         oauth,
+        manual_oauth,
         disabled: raw.disabled,
         permissions: raw.permissions,
+    })
+}
+
+fn expand_manual_oauth(
+    server: &str,
+    cfg: &ManualOauthConfig,
+    workspace_root: &Path,
+) -> Result<ManualOauthConfig, McpError> {
+    let expand_opt = |name: &str, raw: Option<&String>| -> Result<Option<String>, McpError> {
+        match raw {
+            None => Ok(None),
+            Some(v) => Ok(Some(expand_value(
+                server,
+                &format!("oauth_config.{name}"),
+                v,
+                workspace_root,
+            )?)),
+        }
+    };
+    Ok(ManualOauthConfig {
+        client_id: expand_opt("client_id", cfg.client_id.as_ref())?,
+        client_secret: expand_opt("client_secret", cfg.client_secret.as_ref())?,
+        auth_url: expand_opt("auth_url", cfg.auth_url.as_ref())?,
+        token_url: expand_opt("token_url", cfg.token_url.as_ref())?,
+        scopes: cfg.scopes.clone(),
+        audience: expand_opt("audience", cfg.audience.as_ref())?,
     })
 }
 
@@ -610,19 +663,75 @@ command = "echo"
     }
 
     #[test]
-    fn oauth_auto_rejected_in_phase_b() {
+    fn oauth_auto_accepted_in_phase_c() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.s]
+transport = "http"
+url = "https://example.com"
+oauth = "auto"
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize("s", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.oauth, OauthMode::Auto);
+    }
+
+    #[test]
+    fn oauth_manual_requires_config_block() {
         let tmp = tempfile::TempDir::new().unwrap();
         let body = r#"
 [server.bad]
 transport = "http"
 url = "https://example.com"
+oauth = "manual"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, McpError::OauthManualIncomplete { .. }),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn oauth_manual_with_config_block_parses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.ok]
+transport = "http"
+url = "https://example.com"
+oauth = "manual"
+
+[server.ok.oauth_config]
+client_id = "my-client"
+auth_url = "https://auth.example.com/authorize"
+token_url = "https://auth.example.com/token"
+scopes = ["read", "write"]
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize("ok", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.oauth, OauthMode::Manual);
+        assert_eq!(cfg.manual_oauth.client_id.as_deref(), Some("my-client"));
+        assert_eq!(
+            cfg.manual_oauth.scopes,
+            vec!["read".to_string(), "write".to_string()],
+        );
+    }
+
+    #[test]
+    fn oauth_stdio_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+command = "echo"
 oauth = "auto"
 "#;
         let raw = parse_one(body);
         let err =
             normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
         assert!(
-            matches!(&err, McpError::OauthPhaseC { mode, .. } if mode == "auto"),
+            matches!(err, McpError::StdioFieldMismatch { field: "oauth", .. }),
             "got: {err:?}",
         );
     }

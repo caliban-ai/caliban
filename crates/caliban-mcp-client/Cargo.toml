@@ -29,13 +29,23 @@ futures            = { workspace = true }
 schemars           = { workspace = true }
 http               = { workspace = true }
 url                = { workspace = true }
+# Phase C deps — OAuth + token storage + loopback callback server.
+oauth2             = { workspace = true }
+keyring            = { workspace = true }
+axum               = { workspace = true }
+reqwest            = { workspace = true }
+chrono             = { workspace = true }
+sha2               = { workspace = true }
+base64             = { workspace = true }
+rand               = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
-tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tracing-subscriber = { workspace = true }
 wiremock           = { workspace = true }
 axum               = { workspace = true }
+serde_json         = { workspace = true }
 
 # In-tree test server binary used by integration tests via CARGO_BIN_EXE_test_server.
 [[bin]]

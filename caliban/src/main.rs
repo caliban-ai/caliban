@@ -227,6 +227,16 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_MCP")]
     pub(crate) no_mcp: bool,
 
+    /// Override the loopback port used by the OAuth callback server
+    /// (ADR 0023 Phase C). Defaults to `0` (ephemeral); honors the
+    /// `CALIBAN_MCP_OAUTH_PORT` env var when this flag is not set.
+    #[arg(
+        long = "mcp-oauth-port",
+        value_name = "PORT",
+        env = "CALIBAN_MCP_OAUTH_PORT"
+    )]
+    pub(crate) mcp_oauth_port: Option<u16>,
+
     /// Disable plugin discovery (ADR 0030). Skips scanning all plugin roots
     /// (project, user, managed) and treats `CALIBAN_ENABLED_PLUGINS` as empty.
     #[arg(long, env = "CALIBAN_NO_PLUGINS")]

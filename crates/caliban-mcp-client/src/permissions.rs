@@ -127,6 +127,7 @@ mod tests {
             url: None,
             headers: BTreeMap::new(),
             oauth: crate::config::OauthMode::Off,
+            manual_oauth: crate::oauth::ManualOauthConfig::default(),
             disabled: false,
             permissions: perms,
         }

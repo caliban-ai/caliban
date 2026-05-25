@@ -13,7 +13,7 @@ use caliban_agent_core::{
     ToolCtx, default_rules,
 };
 use caliban_mcp_client::{
-    OauthMode, ServerConfig, ServerPermissions, TransportKind, merge_with_global,
+    ManualOauthConfig, OauthMode, ServerConfig, ServerPermissions, TransportKind, merge_with_global,
 };
 
 fn server_with_permissions(perms: ServerPermissions) -> ServerConfig {
@@ -26,6 +26,7 @@ fn server_with_permissions(perms: ServerPermissions) -> ServerConfig {
         url: None,
         headers: BTreeMap::new(),
         oauth: OauthMode::Off,
+        manual_oauth: ManualOauthConfig::default(),
         disabled: false,
         permissions: perms,
     }
