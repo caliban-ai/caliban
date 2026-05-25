@@ -107,6 +107,12 @@ impl std::fmt::Debug for WebSearchTool {
 
 impl WebSearchTool {
     /// Build a tool using the given HTTP client.
+    ///
+    /// Production callers should pass a client built with
+    /// [`caliban_common::http::default_client`] so the user-agent, TLS,
+    /// HTTP/2, and timeout defaults are shared with provider transports.
+    /// Tests inject their own client (typically a no-config
+    /// `reqwest::Client::new()`) to bypass DNS / TLS for `wiremock`.
     #[must_use]
     pub fn new(client: reqwest::Client) -> Self {
         Self {

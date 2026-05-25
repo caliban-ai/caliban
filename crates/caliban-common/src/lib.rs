@@ -11,5 +11,6 @@
 pub mod expand;
 pub mod fs;
 pub mod glob_match;
+pub mod http;
 pub mod paths;
 pub mod tracing_targets;

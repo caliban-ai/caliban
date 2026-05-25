@@ -16,6 +16,7 @@ live-tests = []
 
 [dependencies]
 caliban-provider   = { path = "../caliban-provider" }
+caliban-common     = { path = "../caliban-common" }
 async-trait        = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }

@@ -579,15 +579,7 @@ fn auto_memory_disabled() -> bool {
 /// here. A separate client is intentional — provider transports configure
 /// their own clients and have different timeout/keep-alive needs.
 fn web_fetch_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!(
-            "caliban/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/johnford2002/caliban)",
-        ))
-        .build()
-        .expect("reqwest::Client default builder succeeds")
+    caliban_common::http::no_redirect_client()
 }
 
 pub(crate) fn summarize(s: &str, max: usize) -> String {

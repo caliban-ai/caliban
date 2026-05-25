@@ -64,6 +64,10 @@ impl WebFetchTool {
     /// [`WebFetchTool`] follows redirects manually so it can apply same-host
     /// policy. If your client follows redirects automatically, redirect tests
     /// will pass but cross-host policy will be silently bypassed.
+    ///
+    /// Production callers should pass
+    /// [`caliban_common::http::no_redirect_client`], which already disables
+    /// auto-redirect on top of the shared TLS / HTTP/2 / user-agent defaults.
     #[must_use]
     pub fn new(client: reqwest::Client) -> Self {
         Self {

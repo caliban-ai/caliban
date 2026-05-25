@@ -14,7 +14,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR | Tier | Title | LOC delta (consumer sites) | LOC delta (incl. new common crate) | Dup sites consolidated | Tests +/− | Binary size Δ | Test runtime Δ |
 |---|---|---|---:|---:|---:|---:|---:|---:|
 | PR-T1-A | 1 | `caliban-common` foundation crate | **−305** (544 deleted / 239 added at consumer sites) | +629 (new `caliban-common` module is ~934 LOC incl. ~350 LOC of tests) | 7 / 8 (env-expand ×2; atomic-write ×5; sanitize_cwd ×2; walk_up ×2; matches_glob+first_arg ×1; tracing targets 61/88 sites; XDG paths consolidated into helpers awaiting next consumers — sessions/supervisor/oauth) | +34 net new (39 new in `caliban-common`; carried-over tests removed from `agent-core`/`memory`) | n/a | n/a |
-| PR-T1-B | 1 | Shared `reqwest::Client` factory | — | — | — | — | — |
+| PR-T1-B | 1 | Shared `reqwest::Client` factory | **+12** (30 added / 18 deleted at consumer sites) | +158 (new `caliban-common::http` is ~146 LOC incl. ~52 LOC of tests) | 9 / 9 (7 provider transports + vertex `list_client` + `web_fetch_client`) | +6 net new (all in `caliban-common::http`) | n/a | n/a |
 | PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | — | — | — | — | — |
 | PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | — | — | — | — | — |
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | — | — | — | — | — |
@@ -73,3 +73,38 @@ Baselines (TBD — captured by PR-T4-0):
   which ~350 LOC are tests) is the foundation the rest of the sprint
   builds on — the consumer-site delta is −305 lines and the headline
   net-negative goal is sprint-level, not PR-level.
+
+## PR-T1-B notes
+
+- New `caliban-common::http` module with three constructors:
+  - `default_client_builder()` — yields a `reqwest::ClientBuilder`
+    pre-configured with the shared User-Agent
+    (`caliban/<CARGO_PKG_VERSION>`), HTTP/2 adaptive window, hickory-DNS
+    resolver, rustls TLS backend, redirect limit of 10, and a 30s default
+    timeout. Provider transports layer their custom timeout on top via
+    `.timeout(config.timeout)`.
+  - `default_client()` — convenience helper that calls `.build()` on the
+    above; panics on TLS / DNS init failure (matches the expectations of
+    every existing call site that did `.expect(...)` on its builder).
+  - `no_redirect_client()` — same defaults but with `Policy::none()`, for
+    `web_fetch`'s manual same-host redirect enforcement.
+- Migrated 9 call sites: 8 provider transports
+  (`anthropic::{direct,vertex}`, `openai::{direct,azure}`,
+  `google::{ai_studio,vertex}`, `ollama::direct`, `vertex::list_client`)
+  plus `caliban/src/main.rs::web_fetch_client`.
+- The brief described "5–10 LOC shrink per migrated site"; in practice
+  each provider site had only `.timeout(config.timeout)` set explicitly
+  before this PR — the savings show up as *absorbed* shared defaults
+  (User-Agent, HTTP/2, hickory-DNS, rustls, redirect cap) that each site
+  would otherwise need to repeat to reach parity. The `web_fetch_client`
+  site does shrink by 8 LOC (boilerplate → one-line delegation).
+- Behaviour preserved: provider transports keep their explicit
+  `.timeout(config.timeout)` override (some configs set this to multi-
+  minute values). The Anthropic Vertex variant inherits its
+  `anthropic-version` header from existing `auth_headers()` logic
+  unchanged. `web_fetch` keeps `Policy::none()` for its manual same-host
+  redirect handling.
+- `WebSearchTool::new` and `WebFetchTool::new` keep their injectable
+  `reqwest::Client` parameter for test ergonomics (wiremock-friendly
+  clients without TLS); docstrings now direct production callers at
+  `caliban_common::http::{default_client, no_redirect_client}`.
