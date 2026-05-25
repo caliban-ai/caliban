@@ -180,6 +180,8 @@ mod tests {
                     url: "https://example.com/x.png".into(),
                 },
                 cache_control: None,
+                sha256: None,
+                dims: None,
             })],
         }];
         let n = DerivedNeeds::from_request(&req);

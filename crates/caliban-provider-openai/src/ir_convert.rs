@@ -127,6 +127,13 @@ pub fn ir_to_native_request(
                                     format!("data:{media_type};base64,{data}")
                                 }
                                 IrImageSource::Url { url } => url,
+                                IrImageSource::BlobRef { media_type, .. } => {
+                                    // Should have been resolved by the
+                                    // session layer; emit an empty data URL
+                                    // so the wire shape stays well-formed
+                                    // and the provider can reject it.
+                                    format!("data:{media_type};base64,")
+                                }
                             };
                             user_parts.push(NativeContentPart::ImageUrl {
                                 image_url: NativeImageUrl { url },

@@ -21,6 +21,7 @@ members = [
     "crates/caliban-sandbox",
     "crates/caliban-plugins",
     "crates/caliban-telemetry",
+    "crates/caliban-images",
     "caliban",
 ]
 
@@ -74,6 +75,10 @@ sha2   = "0.10"
 semver = { version = "1", features = ["serde"] }
 tar    = "0.4"
 flate2 = "1"
+base64 = "0.22"
+image  = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+infer  = { version = "0.16", default-features = false }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
 
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)

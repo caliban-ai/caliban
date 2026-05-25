@@ -968,6 +968,8 @@ mod tests {
                         url: "https://x/y.png".into(),
                     },
                     cache_control: None,
+                    sha256: None,
+                    dims: None,
                 },
             )],
         }];
@@ -1016,6 +1018,8 @@ mod tests {
                         url: "https://x/y.png".into(),
                     },
                     cache_control: None,
+                    sha256: None,
+                    dims: None,
                 },
             )],
         }];

@@ -96,6 +96,14 @@ pub struct ImageBlock {
     /// Optional cache-control marker.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cache_control: Option<CacheControl>,
+    /// SHA-256 fingerprint (64-char hex) of the (post-resize) image bytes.
+    /// Populated by [`caliban-images`] at ingest time; the provider IR
+    /// itself does not require it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sha256: Option<String>,
+    /// (width, height) in pixels, populated at ingest.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dims: Option<(u32, u32)>,
 }
 
 /// The source of image data.
@@ -113,5 +121,17 @@ pub enum ImageSource {
     Url {
         /// The URL of the image.
         url: String,
+    },
+    /// A reference to a session-local blob, identified by SHA-256.
+    ///
+    /// **Never** sent to a provider: provider adapters must reject `BlobRef`
+    /// (or, equivalently, the session loader resolves it to
+    /// [`ImageSource::Base64`] before dispatch). Round-trips through
+    /// `serde_json` because session storage persists this variant on-disk.
+    BlobRef {
+        /// SHA-256 fingerprint (64-char hex).
+        sha256: String,
+        /// MIME type of the referenced blob.
+        media_type: String,
     },
 }

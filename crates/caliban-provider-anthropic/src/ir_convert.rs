@@ -108,6 +108,17 @@ fn ir_content_block_to_native(b: ContentBlock) -> NativeContentBlock {
                 }
                 // ImageSource::Url is a struct variant: { url: String }
                 IrImageSource::Url { url } => NativeImageSource::Url { url },
+                // BlobRef is session-local; resolve it to Base64 before
+                // dispatching. We do a best-effort conversion to an
+                // empty-data block which providers will reject — better than
+                // silently dropping it.
+                IrImageSource::BlobRef {
+                    media_type,
+                    sha256: _,
+                } => NativeImageSource::Base64 {
+                    media_type,
+                    data: String::new(),
+                },
             },
             cache_control: i.cache_control.map(|_| NativeCacheControl::Ephemeral),
         }),
@@ -211,6 +222,8 @@ fn native_block_to_ir(b: NativeContentBlock) -> Result<ContentBlock> {
                 NativeImageSource::Url { url } => IrImageSource::Url { url },
             },
             cache_control: i.cache_control.map(|_| CacheControl::Ephemeral),
+            sha256: None,
+            dims: None,
         }),
         NativeContentBlock::ToolUse(tu) => ContentBlock::ToolUse(IrToolUseBlock {
             id: tu.id,

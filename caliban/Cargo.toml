@@ -29,6 +29,7 @@ caliban-mcp-client         = { path = "../crates/caliban-mcp-client" }
 caliban-model-router       = { path = "../crates/caliban-model-router" }
 caliban-plugins            = { path = "../crates/caliban-plugins" }
 caliban-telemetry          = { path = "../crates/caliban-telemetry" }
+caliban-images             = { path = "../crates/caliban-images" }
 rust_decimal               = { version = "1", default-features = false }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
@@ -60,6 +61,7 @@ async-trait      = { workspace = true }
 secrecy          = { workspace = true }
 url              = { workspace = true }
 serde_json       = { workspace = true }
+image            = { workspace = true }
 
 [lints]
 workspace = true

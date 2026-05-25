@@ -136,6 +136,12 @@ pub(crate) fn format_history(messages: &[Message], show_all: bool) -> Vec<Line<'
                         caliban_provider::ImageSource::Url { url } => {
                             format!("[image url: {url}]")
                         }
+                        caliban_provider::ImageSource::BlobRef { sha256, media_type } => {
+                            format!(
+                                "[image blob: {media_type} sha256={}…]",
+                                &sha256[..12.min(sha256.len())]
+                            )
+                        }
                     };
                     out.push(Line::styled(
                         format!("    {descr}"),
