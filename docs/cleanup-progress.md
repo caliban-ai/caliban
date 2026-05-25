@@ -18,7 +18,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T2-A | 2 | Split `caliban/src/tui.rs` (3970 LOC) | **+101** (4071 lines across 5 files / 3970 original; tests stay at root) | n/a | n/a (file split, no dup consolidation) | 0 net (existing tests unmoved) | n/a | n/a |
 | PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | **+298** (2142 total / 1844 before; pure file split — no consumer-site delta) | n/a (no new crate) | n/a (split, no dup consolidation) | +0 (no new tests) | n/a | n/a |
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | **+52** (4 files, 1271 LOC total vs. 1219 single-file) | — | — | ±0 (3 turn-timing tests carried over) | n/a | n/a |
-| PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | — | — | — | — | — |
+| PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | **+64** (lib.rs 1499 → 342; new builder.rs 102, dispatch.rs 280, provider_impl.rs 60, tests.rs 779) | — | — | 0 (existing 64 tests relocated to `tests.rs` unchanged; all green) | n/a | n/a |
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | — | — | — | — | — |
 | PR-T3-B | 3 | Settings as canonical config root | — | — | — | — | — |
 | PR-T4-0 | 4 | Baseline measurement | — | — | — | — | — |
@@ -264,3 +264,46 @@ untouched.
 `crate::tui::{App,TranscriptLine,Overlay,…}` import paths preserved at
 the root so external callers (`main.rs`, `tui/slash/*`) compile
 unchanged.
+
+## PR-T2-D notes
+
+- Pure file split, no semantic changes, no new tests. `lib.rs` slimmed
+  from 1499 LOC to 342 LOC; existing 64 router-level tests relocated
+  verbatim from the inline `#[cfg(test)] mod tests { ... }` block to a
+  sibling `tests.rs` declared via `#[cfg(test)] mod tests;`.
+- New modules:
+  - `builder.rs` (102 LOC) — `ModelRouterBuilder` + its `Debug` /
+    fluent methods.
+  - `provider_impl.rs` (60 LOC) — `impl Provider for ModelRouter`
+    delegating `complete`/`stream` to `dispatch.rs` and supplying the
+    `capabilities` / `list_models` / `name` glue.
+  - `dispatch.rs` (280 LOC) — candidate-resolution dispatch as
+    additional inherent `pub(crate)` methods on `ModelRouter`
+    (`dispatch_complete`, `dispatch_stream`, `rewrite_for_route`).
+    Reusing inherent methods lets the dispatch loop touch private
+    fields directly (no new public seams).
+- Deviations from spec target sizes:
+  - Spec targeted `lib.rs ~200`, `builder.rs ~250`, `provider_impl.rs ~400`,
+    `dispatch.rs ~650` (total ~1500). Actual is `lib.rs 342`, `builder.rs
+    102`, `provider_impl.rs 60`, `dispatch.rs 280`, plus `tests.rs 779`.
+  - `lib.rs` is +142 over target because the public `RouteUsage` /
+    `RouterStatsSnapshot` types, the `pub(crate) StatsHandle`, and the
+    `render_diagnostics` free function all stay there (these are the
+    natural public surface of the crate and don't fit any of the
+    sibling modules cleanly).
+  - `builder.rs` / `provider_impl.rs` are well *under* target because
+    each is doing exactly one thing — the dispatch loop's heaviness
+    moved fully into `dispatch.rs`, not into `provider_impl.rs`.
+  - `dispatch.rs` is under target (280 vs ~650) because it's a single
+    `impl ModelRouter { ... }` block of the existing `complete`/`stream`
+    bodies — no helper extraction (the spec said *pure file split*).
+- Crate field visibility tightened from `private` to `pub(crate)` on
+  `ModelRouter.{default_purpose, routes, providers, breakers, stats}`
+  so the new `dispatch.rs` and `provider_impl.rs` modules can reach
+  them directly. `StatsHandle` and `StatsInner` likewise widened to
+  `pub(crate)`. Nothing escapes the crate boundary.
+- `lib.rs` retains the public re-export hub (`pub use builder::...`,
+  `pub use breaker::...`, etc.); `ModelRouter`, `ModelRouterBuilder`,
+  `RouterConfig`, `RouteEntry`, `render_diagnostics`, `Result`,
+  `RouterError`, and the rest of the public API remain reachable from
+  `caliban_model_router::*` unchanged.
