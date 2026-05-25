@@ -3,12 +3,15 @@
 //! `caliban-provider`.
 
 pub mod agent;
+pub mod auto_mode;
 pub(crate) mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
 pub mod hooks_config;
 pub mod hooks_router;
+pub mod mode_filter;
+pub mod permission_mode;
 pub mod permissions;
 pub mod plan_mode;
 pub mod post_process;
@@ -21,6 +24,12 @@ pub mod tool;
 pub mod turn;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
+pub use auto_mode::{
+    AutoModeClassifier, AutoModeConfig, AutoModeDecision, AutoVerdict, CLASSIFIER_INPUT_CAP,
+    DEFAULTS_TOKEN, DecisionSource, DefaultsKind, build_prompt as auto_mode_build_prompt,
+    default_patterns as auto_mode_default_patterns,
+    parse_classifier_response as auto_mode_parse_classifier_response,
+};
 pub use compact::{
     Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor, estimate_tokens,
 };
@@ -33,6 +42,10 @@ pub use hooks::{
 };
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
 pub use hooks_router::{AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook};
+pub use mode_filter::ModeFilter;
+pub use permission_mode::{
+    FILE_EDIT_TOOLS, PermissionMode, SharedPermissionMode, is_file_edit_tool, resolve_startup_mode,
+};
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
     default_rules, load_rules, load_rules_file,

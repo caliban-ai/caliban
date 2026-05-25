@@ -251,6 +251,23 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_AUTO_ALLOW")]
     pub(crate) auto_allow: bool,
 
+    /// Initial permission mode (ADR 0029). Valid values (camelCase):
+    /// `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`,
+    /// `bypassPermissions`. Overrides `CALIBAN_DEFAULT_PERMISSION_MODE`.
+    #[arg(long = "permission-mode", value_name = "MODE")]
+    pub(crate) permission_mode: Option<String>,
+
+    /// DANGEROUS: required to enter `bypassPermissions` mode. Without this
+    /// flag, the binary refuses to start in bypass mode and the
+    /// Shift+Tab cycle skips past it (ADR 0029).
+    #[arg(long = "allow-dangerously-skip-permissions")]
+    pub(crate) allow_dangerously_skip_permissions: bool,
+
+    /// Disable the auto-mode classifier. Every call that would be
+    /// classified instead falls through to the Ask handler (ADR 0029).
+    #[arg(long = "disable-auto-mode", env = "CALIBAN_DISABLE_AUTO_MODE")]
+    pub(crate) disable_auto_mode: bool,
+
     /// Disable the built-in `AgentTool` (the sub-agent primitive).
     #[arg(long, env = "CALIBAN_NO_SUB_AGENT")]
     pub(crate) no_sub_agent: bool,
@@ -912,6 +929,21 @@ async fn main() -> Result<()> {
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
 
+    // Resolve the initial permission mode (ADR 0029). CLI flag wins over
+    // env; bypass mode requires --allow-dangerously-skip-permissions.
+    let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
+    let initial_perm_mode = caliban_agent_core::resolve_startup_mode(
+        args.permission_mode.as_deref(),
+        env_perm.as_deref(),
+        args.allow_dangerously_skip_permissions,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let permission_mode = caliban_agent_core::SharedPermissionMode::new(initial_perm_mode);
+    // Keep the legacy plan-mode flag in sync with `Plan`.
+    if initial_perm_mode == caliban_agent_core::PermissionMode::Plan {
+        plan_mode.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // Discover plugins early (ADR 0030). Plugins contribute skill roots,
     // hooks config, MCP servers, agents, and output styles, so the manager
     // is constructed before any of those subsystems init. `--bare` and the
@@ -1078,11 +1110,12 @@ async fn main() -> Result<()> {
         !has_prompt && !headless_active && std::io::stdin().is_terminal()
     };
 
-    let (permissions_hook, tui_ask_rx) = if args.no_permissions {
-        (None, None)
+    let (permissions_hook, tui_ask_rx, auto_mode_classifier) = if args.no_permissions {
+        (None, None, None)
     } else {
         use caliban_agent_core::{
-            Action, NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, load_rules,
+            Action, AutoModeClassifier, AutoModeConfig, DEFAULTS_TOKEN, ModeFilter,
+            NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, load_rules,
         };
         let mut cli_rules: Vec<Rule> = Vec::new();
         for p in &args.allow {
@@ -1123,9 +1156,32 @@ async fn main() -> Result<()> {
                 None,
             )
         };
-        let hook: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+        let inner: Arc<dyn caliban_agent_core::Hooks> =
             Arc::new(PermissionsHook::new(rules, ask, Arc::new(NoopHooks)));
-        (Some(hook), ask_rx)
+
+        // Build the auto-mode classifier. The provider is the same one wired
+        // for the agent; when it's a router, FastClassifier requests route
+        // to whichever model the operator configured for that purpose.
+        let auto_cfg = AutoModeConfig {
+            environment: vec![DEFAULTS_TOKEN.into()],
+            allow: vec![DEFAULTS_TOKEN.into()],
+            soft_deny: vec![DEFAULTS_TOKEN.into()],
+            hard_deny: vec![DEFAULTS_TOKEN.into()],
+            disabled: args.disable_auto_mode,
+        };
+        let classifier = Arc::new(AutoModeClassifier::new(
+            Arc::clone(&provider),
+            &model,
+            auto_cfg,
+        ));
+
+        let filter: Arc<dyn caliban_agent_core::Hooks + Send + Sync> = Arc::new(ModeFilter::new(
+            permission_mode.clone(),
+            inner,
+            Some(Arc::clone(&classifier)),
+            args.allow_dangerously_skip_permissions,
+        ));
+        (Some(filter), ask_rx, Some(classifier))
     };
 
     let mut builder = Agent::builder()
@@ -1372,6 +1428,7 @@ async fn main() -> Result<()> {
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {
+            let bypass_latch = args.allow_dangerously_skip_permissions;
             return tui::run(
                 args,
                 agent,
@@ -1380,6 +1437,9 @@ async fn main() -> Result<()> {
                 system_prompt,
                 todos,
                 plan_mode,
+                permission_mode,
+                bypass_latch,
+                auto_mode_classifier,
                 mcp_summaries,
                 tui_ask_rx,
             )

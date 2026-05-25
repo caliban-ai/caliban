@@ -1,6 +1,6 @@
 # ADR 0029 · Permission modes + auto-mode classifier
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-permission-modes-design.md`
 

@@ -58,8 +58,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Capability | Caliban | Notes |
 |---|---|---|
 | Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020 |
-| Permission modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | 🟡 | plan-mode only |
-| Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | 🔴 | |
+| Permission modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | ✅ | ADR-0029; Shift+Tab cycles + status-bar chip; `--permission-mode` flag; `CALIBAN_DEFAULT_PERMISSION_MODE` env; `--allow-dangerously-skip-permissions` gate for bypass |
+| Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | ✅ | ADR-0029; `AutoModeClassifier` via router `RequestPurpose::FastClassifier` with `$defaults` curated rule lists, sha256-keyed cache, 4 KiB input truncation |
 | TUI Ask modal | 🔴 | *(deferred PR #8)* |
 | OS-level sandbox (Seatbelt / bubblewrap) | ✅ | ADR-0032; v1 ships macOS + Linux/WSL; Windows native deferred |
 

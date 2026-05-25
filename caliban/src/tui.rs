@@ -358,6 +358,16 @@ pub(crate) struct App {
     /// Shared plan-mode flag. Toggled by `/plan` and by the
     /// `EnterPlanMode`/`ExitPlanMode` tools.
     pub(crate) plan_mode: caliban_agent_core::SharedPlanMode,
+    /// Active permission mode (ADR 0029). Cycled via `Shift+Tab`. Lock-free
+    /// reads via `ArcSwap` under the hood.
+    pub(crate) permission_mode: caliban_agent_core::SharedPermissionMode,
+    /// `true` when the operator passed `--allow-dangerously-skip-permissions`
+    /// at startup. Gates entry into [`caliban_agent_core::PermissionMode::BypassPermissions`].
+    pub(crate) bypass_latch: bool,
+    /// Optional handle to the auto-mode classifier so we can drop the cache
+    /// when the operator cycles out of `auto`. `None` when no
+    /// `FastClassifier` route is wired.
+    pub(crate) auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
     /// Snapshot of per-server MCP lifecycle status at startup. Surfaces in the
     /// `/mcp` overlay. Empty when `--no-mcp` is set or no servers are
     /// configured.
@@ -405,6 +415,9 @@ impl App {
         system_prompt: Option<String>,
         todos: caliban_agent_core::SharedTodos,
         plan_mode: caliban_agent_core::SharedPlanMode,
+        permission_mode: caliban_agent_core::SharedPermissionMode,
+        bypass_latch: bool,
+        auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
         mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
         ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
     ) -> Self {
@@ -494,6 +507,9 @@ impl App {
             last_turn_ttft_ms: None,
             todos,
             plan_mode,
+            permission_mode,
+            bypass_latch,
+            auto_mode_classifier,
             mcp_servers,
             context_window,
             cost_accumulator,
@@ -1586,6 +1602,17 @@ fn render_status(app: &App) -> Line<'static> {
         ""
     };
 
+    // Permission mode chip (ADR 0029). Hidden for `default`; cycled via
+    // Shift+Tab. Note that the `Plan` permission mode prints its own chip
+    // here in addition to the legacy plan_mode chip above so the two
+    // stay visually consistent during the SharedPlanMode → PermissionMode
+    // migration window.
+    let perm_mode = app.permission_mode.load();
+    let perm_mode_part = match perm_mode {
+        caliban_agent_core::PermissionMode::Default => String::new(),
+        other => format!(" \u{00B7} [{}]", other.chip()),
+    };
+
     // Context-window utilization indicator. Hidden when capacity is zero
     // (e.g. provider hasn't reported `Capabilities`).
     let context_part = caliban_telemetry::format_status_segment(&app.context_window)
@@ -1593,7 +1620,7 @@ fn render_status(app: &App) -> Line<'static> {
         .unwrap_or_default();
 
     let text = format!(
-        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{overlay_part}{running_part}{context_part}"
+        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{perm_mode_part}{overlay_part}{running_part}{context_part}"
     );
     Line::from(Span::styled(
         text,
@@ -1822,6 +1849,9 @@ pub(crate) async fn run(
     system_prompt: Option<String>,
     todos: caliban_agent_core::SharedTodos,
     plan_mode: caliban_agent_core::SharedPlanMode,
+    permission_mode: caliban_agent_core::SharedPermissionMode,
+    bypass_latch: bool,
+    auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
     mcp_servers: Vec<caliban_mcp_client::ServerSummary>,
     ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
 ) -> Result<()> {
@@ -1834,6 +1864,9 @@ pub(crate) async fn run(
         system_prompt,
         todos,
         plan_mode,
+        permission_mode,
+        bypass_latch,
+        auto_mode_classifier,
         mcp_servers,
         ask_rx,
     );
@@ -2526,6 +2559,65 @@ fn handle_event(
     }
 }
 
+/// Pure cycle: given the current mode + whether the bypass latch is set,
+/// return the next mode + an optional toast-text message. Extracted so the
+/// behavior is unit-testable without constructing a full `App`.
+///
+/// When the cycle would step into `BypassPermissions` without the latch,
+/// the dangerous slot is skipped and a warning message is returned.
+pub(crate) fn next_permission_mode(
+    current: caliban_agent_core::PermissionMode,
+    bypass_latch: bool,
+) -> (caliban_agent_core::PermissionMode, Option<String>) {
+    use caliban_agent_core::PermissionMode;
+    let candidate = current.next();
+    if candidate == PermissionMode::BypassPermissions && !bypass_latch {
+        let skipped = candidate.next();
+        let toast = "bypassPermissions requires --allow-dangerously-skip-permissions".to_string();
+        return (skipped, Some(toast));
+    }
+    (candidate, None)
+}
+
+/// Advance the permission mode (ADR 0029). Refuses to enter
+/// `BypassPermissions` without `--allow-dangerously-skip-permissions`; in
+/// that case skips past it. Drops the auto-mode classifier cache when
+/// leaving `auto`.
+pub(crate) fn cycle_permission_mode(app: &mut App) {
+    use caliban_agent_core::PermissionMode;
+    let prev = app.permission_mode.load();
+    let (next, warning) = next_permission_mode(prev, app.bypass_latch);
+    if let Some(msg) = warning {
+        app.toast = Some(toast::Toast::info(msg));
+    }
+    // Cycling out of auto: drop the classifier cache so the next visit
+    // re-classifies from scratch.
+    if prev == PermissionMode::Auto
+        && next != PermissionMode::Auto
+        && let Some(c) = app.auto_mode_classifier.as_ref()
+    {
+        c.clear_cache();
+    }
+    app.permission_mode.store(next);
+    // Keep the legacy SharedPlanMode flag in sync with the enum so the
+    // existing `/plan` chip and the `EnterPlanMode`/`ExitPlanMode` tools
+    // stay coherent.
+    app.plan_mode.store(
+        next == PermissionMode::Plan,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let label = if next == PermissionMode::Default {
+        "default".to_string()
+    } else {
+        next.chip().to_string()
+    };
+    // Don't overwrite an explicit warning toast — only set the success
+    // toast when no warning was emitted.
+    if app.toast.is_none() {
+        app.toast = Some(toast::Toast::info(format!("permission mode: {label}")));
+    }
+}
+
 /// Rows of scroll per wheel notch. Three is what most terminals give you
 /// natively in their scroll-back and matches the cadence in `PageUp` (10
 /// felt too aggressive for a fine-grained wheel).
@@ -2667,6 +2759,13 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
         }
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
             open_reverse_history(app);
+            return;
+        }
+        // Shift+Tab cycles permission modes (ADR 0029). Skips
+        // BypassPermissions when no `--allow-dangerously-skip-permissions`
+        // latch is set, fires a warning toast in that case.
+        (KeyCode::BackTab, _) => {
+            cycle_permission_mode(app);
             return;
         }
         _ => {}
@@ -3458,5 +3557,37 @@ mod tests {
     fn esc_chord_requires_a_previous_press() {
         let t = std::time::Instant::now();
         assert!(!is_esc_chord(None, t));
+    }
+
+    // === Permission-mode cycling (ADR 0029) ===
+
+    #[test]
+    fn next_permission_mode_with_latch_passes_through_bypass() {
+        use caliban_agent_core::PermissionMode;
+        // With the latch, the cycle reaches BypassPermissions normally.
+        let mut m = PermissionMode::DontAsk;
+        let (next, warning) = next_permission_mode(m, true);
+        m = next;
+        assert_eq!(m, PermissionMode::BypassPermissions);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn next_permission_mode_without_latch_skips_bypass() {
+        use caliban_agent_core::PermissionMode;
+        // Coming from DontAsk, the next step is BypassPermissions; without
+        // the latch we skip it and emit a warning toast.
+        let (next, warning) = next_permission_mode(PermissionMode::DontAsk, false);
+        assert_eq!(next, PermissionMode::Default);
+        let msg = warning.expect("warning toast emitted");
+        assert!(msg.contains("--allow-dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn next_permission_mode_default_advances_to_accept_edits() {
+        use caliban_agent_core::PermissionMode;
+        let (next, warning) = next_permission_mode(PermissionMode::Default, false);
+        assert_eq!(next, PermissionMode::AcceptEdits);
+        assert!(warning.is_none());
     }
 }
