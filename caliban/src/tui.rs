@@ -1458,7 +1458,11 @@ fn mcp_lines(app: &App) -> Vec<Line<'static>> {
 
     out.push(Line::raw(""));
     out.push(Line::styled(
-        "   Phase B: stdio + http + sse. OAuth / elicitation / resources land in Phase C.",
+        "   Glyphs: \u{25CF} connected · \u{25D0} needs reauth · \u{25CB} disabled/failed",
+        dim,
+    ));
+    out.push(Line::styled(
+        "   [d] disable · [r] reload · [a] start OAuth · [s] view stderr · [t] tools",
         dim,
     ));
     out.push(Line::raw(""));
@@ -2397,6 +2401,15 @@ fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option<TurnEventS
                 handle_reverse_history_key(key, app);
                 return;
             }
+            // Phase C: per-server actions. We render the toasts and let
+            // the manager-level wiring catch up in v2.1 (full disable /
+            // reload / OAuth-from-key requires McpClientManager
+            // mutability beyond the scope of this PR). For now the keys
+            // surface as informative toasts so the operator knows the
+            // contract.
+            Overlay::Mcp if handle_mcp_overlay_key(key, app) => {
+                return;
+            }
             _ => {}
         }
         match (key.code, key.modifiers) {
@@ -2899,6 +2912,50 @@ fn dispatch_shell_escape(command: &str, app: &mut App) {
 }
 
 /// Key dispatch for the Permission Ask modal.
+/// Key dispatch for the `/mcp` overlay (ADR 0023 Phase C). Returns `true`
+/// when the key was handled and the dispatcher should not fall through to
+/// the generic Esc/q close branch.
+///
+/// The actual reload / disable / OAuth start operations require mutating
+/// `McpClientManager`, which is owned outside the TUI loop. Until that
+/// plumbing lands (v2.1), the keys surface as toasts so the contract is
+/// discoverable while the underlying transitions are still external.
+fn handle_mcp_overlay_key(key: KeyEvent, app: &mut App) -> bool {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('d'), KeyModifiers::NONE) => {
+            app.toast = Some(toast::Toast::warn(
+                "mcp: disable not yet wired — edit `disabled = true` in mcp.toml then restart",
+            ));
+            true
+        }
+        (KeyCode::Char('r'), KeyModifiers::NONE) => {
+            app.toast = Some(toast::Toast::warn(
+                "mcp: live reload not yet wired — restart caliban to pick up edits",
+            ));
+            true
+        }
+        (KeyCode::Char('a'), KeyModifiers::NONE) => {
+            app.toast = Some(toast::Toast::info(
+                "mcp: OAuth flow auto-triggers on first call when oauth=auto or manual",
+            ));
+            true
+        }
+        (KeyCode::Char('s'), KeyModifiers::NONE) => {
+            app.toast = Some(toast::Toast::info(
+                "mcp: stderr is logged to RUST_LOG=caliban::mcp::stderr",
+            ));
+            true
+        }
+        (KeyCode::Char('t'), KeyModifiers::NONE) => {
+            app.toast = Some(toast::Toast::info(
+                "mcp: tool list shown in the transcript on /usage and via tool dispatcher",
+            ));
+            true
+        }
+        _ => false,
+    }
+}
+
 fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
     let response = match (key.code, key.modifiers) {
         (KeyCode::Char('y'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {

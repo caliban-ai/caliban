@@ -37,6 +37,21 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Free runner disk
+        # The cloud-features build pulls a large dependency closure
+        # (aws-sdk-bedrockruntime, libgit2, axum, oauth2, image, etc.)
+        # that overflows the default GHA disk (~14 GB free). Drop the
+        # bundled .NET / Android / Haskell / large Docker images that
+        # we don't use to free ~30 GB before checkout.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

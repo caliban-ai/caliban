@@ -157,10 +157,13 @@ pub enum McpError {
         /// Field that was misplaced.
         field: &'static str,
     },
-    /// `oauth = "auto"` or `"manual"` configured in Phase B.
-    #[error(
-        "mcp: server '{server}' oauth='{mode}' is not yet supported (Phase C). Phase B only accepts oauth='off'."
+    /// Legacy Phase B variant — superseded by `OauthDiscovery`/`OauthFlow`
+    /// in Phase C. Retained for binary compatibility; never constructed.
+    #[deprecated(
+        since = "0.0.0",
+        note = "Phase C wires real OAuth — this variant is no longer produced"
     )]
+    #[error("mcp: server '{server}' oauth='{mode}' is not yet supported (legacy Phase B error)")]
     OauthPhaseC {
         /// Server name.
         server: String,
@@ -196,6 +199,63 @@ pub enum McpError {
         name: String,
         /// Reason from `http::HeaderName`/`HeaderValue` parsing.
         reason: String,
+    },
+    // -------- Phase C: OAuth + elicitation + resources --------
+    /// `[server.X.oauth]` discovery (well-known docs) failed.
+    #[error("mcp: server '{server}' oauth discovery failed: {message}")]
+    OauthDiscovery {
+        /// Server name.
+        server: String,
+        /// Stringified underlying error.
+        message: String,
+    },
+    /// Browser-redirect / loopback PKCE flow failed.
+    #[error("mcp: server '{server}' oauth flow failed: {message}")]
+    OauthFlow {
+        /// Server name.
+        server: String,
+        /// Reason (cancelled / timed out / state mismatch / etc.).
+        message: String,
+    },
+    /// Token-endpoint exchange or refresh failed.
+    #[error("mcp: server '{server}' oauth token exchange failed: {message}")]
+    OauthExchange {
+        /// Server name.
+        server: String,
+        /// Stringified upstream error.
+        message: String,
+    },
+    /// `oauth = "manual"` was set but a required field is missing in the
+    /// `[server.X.oauth]` block.
+    #[error("mcp: server '{server}' manual oauth block is missing required field '{field}'")]
+    OauthManualIncomplete {
+        /// Server name.
+        server: String,
+        /// Field that was missing (`client_id`, `auth_url`, `token_url`).
+        field: &'static str,
+    },
+    /// OS keyring access failed (no backend or permission denied).
+    #[error("mcp: server '{server}' keyring error: {source}")]
+    Keyring {
+        /// Server name.
+        server: String,
+        /// Stringified `keyring::Error`.
+        #[source]
+        source: keyring::Error,
+    },
+    /// Generic token-store IO/serialization issue.
+    #[error("mcp: token store error: {0}")]
+    TokenStore(String),
+    /// Resource template arity mismatch (positional args don't match the
+    /// number of `{placeholder}` slots).
+    #[error("mcp: resource template '{template}' expects {expected} args but got {actual}")]
+    ResourceTemplateArity {
+        /// Template that was being expanded.
+        template: String,
+        /// Number of unique placeholders.
+        expected: usize,
+        /// Number of args provided.
+        actual: usize,
     },
 }
 

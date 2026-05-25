@@ -22,8 +22,8 @@ use axum::{
     routing::post,
 };
 use caliban_mcp_client::{
-    Conn, McpClientManager, McpConfig, OauthMode, ServerConfig, ServerPermissions, Transport,
-    TransportKind,
+    Conn, ManualOauthConfig, McpClientManager, McpConfig, OauthMode, ServerConfig,
+    ServerPermissions, Transport, TransportKind,
 };
 use futures::stream;
 use http::{HeaderName, header};
@@ -243,6 +243,7 @@ fn http_config(url: &str, headers: BTreeMap<String, String>) -> ServerConfig {
         url: Some(Url::parse(url).expect("parse url")),
         headers,
         oauth: OauthMode::Off,
+        manual_oauth: ManualOauthConfig::default(),
         disabled: false,
         permissions: ServerPermissions::default(),
     }
@@ -387,6 +388,7 @@ async fn sse_transport_happy_path() {
             url: Some(fixture.url.clone()),
             headers: BTreeMap::new(),
             oauth: OauthMode::Off,
+            manual_oauth: ManualOauthConfig::default(),
             disabled: false,
             permissions: ServerPermissions::default(),
         },
@@ -423,6 +425,7 @@ async fn sse_transport_get_stream_attempted() {
             url: Some(fixture.url.clone()),
             headers: BTreeMap::new(),
             oauth: OauthMode::Off,
+            manual_oauth: ManualOauthConfig::default(),
             disabled: false,
             permissions: ServerPermissions::default(),
         },

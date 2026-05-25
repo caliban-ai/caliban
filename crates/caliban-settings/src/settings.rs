@@ -225,6 +225,7 @@ impl Settings {
                     url: None,
                     headers: std::collections::BTreeMap::new(),
                     oauth: caliban_mcp_client::OauthMode::Off,
+                    manual_oauth: caliban_mcp_client::ManualOauthConfig::default(),
                     disabled: s.disabled,
                     permissions: caliban_mcp_client::ServerPermissions::default(),
                 },

@@ -150,12 +150,12 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Real spawn / handshake / `list_tools` (rmcp 1.7) | ✅ | ADR-0023 Phase A |
 | HTTP / SSE transports | ✅ | ADR-0023 Phase B (rmcp streamable-http client; legacy SSE folded in) |
 | Per-server permission scoping | ✅ | ADR-0023 Phase B (`[server.X.permissions]` composes with global rules) |
-| `/mcp` slash + per-server enable/auth | 🔴 | |
-| OAuth flow + `--mcp-oauth-port` | 🔴 | |
-| Elicitation (server-initiated input) | 🔴 | |
-| `${CLAUDE_PROJECT_DIR}` expansion in `.mcp.json` | 🔴 | |
-| `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` / `MAX_MCP_OUTPUT_TOKENS` envs | 🔴 | |
-| Resources (`@server:resource` references) | 🔴 | |
+| `/mcp` slash + per-server enable/auth | ✅ | ADR-0023 Phase C — Phase C glyphs (●/◐/○), `d/r/a/s/t` key hints rendered |
+| OAuth flow + `--mcp-oauth-port` | ✅ | ADR-0023 Phase C — PKCE + loopback, RFC 8414 discovery, manual config, keyring + file-store fallback |
+| Elicitation (server-initiated input) | ✅ | ADR-0023 Phase C — `ElicitationBridge` mpsc → TUI, 5-min cap, auto-decline in `--print` |
+| `${CLAUDE_PROJECT_DIR}` expansion in `.mcp.json` | ✅ | Implemented in Phase B `config::expand_value` (we use `mcp.toml` not `.mcp.json`) |
+| `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` / `MAX_MCP_OUTPUT_TOKENS` envs | ✅ | ADR-0023 — `CALIBAN_MCP_TIMEOUT`/`CALIBAN_MCP_TOOL_TIMEOUT` primary, `MCP_*` honoured for parity |
+| Resources (`@server:resource` references) | ✅ | ADR-0023 Phase C — `McpResource` cache, `list_changed` invalidation, URI-template positional expansion |
 
 ## I. Model router & providers
 
