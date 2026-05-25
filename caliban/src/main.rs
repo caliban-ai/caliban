@@ -1140,40 +1140,49 @@ async fn main() -> Result<()> {
         &plugin_skill_roots,
     );
 
-    // MCP servers — Phase A: real spawn / handshake / list_tools (ADR 0023).
+    // MCP servers — Phase B: stdio + HTTP + SSE transports (ADR 0023).
     // --bare (ADR 0025) suppresses MCP discovery entirely for reproducible CI.
-    let mcp_summaries: Vec<caliban_mcp_client::ServerSummary> = if args.no_mcp || args.bare {
-        Vec::new()
+    // We also retain the parsed `McpConfig.servers` map so the permissions
+    // setup downstream can fold `[server.X.permissions]` blocks into the
+    // global rule list.
+    let (mcp_summaries, mcp_server_cfg): (
+        Vec<caliban_mcp_client::ServerSummary>,
+        std::collections::BTreeMap<String, caliban_mcp_client::ServerConfig>,
+    ) = if args.no_mcp || args.bare {
+        (Vec::new(), std::collections::BTreeMap::new())
     } else {
         let ws_root_for_mcp = args.workspace.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
         match caliban_mcp_client::load_config(&ws_root_for_mcp) {
-            Ok(cfg) => match caliban_mcp_client::McpClientManager::start(&cfg).await {
-                Ok(mgr) => {
-                    mgr.register_all(&mut registry);
-                    if mgr.enabled_count() > 0
-                        || mgr.skipped_disabled() > 0
-                        || mgr.failed_count() > 0
-                    {
-                        tracing::info!(
-                            target: "caliban::mcp",
-                            connected = mgr.enabled_count(),
-                            failed = mgr.failed_count(),
-                            disabled = mgr.skipped_disabled(),
-                            "mcp manager started",
-                        );
+            Ok(cfg) => {
+                let servers_for_perms = cfg.servers.clone();
+                match caliban_mcp_client::McpClientManager::start(&cfg).await {
+                    Ok(mgr) => {
+                        mgr.register_all(&mut registry);
+                        if mgr.enabled_count() > 0
+                            || mgr.skipped_disabled() > 0
+                            || mgr.failed_count() > 0
+                        {
+                            tracing::info!(
+                                target: "caliban::mcp",
+                                connected = mgr.enabled_count(),
+                                failed = mgr.failed_count(),
+                                disabled = mgr.skipped_disabled(),
+                                "mcp manager started",
+                            );
+                        }
+                        (mgr.summaries().to_vec(), servers_for_perms)
                     }
-                    mgr.summaries().to_vec()
+                    Err(e) => {
+                        tracing::warn!(target: "caliban::mcp", error = %e, "mcp manager start failed; continuing without MCP");
+                        (Vec::new(), servers_for_perms)
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(target: "caliban::mcp", error = %e, "mcp manager start failed; continuing without MCP");
-                    Vec::new()
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!(target: "caliban::mcp", error = %e, "mcp config load failed; continuing without MCP");
-                Vec::new()
+                (Vec::new(), std::collections::BTreeMap::new())
             }
         }
     };
@@ -1336,7 +1345,12 @@ async fn main() -> Result<()> {
         let workspace_root = args.workspace.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
-        let rules = load_rules(cli_rules, &workspace_root).context("loading permissions rules")?;
+        let global_rules =
+            load_rules(cli_rules, &workspace_root).context("loading permissions rules")?;
+        // Phase B: fold per-server `[server.X.permissions]` blocks into the
+        // global rule list at the documented priority slot
+        // (global deny → server deny/ask/allow → global ask/allow → default).
+        let rules = caliban_mcp_client::merge_with_global(global_rules, &mcp_server_cfg);
         // In interactive (TUI) mode, route Ask through the modal bridge. In
         // headless/single-prompt mode, fall back to the non-interactive handler.
         let (ask, ask_rx): (Arc<dyn caliban_agent_core::AskHandler>, _) = if tui_mode_active {

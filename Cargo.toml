@@ -54,6 +54,7 @@ aws-sdk-bedrockruntime = "1"
 aws-smithy-types       = "1"
 gcp_auth               = "0.12"
 wiremock = "0.6"
+axum     = { version = "0.7", default-features = false, features = ["tokio", "http1"] }
 proptest = "1"
 tokio-util = { version = "0.7" }
 arc-swap   = "1"
@@ -71,7 +72,12 @@ uuid          = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 dirs   = "5"
 toml   = "0.8"
-rmcp   = { version = "1.7", features = ["client", "transport-child-process"] }
+rmcp   = { version = "1.7", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+] }
 schemars = "1"
 sha2   = "0.10"
 semver = { version = "1", features = ["serde"] }

@@ -625,6 +625,8 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -634,6 +636,7 @@ dependencies = [
  "rustversion",
  "serde",
  "sync_wrapper",
+ "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -793,7 +796,7 @@ dependencies = [
  "image",
  "nucleo-matcher",
  "ratatui",
- "reqwest",
+ "reqwest 0.12.28",
  "rust_decimal",
  "secrecy",
  "serde",
@@ -821,7 +824,7 @@ dependencies = [
  "futures",
  "proptest",
  "rand 0.8.6",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -881,10 +884,12 @@ name = "caliban-mcp-client"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "axum",
  "caliban-agent-core",
  "caliban-provider",
  "dirs",
  "futures",
+ "http 1.4.0",
  "rmcp",
  "schemars",
  "serde",
@@ -896,6 +901,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -955,7 +962,7 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
- "reqwest",
+ "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",
@@ -997,7 +1004,7 @@ dependencies = [
  "futures",
  "gcp_auth",
  "http 1.4.0",
- "reqwest",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
@@ -1034,7 +1041,7 @@ dependencies = [
  "futures",
  "gcp_auth",
  "http 1.4.0",
- "reqwest",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
@@ -1054,7 +1061,7 @@ dependencies = [
  "caliban-provider",
  "futures",
  "http 1.4.0",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1074,7 +1081,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "http 1.4.0",
- "reqwest",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
@@ -1092,7 +1099,7 @@ dependencies = [
  "caliban-provider",
  "caliban-provider-anthropic",
  "gcp_auth",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1211,7 +1218,7 @@ dependencies = [
  "htmd",
  "ignore",
  "libc",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -3845,9 +3852,43 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.4.2",
  "web-sys",
  "webpki-roots",
+]
+
+[[package]]
+name = "reqwest"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "sync_wrapper",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.3",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.5.0",
+ "web-sys",
 ]
 
 [[package]]
@@ -3880,13 +3921,16 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "http 1.4.0",
  "pastey",
  "pin-project-lite",
  "process-wrap",
+ "reqwest 0.13.3",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -4367,6 +4411,19 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3962b63f038885f15bce2c6e02c0e7925c072f1ac86bb60fd44c5c6b762fb72"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body 1.0.1",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -5210,6 +5267,19 @@ name = "wasm-streams"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
 dependencies = [
  "futures-util",
  "js-sys",

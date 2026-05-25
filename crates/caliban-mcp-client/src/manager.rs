@@ -106,15 +106,35 @@ impl McpClientManager {
         let mut mgr = Self::default();
 
         for (name, server) in &cfg.servers {
+            let transport_label = server.transport.as_str();
             if server.disabled {
                 mgr.summaries.push(ServerSummary {
                     name: name.clone(),
                     status: ServerStatus::Disabled,
+                    transport: transport_label,
                 });
                 continue;
             }
 
-            let transport = Transport::from_config(server);
+            let transport = match Transport::from_config(name, server) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "caliban::mcp",
+                        server = %name,
+                        error = %e,
+                        "mcp server config invalid; skipping",
+                    );
+                    mgr.summaries.push(ServerSummary {
+                        name: name.clone(),
+                        status: ServerStatus::Failed {
+                            reason: e.to_string(),
+                        },
+                        transport: transport_label,
+                    });
+                    continue;
+                }
+            };
             match Conn::start(name.clone(), transport, startup_timeout).await {
                 Ok(conn) => {
                     let conn = Arc::new(conn);
@@ -135,10 +155,12 @@ impl McpClientManager {
                             mgr.summaries.push(ServerSummary {
                                 name: name.clone(),
                                 status: ServerStatus::Connected { tools: count },
+                                transport: transport_label,
                             });
                             tracing::info!(
                                 target: "caliban::mcp",
                                 server = %name,
+                                transport = transport_label,
                                 tools = count,
                                 "mcp server connected",
                             );
@@ -154,6 +176,7 @@ impl McpClientManager {
                             mgr.summaries.push(ServerSummary {
                                 name: name.clone(),
                                 status: ServerStatus::Failed { reason },
+                                transport: transport_label,
                             });
                             // Drop conn so the child shuts down.
                             drop(conn);
@@ -171,6 +194,7 @@ impl McpClientManager {
                     mgr.summaries.push(ServerSummary {
                         name: name.clone(),
                         status: ServerStatus::Failed { reason },
+                        transport: transport_label,
                     });
                 }
             }

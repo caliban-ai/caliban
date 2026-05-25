@@ -1,45 +1,167 @@
 //! `mcp.toml` config schema + discovery + merge.
+//!
+//! Phase B extends the v1 stdio-only schema with HTTP and SSE transports plus
+//! per-server permission blocks. See `docs/superpowers/specs/2026-05-24-mcp-v2-design.md`
+//! and `adrs/0023-mcp-v2-transports-and-oauth.md`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use url::Url;
 
 use crate::error::McpError;
 
-/// One MCP server entry as written in `mcp.toml`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ServerConfig {
-    /// Executable path or PATH-resolvable name.
-    pub command: String,
-    /// CLI arguments forwarded verbatim.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Environment variables. Values support full-value `${VAR}` expansion
-    /// from the caliban process env (no inline interpolation in v1).
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    /// Working directory. Relative paths resolve against caliban's cwd. When
-    /// `None`, the child inherits caliban's cwd.
-    #[serde(default)]
-    pub cwd: Option<PathBuf>,
-    /// Skip this server entirely (useful for project-level disables).
-    #[serde(default)]
-    pub disabled: bool,
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Transport kind selector. Defaults to `Stdio` to keep v1 configs working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportKind {
+    /// Spawn a child process and speak JSON-RPC over its stdio.
+    #[default]
+    Stdio,
+    /// Connect over rmcp's streamable-http client (POST + chunked + SSE).
+    Http,
+    /// Legacy "SSE-only" servers; routed through the same rmcp streamable-http
+    /// client transport (rmcp 1.7 folded the standalone SSE client into the
+    /// streamable-http worker — see the spec note in
+    /// `docs/superpowers/specs/2026-05-24-mcp-v2-design.md`).
+    Sse,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ServersFile {
+impl TransportKind {
+    /// Stringly-typed name for diagnostics and the `/mcp` overlay.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Http => "http",
+            Self::Sse => "sse",
+        }
+    }
+}
+
+/// OAuth mode. Phase B only accepts `Off`; `Auto` and `Manual` are reserved
+/// for Phase C and rejected at config-parse time with a clear error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OauthMode {
+    /// No OAuth — direct connection (possibly with static `Authorization` header
+    /// supplied via the `headers` table).
+    #[default]
+    Off,
+    /// Discover via `/.well-known/oauth-protected-resource` (Phase C).
+    Auto,
+    /// Use the manually-configured `[server.X.oauth]` block (Phase C).
+    Manual,
+}
+
+impl OauthMode {
+    #[must_use]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// Per-server permission rules — globs scoped to this server's tools. Glob
+/// syntax matches the existing permissions engine (`*`, `?`); each entry is
+/// compared against the *unprefixed* tool name. The mcp client transforms
+/// these into full `mcp__<server>__<tool>` patterns when handing them to the
+/// global permissions engine.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ServerPermissions {
+    /// Patterns to allow without prompting.
     #[serde(default)]
-    server: BTreeMap<String, ServerConfig>,
+    pub allow: Vec<String>,
+    /// Patterns to deny.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Patterns to ask about interactively.
+    #[serde(default)]
+    pub ask: Vec<String>,
+}
+
+/// One MCP server entry as written in `mcp.toml`. The field set spans all
+/// three transports; validation enforces the right subset per `transport`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerConfig {
+    /// Transport selector (defaults to `stdio` for v1 compatibility).
+    pub transport: TransportKind,
+    // ---- stdio ----
+    /// Executable for `transport = "stdio"`. Empty when not stdio.
+    pub command: String,
+    /// CLI arguments forwarded verbatim (stdio only).
+    pub args: Vec<String>,
+    /// Environment variables (stdio only). Values support `${VAR}` /
+    /// `${VAR:-default}` / `${CLAUDE_PROJECT_DIR}` expansion.
+    pub env: BTreeMap<String, String>,
+    /// Working directory (stdio only). Relative paths resolve against
+    /// caliban's cwd; `None` inherits.
+    pub cwd: Option<PathBuf>,
+    // ---- http / sse ----
+    /// Absolute http/https URL for http/sse transports. `None` for stdio.
+    pub url: Option<Url>,
+    /// Static request headers (http/sse only). Values support env expansion.
+    pub headers: BTreeMap<String, String>,
+    /// OAuth mode. Phase B only honors `Off`.
+    pub oauth: OauthMode,
+    // ---- common ----
+    /// Skip this server entirely.
+    pub disabled: bool,
+    /// Per-server permission scoping (composes with global rules).
+    pub permissions: ServerPermissions,
 }
 
 /// The merged, parsed MCP config.
 #[derive(Debug, Default)]
 pub struct McpConfig {
-    /// Map of server name → resolved config (with `${VAR}` expanded).
+    /// Map of server name → resolved config (with `${VAR}` expanded and
+    /// transport-specific validation applied).
     pub servers: BTreeMap<String, ServerConfig>,
 }
+
+// ---------------------------------------------------------------------------
+// Raw (pre-validation) form for serde
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+struct RawServerConfig {
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    oauth: Option<String>,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    permissions: ServerPermissions,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ServersFile {
+    #[serde(default)]
+    server: BTreeMap<String, RawServerConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
 
 /// Validate a server name against `^[a-z0-9_-]{1,32}$`.
 #[must_use]
@@ -65,20 +187,29 @@ pub fn discovery_paths(workspace_root: &Path) -> (Option<PathBuf>, PathBuf) {
 /// Either file may be missing — both missing is a no-op (`Ok(empty config)`).
 /// Project entries replace user entries with the same name wholesale.
 ///
+/// `${VAR}` / `${VAR:-default}` / `${CLAUDE_PROJECT_DIR}` expansion is applied
+/// to `command`, `args`, `env.*`, `cwd`, `url`, and `headers.*`.
+///
 /// # Errors
-/// Returns [`McpError::ConfigParse`] if a file exists but is malformed, or
-/// [`McpError::InvalidServerName`] if a server key violates the naming rule.
+/// Returns [`McpError::ConfigParse`] if a file exists but is malformed,
+/// [`McpError::InvalidServerName`] if a server key violates the naming rule,
+/// or one of the transport-specific validation variants
+/// ([`McpError::InvalidUrl`], [`McpError::MissingUrl`], etc.).
 pub fn load_config(workspace_root: &Path) -> Result<McpConfig, McpError> {
     let (user, project) = discovery_paths(workspace_root);
     let mut merged: BTreeMap<String, ServerConfig> = BTreeMap::new();
     if let Some(p) = user.as_deref() {
-        merge_from(&mut merged, p)?;
+        merge_from(&mut merged, p, workspace_root)?;
     }
-    merge_from(&mut merged, &project)?;
+    merge_from(&mut merged, &project, workspace_root)?;
     Ok(McpConfig { servers: merged })
 }
 
-fn merge_from(into: &mut BTreeMap<String, ServerConfig>, path: &Path) -> Result<(), McpError> {
+fn merge_from(
+    into: &mut BTreeMap<String, ServerConfig>,
+    path: &Path,
+    workspace_root: &Path,
+) -> Result<(), McpError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -93,44 +224,259 @@ fn merge_from(into: &mut BTreeMap<String, ServerConfig>, path: &Path) -> Result<
         path: path.to_path_buf(),
         source,
     })?;
-    for (name, cfg) in parsed.server {
+    for (name, raw_cfg) in parsed.server {
         if !is_valid_server_name(&name) {
             return Err(McpError::InvalidServerName(name));
         }
-        let cfg = expand_env(&name, cfg)?;
+        let cfg = normalize(&name, raw_cfg, workspace_root)?;
         into.insert(name, cfg);
     }
     Ok(())
 }
 
-fn expand_env(server: &str, mut cfg: ServerConfig) -> Result<ServerConfig, McpError> {
-    let mut expanded: BTreeMap<String, String> = BTreeMap::new();
-    for (k, v) in &cfg.env {
-        let new_v = if v.starts_with("${") && v.ends_with('}') && v.len() > 3 {
-            let var = &v[2..v.len() - 1];
-            match std::env::var(var) {
-                Ok(val) => val,
-                Err(_) => {
-                    return Err(McpError::MissingEnv {
+// ---------------------------------------------------------------------------
+// Validation + env-var expansion
+// ---------------------------------------------------------------------------
+
+fn normalize(
+    server: &str,
+    raw: RawServerConfig,
+    workspace_root: &Path,
+) -> Result<ServerConfig, McpError> {
+    let transport = parse_transport(server, raw.transport.as_deref())?;
+    let oauth = parse_oauth(server, raw.oauth.as_deref())?;
+    if !matches!(oauth, OauthMode::Off) {
+        return Err(McpError::OauthPhaseC {
+            server: server.to_string(),
+            mode: oauth.as_str().to_string(),
+        });
+    }
+    match transport {
+        TransportKind::Stdio => normalize_stdio(server, transport, oauth, raw, workspace_root),
+        TransportKind::Http | TransportKind::Sse => {
+            normalize_remote(server, transport, oauth, raw, workspace_root)
+        }
+    }
+}
+
+fn parse_transport(server: &str, raw: Option<&str>) -> Result<TransportKind, McpError> {
+    match raw {
+        None | Some("stdio") => Ok(TransportKind::Stdio),
+        Some("http") => Ok(TransportKind::Http),
+        Some("sse") => Ok(TransportKind::Sse),
+        Some(other) => Err(McpError::InvalidTransport {
+            server: server.to_string(),
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn parse_oauth(server: &str, raw: Option<&str>) -> Result<OauthMode, McpError> {
+    match raw {
+        None | Some("off") => Ok(OauthMode::Off),
+        Some("auto") => Ok(OauthMode::Auto),
+        Some("manual") => Ok(OauthMode::Manual),
+        Some(other) => Err(McpError::InvalidOauthMode {
+            server: server.to_string(),
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn normalize_stdio(
+    server: &str,
+    transport: TransportKind,
+    oauth: OauthMode,
+    raw: RawServerConfig,
+    workspace_root: &Path,
+) -> Result<ServerConfig, McpError> {
+    if raw.url.is_some() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "url",
+        });
+    }
+    if !raw.headers.is_empty() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "headers",
+        });
+    }
+    let command = raw.command.unwrap_or_default();
+    if command.is_empty() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "command",
+        });
+    }
+    let command = expand_value(server, "command", &command, workspace_root)?;
+    let args = raw
+        .args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| expand_value(server, &format!("args[{i}]"), a, workspace_root))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &raw.env {
+        env.insert(
+            k.clone(),
+            expand_value(server, &format!("env[{k}]"), v, workspace_root)?,
+        );
+    }
+    Ok(ServerConfig {
+        transport,
+        command,
+        args,
+        env,
+        cwd: raw.cwd,
+        url: None,
+        headers: BTreeMap::new(),
+        oauth,
+        disabled: raw.disabled,
+        permissions: raw.permissions,
+    })
+}
+
+fn normalize_remote(
+    server: &str,
+    transport: TransportKind,
+    oauth: OauthMode,
+    raw: RawServerConfig,
+    workspace_root: &Path,
+) -> Result<ServerConfig, McpError> {
+    // Reject stdio-only fields so the config is unambiguous.
+    if raw.command.is_some() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "command",
+        });
+    }
+    if !raw.args.is_empty() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "args",
+        });
+    }
+    if !raw.env.is_empty() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "env",
+        });
+    }
+    if raw.cwd.is_some() {
+        return Err(McpError::StdioFieldMismatch {
+            server: server.to_string(),
+            field: "cwd",
+        });
+    }
+    let url_raw = raw.url.as_deref().ok_or_else(|| McpError::MissingUrl {
+        server: server.to_string(),
+        transport: transport.as_str(),
+    })?;
+    let url_expanded = expand_value(server, "url", url_raw, workspace_root)?;
+    let parsed = Url::parse(&url_expanded).map_err(|e| McpError::InvalidUrl {
+        server: server.to_string(),
+        url: url_expanded.clone(),
+        reason: e.to_string(),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(McpError::InvalidUrl {
+            server: server.to_string(),
+            url: url_expanded,
+            reason: format!("scheme must be http or https, got '{}'", parsed.scheme()),
+        });
+    }
+    if !parsed.has_host() {
+        return Err(McpError::InvalidUrl {
+            server: server.to_string(),
+            url: url_expanded,
+            reason: "missing host".to_string(),
+        });
+    }
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &raw.headers {
+        let v = expand_value(server, &format!("headers[{k}]"), v, workspace_root)?;
+        headers.insert(k.clone(), v);
+    }
+    Ok(ServerConfig {
+        transport,
+        command: String::new(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: None,
+        url: Some(parsed),
+        headers,
+        oauth,
+        disabled: raw.disabled,
+        permissions: raw.permissions,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Env-var expansion
+// ---------------------------------------------------------------------------
+
+/// Expand `${VAR}`, `${VAR:-default}`, and `${CLAUDE_PROJECT_DIR}` references
+/// inside `raw`. Supports inline expansion (multiple variables per value).
+///
+/// `CLAUDE_PROJECT_DIR` is bound to `workspace_root`'s string form — operators
+/// don't need to set the env var themselves for it to expand.
+fn expand_value(
+    server: &str,
+    field: &str,
+    raw: &str,
+    workspace_root: &Path,
+) -> Result<String, McpError> {
+    let project_dir = workspace_root.to_string_lossy().into_owned();
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            // Find matching `}`.
+            let start = i + 2;
+            let Some(end_off) = bytes[start..].iter().position(|&b| b == b'}') else {
+                // No closing brace — emit literal and stop trying to expand.
+                out.push_str(&raw[i..]);
+                return Ok(out);
+            };
+            let inner = &raw[start..start + end_off];
+            let (var, default) = match inner.split_once(":-") {
+                Some((v, d)) => (v, Some(d)),
+                None => (inner, None),
+            };
+            let resolved = if var == "CLAUDE_PROJECT_DIR" {
+                Some(project_dir.clone())
+            } else {
+                std::env::var(var).ok()
+            };
+            let value = match (resolved, default) {
+                (Some(v), _) => v,
+                (None, Some(d)) => d.to_string(),
+                (None, None) => {
+                    return Err(McpError::MissingEnvField {
                         server: server.to_string(),
+                        field: field.to_string(),
                         var: var.to_string(),
                     });
                 }
-            }
-        } else if v.contains("${") {
-            // Inline interpolation is not supported in v1.
-            return Err(McpError::InlineInterpolation {
-                server: server.to_string(),
-                key: k.clone(),
-            });
+            };
+            out.push_str(&value);
+            i = start + end_off + 1;
         } else {
-            v.clone()
-        };
-        expanded.insert(k.clone(), new_v);
+            // Push the byte. Safe because we're walking a valid UTF-8 string;
+            // multi-byte sequences don't contain `$` or `{` as their leading
+            // byte by UTF-8 invariants.
+            out.push(raw.as_bytes()[i] as char);
+            i += 1;
+        }
     }
-    cfg.env = expanded;
-    Ok(cfg)
+    Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -144,35 +490,262 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
-    fn parse(body: &str) -> Result<ServersFile, toml::de::Error> {
-        toml::from_str(body)
+    fn parse_one(body: &str) -> ServersFile {
+        toml::from_str(body).expect("parse")
     }
 
     #[test]
-    fn parses_minimal_server() {
+    fn parses_minimal_stdio_server() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let body = "[server.s1]\ncommand = \"echo\"\n";
-        let f = parse(body).unwrap();
-        assert_eq!(f.server.len(), 1);
-        assert_eq!(f.server["s1"].command, "echo");
-        assert!(f.server["s1"].args.is_empty());
-        assert!(!f.server["s1"].disabled);
+        let raw = parse_one(body);
+        let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.transport, TransportKind::Stdio);
+        assert_eq!(cfg.command, "echo");
+        assert!(cfg.args.is_empty());
+        assert!(cfg.url.is_none());
     }
 
     #[test]
-    fn parses_full_server() {
+    fn parses_http_server() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.notion]
+transport = "http"
+url = "https://example.com/mcp"
+headers = { X-Workspace = "demo" }
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize(
+            "notion",
+            raw.server.into_values().next().unwrap(),
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cfg.transport, TransportKind::Http);
+        assert_eq!(cfg.url.unwrap().to_string(), "https://example.com/mcp");
+        assert_eq!(cfg.headers.get("X-Workspace"), Some(&"demo".to_string()));
+    }
+
+    #[test]
+    fn http_requires_url() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = "[server.bad]\ntransport = \"http\"\n";
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(matches!(err, McpError::MissingUrl { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn http_rejects_non_absolute_url() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "http"
+url = "not-a-url"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(matches!(err, McpError::InvalidUrl { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn http_rejects_non_http_scheme() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "http"
+url = "ftp://example.com/mcp"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        let McpError::InvalidUrl { reason, .. } = err else {
+            panic!("expected InvalidUrl");
+        };
+        assert!(reason.contains("scheme"), "reason: {reason}");
+    }
+
+    #[test]
+    fn stdio_rejects_url() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+command = "echo"
+url = "https://example.com"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, McpError::StdioFieldMismatch { field: "url", .. }),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn http_rejects_command() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "http"
+url = "https://example.com"
+command = "echo"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                McpError::StdioFieldMismatch {
+                    field: "command",
+                    ..
+                }
+            ),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn oauth_auto_rejected_in_phase_b() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "http"
+url = "https://example.com"
+oauth = "auto"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(&err, McpError::OauthPhaseC { mode, .. } if mode == "auto"),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn oauth_off_is_ok() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.ok]
+transport = "http"
+url = "https://example.com"
+oauth = "off"
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize("ok", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.oauth, OauthMode::Off);
+    }
+
+    #[test]
+    fn oauth_garbage_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "http"
+url = "https://example.com"
+oauth = "wat"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, McpError::InvalidOauthMode { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transport_garbage_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.bad]
+transport = "carrier-pigeon"
+"#;
+        let raw = parse_one(body);
+        let err =
+            normalize("bad", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, McpError::InvalidTransport { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_expansion_url_with_project_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let body = r#"
+[server.s]
+transport = "http"
+url = "https://example.com${CLAUDE_PROJECT_DIR}/mcp"
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize("s", raw.server.into_values().next().unwrap(), &workspace).unwrap();
+        // URL crate percent-encodes the path — assert the host + that the
+        // workspace path appears (we don't care about the exact encoding).
+        let s = cfg.url.unwrap().to_string();
+        assert!(s.contains("example.com"), "url: {s}");
+        assert!(s.contains("ws"), "url: {s}");
+    }
+
+    #[test]
+    fn env_expansion_with_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.s]
+transport = "http"
+url = "https://${MCP_HOST_THAT_DOES_NOT_EXIST:-example.com}/mcp"
+"#;
+        let raw = parse_one(body);
+        let cfg = normalize("s", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.url.unwrap().to_string(), "https://example.com/mcp");
+    }
+
+    #[test]
+    fn env_expansion_missing_var_with_no_default_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = r#"
+[server.s]
+transport = "http"
+url = "https://${MCP_HOST_THAT_DOES_NOT_EXIST}/mcp"
+"#;
+        let raw = parse_one(body);
+        let err = normalize("s", raw.server.into_values().next().unwrap(), tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, McpError::MissingEnvField { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn permissions_block_parses() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let body = r#"
 [server.linear]
-command = "npx"
-args = ["-y", "@linear/mcp-server"]
-env = { LINEAR_API_KEY = "static-value" }
-cwd = "/tmp"
-disabled = false
+transport = "http"
+url = "https://linear.app/mcp"
+
+[server.linear.permissions]
+allow = ["read_*"]
+deny  = ["delete_*"]
+ask   = ["create_*"]
 "#;
-        let f = parse(body).unwrap();
-        let s = &f.server["linear"];
-        assert_eq!(s.args, vec!["-y", "@linear/mcp-server"]);
-        assert_eq!(s.env["LINEAR_API_KEY"], "static-value");
-        assert_eq!(s.cwd.as_deref(), Some(Path::new("/tmp")));
+        let raw = parse_one(body);
+        let cfg = normalize(
+            "linear",
+            raw.server.into_values().next().unwrap(),
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cfg.permissions.allow, vec!["read_*"]);
+        assert_eq!(cfg.permissions.deny, vec!["delete_*"]);
+        assert_eq!(cfg.permissions.ask, vec!["create_*"]);
     }
 
     #[test]
@@ -198,24 +771,24 @@ disabled = false
             &workspace.join(".caliban/mcp.toml"),
             "[server.linear]\ncommand = \"project-cmd\"\n",
         );
-
-        // Build a config that merges these. Since `load_config` uses `dirs::config_dir`
-        // we can't easily inject the test user file via that path; exercise the merge
-        // helper directly.
         let mut merged: BTreeMap<String, ServerConfig> = BTreeMap::new();
-        super::merge_from(&mut merged, &user).unwrap();
-        super::merge_from(&mut merged, &workspace.join(".caliban/mcp.toml")).unwrap();
+        super::merge_from(&mut merged, &user, &workspace).unwrap();
+        super::merge_from(
+            &mut merged,
+            &workspace.join(".caliban/mcp.toml"),
+            &workspace,
+        )
+        .unwrap();
         assert_eq!(merged["linear"].command, "project-cmd");
-        assert!(
-            merged["linear"].args.is_empty(),
-            "project entry wholly replaces user entry"
-        );
+        assert!(merged["linear"].args.is_empty(), "wholly replaced");
     }
 
     #[test]
     fn disabled_field_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let body = "[server.s1]\ncommand = \"x\"\ndisabled = true\n";
-        let f = parse(body).unwrap();
-        assert!(f.server["s1"].disabled);
+        let raw = parse_one(body);
+        let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert!(cfg.disabled);
     }
 }
