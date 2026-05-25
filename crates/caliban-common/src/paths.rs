@@ -146,18 +146,33 @@ mod tests {
         }
     }
 
-    /// RAII guard restoring `key` to its prior value on drop.
+    /// Process-wide mutex serializing env-mutating tests. Cargo runs unit
+    /// tests in parallel by default; concurrent `set_var` / `remove_var`
+    /// calls race regardless of how careful any single test is, so the
+    /// mutex is held across the full lifetime of each `EnvGuard`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard restoring `key` to its prior value on drop. Acquires
+    /// the process-wide [`ENV_LOCK`] for the guard's lifetime so other
+    /// env-mutating tests serialize behind it.
     struct EnvGuard {
         key: String,
         prev: Option<String>,
+        // Held for the lifetime of the guard. Poison is ignored — env
+        // restoration on Drop is best-effort.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvGuard {
         fn set(key: &str, val: Option<&str>) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let prev = std::env::var(key).ok();
             set_env(key, val);
             Self {
                 key: key.into(),
                 prev,
+                _lock: lock,
             }
         }
     }
