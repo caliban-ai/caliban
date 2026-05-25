@@ -27,6 +27,8 @@ fn arb_image_block() -> impl Strategy<Value = ImageBlock> {
                 data,
             },
             cache_control,
+            sha256: None,
+            dims: None,
         })
 }
 
@@ -63,6 +65,8 @@ fn image_source_url_round_trips() {
             url: "https://example.com/img.png".to_string(),
         },
         cache_control: None,
+        sha256: None,
+        dims: None,
     });
     let json = serde_json::to_string(&cb).expect("serializes");
     assert!(json.contains("\"url\":\"https://example.com/img.png\""));

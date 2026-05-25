@@ -132,6 +132,13 @@ pub fn ir_to_native_request(
                                     ));
                                 }
                             }
+                            IrImageSource::BlobRef { .. } => {
+                                return Err(Error::InvalidRequest(
+                                    "BlobRef image source must be resolved before \
+                                     dispatch; got an unresolved session blob"
+                                        .into(),
+                                ));
+                            }
                         },
                         ContentBlock::ToolResult(tr) => {
                             // Correlate by tool_use_id → function name.

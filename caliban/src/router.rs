@@ -210,6 +210,8 @@ pub(crate) fn run_debug(
                         url: "https://example.invalid/placeholder.png".into(),
                     },
                     cache_control: None,
+                    sha256: None,
+                    dims: None,
                 },
             )],
         }];

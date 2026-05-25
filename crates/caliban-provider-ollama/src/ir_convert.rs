@@ -99,6 +99,13 @@ pub fn ir_to_native_request(
                                     "Ollama only supports base64 images".into(),
                                 ));
                             }
+                            IrImageSource::BlobRef { .. } => {
+                                return Err(Error::InvalidRequest(
+                                    "BlobRef image source must be resolved before \
+                                     dispatch; got an unresolved session blob"
+                                        .into(),
+                                ));
+                            }
                         },
                         ContentBlock::ToolResult(tr) => {
                             // Ollama tool results: {role:"tool", content: <text>}.

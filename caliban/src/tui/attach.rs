@@ -146,6 +146,11 @@ pub(crate) fn resolve_attachments(
         if !candidate.is_file() {
             continue;
         }
+        // Image mentions are handled by `resolve_image_attachments`; skip
+        // them here so we don't try to embed PNG bytes as UTF-8 text.
+        if caliban_images::path_is_image_like(&candidate.to_string_lossy()) {
+            continue;
+        }
         let meta = match std::fs::metadata(&candidate) {
             Ok(m) => m,
             Err(source) => {
@@ -198,6 +203,48 @@ pub(crate) fn resolve_attachments(
         visible_text: buffer.to_string(),
         attachments,
     })
+}
+
+/// Walk `@<token>`s in `buffer` and, for those that resolve to a regular
+/// file with an image MIME, run the bytes through the [`caliban_images`]
+/// pipeline and return the resulting image blocks. Non-image mentions are
+/// left for [`resolve_attachments`] to handle separately.
+///
+/// # Errors
+///
+/// Returns [`caliban_images::IngestError`] on the first attached image that
+/// can't be decoded or whose MIME isn't supported.
+#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]
+pub(crate) fn resolve_image_attachments(
+    buffer: &str,
+    workspace_root: &Path,
+    cwd: &Path,
+) -> Result<Vec<caliban_provider::ImageBlock>, caliban_images::IngestError> {
+    let home = dirs::home_dir();
+    let pipeline = caliban_images::Pipeline::new();
+    let mut out = Vec::new();
+    for tok in extract_at_tokens(buffer) {
+        let (dir, name) = split_at_token(&tok, workspace_root, cwd, home.as_deref());
+        let candidate = if name.is_empty() {
+            dir.clone()
+        } else {
+            dir.join(&name)
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        // Cheap extension filter before reading bytes.
+        let path_str = candidate.to_string_lossy();
+        if !caliban_images::path_is_image_like(&path_str) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&candidate) else {
+            continue;
+        };
+        let result = pipeline.ingest(bytes, None)?;
+        out.push(result.into_block());
+    }
+    Ok(out)
 }
 
 /// Pull out every `@<token>` from `buffer`. Token = run of non-whitespace
@@ -411,6 +458,62 @@ mod tests {
         assert_eq!(r.attachments.len(), 2);
         assert_eq!(r.attachments[0].content, "aa");
         assert_eq!(r.attachments[1].content, "bb");
+    }
+
+    fn make_png(td: &TempDir, name: &str) -> std::path::PathBuf {
+        use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
+        let p = td.path().join(name);
+        let pixels = vec![0u8; 12]; // 2x2 RGB
+        let mut buf = Vec::new();
+        PngEncoder::new(&mut buf)
+            .write_image(&pixels, 2, 2, ColorType::Rgb8.into())
+            .expect("png");
+        std::fs::write(&p, buf).unwrap();
+        p
+    }
+
+    #[test]
+    fn at_mention_of_png_auto_attaches_image() {
+        let td = TempDir::new().unwrap();
+        let p = make_png(&td, "diagram.png");
+        let msg = format!("look @{}", p.display());
+        let imgs = resolve_image_attachments(&msg, td.path(), td.path()).unwrap();
+        assert_eq!(imgs.len(), 1, "expected one image attachment");
+        match &imgs[0].source {
+            caliban_provider::ImageSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert!(!data.is_empty());
+            }
+            other => panic!("expected base64, got {other:?}"),
+        }
+        assert_eq!(imgs[0].dims, Some((2, 2)));
+        assert!(imgs[0].sha256.is_some());
+    }
+
+    #[test]
+    fn at_mention_of_non_image_path_skips_image_attach() {
+        let td = TempDir::new().unwrap();
+        let p = td.path().join("notes.txt");
+        std::fs::write(&p, "hello").unwrap();
+        let msg = format!("@{}", p.display());
+        let imgs = resolve_image_attachments(&msg, td.path(), td.path()).unwrap();
+        assert!(
+            imgs.is_empty(),
+            "text file should not produce image attachment"
+        );
+    }
+
+    #[test]
+    fn at_mention_of_png_path_skipped_by_text_attach() {
+        let td = TempDir::new().unwrap();
+        let p = make_png(&td, "x.png");
+        let msg = format!("@{}", p.display());
+        // The text-attach path must not try to embed the PNG bytes as UTF-8.
+        let r = resolve_attachments(&msg, td.path(), td.path(), 1_000_000, 4_000_000).unwrap();
+        assert!(
+            r.attachments.is_empty(),
+            "text-attach should leave images for the image pipeline"
+        );
     }
 
     #[test]

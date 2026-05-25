@@ -67,6 +67,8 @@ fn rejects_image_in_system() {
                         url: "https://x/img.png".into(),
                     },
                     cache_control: None,
+                    sha256: None,
+                    dims: None,
                 })],
             },
             Message::user_text("u"),

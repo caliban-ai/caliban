@@ -58,6 +58,8 @@ fn minimal_request_with_url_image(url: &str) -> CompletionRequest {
                     url: url.to_string(),
                 },
                 cache_control: None,
+                sha256: None,
+                dims: None,
             })],
         }],
         tools: vec![],

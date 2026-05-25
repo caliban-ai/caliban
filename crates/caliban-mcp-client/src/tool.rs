@@ -121,6 +121,8 @@ fn translate_content(blocks: Vec<Content>) -> Vec<ContentBlock> {
                     data: i.data,
                 },
                 cache_control: None,
+                sha256: None,
+                dims: None,
             })),
             RawContent::Audio(a) => out.push(ContentBlock::Text(TextBlock {
                 text: format!(
@@ -290,7 +292,9 @@ mod tests {
                 assert_eq!(media_type, "image/png");
                 assert_eq!(data, "BASE64DATA");
             }
-            ImageSource::Url { .. } => panic!("expected base64 image"),
+            ImageSource::Url { .. } | ImageSource::BlobRef { .. } => {
+                panic!("expected base64 image")
+            }
         }
     }
 

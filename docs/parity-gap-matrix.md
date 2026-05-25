@@ -112,7 +112,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Vim editing mode | 🔴 | |
 | `Ctrl+O` transcript viewer + dump-to-scrollback | ✅ | ADR-0027; `q`/Esc close, `[` dump, `v` open-in-$VISUAL, scroll keys, `?` help |
 | Background bash (`Ctrl+B`) | ✅ | `Bash{background:true}` + `BashOutput` + `KillShell`; TUI `Ctrl+B` follow-on |
-| Image / vision input | 🔴 | |
+| Image / vision input | ✅ | ADR-0039; `caliban-images` ingest (clipboard, `@path`, DnD), per-adapter wire shapes, capability filter + strict-routing fallback, blob storage, graphics-protocol detection |
 | Slash-menu typeahead | 🟡 | |
 | Permission Ask modal | ✅ | ADR-0027; `TuiAskHandler` + modal overlay; Esc → Deny; 10-min timeout |
 | Reverse history search (`Ctrl+R` / `Ctrl+S`) | ✅ | ADR-0027; session → project → all-projects scopes; persisted per project |
