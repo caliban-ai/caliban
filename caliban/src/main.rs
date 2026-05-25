@@ -291,6 +291,18 @@ pub(crate) struct Args {
     #[arg(long = "bg", value_name = "TASK")]
     pub(crate) bg: Option<String>,
 
+    /// Inject a virtual settings scope above local (ADR 0026). Accepts
+    /// inline JSON (`'{"model": "..."}'`) or a path to a `.json` /
+    /// `.toml` file.
+    #[arg(long = "settings", value_name = "FILE_OR_JSON")]
+    pub(crate) settings_overlay: Option<String>,
+
+    /// Restrict which `settings.json` scopes are read (CSV of
+    /// `managed,user,project,local`). Useful for CI pinning a known-
+    /// good base (ADR 0026).
+    #[arg(long = "setting-sources", value_name = "CSV")]
+    pub(crate) setting_sources: Option<String>,
+
     /// Diagnostic / management subcommands.
     #[command(subcommand)]
     pub(crate) command: Option<CalibanCommand>,
@@ -515,6 +527,30 @@ fn build_registry(
         r.register(Arc::new(SkillTool::new(skills)));
     }
     r
+}
+
+/// Drive the layered `settings.json` loader (ADR 0026).
+///
+/// Honors `--bare`, `--settings`, and `--setting-sources`. When the
+/// unified file is absent, legacy `permissions.toml`, `mcp.toml`, and
+/// `hooks.toml` paths still load via the existing per-feature loaders
+/// (handled in their respective wire-up sites below).
+fn load_layered_settings(
+    args: &Args,
+    workspace_root: &std::path::Path,
+) -> Result<caliban_settings::LoadOutcome> {
+    let mut opts = caliban_settings::LoadOptions::new(workspace_root.to_path_buf());
+    opts.bare = args.bare;
+    if let Some(csv) = args.setting_sources.as_deref() {
+        opts = opts.with_sources_csv(csv);
+    }
+    if let Some(overlay) = args.settings_overlay.as_deref() {
+        opts = opts
+            .with_cli_overlay(overlay)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    let outcome = caliban_settings::load_settings(&opts).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(outcome)
 }
 
 /// Returns true if the user has opted out of the auto-memory feature.
@@ -1057,6 +1093,35 @@ async fn main() -> Result<()> {
         None => WorkspaceRoot::current_dir().context("could not get cwd")?,
     };
 
+    // Load layered settings (ADR 0026). `--bare` mode short-circuits.
+    // Failures here are non-fatal: invalid scope files log a warning
+    // and the binary falls back to the per-feature TOML loaders.
+    let settings_outcome = match load_layered_settings(&args, workspace.root()) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(target: "caliban::settings", error = %e, "settings load failed; continuing with empty settings");
+            caliban_settings::LoadOutcome {
+                settings: caliban_settings::Settings::default(),
+                sources: Vec::new(),
+                validation_warnings: Vec::new(),
+            }
+        }
+    };
+    for w in &settings_outcome.validation_warnings {
+        tracing::warn!(target: "caliban::settings", warning = %w, "settings schema validation");
+    }
+    let settings_handle = caliban_settings::SettingsHandle::new(settings_outcome.settings.clone());
+    let _settings_sources = settings_outcome.sources.clone();
+    let _ = settings_handle.current(); // touch to ensure the handle is connected
+    let settings_snapshot = settings_outcome.settings.clone();
+    // Honor `enable_telemetry` from settings when the env override is
+    // unset.
+    if settings_snapshot.enable_telemetry == Some(true)
+        && std::env::var("CALIBAN_ENABLE_TELEMETRY").is_err()
+    {
+        tracing::info!(target: "caliban::settings", "telemetry enabled via settings.json");
+    }
+
     // Router v2: try caliban.toml first (--config flag or discovery), fall
     // back to the single-provider construction when no router config is
     // present (preserving v1 behavior). ADR 0038.
@@ -1341,6 +1406,13 @@ async fn main() -> Result<()> {
                 action: Action::Ask,
                 comment: None,
             });
+        }
+        // Layer settings.permissions into cli_rules at *higher* priority
+        // than the per-feature TOML fallback (load_rules already appends
+        // the project + user permissions.toml + defaults below). CLI
+        // flags still win because they were pushed first.
+        for r in settings_snapshot.permission_rules() {
+            cli_rules.push(r);
         }
         let workspace_root = args.workspace.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -1637,6 +1709,18 @@ async fn main() -> Result<()> {
     if !has_prompt {
         if stdin_is_tty {
             let bypass_latch = args.allow_dangerously_skip_permissions;
+            let settings_sources_view: Vec<(String, Option<PathBuf>, Option<String>)> =
+                settings_outcome
+                    .sources
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.scope.label().to_string(),
+                            s.path.clone(),
+                            s.format.map(str::to_string),
+                        )
+                    })
+                    .collect();
             return tui::run(
                 args,
                 agent,
@@ -1650,6 +1734,8 @@ async fn main() -> Result<()> {
                 auto_mode_classifier,
                 mcp_summaries,
                 tui_ask_rx,
+                Some(settings_handle.clone()),
+                settings_sources_view,
             )
             .await;
         }

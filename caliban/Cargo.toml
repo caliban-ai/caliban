@@ -32,6 +32,7 @@ caliban-telemetry          = { path = "../crates/caliban-telemetry" }
 caliban-images             = { path = "../crates/caliban-images" }
 caliban-worktrees          = { path = "../crates/caliban-worktrees" }
 caliban-supervisor         = { path = "../crates/caliban-supervisor" }
+caliban-settings           = { path = "../crates/caliban-settings" }
 rust_decimal               = { version = "1", default-features = false }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
