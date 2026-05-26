@@ -1211,6 +1211,7 @@ name = "caliban-sessions"
 version = "0.0.0"
 dependencies = [
  "caliban-agent-core",
+ "caliban-common",
  "caliban-provider",
  "chrono",
  "dirs",
@@ -1218,6 +1219,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
