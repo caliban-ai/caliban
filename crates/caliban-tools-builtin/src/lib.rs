@@ -17,6 +17,7 @@
 pub mod agent;
 pub mod fs;
 pub mod memory;
+pub(crate) mod parallel;
 pub mod plan;
 pub mod search;
 pub mod shell;

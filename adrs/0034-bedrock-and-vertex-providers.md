@@ -1,6 +1,6 @@
 # ADR 0034 · Bedrock + Vertex providers
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Author:** john.ford2002@gmail.com
 - **Spec:** `docs/superpowers/specs/2026-05-24-bedrock-vertex-providers-design.md`

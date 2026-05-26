@@ -118,3 +118,27 @@ splicing, and budget enforcement. `caliban-agent-core` does **not**
 take a dep on it — the binary (`caliban/src/main.rs`) calls the
 memory crate at startup and passes the assembled string to
 `system_prompt::resolve` as a prefix.
+
+## Revised 2026-05-26
+
+Bumped the combined-prefix default from 8,000 to **32,000 tokens**. The
+8,000-token default was conservative against 2024 context windows and
+was increasingly punishing in 2026 (1M-token Sonnet, 200K standard on
+most providers). Truncation-first behavior was at risk of dropping the
+auto-memory index — exactly the tier that grows.
+
+Added per-scope token caps via three optional `[memory]` settings keys
+(all integer, default unset):
+
+- `cap_tokens_auto` — caps the auto-memory tier independently.
+- `cap_tokens_claude_md` — caps the combined CLAUDE.md tier (global +
+  project). When binding, truncates project first, then global.
+- `cap_tokens_combined` — overrides the combined ceiling (`max_tokens`).
+
+When the sum of both per-scope caps would exceed `cap_tokens_combined`,
+each is scaled down proportionally rather than silently dropping a
+tier. Settings.json values override the corresponding env vars
+(`CALIBAN_MEMORY_BUDGET_TOKENS`, `CALIBAN_MEMORY_CAP_TOKENS_AUTO`,
+`CALIBAN_MEMORY_CAP_TOKENS_CLAUDE_MD`) when both are present.
+
+Truncation order within a tier is unchanged from the original Decision.

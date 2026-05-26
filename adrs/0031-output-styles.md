@@ -1,6 +1,6 @@
 # ADR 0031 · Output styles
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Author:** john.ford2002@gmail.com
 - **Spec:** `docs/superpowers/specs/2026-05-24-output-styles-design.md`

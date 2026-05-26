@@ -130,6 +130,13 @@ impl Tool for MultiEditTool {
         }))
     }
 
+    fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(crate::parallel::canonical_key)
+    }
+
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: MultiEditInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;

@@ -1,6 +1,6 @@
 # ADR 0028 · Checkpointing + `/rewind`
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-checkpointing-design.md`
 

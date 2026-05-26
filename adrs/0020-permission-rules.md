@@ -1,6 +1,6 @@
 # ADR 0020 · Permission rules layered on top of `Hooks`
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-23
 
 ## Context

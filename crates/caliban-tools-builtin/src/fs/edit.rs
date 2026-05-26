@@ -61,6 +61,13 @@ impl Tool for EditTool {
         }))
     }
 
+    fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(crate::parallel::canonical_key)
+    }
+
     /// Invoke the Edit tool.
     ///
     /// Reads the file at `input["path"]`, counts occurrences of `old_string`,

@@ -1,6 +1,6 @@
 # ADR 0019 · Skills loading
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-23
 
 ## Context

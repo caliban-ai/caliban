@@ -94,4 +94,21 @@ pub trait Tool: Send + Sync {
         input: serde_json::Value,
         cx: ToolContext,
     ) -> std::result::Result<Vec<ContentBlock>, ToolError>;
+
+    /// Returns `Some(key)` when this tool call has a conflict identity that
+    /// must not run in parallel with another call sharing the same key.
+    /// Returns `None` (the default) when the tool is fully parallel-safe.
+    ///
+    /// The dispatcher groups batched calls by key: the `None` group runs
+    /// fully in parallel (subject to the existing `parallel_tools` semaphore);
+    /// each non-`None` key group runs serially in submission order. Groups
+    /// run in parallel against each other.
+    ///
+    /// Override for tools whose effect is keyed to a specific target —
+    /// typically the canonicalized path of a file the tool writes, or a
+    /// scope+topic string for memory-tier writes. See ADR 0016 (Revised
+    /// 2026-05-26) for the rationale.
+    fn parallel_conflict_key(&self, _input: &serde_json::Value) -> Option<String> {
+        None
+    }
 }

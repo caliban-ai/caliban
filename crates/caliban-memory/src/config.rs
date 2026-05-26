@@ -8,7 +8,7 @@ use caliban_common::paths::sanitize_cwd_for_path;
 
 use crate::project_walk::WalkStop;
 
-const DEFAULT_BUDGET_TOKENS: usize = 8_000;
+const DEFAULT_BUDGET_TOKENS: usize = 32_000;
 
 /// Resolved configuration for one memory-load invocation.
 ///
@@ -52,6 +52,15 @@ pub struct MemoryConfig {
     pub auto_memory_dir: PathBuf,
     /// Approximate token budget for the combined memory prefix.
     pub max_tokens: usize,
+    /// Optional per-scope cap for the auto-memory tier. When set, the auto
+    /// tier is truncated to fit this cap before the combined `max_tokens`
+    /// ceiling is applied. `None` means "no per-scope cap; only the combined
+    /// ceiling applies".
+    pub cap_tokens_auto: Option<usize>,
+    /// Optional per-scope cap for the combined CLAUDE.md tier (global +
+    /// project). When set, truncates project first, then global, to fit. `None`
+    /// means "no per-scope cap".
+    pub cap_tokens_claude_md: Option<usize>,
 }
 
 impl MemoryConfig {
@@ -60,7 +69,11 @@ impl MemoryConfig {
     /// Env vars honored:
     /// - `XDG_CONFIG_HOME` / `XDG_DATA_HOME` for global + auto-memory paths.
     /// - `CALIBAN_MEMORY_DIR` / `CALIBAN_AUTO_MEMORY_DIRECTORY` for auto-memory.
-    /// - `CALIBAN_MEMORY_BUDGET_TOKENS` overrides the default `8_000` budget.
+    /// - `CALIBAN_MEMORY_BUDGET_TOKENS` overrides the default `32_000` budget.
+    /// - `CALIBAN_MEMORY_CAP_TOKENS_AUTO` sets the per-scope cap for the auto
+    ///   tier (unset = no per-scope cap).
+    /// - `CALIBAN_MEMORY_CAP_TOKENS_CLAUDE_MD` sets the per-scope cap for the
+    ///   combined CLAUDE.md tier (global + project; unset = no per-scope cap).
     /// - `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` enables CLAUDE.md load
     ///   from `--add-dir` paths.
     /// - `CALIBAN_DISABLE_CLAUDE_MD_WALK=1` reverts to the single-file project
@@ -94,6 +107,13 @@ impl MemoryConfig {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_BUDGET_TOKENS);
 
+        let cap_tokens_auto = std::env::var("CALIBAN_MEMORY_CAP_TOKENS_AUTO")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let cap_tokens_claude_md = std::env::var("CALIBAN_MEMORY_CAP_TOKENS_CLAUDE_MD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+
         let claude_md_excludes =
             parse_exclude_patterns(std::env::var("CALIBAN_CLAUDE_MD_EXCLUDES").ok().as_deref());
 
@@ -118,6 +138,8 @@ impl MemoryConfig {
             imports_allowlist_path,
             auto_memory_dir,
             max_tokens,
+            cap_tokens_auto,
+            cap_tokens_claude_md,
         }
     }
 }
@@ -143,6 +165,43 @@ impl MemoryConfig {
             imports_allowlist_path: PathBuf::from("/tmp/.caliban/imports-allowlist.json"),
             auto_memory_dir,
             max_tokens: 100_000,
+            cap_tokens_auto: None,
+            cap_tokens_claude_md: None,
+        }
+    }
+
+    /// Builder-style setter for the per-scope auto-tier cap. Allows callers
+    /// (typically the binary at startup, reading from `[memory]` settings) to
+    /// override the env-driven value.
+    #[must_use]
+    pub fn with_cap_tokens_auto(mut self, n: usize) -> Self {
+        self.cap_tokens_auto = Some(n);
+        self
+    }
+
+    /// Builder-style setter for the per-scope CLAUDE.md-tier cap.
+    #[must_use]
+    pub fn with_cap_tokens_claude_md(mut self, n: usize) -> Self {
+        self.cap_tokens_claude_md = Some(n);
+        self
+    }
+
+    /// Compute the effective per-scope cap accounting for the combined
+    /// ceiling. When the sum of both per-scope caps would exceed `max_tokens`,
+    /// each is scaled down proportionally so the sum equals `max_tokens`.
+    ///
+    /// `this_cap` is the per-scope cap being computed; `other_cap` is the
+    /// other per-scope cap (used to compute the per-scope sum). When the
+    /// other cap is unset, the combined ceiling is treated as its value.
+    #[must_use]
+    pub fn effective_cap(&self, this_cap: usize, other_cap: Option<usize>) -> usize {
+        let other = other_cap.unwrap_or(self.max_tokens);
+        let per_scope_sum = this_cap.saturating_add(other);
+        if per_scope_sum <= self.max_tokens {
+            this_cap
+        } else {
+            // Proportional scale-down so the sum fits the combined ceiling.
+            ((this_cap as u128) * (self.max_tokens as u128) / (per_scope_sum as u128)) as usize
         }
     }
 }
@@ -224,7 +283,43 @@ mod tests {
 
     #[test]
     fn default_budget_constant_matches() {
-        assert_eq!(DEFAULT_BUDGET_TOKENS, 8_000);
+        assert_eq!(DEFAULT_BUDGET_TOKENS, 32_000);
+    }
+
+    #[test]
+    fn with_cap_tokens_auto_sets_value() {
+        let cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m")).with_cap_tokens_auto(4_096);
+        assert_eq!(cfg.cap_tokens_auto, Some(4_096));
+    }
+
+    #[test]
+    fn effective_cap_returns_raw_when_sum_fits_combined() {
+        let cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m"));
+        // max_tokens=100_000; auto=16K + claude_md=16K = 32K < 100K → no scale.
+        assert_eq!(cfg.effective_cap(16_000, Some(16_000)), 16_000);
+    }
+
+    #[test]
+    fn effective_cap_scales_proportionally_when_sum_exceeds_combined() {
+        let cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m"))
+            .with_cap_tokens_auto(20_000)
+            .with_cap_tokens_claude_md(20_000);
+        // Force combined ceiling below the per-scope sum.
+        let cfg = MemoryConfig {
+            max_tokens: 20_000,
+            ..cfg
+        };
+        // per_scope_sum=40_000 > max=20_000 → scale to 50%: each gets 10_000.
+        assert_eq!(cfg.effective_cap(20_000, Some(20_000)), 10_000);
+    }
+
+    #[test]
+    fn effective_cap_treats_missing_other_as_combined_ceiling() {
+        let cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m"));
+        // other=None → treated as max_tokens=100_000.
+        // per_scope_sum = 50_000 + 100_000 = 150_000 > 100_000 → scale.
+        // Expected: 50_000 * 100_000 / 150_000 = 33_333.
+        assert_eq!(cfg.effective_cap(50_000, None), 33_333);
     }
 
     #[test]

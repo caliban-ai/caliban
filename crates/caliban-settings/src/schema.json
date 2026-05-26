@@ -69,8 +69,11 @@
     "memory": {
       "type": "object",
       "properties": {
-        "auto_memory_enabled":   { "type": "boolean" },
-        "auto_memory_directory": { "type": "string" }
+        "auto_memory_enabled":    { "type": "boolean" },
+        "auto_memory_directory":  { "type": "string" },
+        "cap_tokens_auto":        { "type": "integer", "minimum": 0 },
+        "cap_tokens_claude_md":   { "type": "integer", "minimum": 0 },
+        "cap_tokens_combined":    { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": true
     },

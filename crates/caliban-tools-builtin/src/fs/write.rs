@@ -56,6 +56,13 @@ impl Tool for WriteTool {
         }))
     }
 
+    fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(crate::parallel::canonical_key)
+    }
+
     /// Invoke the Write tool.
     ///
     /// Writes `input["content"]` to `input["path"]`, creating missing parent

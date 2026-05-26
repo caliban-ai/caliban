@@ -1,6 +1,6 @@
 # ADR 0021 · Sub-agent primitive via `AgentTool`
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-23
 
 ## Context

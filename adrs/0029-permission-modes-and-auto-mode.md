@@ -128,3 +128,22 @@ DisabledFallback }`.
   first), 0028 (Checkpointing — parallel hook-surface work), 0021
   (Sub-agents — v2 refines per-subagent override).
 - Parity reference: `docs/claude-code-capability-inventory.md` §6, §3.
+
+## Revised 2026-05-26
+
+The original Decision committed `caliban-auto-mode` to be a new Layer-3
+crate. In practice the implementation lives inside `caliban-agent-core`
+across `auto_mode.rs`, `mode_filter.rs`, and `permission_mode.rs`
+(~1,750 LOC combined).
+
+**Why this is the correct outcome.** Auto-mode dispatch is tightly
+coupled to the permission pipeline (`PermissionsHook`,
+`SharedPermissionMode`, the soft-deny → Ask handshake) which already
+lives in agent-core. Extracting auto-mode would either pull most of the
+permission pipeline out with it or introduce a circular dep. The static
+rule pre-pass, the classifier dispatch, and the LRU cache all live next
+to the data they need.
+
+**Revisit if** auto-mode grows a second consumer (e.g., a non-agent
+classifier client), or if the dispatch path becomes a measurable
+compile-time burden on `caliban-agent-core`.

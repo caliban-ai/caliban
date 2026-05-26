@@ -119,7 +119,7 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
         truncated: false,
     };
 
-    enforce_budget(&mut prefix, config.max_tokens);
+    enforce_caps_and_budget(&mut prefix, config);
     prefix.estimated_tokens = prefix.global.as_ref().map_or(0, |t| t.estimated_tokens)
         + prefix.project.as_ref().map_or(0, |t| t.estimated_tokens)
         + prefix.auto.as_ref().map_or(0, |t| t.estimated_tokens);
@@ -355,6 +355,49 @@ async fn ensure_auto_memory(dir: &Path) -> Result<PathBuf> {
     Ok(memory_md)
 }
 
+/// Apply per-scope caps from `config`, then the combined `max_tokens` ceiling.
+///
+/// Per-scope ordering:
+/// 1. `cap_tokens_auto` truncates the auto tier in isolation.
+/// 2. `cap_tokens_claude_md` applies to the combined global + project tiers;
+///    truncates project first (less important within the CLAUDE.md group), then
+///    global if still over.
+/// 3. The combined `max_tokens` ceiling is enforced last via [`enforce_budget`],
+///    which walks tiers in priority order (auto → project → global).
+fn enforce_caps_and_budget(prefix: &mut MemoryPrefix, config: &MemoryConfig) {
+    if let Some(cap) = config.cap_tokens_auto {
+        let effective = config.effective_cap(cap, config.cap_tokens_claude_md);
+        if prefix
+            .auto
+            .as_ref()
+            .is_some_and(|t| t.estimated_tokens > effective)
+        {
+            truncate_tier(prefix, TierKind::Auto, effective);
+            prefix.truncated = true;
+        }
+    }
+    if let Some(cap) = config.cap_tokens_claude_md {
+        let effective = config.effective_cap(cap, config.cap_tokens_auto);
+        let global_t = prefix.global.as_ref().map_or(0, |t| t.estimated_tokens);
+        let project_t = prefix.project.as_ref().map_or(0, |t| t.estimated_tokens);
+        if global_t + project_t > effective {
+            // Truncate project first, then global.
+            let project_allowance = effective.saturating_sub(global_t);
+            if project_allowance < project_t {
+                truncate_tier(prefix, TierKind::Project, project_allowance);
+                prefix.truncated = true;
+            }
+            let project_after = prefix.project.as_ref().map_or(0, |t| t.estimated_tokens);
+            let global_allowance = effective.saturating_sub(project_after);
+            if global_allowance < global_t {
+                truncate_tier(prefix, TierKind::Global, global_allowance);
+                prefix.truncated = true;
+            }
+        }
+    }
+    enforce_budget(prefix, config.max_tokens);
+}
+
 /// Truncate tiers in priority order (auto → project → global) until the total
 /// token estimate fits the budget. Each truncation snips at a line boundary
 /// and appends a marker. Sets `prefix.truncated` accordingly.
@@ -555,6 +598,96 @@ mod tests {
         assert_eq!(other_tokens(&p, TierKind::Auto), 30);
         assert_eq!(other_tokens(&p, TierKind::Project), 40);
         assert_eq!(other_tokens(&p, TierKind::Global), 50);
+    }
+
+    #[test]
+    fn enforce_caps_truncates_auto_to_per_scope_cap() {
+        let big_auto = "x".repeat(4_000); // ~1000 tokens
+        let mut p = MemoryPrefix {
+            global: Some(tier("hi")),
+            project: Some(tier("there")),
+            auto: Some(tier(&big_auto)),
+            ..MemoryPrefix::default()
+        };
+        let cfg = MemoryConfig {
+            cap_tokens_auto: Some(100),
+            ..MemoryConfig::for_test(std::path::PathBuf::from("/tmp/m"))
+        };
+        enforce_caps_and_budget(&mut p, &cfg);
+        assert!(p.truncated);
+        let auto = p.auto.as_ref().unwrap();
+        let auto_tokens = auto.estimated_tokens;
+        assert!(
+            auto_tokens <= 100,
+            "auto cap not honored: {auto_tokens} > 100"
+        );
+    }
+
+    #[test]
+    fn enforce_caps_truncates_project_first_then_global_under_claude_md_cap() {
+        let small = "x".repeat(40); // ~10 tokens
+        let big_project = "p".repeat(4_000); // ~1000 tokens
+        let big_global = "g".repeat(4_000); // ~1000 tokens
+        let mut p = MemoryPrefix {
+            global: Some(tier(&big_global)),
+            project: Some(tier(&big_project)),
+            auto: Some(tier(&small)),
+            ..MemoryPrefix::default()
+        };
+        let cfg = MemoryConfig {
+            cap_tokens_claude_md: Some(500),
+            ..MemoryConfig::for_test(std::path::PathBuf::from("/tmp/m"))
+        };
+        enforce_caps_and_budget(&mut p, &cfg);
+        assert!(p.truncated);
+        let global_t = p.global.as_ref().map_or(0, |t| t.estimated_tokens);
+        let project_t = p.project.as_ref().map_or(0, |t| t.estimated_tokens);
+        assert!(
+            global_t + project_t <= 500,
+            "claude_md cap not honored: {global_t} + {project_t} > 500",
+        );
+        // Project should bear the brunt — global stays full (~1000 tokens
+        // exceeds 500 alone, so global is also truncated, but project should
+        // be MORE truncated than global).
+        // Actually since global alone (1000) > cap (500), both will be hit.
+        // Just check project is smaller than global, since project goes first.
+        assert!(
+            project_t == 0 || project_t < global_t,
+            "project should be truncated first: project={project_t} global={global_t}",
+        );
+    }
+
+    #[test]
+    fn enforce_caps_proportional_scaling_when_per_scope_sum_exceeds_combined() {
+        // Both per-scope caps are 20K, combined is 20K → effective caps scale to 10K each.
+        let mut big_auto = String::new();
+        for _ in 0..20_000 {
+            big_auto.push_str("aaaa\n");
+        } // ~25K tokens
+        let mut big_md = String::new();
+        for _ in 0..20_000 {
+            big_md.push_str("bbbb\n");
+        } // ~25K tokens
+        let mut p = MemoryPrefix {
+            global: Some(tier(&big_md)),
+            project: None,
+            auto: Some(tier(&big_auto)),
+            ..MemoryPrefix::default()
+        };
+        let cfg = MemoryConfig {
+            max_tokens: 20_000,
+            cap_tokens_auto: Some(20_000),
+            cap_tokens_claude_md: Some(20_000),
+            ..MemoryConfig::for_test(std::path::PathBuf::from("/tmp/m"))
+        };
+        enforce_caps_and_budget(&mut p, &cfg);
+        // After per-scope scaling: each effective cap = 10K.
+        // Then combined enforce_budget(20K) is a no-op since total = 10K + 10K = 20K.
+        let auto_t = p.auto.as_ref().unwrap().estimated_tokens;
+        let global_t = p.global.as_ref().unwrap().estimated_tokens;
+        assert!(auto_t <= 10_000, "auto effective cap: {auto_t}");
+        assert!(global_t <= 10_000, "global effective cap: {global_t}");
+        assert!(auto_t + global_t <= 20_000);
     }
 
     #[tokio::test]

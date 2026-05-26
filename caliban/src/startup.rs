@@ -1248,6 +1248,7 @@ pub(crate) async fn resolve_system_prompt(
     args: &Args,
     agent: &Arc<Agent>,
     cwd_for_prompt: &std::path::Path,
+    settings_snapshot: &caliban_settings::Settings,
 ) -> Result<Option<String>> {
     let tool_names: Vec<&str> = agent.tools().names().collect();
     let default_prompt_in_effect =
@@ -1311,7 +1312,10 @@ pub(crate) async fn resolve_system_prompt(
     let final_prompt = if args.bare {
         with_style
     } else {
-        let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
+        let cfg = apply_memory_settings(
+            caliban_memory::MemoryConfig::from_env(&workspace_root),
+            settings_snapshot,
+        );
         match caliban_memory::load(&cfg).await {
             Ok(prefix) => prefix.splice_into(&with_style),
             Err(e) => {
@@ -1321,6 +1325,39 @@ pub(crate) async fn resolve_system_prompt(
         }
     };
     Ok(Some(final_prompt))
+}
+
+/// Overlay `settings.memory.cap_tokens_*` (when present) onto a `MemoryConfig`
+/// built from env defaults. Settings values take precedence over env vars when
+/// both are set; missing settings keys leave the env-derived value in place.
+///
+/// Honored keys (all integer, non-negative):
+/// - `memory.cap_tokens_combined` → `max_tokens`
+/// - `memory.cap_tokens_auto` → per-scope auto-tier cap
+/// - `memory.cap_tokens_claude_md` → per-scope CLAUDE.md-tier cap (global + project)
+fn apply_memory_settings(
+    mut cfg: caliban_memory::MemoryConfig,
+    settings_snapshot: &caliban_settings::Settings,
+) -> caliban_memory::MemoryConfig {
+    let Some(memory) = settings_snapshot.memory.as_ref() else {
+        return cfg;
+    };
+    let read_usize = |key: &str| {
+        memory
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+    };
+    if let Some(n) = read_usize("cap_tokens_combined") {
+        cfg.max_tokens = n;
+    }
+    if let Some(n) = read_usize("cap_tokens_auto") {
+        cfg = cfg.with_cap_tokens_auto(n);
+    }
+    if let Some(n) = read_usize("cap_tokens_claude_md") {
+        cfg = cfg.with_cap_tokens_claude_md(n);
+    }
+    cfg
 }
 
 #[cfg(test)]

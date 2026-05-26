@@ -652,11 +652,16 @@ impl Agent {
                             });
                         }
                         HookDecision::Allow => {
+                            let conflict_key = self
+                                .tools
+                                .get(&tu.name)
+                                .and_then(|t| t.parallel_conflict_key(&tu.input));
                             plans.push(DispatchPlan::Allowed {
                                 original_index: idx,
                                 id: tu.id.clone(),
                                 name: tu.name.clone(),
                                 input: tu.input.clone(),
+                                conflict_key,
                             });
                         }
                         HookDecision::UpdatedInput(new_input) => {
@@ -665,11 +670,16 @@ impl Agent {
                                 tool_use_id = %tu.id,
                                 "hook.updated_input: tool input rewritten by before_tool hook"
                             );
+                            let conflict_key = self
+                                .tools
+                                .get(&tu.name)
+                                .and_then(|t| t.parallel_conflict_key(&new_input));
                             plans.push(DispatchPlan::Allowed {
                                 original_index: idx,
                                 id: tu.id.clone(),
                                 name: tu.name.clone(),
                                 input: new_input,
+                                conflict_key,
                             });
                         }
                     }
@@ -690,6 +700,11 @@ impl Agent {
                 let mut denied_count: usize = 0;
                 let mut dispatched_count: usize = 0;
 
+                // Per-key serialization locks (ADR 0016 Revised 2026-05-26).
+                // Calls with the same conflict_key acquire the same Mutex
+                // before the semaphore, so two writes to the same target
+                // serialize while different-target writes still parallelize.
+                let conflict_locks = parallel::build_conflict_locks(&plans);
                 let mut pending = FuturesUnordered::new();
                 for plan in plans {
                     match plan {
@@ -697,7 +712,13 @@ impl Agent {
                             denied_count += 1;
                             ordered_results[original_index] = Some(result);
                         }
-                        DispatchPlan::Allowed { original_index, id, name, input } => {
+                        DispatchPlan::Allowed {
+                            original_index,
+                            id,
+                            name,
+                            input,
+                            conflict_key,
+                        } => {
                             if cancel.is_cancelled() {
                                 stopped_for = StopCondition::Cancelled;
                                 break;
@@ -705,7 +726,19 @@ impl Agent {
                             dispatched_count += 1;
                             let sem_for_tool = Arc::clone(&sem);
                             let cancel_for_tool = cancel.clone();
+                            let lock_for_tool = conflict_key
+                                .as_ref()
+                                .and_then(|k| conflict_locks.get(k).map(Arc::clone));
                             pending.push(async move {
+                                // Per-key serialization: when set, this future
+                                // FIFO-blocks against other same-key futures.
+                                // Lock held across the full dispatch so the
+                                // next caller sees the side-effects of this
+                                // one. Tokio Mutex is FIFO.
+                                let _key_guard = match lock_for_tool {
+                                    Some(m) => Some(m.lock_owned().await),
+                                    None => None,
+                                };
                                 // Acquire inside the future so concurrent
                                 // futures actually progress. (Pre-acquiring
                                 // in the for-loop would deadlock when

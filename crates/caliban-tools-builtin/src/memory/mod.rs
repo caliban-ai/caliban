@@ -153,6 +153,12 @@ impl Tool for WriteMemoryTopicTool {
         })
     }
 
+    fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
+        let name = input.get("name").and_then(Value::as_str)?;
+        let kind = input.get("type").and_then(Value::as_str)?;
+        Some(format!("memory:{kind}:{name}"))
+    }
+
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: WriteInput = serde_json::from_value(input)
             .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;

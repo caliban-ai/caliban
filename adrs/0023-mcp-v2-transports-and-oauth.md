@@ -1,6 +1,6 @@
 # ADR 0023 · MCP v2 — transports, OAuth, elicitation, resources
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-mcp-v2-design.md`
 - **Supersedes scope of:** ADR 0017 deferred items

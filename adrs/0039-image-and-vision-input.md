@@ -1,6 +1,6 @@
 # ADR 0039 · Image + vision input
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-image-input-design.md`
 - **Author:** john.ford2002@gmail.com

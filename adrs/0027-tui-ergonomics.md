@@ -104,3 +104,20 @@ program). Walker stays on the existing `ignore` crate — no new deps.
 - Companion ADRs: 0028 (Checkpointing — consumes Esc-Esc), 0029
   (Auto-mode — consumes the Ask modal), 0023 (MCP v2 — reuses overlay
   primitives).
+
+## Revised 2026-05-26
+
+The original Decision committed the Ask modal to a new `caliban-tui-ask`
+crate. In practice the modal shipped at `caliban/src/tui/ask.rs` (~202
+LOC) inside the binary.
+
+**Why this is the correct outcome.** The modal is binary-coupled (it
+consumes the binary's `App` state, dispatches via the binary's `Action`
+enum, and renders into the binary's overlay system). Extracting it would
+require either threading App/Action/overlay traits through a public
+surface or duplicating them — both costs without payoff. The "extract
+when sharable" trigger from the original Decision never fired.
+
+**Revisit if** another consumer needs the modal (e.g., a hypothetical
+standalone `caliban-tui` library separated from the binary), or LOC
+grows past ~500.

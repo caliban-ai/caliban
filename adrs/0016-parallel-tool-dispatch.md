@@ -95,3 +95,42 @@ order.
 - Implementation: `crates/caliban-agent-core/src/agent.rs`
   (`parallel_tools` / `parallel_tool_limit` fields),
   `crates/caliban-agent-core/src/stream.rs` (three-phase dispatch)
+
+## Revised 2026-05-26
+
+The original Decision deferred a per-tool `is_parallel_safe()` flag,
+noting that no built-in had write contention. That observation was
+true in 2024 (Bash / Read / Grep / Glob). It is no longer true: ADRs
+0028 + 0035 introduced Edit / Write / MultiEdit / NotebookEdit /
+WriteMemoryTopic, all of which can collide on the same target within
+one turn.
+
+**Revised mechanism:** `parallel_conflict_key(&self, input) ->
+Option<String>` on the `Tool` trait. Returns `None` for fully
+parallel-safe tools (the default; matches the original 2024 posture).
+Returns a conflict-identity string for tools whose effect is keyed to
+a target — typically the canonicalized path for filesystem writes;
+for `WriteMemoryTopic`, a `memory:{type}:{name}` string. The dispatcher
+builds a per-key `tokio::sync::Mutex` map and each tool's dispatch
+future awaits its key's mutex (FIFO) before acquiring the
+`parallel_tool_limit` semaphore. Same-key calls serialize in
+submission order; different-key calls and `None`-key calls parallelize.
+
+**What this preserves.** Read / Grep / Glob / Bash continue to behave
+exactly as before (default `None`). Two `Edit`s on different files
+still parallelize. The parallel-tools differentiator from Claude Code
+is intact.
+
+**What this fixes.** Two `Edit`s on the same file (whether via the
+same path string, a `./`-prefixed variant, or a symlink that
+canonicalizes to the same inode) now serialize in submission order
+rather than interleaving non-deterministically.
+
+**Per-tool overrides shipped:** `Edit`, `Write`, `MultiEdit`,
+`NotebookEdit` all key on the canonicalized path
+(`crates/caliban-tools-builtin/src/parallel.rs::canonical_key`).
+`WriteMemoryTopic` keys on `memory:{type}:{name}`.
+
+**Tests:** `crates/caliban-agent-core/tests/parallel_conflict_key.rs`
+covers distinct-key parallelism, same-key serialization,
+keyed + plain mixing, and shared-key + independent triples.

@@ -1,6 +1,6 @@
 # ADR 0024 · Hook event taxonomy + external handler types
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-hooks-expansion-design.md`
 
