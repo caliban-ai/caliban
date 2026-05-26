@@ -85,12 +85,30 @@ pub(crate) fn map_openai_sse_to_events(
                 break;
             }
 
-            let chunk: NativeChunk = serde_json::from_str(&event.data).map_err(|e| {
-                ProviderError::adapter(OpenAIError::StreamParse(format!(
-                    "chunk parse error: {e}; data: {}",
-                    event.data
-                )))
-            })?;
+            let chunk: NativeChunk = match serde_json::from_str(&event.data) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Fallback: some OpenAI-compatible servers (notably LM
+                    // Studio for context-overflow, also seen on Ollama and
+                    // vLLM for some failure modes) return HTTP 200 with an
+                    // `{"error": {"message": "..."}}` JSON object inside
+                    // the SSE body rather than a non-2xx status. If the
+                    // chunk fails NativeChunk deserialization, try parsing
+                    // it as that error envelope and surface the upstream
+                    // message verbatim instead of the layered chunk-parse
+                    // error. See `docs/2026-05-25-lmstudio-probe-findings.md`
+                    // Finding 12.
+                    if let Some(msg) = extract_upstream_error(&event.data) {
+                        Err(ProviderError::from(OpenAIError::UpstreamError(msg)))?;
+                        unreachable!();
+                    }
+                    Err(ProviderError::adapter(OpenAIError::StreamParse(format!(
+                        "chunk parse error: {e}; data: {}",
+                        event.data
+                    ))))?;
+                    unreachable!();
+                }
+            };
 
             // 1. First chunk → MessageStart.
             if !state.started {
@@ -311,6 +329,35 @@ fn map_finish_reason(r: NativeFinishReason) -> StopReason {
         NativeFinishReason::ToolCalls | NativeFinishReason::FunctionCall => StopReason::ToolUse,
         NativeFinishReason::ContentFilter => StopReason::ContentFilter,
     }
+}
+
+/// Attempt to recover an upstream error message from an SSE data frame that
+/// failed `NativeChunk` deserialization. Recognized shapes (all carry a
+/// `{"error": {"message": "..."}}` envelope, with or without sibling
+/// fields like `type` and `code`):
+///
+/// ```json
+/// {"error":{"message":"The number of tokens to keep..."}}
+/// {"error":{"message":"oops","type":"invalid_request_error","code":"foo"}}
+/// ```
+///
+/// Returns the inner `message` string when the shape matches, `None`
+/// otherwise. Used by the SSE parser to surface upstream-side problems
+/// (LM Studio context overflow, Ollama / vLLM error payloads, etc.) as a
+/// readable [`OpenAIError::UpstreamError`] instead of a nested chunk-parse
+/// error. See `docs/2026-05-25-lmstudio-probe-findings.md` Finding 12.
+fn extract_upstream_error(data: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        error: Inner,
+    }
+    #[derive(serde::Deserialize)]
+    struct Inner {
+        message: String,
+    }
+    serde_json::from_str::<Envelope>(data)
+        .ok()
+        .map(|e| e.error.message)
 }
 
 #[cfg(test)]
@@ -916,5 +963,109 @@ mod tests {
             StreamEvent::ContentBlockStop { index: 1 } => {}
             other => panic!("[3] expected CBStop(1); got {other:?}"),
         }
+    }
+
+    // ---- Finding 12: upstream error envelope in SSE body ----------------
+
+    /// Helper unique to F12: collect events but capture the FIRST error
+    /// (the existing `collect_events` panics on Err). Returns
+    /// `(events_yielded_before_error, optional_error)`.
+    async fn collect_events_or_error(
+        body: &'static str,
+    ) -> (Vec<StreamEvent>, Option<ProviderError>) {
+        let mut stream = map_openai_sse_to_events(sse_stream(body));
+        let mut events = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(ev) => events.push(ev),
+                Err(e) => return (events, Some(e)),
+            }
+        }
+        (events, None)
+    }
+
+    #[test]
+    fn extract_upstream_error_recognizes_basic_envelope() {
+        let data = r#"{"error":{"message":"oops"}}"#;
+        assert_eq!(extract_upstream_error(data).as_deref(), Some("oops"));
+    }
+
+    #[test]
+    fn extract_upstream_error_recognizes_lmstudio_context_overflow_shape() {
+        // Verbatim shape captured during the lmstudio probe — the actual
+        // error body LM Studio returns inside the SSE for a context
+        // overflow.
+        let data = r#"{"error":{"message":"The number of tokens to keep from the initial prompt is greater than the context length. Try to load the model with a larger context length, or provide a shorter input"}}"#;
+        let msg = extract_upstream_error(data).expect("envelope must match");
+        assert!(msg.starts_with("The number of tokens"));
+        assert!(msg.contains("context length"));
+    }
+
+    #[test]
+    fn extract_upstream_error_tolerates_siblings() {
+        // OpenAI's documented error envelope carries `type` and `code`
+        // siblings; the helper must not reject them.
+        let data = r#"{"error":{"message":"bad","type":"invalid_request_error","code":"foo"}}"#;
+        assert_eq!(extract_upstream_error(data).as_deref(), Some("bad"));
+    }
+
+    #[test]
+    fn extract_upstream_error_rejects_non_envelope() {
+        // Random JSON, valid `NativeChunk` shape, and outright garbage all
+        // return None so the parser falls through to the legacy chunk-parse
+        // error path.
+        assert!(extract_upstream_error(r#"{"id":"x","choices":[]}"#).is_none());
+        assert!(extract_upstream_error(r#"{"foo":1}"#).is_none());
+        assert!(extract_upstream_error("not json at all").is_none());
+        // Missing inner `message` field.
+        assert!(extract_upstream_error(r#"{"error":{"type":"x"}}"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn lmstudio_context_overflow_surfaces_as_clean_upstream_error() {
+        // Reproduces the lmstudio Finding 12 trigger: HTTP 200 SSE body
+        // carrying an `{"error": {"message": ...}}` envelope instead of
+        // a NativeChunk. The parser must yield a clean ProviderError
+        // whose Display contains the upstream message, not the layered
+        // "stream parse / chunk parse / missing field 'id'" wrapping.
+        let body = "data: {\"error\":{\"message\":\"The number of tokens to keep from the initial prompt is greater than the context length. Try to load the model with a larger context length, or provide a shorter input\"}}\n\n";
+        let (events, err) = collect_events_or_error(body).await;
+        assert!(
+            events.is_empty(),
+            "no IR events should fire before the upstream error",
+        );
+        let err = err.expect("upstream error must surface");
+        let s = format!("{err}");
+        assert!(
+            s.contains("The number of tokens"),
+            "upstream message must appear verbatim; got: {s}"
+        );
+        assert!(
+            !s.contains("chunk parse error"),
+            "legacy chunk-parse wrapping must be gone; got: {s}"
+        );
+        assert!(
+            !s.contains("missing field"),
+            "legacy serde wrapping must be gone; got: {s}"
+        );
+        // Maps to InvalidRequest per OpenAIError → ProviderError conversion.
+        assert!(
+            matches!(err, ProviderError::InvalidRequest(_)),
+            "upstream-error must map to InvalidRequest; got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_envelope_chunk_parse_failure_still_uses_legacy_message() {
+        // When the SSE body is NEITHER a valid NativeChunk nor an error
+        // envelope, the parser must fall through to the legacy chunk-parse
+        // error path (no regression for the broad case).
+        let body = "data: {\"unexpected\":\"shape\"}\n\n";
+        let (_events, err) = collect_events_or_error(body).await;
+        let s = format!("{}", err.expect("error must surface"));
+        assert!(
+            s.contains("chunk parse error") || s.contains("missing field"),
+            "legacy parse path must still produce its diagnostic; got: {s}"
+        );
     }
 }

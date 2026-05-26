@@ -124,6 +124,20 @@ pub(crate) struct TextDelta {
     pub(crate) delta: String,
 }
 
+/// `thinking` delta payload — streamed reasoning text from models that emit
+/// `reasoning_content` (Qwen3 reasoning variants, `DeepSeek-R1`, `OpenAI`
+/// o-series). Mirrors [`TextDelta`]; distinguished by `type` and by the
+/// fact that the parent block in the final `message` frame is a
+/// `ContentBlock::Thinking` rather than `Text`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ThinkingDelta {
+    /// Always `"thinking"`.
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    /// Incremental reasoning fragment.
+    pub(crate) delta: String,
+}
+
 /// `tool_use` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ToolUse {
@@ -279,6 +293,16 @@ pub(crate) fn system_api_retry(
 pub(crate) fn text_delta(delta: impl Into<String>) -> TextDelta {
     TextDelta {
         kind: "text".into(),
+        delta: delta.into(),
+    }
+}
+
+/// Build a `thinking` delta frame. Emitted under `--include-partial-messages`
+/// when the upstream model streams `reasoning_content` deltas.
+#[must_use]
+pub(crate) fn thinking_delta(delta: impl Into<String>) -> ThinkingDelta {
+    ThinkingDelta {
+        kind: "thinking".into(),
         delta: delta.into(),
     }
 }
@@ -457,6 +481,24 @@ mod tests {
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "text");
         assert_eq!(json["delta"], "Hello");
+    }
+
+    #[test]
+    fn thinking_delta_serializes() {
+        let frame = thinking_delta("Let me think...");
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["delta"], "Let me think...");
+    }
+
+    #[test]
+    fn thinking_delta_distinguishable_from_text_delta() {
+        // Same top-level shape, different `type` discriminator — consumers
+        // route on `type`.
+        let t = serde_json::to_value(text_delta("hi")).unwrap();
+        let r = serde_json::to_value(thinking_delta("hi")).unwrap();
+        assert_ne!(t["type"], r["type"]);
+        assert_eq!(t["delta"], r["delta"]);
     }
 
     #[test]

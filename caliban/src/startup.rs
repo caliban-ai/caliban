@@ -276,10 +276,36 @@ pub(crate) async fn run_and_render(
                 final_messages: fm,
                 total_usage: tu,
                 turn_count,
-                ..
+                stopped_for,
             } => {
                 if !at_column_zero {
                     println!();
+                }
+                // F5/F9 follow-up: the TUI + headless drivers surface
+                // `stopped_for` for non-`EndOfTurn` variants. The single-
+                // prompt CLI driver was missed by the original fix —
+                // provider errors and hook-denial were silently swallowed
+                // (run exits 0 with empty stdout, no signal). Surface the
+                // same one-line description on stderr — even under
+                // --quiet — so the run never finishes invisibly.
+                if let Some(line) = stopped_for_surface_line(&stopped_for) {
+                    eprintln!("{line}");
+                }
+                // F13: if the model's final assistant message has Thinking
+                // blocks but no Text block, the user saw nothing on stdout.
+                // Surface a one-line hint on stderr — even under --quiet —
+                // so the run isn't silently empty. Common with reasoning
+                // models (Qwen3 reasoning, DeepSeek-R1, OpenAI o-series)
+                // when an upstream tool error leaves the model with no
+                // useful reply to commit to.
+                let thinking_only = last_assistant_thinking_only(&fm);
+                if thinking_only {
+                    let hint = if quiet {
+                        "[caliban: model emitted reasoning only — no visible reply (drop --quiet to see reasoning streamed on stderr, or inspect the session JSON)]"
+                    } else {
+                        "[caliban: model emitted reasoning only — no visible reply]"
+                    };
+                    eprintln!("{hint}");
                 }
                 if !quiet {
                     eprintln!(
@@ -300,6 +326,61 @@ pub(crate) async fn run_and_render(
     }
 
     Ok((final_messages, total_usage))
+}
+
+/// Map a [`caliban_agent_core::StopCondition`] to a one-line stderr
+/// surface for the single-prompt CLI driver. Returns `None` for the
+/// natural `EndOfTurn` stop (no surfacing needed). Mirrors the TUI and
+/// headless drivers' surfacing of the lmstudio probe's Findings 5 + 9,
+/// closing the previously-missed `run_and_render` path.
+///
+/// Kept separate from `tui::events::stopped_for_surface` (which carries
+/// a `level` color hint) so this stays free of tui-specific types and
+/// can be unit-tested in isolation.
+fn stopped_for_surface_line(stopped_for: &caliban_agent_core::StopCondition) -> Option<String> {
+    use caliban_agent_core::StopCondition;
+    match stopped_for {
+        StopCondition::EndOfTurn => None,
+        StopCondition::ProviderError(msg) => Some(format!("[caliban: provider error: {msg}]")),
+        StopCondition::HookDenied(msg) => Some(format!("[caliban: hook denied: {msg}]")),
+        StopCondition::CompactionFailed(msg) => {
+            Some(format!("[caliban: compaction failed: {msg}]"))
+        }
+        StopCondition::MaxTurnsReached(n) => Some(format!("[caliban: max-turns ({n}) reached]")),
+        StopCondition::Cancelled => Some("[caliban: cancelled]".to_string()),
+    }
+}
+
+/// Return `true` when the last `Assistant` message in `messages` has at
+/// least one `Thinking` content block AND zero `Text` content blocks.
+/// Used by [`run_and_render`] (lmstudio Finding 13) to surface a hint
+/// when a reasoning model's final turn produced reasoning only — the
+/// CLI's `--quiet` mode gates thinking-delta streaming on stderr, so
+/// otherwise the run looks silently broken.
+///
+/// Returns `false` if there is no assistant message in the history.
+/// Returns `false` if the final assistant message has only `ToolUse`
+/// blocks (different scenario — the model chained to a tool and either
+/// hit max-turns or stopped before producing text; surfaced separately
+/// by the `RunEnd.stopped_for` plumbing).
+fn last_assistant_thinking_only(messages: &[Message]) -> bool {
+    let Some(last_assistant) = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, caliban_provider::Role::Assistant))
+    else {
+        return false;
+    };
+    let mut has_thinking = false;
+    let mut has_text = false;
+    for block in &last_assistant.content {
+        match block {
+            caliban_provider::ContentBlock::Thinking(_) => has_thinking = true,
+            caliban_provider::ContentBlock::Text(_) => has_text = true,
+            _ => {}
+        }
+    }
+    has_thinking && !has_text
 }
 
 /// Source of user prompts for [`run_headless`]. Either a single explicit
@@ -1240,4 +1321,162 @@ pub(crate) async fn resolve_system_prompt(
         }
     };
     Ok(Some(final_prompt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{last_assistant_thinking_only, stopped_for_surface_line};
+    use caliban_agent_core::StopCondition;
+    use caliban_provider::{ContentBlock, Message, Role, TextBlock, ThinkingBlock};
+
+    fn thinking(text: &str) -> ContentBlock {
+        ContentBlock::Thinking(ThinkingBlock {
+            thinking: text.into(),
+            signature: None,
+        })
+    }
+
+    fn text(text: &str) -> ContentBlock {
+        ContentBlock::Text(TextBlock {
+            text: text.into(),
+            cache_control: None,
+        })
+    }
+
+    fn assistant(blocks: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: blocks,
+        }
+    }
+
+    fn user_text(s: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![text(s)],
+        }
+    }
+
+    #[test]
+    fn detects_thinking_only_final_turn() {
+        // F13 reproduction: a final assistant turn carrying only a Thinking
+        // block (the symptom seen when a reasoning model has no useful
+        // reply after a tool error).
+        let messages = vec![
+            user_text("hi"),
+            assistant(vec![thinking("I have nothing to say.")]),
+        ];
+        assert!(last_assistant_thinking_only(&messages));
+    }
+
+    #[test]
+    fn text_block_disables_hint() {
+        // Final assistant has both Thinking and Text → user already saw a
+        // reply on stdout; no hint.
+        let messages = vec![
+            user_text("hi"),
+            assistant(vec![thinking("reasoning..."), text("the answer")]),
+        ];
+        assert!(!last_assistant_thinking_only(&messages));
+    }
+
+    #[test]
+    fn text_only_disables_hint() {
+        let messages = vec![user_text("hi"), assistant(vec![text("answer")])];
+        assert!(!last_assistant_thinking_only(&messages));
+    }
+
+    #[test]
+    fn empty_history_disables_hint() {
+        // No assistant message → no hint (typical of immediate-failure runs
+        // surfaced via stopped_for separately).
+        assert!(!last_assistant_thinking_only(&[]));
+    }
+
+    #[test]
+    fn only_inspects_last_assistant_message() {
+        // Earlier assistant turn was thinking-only (intermediate reasoning
+        // before a tool call); final assistant turn produced text. No hint.
+        let messages = vec![
+            user_text("hi"),
+            assistant(vec![thinking("step one")]),
+            user_text("more"),
+            assistant(vec![text("final answer")]),
+        ];
+        assert!(!last_assistant_thinking_only(&messages));
+    }
+
+    #[test]
+    fn ignores_intervening_user_messages_when_finding_last_assistant() {
+        // Final message is a tool_result user message; the prior assistant
+        // turn (thinking-only) is what matters.
+        let messages = vec![
+            user_text("hi"),
+            assistant(vec![thinking("thinking...")]),
+            user_text("(tool_result placeholder)"),
+        ];
+        assert!(last_assistant_thinking_only(&messages));
+    }
+
+    #[test]
+    fn no_thinking_block_disables_hint() {
+        // Assistant message with no content at all (edge case after a
+        // provider error before any deltas land) → no hint, the
+        // stopped_for surface handles that separately.
+        let messages = vec![user_text("hi"), assistant(vec![])];
+        assert!(!last_assistant_thinking_only(&messages));
+    }
+
+    // ---- F5/F9 follow-up: stopped_for surfacing in single-prompt CLI ----
+
+    #[test]
+    fn end_of_turn_does_not_surface() {
+        assert!(stopped_for_surface_line(&StopCondition::EndOfTurn).is_none());
+    }
+
+    #[test]
+    fn provider_error_surfaces_with_message() {
+        let line = stopped_for_surface_line(&StopCondition::ProviderError(
+            "context length exceeded".into(),
+        ))
+        .expect("provider error must surface");
+        assert!(line.contains("provider error"));
+        assert!(line.contains("context length exceeded"));
+        assert!(
+            line.starts_with("[caliban:") && line.ends_with(']'),
+            "must use the [caliban: …] chrome; got {line}"
+        );
+    }
+
+    #[test]
+    fn hook_denied_surfaces_with_message() {
+        let line = stopped_for_surface_line(&StopCondition::HookDenied("policy x".into()))
+            .expect("hook-denied must surface");
+        assert!(line.contains("hook denied"));
+        assert!(line.contains("policy x"));
+    }
+
+    #[test]
+    fn compaction_failed_surfaces_with_message() {
+        let line =
+            stopped_for_surface_line(&StopCondition::CompactionFailed("summarizer 503".into()))
+                .expect("compaction failure must surface");
+        assert!(line.contains("compaction failed"));
+        assert!(line.contains("summarizer 503"));
+    }
+
+    #[test]
+    fn max_turns_surfaces_with_count() {
+        let line = stopped_for_surface_line(&StopCondition::MaxTurnsReached(50))
+            .expect("max-turns must surface");
+        assert!(line.contains("max-turns"));
+        assert!(line.contains("50"));
+    }
+
+    #[test]
+    fn cancelled_surfaces() {
+        let line =
+            stopped_for_surface_line(&StopCondition::Cancelled).expect("cancellation must surface");
+        assert!(line.contains("cancelled"));
+    }
 }

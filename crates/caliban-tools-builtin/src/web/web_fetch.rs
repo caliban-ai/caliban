@@ -114,9 +114,16 @@ fn validate_url(input: &str) -> Result<Url, &'static str> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("URL must not contain a username or password");
     }
-    let host = parsed.host_str().ok_or("URL has no host")?;
-    if !host.contains('.') {
-        return Err("URL host must contain a dot");
+    match parsed.host() {
+        None => return Err("URL has no host"),
+        // IP literals (Ipv4 / Ipv6) and `localhost` are allowed for homelab
+        // and local test rigs (mirrors the carve-out in upgrade_scheme).
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => {}
+        Some(url::Host::Domain(d)) => {
+            if !d.eq_ignore_ascii_case("localhost") && !d.contains('.') {
+                return Err("URL host must contain a dot");
+            }
+        }
     }
     Ok(parsed)
 }
@@ -604,6 +611,32 @@ mod tests {
     fn validate_accepts_dotted_internal_host() {
         // Homelab use case: dotted internal hostname is allowed.
         assert!(validate_url("http://nas.lan/").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_localhost() {
+        // Localhost is allowed for local dev / test rigs (e.g. LM Studio on
+        // http://localhost:1234). Must match the carve-out in upgrade_scheme.
+        assert!(validate_url("http://localhost:8080/").is_ok());
+        assert!(validate_url("http://localhost/").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_localhost_case_insensitive() {
+        assert!(validate_url("http://LOCALHOST/").is_ok());
+        assert!(validate_url("http://LocalHost:1234/v1/models").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_ipv4_literal() {
+        assert!(validate_url("http://127.0.0.1:8080/x").is_ok());
+        assert!(validate_url("http://10.0.0.5/").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_ipv6_literal() {
+        assert!(validate_url("http://[::1]:8080/x").is_ok());
+        assert!(validate_url("http://[fe80::1]/").is_ok());
     }
 
     #[test]

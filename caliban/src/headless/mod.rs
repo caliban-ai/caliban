@@ -436,6 +436,23 @@ impl<W: Write> HeadlessDriver<W> {
                     _ => {}
                 }
             }
+            TurnEvent::AssistantThinkingDelta { text, .. } => {
+                // Reasoning content is preserved in the final `message` frame's
+                // `ContentBlock::Thinking` block regardless of partial-messages
+                // setting. Under `--include-partial-messages` we also stream
+                // each reasoning delta as a top-level `thinking` frame so UIs
+                // can show reasoning live (lmstudio Finding 11).
+                //
+                // Intentionally NOT mirrored into `final_text` (which feeds the
+                // `result` frame and the plain-text output mode) — reasoning
+                // shouldn't leak into the canonical answer body.
+                match self.config.output_format {
+                    OutputFormat::StreamJson if self.config.include_partial_messages => {
+                        self.write_ndjson(&events::thinking_delta(&text))?;
+                    }
+                    _ => {}
+                }
+            }
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
             } => {
@@ -1459,6 +1476,164 @@ mod tests {
         assert!(
             !error_str.is_empty(),
             "result.error must carry the parse error message",
+        );
+    }
+
+    /// Build a single-turn stream that emits a Thinking block followed by a
+    /// Text block. Used by the F11 regression tests below.
+    fn thinking_then_text_turn_stream() -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg".into(),
+                model: "mock".into(),
+            }),
+            // Thinking block.
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Thinking,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking("Let me ".into()),
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking("think...".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            // Text block.
+            Ok(StreamEvent::ContentBlockStart {
+                index: 1,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 1,
+                delta: StreamingDelta::Text("answer".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 1 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]
+    }
+
+    /// Regression test for Finding 11 (lmstudio probe, 2026-05-25):
+    /// stream-json output WITH `include_partial_messages` must emit
+    /// `{"type":"thinking","delta":"..."}` frames for each Thinking
+    /// delta, in addition to the existing `text` deltas.
+    #[tokio::test]
+    async fn include_partial_messages_streams_thinking_delta_frames() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(thinking_then_text_turn_stream());
+
+        let provider_dyn: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Agent::builder()
+            .provider(provider_dyn)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(2)
+            .build()
+            .expect("agent builder");
+        let agent = Arc::new(agent);
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.include_partial_messages = true;
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, config);
+
+        let _summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+        let thinking_deltas: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|v| v["type"] == "thinking" && v["delta"].is_string())
+            .collect();
+        assert_eq!(
+            thinking_deltas.len(),
+            2,
+            "expected one `thinking` frame per Thinking delta; got {:?}",
+            frames.iter().map(|v| &v["type"]).collect::<Vec<_>>()
+        );
+        assert_eq!(thinking_deltas[0]["delta"], "Let me ");
+        assert_eq!(thinking_deltas[1]["delta"], "think...");
+
+        let text_deltas: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|v| v["type"] == "text" && v["delta"].is_string())
+            .collect();
+        assert_eq!(
+            text_deltas.len(),
+            1,
+            "text deltas must still stream alongside thinking deltas"
+        );
+        assert_eq!(text_deltas[0]["delta"], "answer");
+    }
+
+    /// Without `include_partial_messages`, thinking deltas must NOT stream
+    /// (the final `message` frame still carries the Thinking content block
+    /// via the existing `TurnEnd` handling).
+    #[tokio::test]
+    async fn thinking_delta_suppressed_without_include_partial_messages() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(thinking_then_text_turn_stream());
+
+        let provider_dyn: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Agent::builder()
+            .provider(provider_dyn)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(2)
+            .build()
+            .expect("agent builder");
+        let agent = Arc::new(agent);
+
+        let config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        // include_partial_messages defaults to false.
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, config);
+
+        let _summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+        let any_thinking_delta = frames.iter().any(|v| v["type"] == "thinking");
+        assert!(
+            !any_thinking_delta,
+            "thinking delta frames must be suppressed without --include-partial-messages"
+        );
+        // The TurnEnd path bundles the Thinking block into the final
+        // `message` frame's content array.
+        let message_frames: Vec<&serde_json::Value> =
+            frames.iter().filter(|v| v["type"] == "message").collect();
+        assert_eq!(message_frames.len(), 1);
+        let has_thinking_block = message_frames[0]["content"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|b| b["type"] == "thinking"));
+        assert!(
+            has_thinking_block,
+            "final message frame must still carry the Thinking content block"
         );
     }
 }

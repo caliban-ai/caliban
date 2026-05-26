@@ -1,5 +1,53 @@
 # LM Studio probe findings — 2026-05-25
 
+> **Close-out (2026-05-25, end of branch `jf/fix/lmstudio-followups`).**
+>
+> All 13 numbered findings are now functionally closed. Final state:
+>
+> | Status                      | Count | Findings |
+> |-----------------------------|-------|----------|
+> | Fixed on prior branches (already merged) | 7 | F1, F2, F5 (TUI+headless), F6, F7, F8, F9, F10 |
+> | Fixed on this branch (`jf/fix/lmstudio-followups`) | 4 | F11, F12, F13, F5/F9 single-prompt-CLI gap |
+> | Closed without code change  | 1 | F4 (documented as unsupported in README) |
+> | Noted, no fix needed        | 1 | F3 (cosmetic model quirk) |
+> | Total                       | **13** | |
+>
+> Plus the `caliban-sessions` debounced-flush panic (closed by
+> `721cd47`) and the `capabilities_for` 128k fallback (still latent;
+> never in the fix list — documented as a footgun for the day someone
+> wires a non-noop compactor).
+>
+> **Branch commits (in order):**
+>
+> 1. `ee6cf37` fix(webfetch): allow localhost + IP literals in
+>    validate_url (the original WebFetch-fails-on-localhost trigger
+>    that motivated this whole verification pass).
+> 2. `530421c` fix(headless): stream thinking_delta frames under
+>    `--include-partial-messages` (Finding 11).
+> 3. `b1b9c5b` fix(openai): surface upstream error envelopes from
+>    in-band SSE body (Finding 12).
+> 4. `d2ad414` fix(cli): surface thinking-only assistant turns under
+>    `--quiet` (Finding 13).
+> 5. `b274e1d` fix(cli): surface RunEnd.stopped_for in single-prompt
+>    driver — closing a `run_and_render` gap in the original F5/F9
+>    fix, caught by the re-verification probe.
+>
+> **Test additions on this branch:** 4 (localhost validators) + 4
+> (F11 events + driver arms) + 5 (F12 helper + parser fallback) + 7
+> (F13 thinking-only detection) + 6 (F5/F9 stop-condition mapping) =
+> **26 net new unit tests**. `cargo test --workspace -- --test-threads=1`
+> passes clean. Pre-existing `caliban-images::routing` env-var race
+> under parallel test runner is unrelated to this branch (failure is
+> reproducible on `main` too).
+>
+> **One follow-up explicitly deferred:** the single-prompt CLI still
+> exits `0` for non-`EndOfTurn` stop conditions. Visibility is now
+> correct (b274e1d), but mapping `ProviderError` / `HookDenied` /
+> `CompactionFailed` / `MaxTurnsReached` / `Cancelled` to non-zero
+> exit codes per ADR 0025's sysexits.h table requires reshaping
+> `run_and_render`'s return type and `main()`'s exit flow. Noted at
+> the bottom of the status table; not blocking this branch.
+
 > **2026-05-25, mid-session correction.** Source readings used to author
 > Findings 1-4 below were stale relative to the actual branch. The
 > repo had shipped 53 commits since the source I had originally read,
@@ -55,6 +103,248 @@
 > matches `gpt-5*`, `o1*`, `o3*`, `o4*` case-insensitively (Finding 6).
 > Six net new tests cover the model-family branch + stream-options
 > shape. Status table updated below.
+
+> **2026-05-25, end-of-session verification pass.** Re-ran every
+> finding against current `main` (HEAD `de495fc`) with both source
+> inspection and empirical re-probes via the now-rebuilt
+> `target/release/caliban`. Summary:
+>
+> - **F1, F7, F8, F10** — fully closed. Source checks pass; probes
+>   show non-zero token counts (F1+F7: input 365 / output 38), single
+>   `system/init` frame (F8), and 2 user-frames → 2 message-frames
+>   (F10, with the model correctly recalling "Q" across turns).
+> - **F2** — closed in the final assistant `message` frame
+>   (`content` carries `{"type":"thinking","thinking":"..."}` blocks
+>   verbatim). **One narrow gap surfaced during verification:** the
+>   headless driver's `--include-partial-messages` mode emits
+>   `text_delta` frames but no `thinking_delta` equivalent —
+>   `handle_event` (`caliban/src/headless/mod.rs:416-477`) has no
+>   `AssistantThinkingDelta` arm, and `headless/events.rs` has no
+>   `thinking_delta` constructor. Reasoning text is preserved in the
+>   bundled assistant message but is dropped in streaming mode.
+>   Captured as **Finding 11** below.
+> - **F3** — confirmed still cosmetic (model emits leading `\n\n`
+>   prefix; verified in the F1 probe result string). Not a caliban
+>   fix item.
+> - **F4** — closed via documentation. `README.md:196` opens a
+>   "Known model limitations" section that calls out Qwen3 reasoning
+>   models on LM Studio as unsupported for multi-turn tool use.
+> - **F5 + F9** — closed at the visibility level. Triggering a
+>   provider error (qwen2.5-coder with full tool palette ⇒ LM Studio
+>   context overflow) now produces `subtype:"error"`, exit code 1,
+>   and a populated `error` field. **Minor cosmetic wrinkle:** the
+>   error message is double-wrapped as `"adapter error: stream
+>   parse error: chunk parse error: missing field 'id' ..."` because
+>   LM Studio returns the context-overflow error inside an HTTP-200
+>   SSE body rather than via a 4xx status. The actual LM Studio
+>   message *is* embedded in the wrapper, so the user is no longer
+>   blind — but the surface is more layers than it needs to be.
+>   Captured as **Finding 12** below.
+> - **F6** — fully closed at source + test level
+>   (`crates/caliban-provider-openai/src/models.rs:84-134` carries
+>   `uses_completion_tokens(model)` plus 14 unit tests covering
+>   `gpt-5*` / `o1*` / `o3*` / `o4*` (positive), `gpt-4o` /
+>   `gpt-4.1` / `gpt-3.5-turbo` / `qwen3.5-9b-mlx` (negative), and
+>   case-insensitive matching). Did not re-probe against the real
+>   GPT-5 API; the fix has full unit coverage.
+> - **Bonus: `caliban-sessions` debounced-flush panic** (the
+>   `tokio::sync::oneshot::Receiver::blocking_recv()` panic that hit
+>   the user during the previous session) is also closed —
+>   `721cd47 fix(sessions): swap flush done-channel from tokio
+>   oneshot to std mpsc`. Re-verified by running the debug binary
+>   with `--session NAME`: exit 0, no panic, session JSON written.
+> - **Latent footgun** (`capabilities_for` returns 128k for unknown
+>   models — `crates/caliban-provider-openai/src/models.rs:81`) is
+>   still present. Was never on the fix list; flagged here only as
+>   a reminder.
+>
+> Net: 9 of the 10 numbered findings are functionally closed; F3 is
+> noted as model-side cosmetic with no caliban-side action; two
+> small follow-up items (F11, F12) recorded below the existing
+> Findings 1-10 sections.
+
+> ## Finding 11 — `--include-partial-messages` doesn't stream `thinking_delta` frames
+>
+> **Severity:** low-medium. Only affects stream-json output with
+> `--include-partial-messages` against reasoning models.
+>
+> **Where:** `caliban/src/headless/mod.rs:416-477`
+> (`HeadlessDriver::handle_event`) has arms for `AssistantTextDelta`,
+> `ToolCallStart`, `ToolCallEnd`, `TurnEnd`, `RunEnd`, but **no arm
+> for `AssistantThinkingDelta`** — the IR event that F2's stream-parse
+> fix emits when `reasoning_content` arrives. `caliban/src/headless/events.rs`
+> defines `text_delta(...)` but no `thinking_delta(...)` constructor.
+>
+> **Symptom.** With `--output-format stream-json
+> --include-partial-messages` against `qwen3.5-9b-mlx`, the assistant's
+> reasoning trace is streamed by the model (verified: 87
+> `reasoning_content` deltas captured via proxy) but is dropped
+> wholesale by the headless driver. The final `message` frame
+> *does* carry the thinking content block (so F2 isn't fully
+> regressed) — but a UI consumer expecting realtime reasoning
+> visibility sees nothing until the message is finalised.
+>
+> **Suggested fix.** Mirror `text_delta`:
+> - Add `pub(crate) fn thinking_delta(delta) -> ThinkingDelta` to
+>   `headless/events.rs`, with `{"type":"thinking_delta","text":"..."}`
+>   (or `"thinking":"..."` for consistency with the final-message
+>   `ContentBlock::Thinking` shape).
+> - Add an `AssistantThinkingDelta` arm to `handle_event` mirroring
+>   the `AssistantTextDelta` arm — including the
+>   `OutputFormat::Text` branch (probably elide thinking from plain
+>   text output) and the `OutputFormat::StreamJson if
+>   include_partial_messages` branch.
+
+> ## Finding 12 — Provider error from LM Studio is double-wrapped as "adapter / stream parse / chunk parse"
+>
+> **Severity:** low (cosmetic). The Finding 5 + Finding 9 fix
+> successfully *surfaces* the error — this is purely about the
+> shape of the message the user sees.
+>
+> **Where:** Verification probe (qwen2.5-coder + full tool palette ⇒
+> context overflow) produced this `error` field in the headless
+> `result` frame:
+>
+> ```
+> "adapter error: stream parse error: chunk parse error:
+>  missing field 'id' at line 1 column 371; data: {
+>   "error":{"message":"The number of tokens to keep from the
+>   initial prompt is greater than the conte...
+> ```
+>
+> **Root cause hypothesis.** LM Studio returns the context-overflow
+> error as `HTTP 200` with the error JSON object inside the SSE
+> stream body (rather than as `HTTP 400`). caliban's stream parser
+> tries to deserialize the body as a `NativeChunk`, fails on
+> `missing field "id"`, surfaces a `StreamParse` error that propagates
+> up through the agent runloop as a `ProviderError("adapter error:
+> stream parse error: chunk parse error: ...")`. The real LM Studio
+> message is still in there, just deeply nested.
+>
+> **Suggested fix.** In the OpenAI stream parser
+> (`crates/caliban-provider-openai/src/stream_parse.rs`), when a
+> chunk fails to parse as `NativeChunk`, try one more deserialization
+> against `{"error": {"message": String, ...}}` and surface that as
+> a clean `ProviderError("LM Studio: ...")` if it matches. Otherwise
+> fall through to the existing parse-error path. Pattern is
+> common across OpenAI-compatible local servers (Ollama, vLLM, LM
+> Studio, Text Generation Inference) — worth doing once and reusing.
+
+> ### Tool-error-handling investigation (positive finding, no fix needed)
+>
+> **Hypothesis investigated:** "The model stopped processing when any
+> single tool encountered an error." Specifically prompted by a
+> WebFetch failure against a localhost endpoint that produced no
+> visible output afterward.
+>
+> **Source audit.** Walked the dispatch path in
+> `crates/caliban-agent-core/src/stream/hook_dispatch.rs` and the
+> parallel-dispatch loop at
+> `crates/caliban-agent-core/src/stream/mod.rs:735-773`. The
+> dispatch helper maps tool errors as follows:
+>
+> | Tool outcome                              | Returned to loop                       | Sent to model? |
+> |-------------------------------------------|----------------------------------------|----------------|
+> | `Ok(content)`                             | `Ok(ToolResultBlock { is_error: false })` | yes |
+> | `Err(ToolError::Execution(...))` (HTTP fail, IO error, timeout, 4xx/5xx, ...) | `Ok(ToolResultBlock { is_error: true, text: "Error: ..." })` | **yes** |
+> | `Err(ToolError::InvalidInput(...))`       | `Ok(ToolResultBlock { is_error: true })` | yes |
+> | `Err(ToolError::Cancelled)`               | `Err(StopCondition::Cancelled)` — aborts loop | no |
+> | `before_tool` hook itself errors          | `Err(StopCondition::HookDenied)` — aborts loop | no |
+> | Pre-flight `cancel.is_cancelled()` is set | `Err(StopCondition::Cancelled)` — aborts loop | no |
+>
+> So **every regular tool failure** (including connection-refused on a
+> dead localhost endpoint, HTTP 4xx/5xx, timeouts, bad-input) is
+> reported back to the model as a `tool_result` with `is_error: true`
+> and the loop continues. The only fatal-stop paths are explicit
+> cancellation and `before_tool` hook execution errors — both
+> intentional.
+>
+> WebFetch specifically (`crates/caliban-tools-builtin/src/web/web_fetch.rs:443-537`)
+> only returns `ToolError::Cancelled` on the explicit
+> `cx.cancel.cancelled()` path. Connection failures, timeouts, and
+> non-2xx responses all return `ToolError::execution(...)` and become
+> non-fatal `tool_result` blocks.
+>
+> **Empirical probe.** `caliban --prompt 'Use WebFetch with
+> url="http://127.0.0.1:9/never" and timeout_seconds=2. After it
+> returns, tell me what happened in one sentence.'` against
+> `qwen3.5-9b-mlx`. Persisted session shape:
+>
+> ```
+> [0] system
+> [1] user
+> [2] assistant — text + thinking + tool_use (WebFetch)
+> [3] user     — tool_result, is_error=true, "Error: execution failed: error sending request for url..."
+> [4] assistant — thinking (no text)
+> ```
+>
+> The harness did the right thing: tool error wrapped, sent to model,
+> model got another turn. **The actual visible-symptom is captured
+> as Finding 13 below.**
+>
+> ### Finding 13 — Thinking-only assistant turns are silent under `--quiet`
+>
+> **Severity:** medium. User-visible appearance is "the model stopped
+> processing." The model in fact emitted a complete assistant turn,
+> just one composed entirely of `Thinking` content blocks.
+>
+> **Where:** `caliban/src/startup.rs:239` —
+> `TurnEvent::AssistantThinkingDelta { text, .. } if !quiet`. The
+> `if !quiet` guard suppresses thinking deltas from stderr when
+> `--quiet` is set. `AssistantTextDelta` writes to stdout
+> unconditionally (good), but if the assistant message has no
+> `Text` content blocks (only `Thinking`), stdout stays empty and
+> stderr is gated off.
+>
+> **Symptom.** Run `caliban --quiet --prompt "..."` against a
+> reasoning model that, on a particular turn, chooses to respond
+> with thinking only and no text. The most common trigger is a
+> tool error that leaves the model uncertain what to say next — it
+> reasons and then emits `finish_reason: "stop"` without producing
+> a `content` token. From the user's vantage:
+>
+> - stdout: empty.
+> - stderr: nothing (gated by `--quiet`).
+> - exit: 0.
+> - session JSON: the `Thinking` content block IS persisted.
+>
+> So the run *did* produce output — but it's invisible without
+> reading the session file. This is what caused the "WebFetch
+> failure → model silent" observation that motivated the audit.
+>
+> **Cross-driver picture:**
+>
+> | Driver                                                | Thinking handling |
+> |-------------------------------------------------------|------------------|
+> | TUI (`caliban/src/tui/events.rs`)                     | Shown as `(thinking) ...` dim line ✅ |
+> | Single-prompt CLI (`startup.rs::run_and_render`)      | Streams to stderr in dim italics, **gated on `!quiet`** ⚠️ |
+> | Headless stream-json, partial-messages OFF            | Included in final `message` frame `content[]` ✅ |
+> | Headless stream-json, partial-messages ON             | **Dropped entirely** — see Finding 11 |
+>
+> Finding 13 (this) and Finding 11 are the two driver-specific
+> gaps in an otherwise consistent IR-level Thinking model.
+>
+> **Suggested fix.** Two complementary changes:
+>
+> 1. **Always emit a "you have only-thinking" hint** on `RunEnd` for
+>    runs where the final assistant message has no `Text` content
+>    block. Even under `--quiet`, surface something like
+>    `[caliban: model produced reasoning only — no visible reply]`
+>    on stderr so the user has a signal that *something happened*.
+> 2. **Refine `--quiet`'s contract:** today it suppresses all stderr
+>    chrome (TTFT line, thinking deltas, tool-call announcements).
+>    The thinking deltas are arguably the *most* important debug
+>    signal of all those — they explain why the model behaved the
+>    way it did. Either separate `--quiet` into `--quiet-summary`
+>    (default-style) vs `--quiet-all` (strict CI usage), or print
+>    thinking to stderr even under `--quiet` when no text was
+>    emitted (i.e., when stdout is empty).
+>
+> **Interaction with Finding 11.** Both findings stem from the same
+> root cause — thinking content not being a first-class driver-side
+> citizen everywhere text is. Fixing them together (give every
+> driver a documented "how thinking surfaces" answer) avoids further
+> piecemeal regressions.
 
 
 Findings from probing caliban against LM Studio (model: `qwen3.5-9b-mlx`) using
@@ -217,17 +507,22 @@ against both orderings.
 | **2** | **`reasoning_content` dropped from reasoning models** | med-high  | **`provider-openai`** | **fixed** (jf/fix/openai-reasoning-content — `NativeDelta.reasoning_content` routed through `StreamingContentType::Thinking` with close-then-reopen on text/reasoning interleave) |
 | 3 | Leading-newline cosmetic noise in qwen3.5 responses    | cosmetic      | (model quirk; opt'l)   | noted  |
 | **4** | **Qwen-XML tool calls in follow-up turns aren't parsed**   | medium (qwen) | `provider-openai`      | **documented as unsupported (no code fix)** — see [README "Known model limitations"](../README.md#known-model-limitations); Qwen3 reasoning models on LM Studio listed as unsupported for multi-turn tool use. Re-evaluate if Qwen3 reasoning adoption becomes a hard requirement. |
-| **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **fixed** (jf/fix/surface-stopped-for — TUI surfaces `RunEnd.stopped_for` as `[caliban: …]` transcript line + red toast for `ProviderError`/`HookDenied`/`CompactionFailed`; neutral info line for `MaxTurnsReached`/`Cancelled`) |
+| **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **fixed** (jf/fix/surface-stopped-for — TUI + headless surface `RunEnd.stopped_for`; single-prompt CLI parity added in jf/fix/lmstudio-followups b274e1d after a re-verification probe caught the original fix missed `run_and_render`) |
 | **6** | **GPT-5 / o-series reject `max_tokens` — caliban never sends `max_completion_tokens`** | **high** | **`provider-openai`** (ir_convert.rs:247-248) | **fixed** (jf/fix/openai-stream-and-completion-tokens — `uses_completion_tokens(model)` routes `gpt-5*`/`o1*`/`o3*`/`o4*` to `max_completion_tokens`) |
 | **7** | **Streaming `usage` chunk dropped — token counts always show 0** | **medium** | **`provider-openai`** (stream_parse.rs:97-108) | **fixed** (jf/fix/openai-usage-chunk — `chunk.usage` extraction pulled out of the `if let Some(choice)` guard; terminal `choices:[]` usage frame now emits a standalone `MessageDelta { stop_reason: None, usage_delta: Some(_) }`; legacy combined finish+usage chunk preserved) |
 | **8** | **Duplicate `system/init` frame in stream-json output**         | **low-med**| **`caliban` bin / headless driver** (headless/mod.rs:301 + startup.rs:525) | **fixed** (jf/fix/headless-dedupe-init — dropped external `emit_init` in startup.rs; `HeadlessDriver::run` now drains hook buffer right after the canonical `emit_init` so frame order is preserved) |
 | **9** | **Headless mode swallows provider errors identically to TUI**   | **high** (= Finding 5 in headless) | **`caliban` bin / headless driver** (headless/mod.rs:457-475) | **fixed** (jf/fix/surface-stopped-for — `RunEnd` arm maps `ProviderError`/`HookDenied`/`CompactionFailed` to `subtype:"error"` + populated `error` field + exit 1, mirroring the schema-validation path from H-9) |
 | **10**| **`--input-format stream-json` consumes only the first user frame** | **medium** | **`caliban` bin** (startup.rs:374-383) | **fixed** (jf/fix/headless-multi-frame-loop — single-shot `for ... break;` replaced by `HeadlessDriver::run_frames` which runs one agent pass per `User` frame, emits exactly one `system/init` + one final `result` per NDJSON stream, warns on `Control` frames, and errors with subtype=error + exit 66 on empty stdin / exit 64 on mid-stream parse failure) |
-| - | `capabilities_for` fallback is 128k for unknown models | latent footgun| `provider-openai`      | noted  |
+| **11**| **`--include-partial-messages` doesn't stream `thinking_delta` frames** | low-med | **`caliban` bin / headless driver** (headless/mod.rs + events.rs) | **fixed** (jf/fix/lmstudio-followups 530421c — new `ThinkingDelta` payload + `thinking_delta(…)` constructor + `AssistantThinkingDelta` arm in `handle_event`; emits `{"type":"thinking","delta":"…"}` frames under `--include-partial-messages`, suppressed otherwise; final `message` frame still carries the `ContentBlock::Thinking`) |
+| **12**| **LM Studio in-band SSE error wrapped as "adapter / stream parse / chunk parse"** | low (cosmetic) | **`provider-openai`** (stream_parse.rs + error.rs) | **fixed** (jf/fix/lmstudio-followups b1b9c5b — new `OpenAIError::UpstreamError(msg)` variant + `extract_upstream_error(data)` fallback parses `{"error":{"message":…}}` envelopes inside the SSE body; maps to `ProviderError::InvalidRequest(msg)`, so the surface line reads `[caliban: provider error: invalid request: <upstream message>]` — verbatim, no nested wrapping) |
+| **13**| **Thinking-only assistant turns are silent under `--quiet`** | medium | **`caliban` bin** (startup.rs `run_and_render`) | **fixed** (jf/fix/lmstudio-followups d2ad414 — new `last_assistant_thinking_only(messages)` helper; `RunEnd` arm emits `[caliban: model emitted reasoning only — no visible reply…]` on stderr even under `--quiet` when the final assistant message has only Thinking blocks) |
+| - | `capabilities_for` fallback is 128k for unknown models | latent footgun| `provider-openai`      | noted (unchanged; not in fix list) |
+| - | Single-prompt CLI exit code on non-EndOfTurn `stopped_for` | follow-up | `caliban` bin (startup.rs) | **follow-up filed.** F5/F9 surface line added in this branch (b274e1d); exit-code mapping to ADR 0025 sysexits.h values requires reshaping `run_and_render`'s return type + `main()` flow. Not blocking; visibility is what mattered. |
 
-Further findings from probes 2-4 (multi-turn history retention,
-tool-use correctness, skill loading) will be appended below as they
-emerge.
+(Probe-cluster sections below — basic round-trip, history,
+tool use, skill, permissions, MCP, sub-agent, headless — record
+the empirical journey that produced these findings. See the
+close-out at the top for the present-day status of each finding.)
 
 ---
 

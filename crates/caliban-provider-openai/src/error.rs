@@ -26,6 +26,17 @@ pub enum OpenAIError {
     #[error("stream parse error: {0}")]
     StreamParse(String),
 
+    /// The upstream server returned a JSON error object in the SSE body
+    /// (rather than as a non-2xx HTTP status). Observed against LM Studio
+    /// when, e.g., the request exceeds the loaded context window — the
+    /// server replies with HTTP 200 and an `{"error": {"message": ...}}`
+    /// payload in the stream body. Surfacing the upstream message
+    /// verbatim avoids the layered "stream parse / chunk parse / missing
+    /// field 'id'" wrapping that the bare deserialization error produces.
+    /// See `docs/2026-05-25-lmstudio-probe-findings.md` Finding 12.
+    #[error("upstream error: {0}")]
+    UpstreamError(String),
+
     /// A required environment-variable or config field was absent.
     #[error("missing config field: {0}")]
     MissingConfig(String),
@@ -65,6 +76,12 @@ impl From<OpenAIError> for ProviderError {
             | OpenAIError::MissingConfig(_)
             | OpenAIError::Transport(_)
             | OpenAIError::Unsupported(_) => ProviderError::adapter(e),
+            // Upstream-reported errors (in-band SSE error payload) are
+            // request-shaped problems most of the time (oversized prompt,
+            // missing model, malformed input). Map to InvalidRequest so
+            // the surface line reads cleanly; the message is the upstream
+            // text verbatim.
+            OpenAIError::UpstreamError(ref msg) => ProviderError::InvalidRequest(msg.clone()),
         }
     }
 }
