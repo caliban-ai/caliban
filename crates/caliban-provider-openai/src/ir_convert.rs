@@ -6,10 +6,11 @@ use caliban_provider::{
     ToolUseBlock as IrToolUseBlock, Usage as IrUsage,
 };
 
+use crate::models::uses_completion_tokens;
 use crate::schema::request::{
     NativeContent, NativeContentPart, NativeFunctionCall, NativeImageUrl, NativeMessage,
-    NativeRequest, NativeTool, NativeToolCall, NativeToolChoice, NativeToolFunction,
-    NativeToolFunctionName,
+    NativeRequest, NativeStreamOptions, NativeTool, NativeToolCall, NativeToolChoice,
+    NativeToolFunction, NativeToolFunctionName,
 };
 use crate::schema::response::{NativeFinishReason, NativeResponse};
 
@@ -239,19 +240,37 @@ pub fn ir_to_native_request(
         })
         .collect();
 
+    // GPT-5 / o-series reject `max_tokens`; route the cap to
+    // `max_completion_tokens` for those families. Lmstudio probe Finding 6.
+    let (max_tokens, max_completion_tokens) = if uses_completion_tokens(&req.model) {
+        (None, Some(req.max_tokens))
+    } else {
+        (Some(req.max_tokens), None)
+    };
+
+    // Per OpenAI streaming spec, the terminal `usage` chunk is only emitted
+    // when `stream_options.include_usage = true`. Lmstudio probe Finding 1.
+    let stream_options = if stream {
+        Some(NativeStreamOptions {
+            include_usage: true,
+        })
+    } else {
+        None
+    };
+
     Ok(NativeRequest {
         model: req.model,
         messages: native_messages,
         tools,
         tool_choice,
-        max_tokens: Some(req.max_tokens),
-        max_completion_tokens: None,
+        max_tokens,
+        max_completion_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
         stop: req.stop_sequences,
         user: req.metadata.user_id,
         stream,
-        stream_options: None,
+        stream_options,
     })
 }
 
@@ -340,4 +359,103 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
             cache_read_input_tokens: cache_read,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caliban_provider::{CompletionRequest, RequestMetadata};
+
+    fn minimal_request(model: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: model.into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text(IrTextBlock {
+                    text: "hi".into(),
+                    cache_control: None,
+                })],
+            }],
+            tools: vec![],
+            tool_choice: IrToolChoice::default(),
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            metadata: RequestMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn streaming_request_sets_include_usage_true() {
+        let native =
+            ir_to_native_request(minimal_request("gpt-4o"), true, "system").expect("ir_to_native");
+        assert!(native.stream);
+        assert_eq!(
+            native.stream_options,
+            Some(NativeStreamOptions {
+                include_usage: true,
+            })
+        );
+    }
+
+    #[test]
+    fn non_streaming_request_omits_stream_options() {
+        let native =
+            ir_to_native_request(minimal_request("gpt-4o"), false, "system").expect("ir_to_native");
+        assert!(!native.stream);
+        assert_eq!(native.stream_options, None);
+    }
+
+    #[test]
+    fn gpt5_routes_to_max_completion_tokens() {
+        let native =
+            ir_to_native_request(minimal_request("gpt-5"), false, "system").expect("ir_to_native");
+        assert_eq!(native.max_tokens, None);
+        assert_eq!(native.max_completion_tokens, Some(256));
+    }
+
+    #[test]
+    fn gpt4o_uses_legacy_max_tokens() {
+        let native =
+            ir_to_native_request(minimal_request("gpt-4o"), false, "system").expect("ir_to_native");
+        assert_eq!(native.max_tokens, Some(256));
+        assert_eq!(native.max_completion_tokens, None);
+    }
+
+    #[test]
+    fn o_series_models_route_to_max_completion_tokens() {
+        for model in ["o1-mini", "o3-mini", "o4-mini"] {
+            let native = ir_to_native_request(minimal_request(model), false, "system")
+                .expect("ir_to_native");
+            assert_eq!(
+                native.max_tokens, None,
+                "{model} should not send max_tokens"
+            );
+            assert_eq!(
+                native.max_completion_tokens,
+                Some(256),
+                "{model} should send max_completion_tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn case_insensitive_model_family_match() {
+        for model in ["GPT-5", "O1", "O3-MINI"] {
+            let native = ir_to_native_request(minimal_request(model), false, "system")
+                .expect("ir_to_native");
+            assert_eq!(
+                native.max_tokens, None,
+                "{model} should not send max_tokens"
+            );
+            assert_eq!(
+                native.max_completion_tokens,
+                Some(256),
+                "{model} should send max_completion_tokens"
+            );
+        }
+    }
 }
