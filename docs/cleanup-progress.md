@@ -26,7 +26,7 @@ Baselines (captured by PR-T4-0 on 2026-05-25):
 | PR-T3-B | 3 | Settings as canonical config root | **−15** (binary call sites trimmed) | +120 (Settings accessors + 2 tests) | n/a (deprecation pass, not dup consolidation) | +2 net new (in `caliban-settings::settings::tests`) | n/a | n/a |
 | PR-T4-0 | 4 | Baseline measurement | 0 (measurement-only) | +~30 LOC docs only | n/a | 0 | baseline = 26,110,304 B | baseline = 16.84 s warm / 81.29 s cold |
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
-| PR-T4-B | 4 | Session persist debouncing | — | — | — | — | — |
+| PR-T4-B | 4 | Session persist debouncing | **+60** (`store.rs` +56, `lib.rs` +1, `tests/store.rs` +3 — flush call) | +663 (new `debounced.rs` +395 LOC incl. unit tests, new `tests/debounced.rs` +208 LOC) | 1 / 1 (per-turn sync write replaced by single tokio-mpsc + 250 ms debounce window) | +12 net new (6 unit in `debounced::tests`, 6 integration in `tests/debounced.rs`) | n/a | n/a |
 | PR-T4-C | 4 | Cargo dep audit + release profile | **+8** (workspace `Cargo.toml` profile block) | — | n/a (dep audit confirmed already-trimmed; profile only) | 0 (no test changes) | **−9,382,368 bytes / −35.9%** (26,110,304 → 16,727,936) | cold build +55.7s / +19.9% (279.87 → 335.58s) |
 | PR-T4-D | 4 | `CompositeHooks` short-circuit | **+233** (1 src file: +37 net for `is_noop` + `all_noop` field + `push` + 22 early-return guards; 1 test file: +194 for 5 new tests + `AssertSilentNoop` counting wrapper) | — | n/a (perf change, no dup consolidation) | +5 net new (in `crates/caliban-agent-core/tests/hooks_events.rs`) | n/a | per-event 0-await on the all-Noop hot path (no microbench captured) |
 | PR-T5-A | 5 | App builder | — | — | — | — | — |
@@ -205,6 +205,52 @@ In `crates/caliban-agent-core/tests/hooks_events.rs`:
 The F5+F9 spec said it might touch `hooks.rs` for fire-points; verified
 no overlap — F5+F9 consumes `StopCondition` in driver code only, not in
 the trait method bodies that this PR rewrites.
+
+## PR-T4-B notes
+
+- Before: `SessionStore::save` synchronously serialized + tempfile-wrote
+  + persist-renamed the full session JSON on every turn end. For long
+  conversations this is both a latency tax (≈10 ms per turn on a
+  moderately sized session) and an IO amplifier — every interim
+  snapshot hit the disk, not just the meaningful ones.
+- After: `SessionStore::save` validates + serializes synchronously,
+  then enqueues a write request to a dedicated background thread via
+  `tokio::sync::mpsc::UnboundedSender<WriterMsg>`. The thread owns a
+  `current_thread` tokio runtime and drives the debounce state
+  machine.
+- Debounce window: **250 ms**, reset on every new request (true
+  debounce, not throttling). Bursts inside the window collapse to a
+  single `caliban_common::fs::write_atomic` call. The pending state is
+  keyed by destination path so concurrent writes to *different*
+  sessions never clobber each other (per-name latest-wins).
+- Drain semantics: dropping the last `SessionStore` clone signals
+  shutdown by dropping the sender, the writer drains any pending
+  request, and the writer thread joins (bounded by a 2 s ceiling so a
+  wedged disk can't hang process exit). `SessionStore::flush` exposes
+  the same drain as a blocking call for read-after-write tests and
+  any future caller that needs immediate durability.
+- Reads (`load`, `list`) and `delete` auto-flush so the on-disk view
+  is always current from the caller's perspective — the existing
+  integration tests in `tests/store.rs` continue to pass without
+  semantic changes.
+- Crash safety: matches the pre-change contract. A panic / abort with
+  bytes still buffered loses them; a clean shutdown (Drop or
+  explicit flush) does not.
+
+### Deviations from PR-T4-B brief
+
+- The brief describes a single pending request; with bursts hitting
+  different session names that single slot would silently drop the
+  earlier writes. The implementation keeps a `HashMap<PathBuf,
+  Vec<u8>>` (still O(1) writes), preserving the brief's behavior for
+  the same-name case while not regressing the rare cross-name case.
+- The worker runs on a dedicated OS thread (with its own
+  `current_thread` tokio runtime) rather than `tokio::spawn` so the
+  pre-existing synchronous `SessionStore::new(...)` call sites
+  (notably the integration tests, which don't construct a tokio
+  runtime) keep working unchanged.
+- Brief asked for ≥6 net new tests; delivered 12 (6 unit alongside
+  the writer module, 6 integration via `tests/debounced.rs`).
 
 ## PR-T3-A notes
 

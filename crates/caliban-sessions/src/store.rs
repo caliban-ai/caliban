@@ -1,12 +1,19 @@
 //! `SessionStore` — disk-backed CRUD over `PersistedSession`.
+//!
+//! Writes go through a [`DebouncedWriter`](crate::debounced) so a flurry
+//! of intra-turn snapshots collapses into a single atomic file write
+//! (see `docs/superpowers/specs/2026-05-25-cleanup-and-perf-sprint-design.md`,
+//! PR-T4-B). Reads (`load`, `list`) and deletes call [`SessionStore::flush`]
+//! first so callers see a consistent on-disk state.
 
 use std::cmp::Reverse;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 
+use crate::debounced::DebouncedWriter;
 use crate::error::{Error, Result};
 use crate::session::PersistedSession;
 
@@ -25,17 +32,33 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// On-disk session store.
+/// On-disk session store. Cheap to clone (the writer task is shared
+/// across all clones via `Arc`).
 #[derive(Debug, Clone)]
 pub struct SessionStore {
+    inner: Arc<StoreInner>,
+}
+
+#[derive(Debug)]
+struct StoreInner {
     root: PathBuf,
+    writer: DebouncedWriter,
 }
 
 impl SessionStore {
     /// Construct a store with the given root directory.
+    ///
+    /// Spawns the background writer thread that owns the debounce
+    /// window. The thread is shut down (and any pending write drained)
+    /// when the last clone of the returned `SessionStore` is dropped.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            inner: Arc::new(StoreInner {
+                root,
+                writer: DebouncedWriter::new(),
+            }),
+        }
     }
 
     /// Resolve the default root: `$XDG_DATA_HOME/caliban/sessions`
@@ -51,15 +74,20 @@ impl SessionStore {
     /// Get the path for a named session.
     #[must_use]
     pub fn path_for(&self, name: &str) -> PathBuf {
-        self.root.join(format!("{name}.json"))
+        self.inner.root.join(format!("{name}.json"))
     }
 
     /// Load a session by name. Returns Ok(None) if the file doesn't exist.
+    ///
+    /// Flushes any pending debounced write first so callers always see
+    /// the latest persisted state, even mid-debounce-window.
     ///
     /// # Errors
     /// I/O, deserialization, or name-validation errors.
     pub fn load(&self, name: &str) -> Result<Option<PersistedSession>> {
         validate_name(name)?;
+        // Drain any pending write so the on-disk view is current.
+        self.inner.writer.flush();
         let path = self.path_for(name);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -68,29 +96,53 @@ impl SessionStore {
         }
     }
 
-    /// Save a session atomically.
+    /// Save a session.
+    ///
+    /// The actual disk write is deferred: this call validates the
+    /// session name, ensures the destination directory exists,
+    /// serializes the session JSON, and hands it off to a background
+    /// writer task that flushes after a 250 ms debounce window (or
+    /// sooner via [`SessionStore::flush`] / drop).
+    ///
+    /// Returns `Ok(())` once the request is enqueued. I/O failures
+    /// during the eventual write are logged at `warn` rather than
+    /// surfaced to the caller — the calling turn has already
+    /// completed. To force a synchronous flush (and observe its
+    /// outcome only via a subsequent `load`), call
+    /// [`SessionStore::flush`].
     ///
     /// # Errors
-    /// I/O, serialization, or name-validation errors.
+    /// Serialization, name-validation, or directory-creation errors.
     pub fn save(&self, session: &PersistedSession) -> Result<()> {
         validate_name(&session.name)?;
-        std::fs::create_dir_all(&self.root)?;
+        std::fs::create_dir_all(&self.inner.root)?;
         let serialized = serde_json::to_vec_pretty(session)?;
-        // Atomic write: write to temp file in the same dir, then persist (rename).
-        let tmp = NamedTempFile::new_in(&self.root)?;
-        std::fs::write(tmp.path(), &serialized)?;
         let target = self.path_for(&session.name);
-        tmp.persist(&target).map_err(|e| Error::Io(e.error))?;
+        self.inner.writer.request(target, serialized);
         Ok(())
+    }
+
+    /// Block until any pending debounced write has been flushed to
+    /// disk.
+    ///
+    /// Useful for tests and for clean-shutdown paths that want to be
+    /// sure the latest session state hit the disk before continuing.
+    /// Returns immediately if there is nothing pending.
+    pub fn flush(&self) {
+        self.inner.writer.flush();
     }
 
     /// List sessions (their metadata) sorted by `updated_at` descending.
     ///
+    /// Flushes pending writes first so a freshly created session shows
+    /// up in the listing.
+    ///
     /// # Errors
     /// I/O errors. Individual broken files are SKIPPED with no error.
     pub fn list(&self) -> Result<Vec<SessionMetadata>> {
+        self.inner.writer.flush();
         let mut out = Vec::new();
-        let entries = match std::fs::read_dir(&self.root) {
+        let entries = match std::fs::read_dir(&self.inner.root) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
@@ -132,10 +184,14 @@ impl SessionStore {
 
     /// Delete a session.
     ///
+    /// Flushes pending writes first so an in-flight write of `name`
+    /// cannot resurrect the file after the delete returns.
+    ///
     /// # Errors
     /// I/O or name-validation errors.
     pub fn delete(&self, name: &str) -> Result<()> {
         validate_name(name)?;
+        self.inner.writer.flush();
         let path = self.path_for(name);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),

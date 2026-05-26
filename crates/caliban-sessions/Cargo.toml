@@ -11,15 +11,19 @@ publish     = false
 [dependencies]
 caliban-provider   = { path = "../caliban-provider" }
 caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-common     = { path = "../caliban-common" }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
 chrono             = { workspace = true }
 tempfile           = { workspace = true }
 dirs               = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio    = { workspace = true }
 
 [lints]
 workspace = true

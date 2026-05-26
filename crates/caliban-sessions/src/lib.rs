@@ -6,6 +6,7 @@
 
 #![allow(clippy::multiple_crate_versions)]
 
+mod debounced;
 pub mod error;
 pub mod session;
 pub mod store;
