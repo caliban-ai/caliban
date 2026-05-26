@@ -299,6 +299,10 @@ impl<W: Write> HeadlessDriver<W> {
         cancel: CancellationToken,
     ) -> Result<HeadlessRunSummary, HeadlessError> {
         self.emit_init()?;
+        // Drain any hook frames captured before the run began (e.g.
+        // `SessionStart`). Must happen after `emit_init` so the init
+        // frame stays first in the NDJSON stream.
+        self.flush_hook_events()?;
         // Echo the trailing user message, if any.
         if let Some(last_user) = messages
             .iter()
@@ -643,5 +647,85 @@ mod tests {
         let v = content_blocks_to_json(&blocks);
         assert_eq!(v[0]["type"], "text");
         assert_eq!(v[0]["text"], "hi");
+    }
+
+    /// Regression test for Finding 8 (lmstudio probe, 2026-05-25):
+    /// `HeadlessDriver::run` must emit exactly one `system/init` frame
+    /// per stream-json run. Previously the bin emitted one externally
+    /// before calling `run()` and `run()` itself emitted a second.
+    #[tokio::test]
+    async fn run_emits_exactly_one_system_init_frame() {
+        use caliban_agent_core::ToolRegistry;
+        use caliban_provider::{
+            MockProvider, Provider, StopReason, StreamEvent, StreamingContentType, StreamingDelta,
+            Usage,
+        };
+
+        // Scripted single-turn assistant response.
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg_1".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text("ok".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]);
+
+        let provider_dyn: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Agent::builder()
+            .provider(provider_dyn)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(2)
+            .build()
+            .expect("agent builder");
+        let agent = Arc::new(agent);
+
+        let config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, config);
+
+        let messages = vec![Message::user_text("hi")];
+        let _summary = driver
+            .run(agent, messages, CancellationToken::new())
+            .await
+            .expect("driver run succeeded");
+
+        // Inspect the emitted NDJSON.
+        let bytes = driver.writer;
+        let text = String::from_utf8(bytes).expect("valid utf-8");
+        let init_count = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|v| {
+                v.get("type") == Some(&serde_json::json!("system"))
+                    && v.get("subtype") == Some(&serde_json::json!("init"))
+            })
+            .count();
+        assert_eq!(
+            init_count, 1,
+            "expected exactly one system/init frame per stream-json run, got {init_count}.\n\
+             Output was:\n{text}",
+        );
     }
 }
