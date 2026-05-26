@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// Window across which back-to-back writes collapse into one disk write.
 pub(crate) const DEBOUNCE_WINDOW: Duration = Duration::from_millis(250);
@@ -56,8 +56,15 @@ struct PersistRequest {
 enum WriterMsg {
     Persist(PersistRequest),
     /// Block the writer until it finishes any pending flush, then signal
-    /// completion via the oneshot. Used to implement `flush()`.
-    Flush(oneshot::Sender<()>),
+    /// completion via a std mpsc sender. Used to implement `flush()`.
+    ///
+    /// We deliberately use `std::sync::mpsc` (not `tokio::sync::oneshot`)
+    /// here: `flush()` is a synchronous public API called from inside the
+    /// caller's tokio runtime context (e.g. `#[tokio::main]` startup),
+    /// and `oneshot::Receiver::blocking_recv` panics in that situation.
+    /// The std channel has no runtime opinion — it just parks the OS
+    /// thread, which is what we want.
+    Flush(std::sync::mpsc::Sender<()>),
 }
 
 /// Handle to the debounced writer. Cheap to clone (`Arc` internally).
@@ -116,19 +123,20 @@ impl DebouncedWriter {
     /// Block until any pending request has been flushed to disk.
     ///
     /// Safe to call from inside or outside a tokio runtime — it blocks
-    /// the calling thread on a oneshot receiver. If the writer thread
-    /// has already exited (e.g. during shutdown), returns immediately.
+    /// the calling thread on a `std::sync::mpsc` receiver, which has no
+    /// runtime opinion. If the writer thread has already exited (e.g.
+    /// during shutdown), returns immediately.
     pub(crate) fn flush(&self) {
-        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         if self.inner.tx.send(WriterMsg::Flush(done_tx)).is_err() {
             // Worker is gone; nothing to flush.
             return;
         }
-        // `recv` on an oneshot returns Err when the sender is dropped
-        // without sending — that happens on worker shutdown. Treat it
-        // the same as a successful flush: the worker either completed
-        // the flush or there was nothing left to flush.
-        let _ = done_rx.blocking_recv();
+        // `recv` returns Err when the sender is dropped without sending —
+        // that happens on worker shutdown. Treat it the same as a
+        // successful flush: the worker either completed the flush or
+        // there was nothing left to flush.
+        let _ = done_rx.recv();
     }
 }
 
@@ -373,6 +381,28 @@ mod tests {
         }
         assert!(p.exists(), "drop did not drain pending request");
         assert_eq!(std::fs::read(&p).unwrap(), b"drop-drain");
+    }
+
+    #[test]
+    fn flush_from_inside_tokio_runtime_does_not_panic() {
+        // Regression: a previous revision used `tokio::sync::oneshot`
+        // for the flush done-signal, whose `blocking_recv` panics when
+        // called inside a tokio runtime context. `flush()` is called from
+        // `SessionStore::load/list/delete/flush`, all of which run under
+        // `#[tokio::main]` during normal binary startup.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("a.json");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let w = DebouncedWriter::with_window(Duration::from_mins(1));
+            w.request(p.clone(), b"from-runtime".to_vec());
+            w.flush();
+        });
+        assert_eq!(std::fs::read(&p).unwrap(), b"from-runtime");
     }
 
     #[test]
