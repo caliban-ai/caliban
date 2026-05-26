@@ -99,6 +99,16 @@ bincode      = { version = "1" }
 notify     = { version = "6", default-features = false, features = ["macos_kqueue"] }
 jsonschema = { version = "0.17", default-features = false }
 
+# Release profile tuning (PR-T4-C). LTO + single codegen unit + symbol strip
+# trades cold-build time for smaller, faster release binaries. The `thin`
+# LTO level keeps build cost moderate while still inlining across crate
+# boundaries; codegen-units = 1 maximises optimisation opportunities;
+# `strip = "symbols"` drops debuginfo + symbol tables from the artefact.
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
 [workspace.lints.rust]
 unsafe_code      = "deny"  # was forbid; relaxed so localized #[allow(unsafe_code)] with safety comments can apply (e.g., libc::kill in caliban-tools-builtin's Bash tool process-group cleanup)
 missing_docs     = "warn"

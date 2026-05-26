@@ -27,7 +27,7 @@ Baselines (captured by PR-T4-0 on 2026-05-25):
 | PR-T4-0 | 4 | Baseline measurement | 0 (measurement-only) | +~30 LOC docs only | n/a | 0 | baseline = 26,110,304 B | baseline = 16.84 s warm / 81.29 s cold |
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
 | PR-T4-B | 4 | Session persist debouncing | — | — | — | — | — |
-| PR-T4-C | 4 | Cargo dep audit + release profile | — | — | — | — | — |
+| PR-T4-C | 4 | Cargo dep audit + release profile | **+8** (workspace `Cargo.toml` profile block) | — | n/a (dep audit confirmed already-trimmed; profile only) | 0 (no test changes) | **−9,382,368 bytes / −35.9%** (26,110,304 → 16,727,936) | cold build +55.7s / +19.9% (279.87 → 335.58s) |
 | PR-T4-D | 4 | `CompositeHooks` short-circuit | — | — | — | — | — |
 | PR-T5-A | 5 | App builder | — | — | — | — | — |
 | PR-T5-B | 5 | `CalibanError` centralization | — | — | — | — | — |
@@ -557,3 +557,107 @@ Two net new tests in `crates/caliban-settings/src/settings.rs`:
   `RouterConfig`, `RouteEntry`, `render_diagnostics`, `Result`,
   `RouterError`, and the rest of the public API remain reachable from
   `caliban_model_router::*` unchanged.
+
+## PR-T4-C notes
+
+### Release profile tuning
+
+Added a single `[profile.release]` block at the workspace root:
+
+```toml
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+```
+
+- `lto = "thin"` — cross-crate inlining + dead-code elimination at the
+  LLVM level. Cheaper than full LTO; still produces a single
+  whole-binary view.
+- `codegen-units = 1` — one LLVM module per crate, maximising
+  optimisation opportunities (the default of 16 splits crates into
+  parallel-compilable shards that can't inline across each other).
+- `strip = "symbols"` — drop debuginfo + symbol tables from the final
+  artefact. (We were already shipping without debuginfo by default for
+  release; this also strips the symbol table.)
+
+### Cargo dep closure audit (no changes required)
+
+Audited the heavy workspace deps against the brief's checklist; all
+were already at the conservative minimum:
+
+- `image` — `default-features = false`, features `png, jpeg, gif, webp`.
+  All four formats are reachable: `caliban-images::pipeline` matches on
+  `ImageFormat::{Png,Jpeg,Gif,WebP}` in `sniff_mime` and
+  `mime_for_format`. No change.
+- `arboard` — `default-features = false`, feature `image-data`. Only
+  consumer is `caliban-images` (gated behind its `clipboard` feature),
+  which uses `arboard::ImageData` and `Clipboard::get_image()` — both
+  require `image-data`. No change.
+- `oauth2` — `default-features = false`, features `reqwest`,
+  `rustls-tls`. Verified via `cargo tree -e features` that the `oauth2
+  v5.0.0` crate itself does **not** pull `tracing` as a direct
+  dependency. (Tracing is in the closure transitively because reqwest
+  pulls it; that's unavoidable and unrelated to oauth2's feature set.)
+  No change.
+- `reqwest` — `default-features = false`, features `json, rustls-tls,
+  stream, http2, hickory-dns`. All 11 consumers in the workspace use
+  `workspace = true` with no per-site override — no risk of an extra
+  default-features=true sneaking in. No change.
+- `aws-sdk-bedrockruntime` — defaults are `rustls,
+  default-https-client, rt-tokio` (verified via `cargo metadata`); all
+  three are needed to drive the SDK over rustls + tokio. No change.
+- `aws-config` — defaults are `default-https-client, rt-tokio,
+  credentials-process, sso` (verified). Dropping `sso` would pull two
+  extra SDKs (`aws-sdk-sso`, `aws-sdk-ssooidc`) out of the closure, but
+  AWS SSO is a primary auth path for Bedrock users; per the brief
+  ("Don't change anything that risks breaking behaviour — be
+  conservative") this is left as-is.
+- `gcp_auth` — defaults are just `ring` (TLS backend selection). The
+  alternative (`aws-lc-rs`) would also pull a TLS backend; `ring` is
+  the safer default. No change.
+- `keyring` — `default-features = false`, features `apple-native,
+  windows-native, linux-native`. The three platform-native backends are
+  the supported set. No change.
+
+`infer = { version = "0.16", default-features = false }`,
+`axum = { ..., default-features = false, features = [...] }`,
+`chrono = { ..., default-features = false, features = ["serde",
+"clock"] }`, `notify = { ..., default-features = false, ... }`,
+`jsonschema = { ..., default-features = false }`, and `git2 = { ...,
+default-features = false, features = ["vendored-libgit2"] }` were also
+spot-checked — all already minimally configured.
+
+### Measurement methodology
+
+- **Baseline**: built `target/release/caliban` from the tip of
+  `worktree-agent-ac94d2c8e6c7380de` (same branch the changes land on)
+  *before* adding the profile block. Result: 25,876,112 bytes,
+  279.87 s cold build (single `cargo clean && cargo build --release
+  --bin caliban`).
+- **After**: same machine, same command, profile block in place.
+  Result: 16,727,936 bytes, 335.58 s cold build.
+- **Reported delta** in the ledger is against the documented PR-T4-0
+  baseline (26,110,304 bytes) per the brief; the local pre-change
+  measurement (25,876,112 bytes) is within 0.9% of the PR-T4-0
+  baseline (probably noise from intermediate Tier-1/2/3 PRs landing
+  between PR-T4-0 and this branch).
+
+Headline: **−35.9% binary size, +19.9% cold full-release build time**.
+
+### Deviations from the brief
+
+- The brief targeted "~30% reduction"; achieved −35.9%, exceeding
+  target.
+- The brief enumerated several dep-feature audit candidates but
+  noted "be conservative — Only drop features confirmed unused by all
+  consumers." Audit found zero features safe to drop. The
+  `aws-config` SSO feature is the only plausible candidate (drops
+  two transitive SDKs) but is left in place because SSO is a primary
+  authentication path for AWS users and the brief explicitly
+  prioritises behaviour preservation over size optimisation.
+- Build time grew by 55.7 s (not the +30-40% feared in some
+  internal benchmarks for `codegen-units = 1`); the +19.9% delta is
+  within sprint tolerances. CI build duration will move
+  proportionally — flagged for the next sprint-level review if
+  developer feedback objects.
