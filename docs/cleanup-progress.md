@@ -3,11 +3,14 @@
 Tracks per-PR LOC delta, duplication sites consolidated, test-suite changes,
 and (once the perf tier lands) binary-size + test-runtime deltas.
 
-Baselines (TBD — captured by PR-T4-0):
+Baselines (captured by PR-T4-0 on 2026-05-25):
 
-- Release binary size: TBD
-- Workspace test-suite runtime: TBD
-- Headless cold-start time: TBD
+- **Release binary size**: 26,110,304 bytes (25 MB / 24.9 MiB) — `cargo build --release --bin caliban` on Apple M2 Pro, macOS 24.6.0, rustc 1.95.0.
+- **Workspace test-suite runtime** (steady-state, warm cache, all artifacts already compiled):
+  real 16.84 s · user 11.10 s · sys 5.90 s. Cold (incremental rebuild + run): real 81.29 s · user 259.28 s · sys 44.11 s. 1,309 tests pass / 0 fail / 4 ignored across 109 test binaries.
+- **Headless cold-start time** (`./target/release/caliban -p "hello" --provider ollama --max-turns 0 --output-format json --no-save`, wall-clock measured via Python `time.perf_counter_ns()`):
+  - cache-pressured (find /usr/lib + 1 s pause between runs, 5 samples): min **7.96 ms** · median **12.49 ms** · max **39.67 ms**.
+  - warm (10 samples back-to-back): min 4.35 ms · median 4.71 ms · max 7.13 ms.
 
 ## PR ledger
 
@@ -21,13 +24,119 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | **+64** (lib.rs 1499 → 342; new builder.rs 102, dispatch.rs 280, provider_impl.rs 60, tests.rs 779) | — | — | 0 (existing 64 tests relocated to `tests.rs` unchanged; all green) | n/a | n/a |
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | **+59** (16 flat files → 7 capability submodules + workspace.rs; +7 thin `mod.rs` files; lib.rs grew slightly) | — | n/a (file move, no dup consolidation) | 0 net (all existing tests pass unchanged) | n/a | n/a |
 | PR-T3-B | 3 | Settings as canonical config root | **−15** (binary call sites trimmed) | +120 (Settings accessors + 2 tests) | n/a (deprecation pass, not dup consolidation) | +2 net new (in `caliban-settings::settings::tests`) | n/a | n/a |
-| PR-T4-0 | 4 | Baseline measurement | — | — | — | — | — |
+| PR-T4-0 | 4 | Baseline measurement | 0 (measurement-only) | +~30 LOC docs only | n/a | 0 | baseline = 26,110,304 B | baseline = 16.84 s warm / 81.29 s cold |
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
 | PR-T4-B | 4 | Session persist debouncing | — | — | — | — | — |
 | PR-T4-C | 4 | Cargo dep audit + release profile | — | — | — | — | — |
 | PR-T4-D | 4 | `CompositeHooks` short-circuit | — | — | — | — | — |
 | PR-T5-A | 5 | App builder | — | — | — | — | — |
 | PR-T5-B | 5 | `CalibanError` centralization | — | — | — | — | — |
+
+## PR-T4-0 notes
+
+Measurement-only PR: no source changes, no new tests. Captures the three
+baselines that subsequent Tier 4 perf PRs (T4-A hot-path tracing, T4-B
+session persist debouncing, T4-C cargo dep audit + release profile, T4-D
+`CompositeHooks` short-circuit) will compare against.
+
+### Host environment
+
+- `uname -a`: `Darwin Mac.hexadecimate.local 24.6.0 Darwin Kernel Version 24.6.0:
+  Tue Apr 21 20:18:11 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6020 arm64`
+- CPU: Apple M2 Pro, 10 cores (6 performance + 4 efficiency)
+- RAM: 16 GB
+- `rustc --version`: `rustc 1.95.0 (59807616e 2026-04-14) (Homebrew)`
+- `cargo --version`: `cargo 1.95.0 (f2d3ce0bd 2026-03-21) (Homebrew)`
+- Workspace HEAD when captured: `e3c4b93` (post-T3-A merge), default
+  `[profile.release]` (no LTO / no strip — those land in PR-T4-C).
+
+### Measurement 1 — release binary size
+
+```
+cargo build --release --bin caliban
+du -h target/release/caliban     # → 25M
+ls -la target/release/caliban    # → -rwxr-xr-x  1 ... 26110304 May 25 18:52 ...
+stat -f "%z" target/release/caliban  # → 26110304
+file target/release/caliban      # → Mach-O 64-bit executable arm64
+```
+
+- **Bytes**: 26,110,304
+- **Human-readable**: 25 MB (24.9 MiB)
+- **Format**: Mach-O 64-bit arm64, unstripped, no LTO.
+
+### Measurement 2 — workspace test-suite runtime
+
+Two regimes are interesting and recorded separately:
+
+- **Cold** (everything recompiles): `/usr/bin/time -p cargo test --workspace` after a
+  fresh `cargo clean`-equivalent state. Includes test-binary compilation
+  (109 test binaries link individually). One sample:
+  - `real 81.29 s · user 259.28 s · sys 44.11 s`
+  - 1,309 tests pass / 0 fail / 4 ignored across the 109 binaries.
+
+- **Warm** (artifacts already linked; just exec the test binaries): 3
+  consecutive `/usr/bin/time -p cargo test --workspace` runs immediately
+  after the cold run:
+  - run 1: `real 17.24 · user 11.03 · sys 5.99`
+  - run 2: `real 17.08 · user 11.05 · sys 5.91`
+  - run 3: `real 16.00 · user 11.02 · sys 5.57`
+  - median: **real 17.08 s · user 11.05 s · sys 5.91 s**
+
+The warm number is the meaningful baseline for perf-PR comparisons (the
+sprint isn't optimizing compile time). The cold number anchors expected
+CI runtime end-to-end.
+
+### Measurement 3 — headless cold-start time
+
+The spec's `--provider mock` doesn't exist in the CLI surface
+(`ProviderKind` only enumerates Anthropic / Openai / Ollama / Google).
+Used the cleanest substitute: **`--provider ollama --max-turns 0
+--output-format json --no-save -p "hello"`**. Why this is a valid cold-start
+measurement:
+
+1. `caliban-provider-ollama::DirectConfig::from_env().unwrap_or_else(|_| DirectConfig::local())`
+   succeeds even without env vars (the other providers require API
+   keys), so we exercise the full bootstrap (settings load, plugin
+   discovery, registry assembly, MCP-server init, hooks load, permissions
+   wiring, agent build, session resolution, system-prompt resolution)
+   before the network would have fired.
+2. `--max-turns 0` short-circuits in `caliban/src/headless/mod.rs:312`
+   immediately after the `init` and `user`-echo events are emitted —
+   before `agent.stream_until_done(...)` is called — so no Ollama HTTP
+   call is made. Exit code 130 (`HeadlessError::MaxTurnsExceeded(0)`).
+
+`/usr/bin/time -p`'s `0.01`-second resolution undercounts at sub-50 ms
+scale; switched to Python's `time.perf_counter_ns()` wrapping
+`subprocess.run` for nanosecond resolution.
+
+- **Cache-pressured** (5 samples; between each: `find /usr/lib -name '*.dylib'`
+  pollutes the page cache, then `time.sleep(1)`):
+  - `[39.67, 7.96, 11.44, 14.02, 12.49]` ms
+  - **min 7.96 ms · median 12.49 ms · max 39.67 ms**
+- **Warm** (10 back-to-back samples):
+  - `[7.13, 5.52, 4.85, 4.79, 4.64, 4.65, 4.35, 4.39, 4.42, 4.76]` ms
+  - min 4.35 ms · median 4.71 ms · max 7.13 ms
+
+The cache-pressured trio (`min / median / max = 7.96 / 12.49 / 39.67 ms`)
+is the headline baseline. The warm number is recorded for context — at
+that scale most of the elapsed time is `fork+exec+mmap` rather than the
+caliban bootstrap itself.
+
+### Deviations from the PR-T4-0 brief
+
+- The spec suggested a new `crates/caliban-common/bench/README.md` *or*
+  in-ledger notes — picked the latter. The ledger is the single source
+  of truth for sprint deltas, and adding a `bench/` directory with one
+  README would be a low-signal new path. If a `bench` *module* later
+  lands (the spec body proposes one for measurement helpers), this notes
+  section can stay where it is and the module can cross-reference it.
+- The spec offered `--provider mock` as the cold-start invocation; no
+  such variant exists in `ProviderKind`. Documented the substitution
+  (`--provider ollama` with the network-free `DirectConfig::local()`
+  fallback) in measurement 3.
+- `/usr/bin/time -p` was unusable at sub-100 ms resolution on macOS;
+  switched to Python's `perf_counter_ns()` and documented the per-run
+  millisecond samples directly rather than rounded centisecond `real`.
 
 ## PR-T3-A notes
 
