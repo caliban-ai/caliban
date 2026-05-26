@@ -146,6 +146,11 @@ pub(crate) mod doctor {
     }
 
     fn hooks_check(workspace: &Path) -> Check {
+        // Legacy loader (deprecated) — kept here for the `/observe` overlay
+        // which inspects the on-disk `hooks.toml` file directly. The
+        // canonical Settings-based path lives in startup.rs; this is the
+        // diagnostic view.
+        #[allow(deprecated)]
         match caliban_agent_core::HooksConfig::load(workspace) {
             Ok(cfg) => Check {
                 name: "hooks",

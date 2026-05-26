@@ -157,6 +157,10 @@ pub enum PermissionsLoadError {
 /// # Errors
 /// Returns [`PermissionsLoadError::Io`] on read errors other than `NotFound`,
 /// and [`PermissionsLoadError::Parse`] on malformed TOML.
+#[deprecated(
+    since = "0.0.1",
+    note = "load via caliban-settings; legacy loaders remove in v0.2"
+)]
 pub fn load_rules_file(path: &Path) -> std::result::Result<Vec<Rule>, PermissionsLoadError> {
     let body = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -187,6 +191,10 @@ pub fn load_rules_file(path: &Path) -> std::result::Result<Vec<Rule>, Permission
 ///
 /// # Errors
 /// Propagates [`PermissionsLoadError`] from the project or user file readers.
+#[deprecated(
+    since = "0.0.1",
+    note = "load via caliban-settings; legacy loaders remove in v0.2"
+)]
 pub fn load_rules(
     cli_rules: Vec<Rule>,
     workspace_root: &Path,
@@ -194,10 +202,12 @@ pub fn load_rules(
     let mut all = cli_rules;
 
     let project_file = workspace_root.join(".caliban/permissions.toml");
+    #[allow(deprecated)]
     all.extend(load_rules_file(&project_file)?);
 
     let user_dir = dirs::config_dir().map(|d| d.join("caliban/permissions.toml"));
     if let Some(p) = user_dir {
+        #[allow(deprecated)]
         all.extend(load_rules_file(&p)?);
     }
 
@@ -564,6 +574,7 @@ mod tests {
     // --- TOML loader ---
 
     #[test]
+    #[allow(deprecated)]
     fn loader_parses_valid_toml() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("permissions.toml");
@@ -589,6 +600,7 @@ comment = "no rm"
     }
 
     #[test]
+    #[allow(deprecated)]
     fn loader_missing_file_returns_empty() {
         let path = std::path::Path::new("/nonexistent/path/permissions.toml");
         let rules = load_rules_file(path).unwrap();
@@ -596,6 +608,7 @@ comment = "no rm"
     }
 
     #[test]
+    #[allow(deprecated)]
     fn loader_invalid_action_errors() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("permissions.toml");

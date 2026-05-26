@@ -8,6 +8,12 @@
 //! - `caliban_mcp_client::load_config` (`mcp.toml`)
 //! - `caliban_agent_core::permissions::load_rules` (`permissions.toml`)
 //! - `caliban_agent_core::HooksConfig::load` (`hooks.toml`)
+//!
+//! All three legacy entry points are `#[deprecated]` in favor of
+//! [`crate::load_settings`]; this module is the single sanctioned consumer
+//! during the one-release compat window.
+
+#![allow(deprecated)]
 
 use std::path::Path;
 

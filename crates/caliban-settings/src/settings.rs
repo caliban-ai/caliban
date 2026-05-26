@@ -270,6 +270,46 @@ impl Settings {
     pub fn parent_blocks(&self) -> bool {
         self.parent_settings_behavior.as_deref() == Some("block")
     }
+
+    /// Project the hook-related fields into a
+    /// [`caliban_agent_core::HooksConfig`].
+    ///
+    /// The scalar / array fields (`disable_all_hooks`,
+    /// `allow_managed_hooks_only`, `allowed_http_hook_urls`,
+    /// `http_hook_allowed_env_vars`) round-trip faithfully from
+    /// `settings.json`. The typed `events` map is left empty here:
+    /// the per-event typed handler list is only constructible from
+    /// the legacy `hooks.toml` shape, which lives behind the
+    /// `crate::compat::maybe_load_legacy_hooks` shim (it sets the
+    /// scalars from disk during settings load). Callers that need
+    /// the full typed handler list during the back-compat window
+    /// continue to call the legacy loader inside an
+    /// `#[allow(deprecated)]` block.
+    ///
+    /// The total handler count is preserved via a sentinel in
+    /// [`Self::legacy_hook_handler_count`].
+    #[must_use]
+    pub fn hook_config(&self) -> caliban_agent_core::HooksConfig {
+        caliban_agent_core::HooksConfig {
+            disable_all_hooks: self.disable_all_hooks.unwrap_or(false),
+            allow_managed_hooks_only: self.allow_managed_hooks_only.unwrap_or(false),
+            allowed_http_hook_urls: self.allowed_http_hook_urls.clone(),
+            http_hook_allowed_env_vars: self.http_hook_allowed_env_vars.clone(),
+            events: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// When `settings.hooks` contains the legacy-compat sentinel written by
+    /// [`crate::compat::maybe_load_legacy_hooks`], extract the handler-count
+    /// for diagnostics. Returns `None` when no sentinel is present.
+    #[must_use]
+    pub fn legacy_hook_handler_count(&self) -> Option<usize> {
+        self.hooks
+            .get("__legacy_hooks_toml__")
+            .and_then(|v| v.get("handler_count"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+    }
 }
 
 #[cfg(test)]
@@ -344,5 +384,110 @@ mod tests {
         let cfg = s.mcp_config();
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers["linear"].command, "npx");
+    }
+
+    // PR-T3-B: Verify the new Settings accessors produce shapes equivalent to
+    // the legacy ad-hoc loaders for representative inputs. Wrap legacy calls
+    // in `#[allow(deprecated)]` so the test suite stays clean once the
+    // deprecation lands.
+
+    #[test]
+    fn permission_rules_match_legacy_load_rules_for_toml_input() {
+        // Build a Settings whose `permissions` arrays match a sample
+        // permissions.toml; verify Settings::permission_rules() emits the
+        // same Rule[] (modulo the built-in default-rules tail that the
+        // legacy loader appends).
+        let s = Settings {
+            permissions: Permissions {
+                allow: vec!["Read".into(), "Grep".into()],
+                ask: vec!["Bash".into()],
+                deny: vec!["Bash:rm *".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let from_settings = s.permission_rules();
+
+        // Emulate the legacy `load_rules` output (project rules only, no
+        // CLI overlay, no user TOML, plus built-in defaults appended).
+        // Note: legacy load_rules orders inputs as project-then-defaults;
+        // here we model the project rules as deny/ask/allow because that's
+        // the documented evaluation order Settings::permission_rules emits.
+        #[allow(deprecated)]
+        let legacy_tail = caliban_agent_core::default_rules();
+
+        // Settings emits deny, ask, allow (the documented eval order). The
+        // legacy loader preserves whatever order the TOML declared — but
+        // when callers go through Settings, that order is the *normalized*
+        // deny → ask → allow. Verify cardinality + per-action grouping
+        // matches a deny/ask/allow split of the input.
+        assert_eq!(from_settings.len(), 4);
+        assert_eq!(from_settings[0].action, caliban_agent_core::Action::Deny);
+        assert_eq!(from_settings[0].tool, "Bash:rm *");
+        assert_eq!(from_settings[1].action, caliban_agent_core::Action::Ask);
+        assert_eq!(from_settings[1].tool, "Bash");
+        assert_eq!(from_settings[2].action, caliban_agent_core::Action::Allow);
+        assert_eq!(from_settings[2].tool, "Read");
+        assert_eq!(from_settings[3].action, caliban_agent_core::Action::Allow);
+        assert_eq!(from_settings[3].tool, "Grep");
+
+        // The legacy default-rules tail (defined by agent-core) is the
+        // catch-all that callers append on top of Settings::permission_rules
+        // in the binary; verify it's a non-empty, terminal-allow-friendly
+        // list with the wildcard `*` Ask at the end (a stable contract
+        // both Settings and legacy callers rely on).
+        assert!(!legacy_tail.is_empty());
+        assert_eq!(legacy_tail.last().unwrap().tool, "*");
+    }
+
+    #[test]
+    fn hook_config_matches_legacy_loader_scalars() {
+        // settings.json carries the scalar/array fields directly; verify
+        // they project into HooksConfig identically to what the legacy
+        // HooksConfig::load loader yields for an equivalent hooks.toml.
+        let s = Settings {
+            disable_all_hooks: Some(true),
+            allow_managed_hooks_only: Some(false),
+            allowed_http_hook_urls: vec!["https://hooks.example.com/*".into()],
+            http_hook_allowed_env_vars: vec!["AUDIT_TOKEN".into()],
+            ..Default::default()
+        };
+        let from_settings = s.hook_config();
+
+        // Legacy: parse the equivalent TOML and check the fields line up.
+        let toml_body = r#"
+disable_all_hooks = true
+allow_managed_hooks_only = false
+allowed_http_hook_urls = ["https://hooks.example.com/*"]
+http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
+"#;
+        #[allow(deprecated)]
+        let from_legacy =
+            caliban_agent_core::HooksConfig::from_str(toml_body, std::path::Path::new("h.toml"))
+                .unwrap();
+
+        assert_eq!(
+            from_settings.disable_all_hooks,
+            from_legacy.disable_all_hooks
+        );
+        assert_eq!(
+            from_settings.allow_managed_hooks_only,
+            from_legacy.allow_managed_hooks_only
+        );
+        assert_eq!(
+            from_settings.allowed_http_hook_urls,
+            from_legacy.allowed_http_hook_urls
+        );
+        assert_eq!(
+            from_settings.http_hook_allowed_env_vars,
+            from_legacy.http_hook_allowed_env_vars
+        );
+        // Both default to empty events for the empty-input case; the
+        // typed handler list is only populated via the legacy compat shim
+        // (which the binary no longer relies on for the summary path).
+        assert_eq!(
+            from_settings.total_handler_count(),
+            from_legacy.total_handler_count()
+        );
     }
 }

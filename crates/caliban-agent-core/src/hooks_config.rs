@@ -140,9 +140,15 @@ impl HooksConfig {
     ///
     /// # Errors
     /// Returns [`HooksConfigError`] if either file fails to read or parse.
+    #[deprecated(
+        since = "0.0.1",
+        note = "load via caliban-settings; legacy loaders remove in v0.2"
+    )]
     pub fn load(workspace_root: &Path) -> Result<Self, HooksConfigError> {
+        #[allow(deprecated)]
         let project = Self::load_one(&workspace_root.join(".caliban/hooks.toml"))?;
         let user = if let Some(d) = dirs::config_dir() {
+            #[allow(deprecated)]
             Self::load_one(&d.join("caliban/hooks.toml"))?
         } else {
             Self::default()
@@ -156,6 +162,10 @@ impl HooksConfig {
     /// Returns [`HooksConfigError::Io`] on read errors other than `NotFound`,
     /// [`HooksConfigError::Parse`] on malformed TOML, or
     /// [`HooksConfigError::Invalid`] on handler validation errors.
+    #[deprecated(
+        since = "0.0.1",
+        note = "load via caliban-settings; legacy loaders remove in v0.2"
+    )]
     pub fn load_one(path: &Path) -> Result<Self, HooksConfigError> {
         let body = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -422,6 +432,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn missing_file_returns_default() {
         let path = std::path::Path::new("/definitely/does/not/exist/hooks.toml");
         let cfg = HooksConfig::load_one(path).unwrap();
