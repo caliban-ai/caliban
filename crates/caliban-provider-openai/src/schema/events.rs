@@ -40,6 +40,11 @@ pub struct NativeDelta {
     /// Incremental text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Incremental reasoning trace from reasoning-family models (Qwen3.x
+    /// reasoning variants, DeepSeek-R1, etc.). Emitted alongside or before
+    /// `content` and routed to the `Thinking` IR channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Incremental tool-call deltas.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<NativeDeltaToolCall>,

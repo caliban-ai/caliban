@@ -21,10 +21,17 @@ use crate::schema::events::{NativeChunk, NativeFinishReason};
 struct StreamState {
     /// Whether we have emitted `MessageStart` yet.
     started: bool,
-    /// Whether content block 0 (text) is currently open.
+    /// Whether a text content block is currently open.
     text_block_open: bool,
-    /// The content-block index assigned to the text block.
+    /// The content-block index of the currently open text block (valid only
+    /// while `text_block_open == true`). Each open/close cycle gets a fresh
+    /// index since text and reasoning may interleave.
     text_block_index: u32,
+    /// Whether a thinking (reasoning) content block is currently open.
+    thinking_block_open: bool,
+    /// The content-block index of the currently open thinking block (valid
+    /// only while `thinking_block_open == true`).
+    thinking_block_index: u32,
     /// Map from `OpenAI`'s `tool_calls[i].index` → our content-block state.
     tool_blocks: HashMap<u32, ToolBlockState>,
     /// The next content-block index to hand out.
@@ -117,8 +124,48 @@ pub(crate) fn map_openai_sse_to_events(
             if let Some(choice) = chunk.choices.first() {
                 let delta = &choice.delta;
 
+                // -- Reasoning content (Qwen / DeepSeek reasoning families) --
+                //
+                // Reasoning deltas open a `Thinking` block. If a text block
+                // is currently open, close it first so the IR stays
+                // well-formed (a single delta may carry both fields, or
+                // reasoning may resume after a content burst).
+                if let Some(reasoning) = &delta.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    if state.text_block_open {
+                        yield StreamEvent::ContentBlockStop {
+                            index: state.text_block_index,
+                        };
+                        state.text_block_open = false;
+                    }
+                    if !state.thinking_block_open {
+                        state.thinking_block_index = state.next_block_index;
+                        state.next_block_index += 1;
+                        state.thinking_block_open = true;
+                        yield StreamEvent::ContentBlockStart {
+                            index: state.thinking_block_index,
+                            content_type: StreamingContentType::Thinking,
+                        };
+                    }
+                    yield StreamEvent::Delta {
+                        index: state.thinking_block_index,
+                        delta: StreamingDelta::Thinking(reasoning.clone()),
+                    };
+                }
+
                 // -- Text content --
                 if let Some(text) = &delta.content {
+                    // Close any open thinking block before opening text;
+                    // reasoning and content may interleave (DeepSeek) so we
+                    // expect close-then-reopen, not a single contiguous
+                    // reasoning span.
+                    if state.thinking_block_open {
+                        yield StreamEvent::ContentBlockStop {
+                            index: state.thinking_block_index,
+                        };
+                        state.thinking_block_open = false;
+                    }
                     if !state.text_block_open {
                         state.text_block_index = state.next_block_index;
                         state.next_block_index += 1;
@@ -136,6 +183,12 @@ pub(crate) fn map_openai_sse_to_events(
 
                 // -- Refusal (safety layer) — treated as text --
                 if let Some(ref_text) = &delta.refusal {
+                    if state.thinking_block_open {
+                        yield StreamEvent::ContentBlockStop {
+                            index: state.thinking_block_index,
+                        };
+                        state.thinking_block_open = false;
+                    }
                     if !state.text_block_open {
                         state.text_block_index = state.next_block_index;
                         state.next_block_index += 1;
@@ -154,12 +207,19 @@ pub(crate) fn map_openai_sse_to_events(
                 // -- Tool calls --
                 for tc in &delta.tool_calls {
                     if !state.tool_blocks.contains_key(&tc.index) {
-                        // Close any open text block before opening a tool block.
+                        // Close any open text or thinking block before
+                        // opening a tool block.
                         if state.text_block_open {
                             yield StreamEvent::ContentBlockStop {
                                 index: state.text_block_index,
                             };
                             state.text_block_open = false;
+                        }
+                        if state.thinking_block_open {
+                            yield StreamEvent::ContentBlockStop {
+                                index: state.thinking_block_index,
+                            };
+                            state.thinking_block_open = false;
                         }
                         let id = tc.id.clone().unwrap_or_default();
                         let name = tc
@@ -196,6 +256,13 @@ pub(crate) fn map_openai_sse_to_events(
                             index: state.text_block_index,
                         };
                         state.text_block_open = false;
+                    }
+                    // Close any still-open thinking block.
+                    if state.thinking_block_open {
+                        yield StreamEvent::ContentBlockStop {
+                            index: state.thinking_block_index,
+                        };
+                        state.thinking_block_open = false;
                     }
                     // Close tool blocks in ascending our_index order.
                     let mut tool_indices: Vec<u32> =
@@ -249,6 +316,7 @@ fn map_finish_reason(r: NativeFinishReason) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::events::NativeDelta;
     use futures::StreamExt;
     use futures::stream;
 
@@ -438,5 +506,415 @@ mod tests {
             .expect("usage_delta should be populated on the combined finish frame");
         assert_eq!(usage.input_tokens, 7);
         assert_eq!(usage.output_tokens, 1);
+    }
+
+    /// Build an SSE byte stream from a list of `data: ...` chunk strings.
+    /// Each entry becomes a single SSE event terminated by a blank line.
+    fn sse_stream_from_chunks(chunks: &[&str]) -> BoxStream<'static, Result<Bytes, OpenAIError>> {
+        let mut buf = String::new();
+        for e in chunks {
+            buf.push_str("data: ");
+            buf.push_str(e);
+            buf.push_str("\n\n");
+        }
+        let bytes = Bytes::from(buf);
+        Box::pin(stream::iter(vec![Ok::<_, OpenAIError>(bytes)]))
+    }
+
+    /// Construct one chat.completion.chunk JSON from a delta JSON snippet and
+    /// optional finish reason. Used by the F2 reasoning-content tests.
+    fn chunk(delta_json: &str, finish: Option<&str>) -> String {
+        let finish_field = finish.map_or_else(|| "null".to_string(), |r| format!("\"{r}\""));
+        format!(
+            r#"{{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1700000000,"model":"qwen3.5-9b-mlx","choices":[{{"index":0,"delta":{delta_json},"finish_reason":{finish_field}}}]}}"#
+        )
+    }
+
+    async fn collect_events_from_chunks(chunks: Vec<&str>) -> Vec<StreamEvent> {
+        let mut s = map_openai_sse_to_events(sse_stream_from_chunks(&chunks));
+        let mut out = Vec::new();
+        while let Some(item) = s.next().await {
+            out.push(item.expect("stream item"));
+        }
+        out
+    }
+
+    #[test]
+    fn native_delta_deserializes_reasoning_content() {
+        // Reasoning-only delta deserializes with reasoning_content populated
+        // and content absent.
+        let j = r#"{"reasoning_content":"Let me think..."}"#;
+        let d: NativeDelta = serde_json::from_str(j).unwrap();
+        assert_eq!(d.reasoning_content.as_deref(), Some("Let me think..."));
+        assert!(d.content.is_none());
+
+        // Mixed delta: both fields populated in the same chunk.
+        let j2 = r#"{"content":"Hello","reasoning_content":"thinking"}"#;
+        let d2: NativeDelta = serde_json::from_str(j2).unwrap();
+        assert_eq!(d2.content.as_deref(), Some("Hello"));
+        assert_eq!(d2.reasoning_content.as_deref(), Some("thinking"));
+
+        // Absence is fine — round-trips to None and does not appear in output.
+        let j3 = r#"{"content":"hi"}"#;
+        let d3: NativeDelta = serde_json::from_str(j3).unwrap();
+        assert!(d3.reasoning_content.is_none());
+        let back = serde_json::to_string(&d3).unwrap();
+        assert!(!back.contains("reasoning_content"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stream_emits_thinking_block() {
+        // A stream with only reasoning_content (no content) should produce:
+        // MessageStart, CBStart(Thinking), Delta(Thinking), CBStop, MessageDelta(Length), MessageStop.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"reasoning_content":"Thinking..."}"#, None),
+            chunk(r#"{"reasoning_content":" more."}"#, None),
+            chunk("{}", Some("length")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        assert!(matches!(got[0], StreamEvent::MessageStart { .. }));
+        match &got[1] {
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Thinking,
+            } => {}
+            other => panic!("expected ContentBlockStart(Thinking, 0), got {other:?}"),
+        }
+        match &got[2] {
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking(t),
+            } if t == "Thinking..." => {}
+            other => panic!("expected Thinking delta, got {other:?}"),
+        }
+        match &got[3] {
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking(t),
+            } if t == " more." => {}
+            other => panic!("expected Thinking delta, got {other:?}"),
+        }
+        match &got[4] {
+            StreamEvent::ContentBlockStop { index: 0 } => {}
+            other => panic!("expected ContentBlockStop(0), got {other:?}"),
+        }
+        match &got[5] {
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::MaxTokens),
+                ..
+            } => {}
+            other => panic!("expected MessageDelta(MaxTokens), got {other:?}"),
+        }
+        assert!(matches!(got[6], StreamEvent::MessageStop));
+    }
+
+    #[tokio::test]
+    async fn reasoning_then_content_closes_thinking_before_text() {
+        // Reasoning deltas, then content deltas, then finish:
+        // Thinking block must close before the Text block opens.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"reasoning_content":"R1"}"#, None),
+            chunk(r#"{"content":"Hello"}"#, None),
+            chunk("{}", Some("stop")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        // Filter to block-level events for clarity.
+        let blocks: Vec<&StreamEvent> = got
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                        | StreamEvent::Delta { .. }
+                )
+            })
+            .collect();
+
+        // Expected sequence:
+        //   CBStart(Thinking, 0)
+        //   Delta(Thinking, 0)
+        //   CBStop(0)
+        //   CBStart(Text, 1)
+        //   Delta(Text, 1)
+        //   CBStop(1)
+        match blocks[0] {
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Thinking,
+            } => {}
+            other => panic!("[0] expected CBStart(Thinking,0); got {other:?}"),
+        }
+        match blocks[1] {
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking(_),
+            } => {}
+            other => panic!("[1] expected Delta(Thinking,0); got {other:?}"),
+        }
+        match blocks[2] {
+            StreamEvent::ContentBlockStop { index: 0 } => {}
+            other => panic!("[2] expected CBStop(0); got {other:?}"),
+        }
+        match blocks[3] {
+            StreamEvent::ContentBlockStart {
+                index: 1,
+                content_type: StreamingContentType::Text,
+            } => {}
+            other => panic!("[3] expected CBStart(Text,1); got {other:?}"),
+        }
+        match blocks[4] {
+            StreamEvent::Delta {
+                index: 1,
+                delta: StreamingDelta::Text(_),
+            } => {}
+            other => panic!("[4] expected Delta(Text,1); got {other:?}"),
+        }
+        match blocks[5] {
+            StreamEvent::ContentBlockStop { index: 1 } => {}
+            other => panic!("[5] expected CBStop(1); got {other:?}"),
+        }
+        assert_eq!(blocks.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn content_then_reasoning_closes_text_before_reopening_thinking() {
+        // Some providers (DeepSeek) interleave: content first, then reasoning.
+        // The text block must close before a new thinking block opens.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"content":"Hi"}"#, None),
+            chunk(r#"{"reasoning_content":"second thoughts"}"#, None),
+            chunk("{}", Some("stop")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+        let blocks: Vec<&StreamEvent> = got
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                        | StreamEvent::Delta { .. }
+                )
+            })
+            .collect();
+
+        match blocks[0] {
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            } => {}
+            other => panic!("[0] expected CBStart(Text,0); got {other:?}"),
+        }
+        match blocks[1] {
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(_),
+            } => {}
+            other => panic!("[1] expected Delta(Text,0); got {other:?}"),
+        }
+        match blocks[2] {
+            StreamEvent::ContentBlockStop { index: 0 } => {}
+            other => panic!("[2] expected CBStop(0); got {other:?}"),
+        }
+        match blocks[3] {
+            StreamEvent::ContentBlockStart {
+                index: 1,
+                content_type: StreamingContentType::Thinking,
+            } => {}
+            other => panic!("[3] expected CBStart(Thinking,1); got {other:?}"),
+        }
+        match blocks[4] {
+            StreamEvent::Delta {
+                index: 1,
+                delta: StreamingDelta::Thinking(_),
+            } => {}
+            other => panic!("[4] expected Delta(Thinking,1); got {other:?}"),
+        }
+        match blocks[5] {
+            StreamEvent::ContentBlockStop { index: 1 } => {}
+            other => panic!("[5] expected CBStop(1); got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_interleaved_segments_produce_balanced_pairs() {
+        // R, T, R, T, R — five alternating segments. Each open must close
+        // before the next opens; finish closes the last one.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"reasoning_content":"r1"}"#, None),
+            chunk(r#"{"content":"t1"}"#, None),
+            chunk(r#"{"reasoning_content":"r2"}"#, None),
+            chunk(r#"{"content":"t2"}"#, None),
+            chunk(r#"{"reasoning_content":"r3"}"#, None),
+            chunk("{}", Some("stop")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        // Count starts and stops; they must balance per type.
+        let mut thinking_opens = 0;
+        let mut text_opens = 0;
+        let mut stops = 0;
+        // Track running open/close per index to ensure no double-open
+        // and no stop without a prior start.
+        let mut open_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for e in &got {
+            match e {
+                StreamEvent::ContentBlockStart {
+                    index,
+                    content_type: StreamingContentType::Thinking,
+                } => {
+                    assert!(
+                        open_indices.insert(*index),
+                        "double-open of thinking idx {index}"
+                    );
+                    thinking_opens += 1;
+                }
+                StreamEvent::ContentBlockStart {
+                    index,
+                    content_type: StreamingContentType::Text,
+                } => {
+                    assert!(
+                        open_indices.insert(*index),
+                        "double-open of text idx {index}"
+                    );
+                    text_opens += 1;
+                }
+                StreamEvent::ContentBlockStop { index } => {
+                    assert!(
+                        open_indices.remove(index),
+                        "stop without prior open at idx {index}"
+                    );
+                    stops += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(thinking_opens, 3, "expected 3 thinking opens");
+        assert_eq!(text_opens, 2, "expected 2 text opens");
+        assert_eq!(stops, 5, "expected 5 stops (one per open)");
+        assert!(
+            open_indices.is_empty(),
+            "all blocks should be closed by finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_reasoning_stream_parses_identically_to_before() {
+        // Backward-compat: a vanilla content-only stream produces the same
+        // event sequence it always did, with no spurious thinking events.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"content":"Hello"}"#, None),
+            chunk(r#"{"content":"!"}"#, None),
+            chunk("{}", Some("stop")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        // No Thinking content type and no Thinking delta should appear.
+        for e in &got {
+            match e {
+                StreamEvent::ContentBlockStart {
+                    content_type: StreamingContentType::Thinking,
+                    ..
+                } => panic!("unexpected Thinking block in pure-text stream: {e:?}"),
+                StreamEvent::Delta {
+                    delta: StreamingDelta::Thinking(_),
+                    ..
+                } => panic!("unexpected Thinking delta in pure-text stream: {e:?}"),
+                _ => {}
+            }
+        }
+
+        // Expected event sequence: MessageStart, CBStart(Text,0),
+        // Delta(Text), Delta(Text), CBStop(0), MessageDelta, MessageStop.
+        assert!(matches!(got[0], StreamEvent::MessageStart { .. }));
+        assert!(matches!(
+            got[1],
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text
+            }
+        ));
+        assert!(matches!(
+            got[2],
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(_)
+            }
+        ));
+        assert!(matches!(
+            got[3],
+            StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(_)
+            }
+        ));
+        assert!(matches!(got[4], StreamEvent::ContentBlockStop { index: 0 }));
+        assert!(matches!(got[5], StreamEvent::MessageDelta { .. }));
+        assert!(matches!(got[6], StreamEvent::MessageStop));
+        assert_eq!(got.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn reasoning_then_tool_call_closes_thinking_before_tool() {
+        // If a tool call arrives while a thinking block is open, the
+        // thinking block must close before the tool block opens.
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"reasoning_content":"deciding to call Foo"}"#, None),
+            chunk(
+                r#"{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Foo","arguments":"{}"}}]}"#,
+                None,
+            ),
+            chunk("{}", Some("tool_calls")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        let blocks: Vec<&StreamEvent> = got
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. } | StreamEvent::ContentBlockStop { .. }
+                )
+            })
+            .collect();
+
+        // Expect: CBStart(Thinking,0), CBStop(0), CBStart(ToolUse,1), CBStop(1).
+        match blocks[0] {
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Thinking,
+            } => {}
+            other => panic!("[0] expected CBStart(Thinking,0); got {other:?}"),
+        }
+        match blocks[1] {
+            StreamEvent::ContentBlockStop { index: 0 } => {}
+            other => panic!("[1] expected CBStop(0); got {other:?}"),
+        }
+        match blocks[2] {
+            StreamEvent::ContentBlockStart {
+                index: 1,
+                content_type: StreamingContentType::ToolUse { name, .. },
+            } if name == "Foo" => {}
+            other => panic!("[2] expected CBStart(ToolUse Foo, 1); got {other:?}"),
+        }
+        match blocks[3] {
+            StreamEvent::ContentBlockStop { index: 1 } => {}
+            other => panic!("[3] expected CBStop(1); got {other:?}"),
+        }
     }
 }

@@ -37,6 +37,12 @@ pub struct NativeResponseMessage {
     /// Text content; absent when the response is pure tool calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Full reasoning trace from reasoning-family models (Qwen3.x reasoning
+    /// variants, DeepSeek-R1, etc.). Captured so the field doesn't get
+    /// silently dropped on non-streaming responses; consumers may surface it
+    /// as a Thinking block in future.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Tool calls issued by the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<NativeToolCall>,

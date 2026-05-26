@@ -214,7 +214,7 @@ against both orderings.
 | # | Finding                                                | Severity      | Suggested area         | Status |
 |---|--------------------------------------------------------|---------------|------------------------|--------|
 | **1** | **Streaming usage not requested (`stream_options.include_usage`)** | low-med  | `provider-openai` (ir_convert.rs:254) | **fixed** (jf/fix/openai-stream-and-completion-tokens — `stream_options: Some({include_usage: true})` when `stream=true`) |
-| 2 | `reasoning_content` dropped from reasoning models      | med-high      | `provider-openai`      | open   |
+| **2** | **`reasoning_content` dropped from reasoning models** | med-high  | **`provider-openai`** | **fixed** (jf/fix/openai-reasoning-content — `NativeDelta.reasoning_content` routed through `StreamingContentType::Thinking` with close-then-reopen on text/reasoning interleave) |
 | 3 | Leading-newline cosmetic noise in qwen3.5 responses    | cosmetic      | (model quirk; opt'l)   | noted  |
 | **4** | **Qwen-XML tool calls in follow-up turns aren't parsed**   | medium (qwen) | `provider-openai`      | **documented as unsupported (no code fix)** — see [README "Known model limitations"](../README.md#known-model-limitations); Qwen3 reasoning models on LM Studio listed as unsupported for multi-turn tool use. Re-evaluate if Qwen3 reasoning adoption becomes a hard requirement. |
 | **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **fixed** (jf/fix/surface-stopped-for — TUI surfaces `RunEnd.stopped_for` as `[caliban: …]` transcript line + red toast for `ProviderError`/`HookDenied`/`CompactionFailed`; neutral info line for `MaxTurnsReached`/`Cancelled`) |
