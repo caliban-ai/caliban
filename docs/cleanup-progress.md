@@ -28,7 +28,7 @@ Baselines (captured by PR-T4-0 on 2026-05-25):
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
 | PR-T4-B | 4 | Session persist debouncing | — | — | — | — | — |
 | PR-T4-C | 4 | Cargo dep audit + release profile | **+8** (workspace `Cargo.toml` profile block) | — | n/a (dep audit confirmed already-trimmed; profile only) | 0 (no test changes) | **−9,382,368 bytes / −35.9%** (26,110,304 → 16,727,936) | cold build +55.7s / +19.9% (279.87 → 335.58s) |
-| PR-T4-D | 4 | `CompositeHooks` short-circuit | — | — | — | — | — |
+| PR-T4-D | 4 | `CompositeHooks` short-circuit | **+233** (1 src file: +37 net for `is_noop` + `all_noop` field + `push` + 22 early-return guards; 1 test file: +194 for 5 new tests + `AssertSilentNoop` counting wrapper) | — | n/a (perf change, no dup consolidation) | +5 net new (in `crates/caliban-agent-core/tests/hooks_events.rs`) | n/a | per-event 0-await on the all-Noop hot path (no microbench captured) |
 | PR-T5-A | 5 | App builder | — | — | — | — | — |
 | PR-T5-B | 5 | `CalibanError` centralization | — | — | — | — | — |
 
@@ -137,6 +137,74 @@ caliban bootstrap itself.
 - `/usr/bin/time -p` was unusable at sub-100 ms resolution on macOS;
   switched to Python's `perf_counter_ns()` and documented the per-run
   millisecond samples directly rather than rounded centisecond `real`.
+
+## PR-T4-D notes
+
+Adds an all-noop short-circuit to `CompositeHooks` so per-event fan-out
+collapses to a single `Ok(...)` return when every layer is a no-op.
+
+### Mechanism
+
+- New `Hooks::is_noop(&self) -> bool` trait method with a default `false`.
+  `NoopHooks` overrides to `true`. Custom impls may opt in if they truly
+  do nothing — the composite trusts the signal.
+- `CompositeHooks` gains an `all_noop: bool` field, set in `new` via
+  `layers.iter().all(|h| h.is_noop())`.
+- New `CompositeHooks::push` method: appends a layer and flips
+  `all_noop` to `false` if the new layer is not a no-op. Adding a
+  `NoopHooks` after a real hook keeps the flag `false` (monotonic in
+  the direction of "we have a real hook").
+- Every event method (22 total — `before_run`/`after_run`, `before_turn`/
+  `after_turn`, `before_tool`/`after_tool`, `session_start`/`session_end`,
+  `user_prompt_submit`, `pre_compact`/`post_compact`, `config_change`,
+  `cwd_changed`, `file_changed`, `permission_request`/`permission_denied`,
+  `notification`, `subagent_start`/`subagent_stop`, `task_created`/
+  `task_completed`) gets an explicit `if self.all_noop { return Ok(...); }`
+  guard. No macro — explicit guards are easier to read and keep the
+  call-graph trivial under clippy.
+- `new`'s `Self { layers }` becomes `Self { layers, all_noop }`; the
+  `Debug` impl adds `all_noop` to the `debug_struct` field list. No
+  other call-site touched: every existing `CompositeHooks::new(vec![...])`
+  in the binary (`caliban/src/startup.rs::build_permissions`) and tests
+  compiles unchanged.
+
+### Hot path
+
+Typical runs without configured hooks build a composite with a single
+`NoopHooks` layer (or the binary's permissions-only composite that
+sometimes wraps a `NoopHooks` tail). On those paths the per-turn 15+
+event fires (before_run + before_turn + N×before_tool + N×after_tool +
+after_turn + after_run, plus session/prompt/compact events) collapse to
+trivial `Ok(...)` returns with zero `.await` yields and zero `Arc`
+clones. The `AssertSilentNoop` test wrapper proves no member is even
+touched on the short-circuit path.
+
+### Tests added (5 net new)
+
+In `crates/caliban-agent-core/tests/hooks_events.rs`:
+
+- `composite_all_noop_members_sets_all_noop_true` — `CompositeHooks::new`
+  with all-`NoopHooks` members reports `all_noop()` true; empty composite
+  is also `all_noop()` true.
+- `composite_push_non_noop_flips_all_noop_false` — pushing a real
+  (non-noop) `RecorderHooks` flips the flag.
+- `composite_re_adding_noop_after_real_hook_keeps_flag_false` — the
+  flag is monotonic: pushing a `NoopHooks` after a real hook does not
+  flip it back.
+- `composite_all_noop_returns_default_without_calling_members` — drives
+  every event on an all-noop composite (two `AssertSilentNoop` wrappers
+  that panic-bump if called) and asserts `invocation_count == 0` for
+  both wrappers. Confirms zero member calls / zero `.await` yields on
+  the short-circuit path.
+- `composite_mixed_noop_and_real_calls_the_real_one` — mixed composition
+  (one `NoopHooks` + one `RecorderHooks`); `all_noop()` reports false
+  and the recorder observes every fired event.
+
+### Coordination
+
+The F5+F9 spec said it might touch `hooks.rs` for fire-points; verified
+no overlap — F5+F9 consumes `StopCondition` in driver code only, not in
+the trait method bodies that this PR rewrites.
 
 ## PR-T3-A notes
 

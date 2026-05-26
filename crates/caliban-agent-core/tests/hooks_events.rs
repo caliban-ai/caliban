@@ -627,3 +627,399 @@ async fn envelope_with_cwd_inserts_cwd_string() {
     );
     assert_eq!(env["cwd"], "/proj");
 }
+
+// ---------------------------------------------------------------------------
+// CompositeHooks all-noop short-circuit (PR-T4-D)
+// ---------------------------------------------------------------------------
+
+/// Counting wrapper that asserts no event method is ever called. Used to
+/// verify the all-noop short-circuit path doesn't `await` member hooks.
+///
+/// Unlike `NoopHooks`, this impl reports `is_noop() = true` (so it doesn't
+/// flip the composite's flag) but panics if any event method actually runs —
+/// proving the composite never delegated.
+#[derive(Default)]
+struct AssertSilentNoop {
+    invocations: std::sync::atomic::AtomicUsize,
+}
+
+impl AssertSilentNoop {
+    fn invocation_count(&self) -> usize {
+        self.invocations.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn bump(&self) {
+        self.invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Hooks for AssertSilentNoop {
+    fn is_noop(&self) -> bool {
+        true
+    }
+    async fn before_run(&self, _: &caliban_agent_core::RunCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn after_run(
+        &self,
+        _: &caliban_agent_core::RunCtx<'_>,
+        _: &caliban_agent_core::RunHookOutcome,
+    ) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn before_turn(&self, _: &caliban_agent_core::TurnCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn after_turn(
+        &self,
+        _: &caliban_agent_core::TurnCtx<'_>,
+        _: &caliban_agent_core::TurnOutcome,
+    ) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn before_tool(&self, _: &ToolCtx<'_>) -> Result<HookDecision> {
+        self.bump();
+        Ok(HookDecision::Allow)
+    }
+    async fn after_tool(
+        &self,
+        _: &ToolCtx<'_>,
+        _: &std::result::Result<
+            Vec<caliban_provider::ContentBlock>,
+            caliban_agent_core::tool::ToolError,
+        >,
+    ) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn session_start(&self, _: &SessionCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn session_end(&self, _: &SessionCtx<'_>, _: &SessionOutcome) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn user_prompt_submit(&self, _: &PromptCtx<'_>) -> Result<HookDecision> {
+        self.bump();
+        Ok(HookDecision::Allow)
+    }
+    async fn pre_compact(&self, _: &CompactCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn post_compact(&self, _: &CompactCtx<'_>, _: &CompactOutcome) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn config_change(&self, _: &ConfigChangeCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn cwd_changed(&self, _: &CwdChangedCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn file_changed(&self, _: &FileChangedCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn permission_request(&self, _: &PermCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn permission_denied(&self, _: &PermCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn notification(&self, _: &NotificationCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn subagent_start(&self, _: &SubagentCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn subagent_stop(&self, _: &SubagentCtx<'_>, _: &SubagentOutcome) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn task_created(&self, _: &TaskCtx<'_>) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+    async fn task_completed(&self, _: &TaskCtx<'_>, _: &TaskOutcome) -> Result<()> {
+        self.bump();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn composite_all_noop_members_sets_all_noop_true() {
+    let composite = CompositeHooks::new(vec![
+        Arc::new(NoopHooks) as Arc<dyn Hooks>,
+        Arc::new(NoopHooks) as Arc<dyn Hooks>,
+        Arc::new(NoopHooks) as Arc<dyn Hooks>,
+    ]);
+    assert!(composite.all_noop());
+
+    // Empty composite is also all-noop (nothing to call).
+    let empty = CompositeHooks::new(vec![]);
+    assert!(empty.all_noop());
+}
+
+#[tokio::test]
+async fn composite_push_non_noop_flips_all_noop_false() {
+    let mut composite = CompositeHooks::new(vec![Arc::new(NoopHooks) as Arc<dyn Hooks>]);
+    assert!(composite.all_noop());
+
+    // RecorderHooks does not override is_noop -> defaults to false.
+    composite.push(Arc::new(RecorderHooks::default()) as Arc<dyn Hooks>);
+    assert!(!composite.all_noop());
+    assert_eq!(composite.len(), 2);
+}
+
+#[tokio::test]
+async fn composite_re_adding_noop_after_real_hook_keeps_flag_false() {
+    let mut composite = CompositeHooks::new(vec![]);
+    assert!(composite.all_noop());
+
+    // Push a real (non-noop) hook -> flag flips false.
+    composite.push(Arc::new(RecorderHooks::default()) as Arc<dyn Hooks>);
+    assert!(!composite.all_noop());
+
+    // Pushing a NoopHooks afterwards must NOT flip the flag back to true:
+    // the composite still contains a real hook that needs dispatching.
+    composite.push(Arc::new(NoopHooks) as Arc<dyn Hooks>);
+    assert!(!composite.all_noop(), "flag must remain false (monotonic)");
+    assert_eq!(composite.len(), 2);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn composite_all_noop_returns_default_without_calling_members() {
+    let silent_a = Arc::new(AssertSilentNoop::default());
+    let silent_b = Arc::new(AssertSilentNoop::default());
+    let composite = CompositeHooks::new(vec![
+        Arc::clone(&silent_a) as Arc<dyn Hooks>,
+        Arc::clone(&silent_b) as Arc<dyn Hooks>,
+    ]);
+    assert!(composite.all_noop());
+
+    let cwd = PathBuf::from("/t");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run_ctx = caliban_agent_core::RunCtx {
+        session_id: "s",
+        workspace_root: &cwd,
+        user_message: None,
+        prompt_index: 0,
+        cancel: cancel.clone(),
+    };
+    let run_outcome = caliban_agent_core::RunHookOutcome {
+        turn_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        success: true,
+    };
+    composite.before_run(&run_ctx).await.unwrap();
+    composite.after_run(&run_ctx, &run_outcome).await.unwrap();
+
+    let cfg = caliban_agent_core::AgentConfig::default();
+    let turn_ctx = caliban_agent_core::TurnCtx {
+        turn_index: 0,
+        messages: &[],
+        config: &cfg,
+    };
+    let turn_outcome = caliban_agent_core::TurnOutcome {
+        assistant_message: caliban_provider::Message::user_text(""),
+        tool_results: vec![],
+        stop_reason: caliban_provider::StopReason::EndTurn,
+        usage: caliban_provider::Usage::default(),
+        continue_loop: false,
+    };
+    composite.before_turn(&turn_ctx).await.unwrap();
+    composite
+        .after_turn(&turn_ctx, &turn_outcome)
+        .await
+        .unwrap();
+
+    let input = serde_json::json!({});
+    let tool_ctx = ToolCtx {
+        turn_index: 0,
+        tool_use_id: "t",
+        tool_name: "Bash",
+        input: &input,
+    };
+    let bt = composite.before_tool(&tool_ctx).await.unwrap();
+    assert!(matches!(bt, HookDecision::Allow));
+    let tool_result: std::result::Result<
+        Vec<caliban_provider::ContentBlock>,
+        caliban_agent_core::tool::ToolError,
+    > = Ok(vec![]);
+    composite.after_tool(&tool_ctx, &tool_result).await.unwrap();
+
+    let session_ctx = SessionCtx {
+        session_id: "s",
+        cwd: &cwd,
+        provider: "p",
+        model: "m",
+    };
+    let session_outcome = SessionOutcome {
+        turn_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    composite.session_start(&session_ctx).await.unwrap();
+    composite
+        .session_end(&session_ctx, &session_outcome)
+        .await
+        .unwrap();
+
+    let prompt_ctx = PromptCtx {
+        session_id: "s",
+        cwd: &cwd,
+        turn_index: 0,
+        prompt: "hi",
+        attachments: &[],
+    };
+    let ps = composite.user_prompt_submit(&prompt_ctx).await.unwrap();
+    assert!(matches!(ps, HookDecision::Allow));
+
+    let compact_ctx = CompactCtx {
+        session_id: "s",
+        token_count_before: 100,
+        strategy: "Noop",
+    };
+    let compact_outcome = CompactOutcome {
+        token_count_after: 100,
+        compacted: false,
+    };
+    composite.pre_compact(&compact_ctx).await.unwrap();
+    composite
+        .post_compact(&compact_ctx, &compact_outcome)
+        .await
+        .unwrap();
+
+    let cc_ctx = ConfigChangeCtx {
+        changed_keys: &[],
+        new_settings_summary: "{}",
+    };
+    composite.config_change(&cc_ctx).await.unwrap();
+
+    let cwd_ctx = CwdChangedCtx {
+        old_cwd: &cwd,
+        new_cwd: &cwd,
+    };
+    composite.cwd_changed(&cwd_ctx).await.unwrap();
+
+    let fc_ctx = FileChangedCtx {
+        path: &cwd,
+        kind: FileChangeKind::Modified,
+        tool: "Write",
+    };
+    composite.file_changed(&fc_ctx).await.unwrap();
+
+    let perm_ctx = PermCtx {
+        turn_index: 0,
+        tool_use_id: "t",
+        tool_name: "Bash",
+        input: &input,
+        rule_action: "allow",
+        rule_comment: None,
+    };
+    composite.permission_request(&perm_ctx).await.unwrap();
+    composite.permission_denied(&perm_ctx).await.unwrap();
+
+    let notif_ctx = NotificationCtx {
+        level: NotificationLevel::Info,
+        message: "hi",
+    };
+    composite.notification(&notif_ctx).await.unwrap();
+
+    let sub_ctx = SubagentCtx {
+        parent_turn_index: 0,
+        agent_name: "agent",
+        task_id: "task",
+    };
+    let sub_outcome = SubagentOutcome {
+        success: true,
+        final_text: "done".into(),
+    };
+    composite.subagent_start(&sub_ctx).await.unwrap();
+    composite
+        .subagent_stop(&sub_ctx, &sub_outcome)
+        .await
+        .unwrap();
+
+    let task_ctx = TaskCtx {
+        task_id: "t",
+        content: "do thing",
+        status: "pending",
+    };
+    let task_outcome = TaskOutcome {
+        terminal_status: "completed".into(),
+    };
+    composite.task_created(&task_ctx).await.unwrap();
+    composite
+        .task_completed(&task_ctx, &task_outcome)
+        .await
+        .unwrap();
+
+    // The flag was true, so the composite must have short-circuited every
+    // event without ever delegating to either silent wrapper.
+    assert_eq!(
+        silent_a.invocation_count(),
+        0,
+        "silent_a should not have been called"
+    );
+    assert_eq!(
+        silent_b.invocation_count(),
+        0,
+        "silent_b should not have been called"
+    );
+}
+
+#[tokio::test]
+async fn composite_mixed_noop_and_real_calls_the_real_one() {
+    // Mixed composition: one NoopHooks + one RecorderHooks. all_noop must be
+    // false and the recorder must observe every event the composite fans out.
+    let recorder = Arc::new(RecorderHooks::default());
+    let composite = CompositeHooks::new(vec![
+        Arc::new(NoopHooks) as Arc<dyn Hooks>,
+        Arc::clone(&recorder) as Arc<dyn Hooks>,
+    ]);
+    assert!(
+        !composite.all_noop(),
+        "mixed composite must not be all-noop"
+    );
+
+    let cwd = PathBuf::from("/t");
+    let session_ctx = SessionCtx {
+        session_id: "S",
+        cwd: &cwd,
+        provider: "p",
+        model: "m",
+    };
+    composite.session_start(&session_ctx).await.unwrap();
+
+    let notif_ctx = NotificationCtx {
+        level: NotificationLevel::Warn,
+        message: "test",
+    };
+    composite.notification(&notif_ctx).await.unwrap();
+
+    let snapshot = recorder.snapshot();
+    assert_eq!(
+        snapshot,
+        vec![
+            "session_start:S".to_string(),
+            "notification:warn".to_string()
+        ],
+        "real hook must have been called on every event"
+    );
+}

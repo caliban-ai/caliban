@@ -445,6 +445,18 @@ pub trait Hooks: Send + Sync {
     async fn task_completed(&self, _ctx: &TaskCtx<'_>, _outcome: &TaskOutcome) -> Result<()> {
         Ok(())
     }
+
+    /// Returns `true` when this hook implementation is guaranteed to be a
+    /// no-op for every event. Used by [`CompositeHooks`] to short-circuit
+    /// fan-out when every member is a no-op (avoids per-event `await` yields
+    /// on the hot path).
+    ///
+    /// The default returns `false`; only [`NoopHooks`] overrides to `true`.
+    /// Custom implementations may opt in if they truly do nothing — the
+    /// composite trusts this signal and will skip calling the impl entirely.
+    fn is_noop(&self) -> bool {
+        false
+    }
 }
 
 /// Default no-op hooks. Use this when you don't need observability callbacks.
@@ -452,7 +464,11 @@ pub trait Hooks: Send + Sync {
 pub struct NoopHooks;
 
 #[async_trait]
-impl Hooks for NoopHooks {}
+impl Hooks for NoopHooks {
+    fn is_noop(&self) -> bool {
+        true
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CompositeHooks
@@ -469,14 +485,30 @@ impl Hooks for NoopHooks {}
 ///
 /// This lets [`crate::permissions::PermissionsHook`] compose with audit /
 /// observability hooks loaded from `hooks.toml`.
+///
+/// ## All-noop short-circuit
+///
+/// When every layer reports `Hooks::is_noop() == true` (or the composite is
+/// empty), `all_noop` is set to `true` at construction. Each event method
+/// then returns the default `Ok(...)` immediately without iterating /
+/// awaiting any layer. This eliminates 15+ wasted `await` yields per
+/// turn-end on the common path where no hooks are configured.
+///
+/// The flag is monotonic in the direction of "we have a real hook": once
+/// [`CompositeHooks::push`] is given a non-noop layer the flag flips to
+/// `false` and stays false even if a later `push` adds a [`NoopHooks`].
 pub struct CompositeHooks {
     layers: Vec<std::sync::Arc<dyn Hooks>>,
+    /// `true` when every layer is a no-op (or `layers` is empty). Set at
+    /// construction; updated by [`CompositeHooks::push`].
+    all_noop: bool,
 }
 
 impl std::fmt::Debug for CompositeHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompositeHooks")
             .field("layers", &self.layers.len())
+            .field("all_noop", &self.all_noop)
             .finish()
     }
 }
@@ -486,7 +518,19 @@ impl CompositeHooks {
     /// the outermost (highest priority for `before_*`).
     #[must_use]
     pub fn new(layers: Vec<std::sync::Arc<dyn Hooks>>) -> Self {
-        Self { layers }
+        let all_noop = layers.iter().all(|h| h.is_noop());
+        Self { layers, all_noop }
+    }
+
+    /// Append a layer to the composite. The flag tracking the all-noop
+    /// short-circuit is updated so that adding a non-noop layer flips it to
+    /// `false`; adding a [`NoopHooks`] after a real hook keeps the flag
+    /// `false` (monotonic in the direction of "we have a real hook").
+    pub fn push(&mut self, layer: std::sync::Arc<dyn Hooks>) {
+        if !layer.is_noop() {
+            self.all_noop = false;
+        }
+        self.layers.push(layer);
     }
 
     /// Number of layers.
@@ -500,11 +544,22 @@ impl CompositeHooks {
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
+
+    /// True when every layer is a no-op (or the composite is empty). When
+    /// `true`, every event method returns the default `Ok(...)` without
+    /// awaiting any member.
+    #[must_use]
+    pub fn all_noop(&self) -> bool {
+        self.all_noop
+    }
 }
 
 #[async_trait]
 impl Hooks for CompositeHooks {
     async fn before_run(&self, ctx: &RunCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.before_run(ctx).await?;
         }
@@ -512,6 +567,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn after_run(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.after_run(ctx, outcome).await?;
         }
@@ -519,6 +577,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.before_turn(ctx).await?;
         }
@@ -526,6 +587,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn after_turn(&self, ctx: &TurnCtx<'_>, outcome: &crate::TurnOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.after_turn(ctx, outcome).await?;
         }
@@ -533,6 +597,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
+        if self.all_noop {
+            return Ok(HookDecision::Allow);
+        }
         // Thread UpdatedInput through layers by owning the latest value.
         let mut latest_input: Option<serde_json::Value> = None;
         for h in &self.layers {
@@ -563,6 +630,9 @@ impl Hooks for CompositeHooks {
         ctx: &ToolCtx<'_>,
         result: &std::result::Result<Vec<ContentBlock>, ToolError>,
     ) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.after_tool(ctx, result).await?;
         }
@@ -570,6 +640,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.session_start(ctx).await?;
         }
@@ -577,6 +650,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.session_end(ctx, outcome).await?;
         }
@@ -584,6 +660,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn user_prompt_submit(&self, ctx: &PromptCtx<'_>) -> Result<HookDecision> {
+        if self.all_noop {
+            return Ok(HookDecision::Allow);
+        }
         let mut latest_prompt: Option<String> = None;
         for h in &self.layers {
             let effective_prompt = latest_prompt.as_deref().unwrap_or(ctx.prompt);
@@ -614,6 +693,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn pre_compact(&self, ctx: &CompactCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.pre_compact(ctx).await?;
         }
@@ -621,6 +703,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn post_compact(&self, ctx: &CompactCtx<'_>, outcome: &CompactOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.post_compact(ctx, outcome).await?;
         }
@@ -628,6 +713,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn config_change(&self, ctx: &ConfigChangeCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.config_change(ctx).await?;
         }
@@ -635,6 +723,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn cwd_changed(&self, ctx: &CwdChangedCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.cwd_changed(ctx).await?;
         }
@@ -642,6 +733,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn file_changed(&self, ctx: &FileChangedCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.file_changed(ctx).await?;
         }
@@ -649,6 +743,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn permission_request(&self, ctx: &PermCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.permission_request(ctx).await?;
         }
@@ -656,6 +753,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn permission_denied(&self, ctx: &PermCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.permission_denied(ctx).await?;
         }
@@ -663,6 +763,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn notification(&self, ctx: &NotificationCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.notification(ctx).await?;
         }
@@ -670,6 +773,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn subagent_start(&self, ctx: &SubagentCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.subagent_start(ctx).await?;
         }
@@ -677,6 +783,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn subagent_stop(&self, ctx: &SubagentCtx<'_>, outcome: &SubagentOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.subagent_stop(ctx, outcome).await?;
         }
@@ -684,6 +793,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn task_created(&self, ctx: &TaskCtx<'_>) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in &self.layers {
             h.task_created(ctx).await?;
         }
@@ -691,6 +803,9 @@ impl Hooks for CompositeHooks {
     }
 
     async fn task_completed(&self, ctx: &TaskCtx<'_>, outcome: &TaskOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
         for h in self.layers.iter().rev() {
             h.task_completed(ctx, outcome).await?;
         }
