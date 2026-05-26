@@ -193,6 +193,59 @@ Cargo feature flags gate cloud transports per-crate. To enable Bedrock-Claude + 
 cargo build --features caliban-provider-anthropic/bedrock,caliban-provider-google/vertex,caliban-provider-openai/azure
 ```
 
+## Known model limitations
+
+### Qwen3 reasoning models on LM Studio — multi-turn tool use unsupported
+
+**Affected models.** Qwen3-family *reasoning* variants when served via
+LM Studio: e.g. `qwen3.5-9b-mlx`, `qwen3-72b-mlx`, and similar Qwen3
+reasoning-mode builds. Non-reasoning Qwen variants are not affected.
+
+**Symptom.** The first tool call in a conversation works. After the
+`tool_result` is sent back, the model's *follow-up* tool call is
+serialized as Qwen-native `<tool_call>` XML inside the OpenAI
+`content` field rather than populating the OpenAI `tool_calls` array:
+
+```
+<tool_call>
+<function=Glob>
+<parameter=pattern>**/*.yaml</parameter>
+</function>
+</tool_call>
+```
+
+caliban's OpenAI-spec parser correctly treats this as text content,
+sees no `tool_calls` field, gets `finish_reason: "stop"`, and ends the
+turn without dispatching anything. The user sees a confusing
+empty-looking assistant turn (or the XML rendered as prose) and no
+tool ever runs.
+
+Text-only follow-ups after a `tool_result` work fine; only the
+second-or-later *tool dispatch* in a chain is broken.
+
+**Why caliban doesn't fix this.** LM Studio passes the model's output
+through verbatim and does not rewrite `<tool_call>` XML into the
+OpenAI `tool_calls` array. Building and maintaining a per-model-family
+content-side XML scanner inside caliban's OpenAI provider would add
+parsing complexity and ongoing maintenance for every Qwen template
+variation. We've elected to keep the bug visible and document the
+limitation instead.
+
+**Workarounds (any one of):**
+
+1. **Configure LM Studio's per-model tool-call adapter** to emit
+   OpenAI-style `tool_calls`. LM Studio exposes a per-model JSON
+   config for tool-call normalization; if your build of LM Studio
+   supports rewriting Qwen-native tool calls into the OpenAI shape,
+   enable it for the affected model.
+2. **Use a non-reasoning Qwen variant** (e.g. a plain `qwen3-*` instruct
+   build without reasoning mode) served via LM Studio.
+3. **Use a hosted provider** — Anthropic, OpenAI, or Google — where
+   tool-call schemas are normalized server-side.
+
+See [`docs/2026-05-25-lmstudio-probe-findings.md`](docs/2026-05-25-lmstudio-probe-findings.md)
+Finding 4 for the full reproduction and analysis.
+
 ## Repository layout
 
 ```
