@@ -16,7 +16,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod app;
-mod ask;
+pub(crate) mod ask;
 mod attach;
 mod completer;
 mod events;
