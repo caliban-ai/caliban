@@ -30,8 +30,13 @@ pub mod tool;
 pub use client::{Conn, Transport};
 pub use config::{
     McpConfig, OauthMode, ServerConfig, ServerPermissions, TransportKind, discovery_paths,
-    is_valid_server_name, load_config,
+    is_valid_server_name,
 };
+// `load_config` is `#[deprecated]` in favor of `caliban-settings` (PR-T3-B).
+// Re-exported with `#[allow(deprecated)]` so the lint surfaces at the call
+// site, not at the crate boundary.
+#[allow(deprecated)]
+pub use config::load_config;
 pub use elicitation::{
     DEFAULT_ELICITATION_TIMEOUT, ElicitationBridge, ElicitationError, ElicitationReceiver,
     ElicitationRequest, ElicitationResponse, SharedElicitationBridge, elicit_rule_pattern,

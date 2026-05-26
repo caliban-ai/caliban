@@ -159,8 +159,11 @@ async fn main() -> Result<()> {
     // MCP servers — Phase B: stdio + HTTP + SSE transports (ADR 0023).
     // Retains the parsed `McpConfig.servers` map so the permissions setup
     // downstream can fold `[server.X.permissions]` blocks into the global
-    // rule list.
-    let (mcp_summaries, mcp_server_cfg) = startup::start_mcp(&args, &mut registry).await;
+    // rule list. MCP servers come from the unified Settings snapshot
+    // (caliban-settings already folds legacy `mcp.toml` via its compat
+    // shim).
+    let (mcp_summaries, mcp_server_cfg) =
+        startup::start_mcp(&args, &settings_snapshot, &mut registry).await;
 
     let model = args
         .model
@@ -173,13 +176,17 @@ async fn main() -> Result<()> {
     // (ADR 0037).
     startup::install_sub_agent(&args, &mut registry, &provider, &model);
 
-    // Load hooks.toml (project + user scope). The in-process
-    // PermissionsHook still runs even when --no-hooks/--bare are set.
-    let hooks_cfg = startup::load_hooks_config(&args);
-    let hooks_cfg_summary = (
-        hooks_cfg.total_handler_count(),
-        hooks_cfg.disable_all_hooks || args.no_hooks,
-    );
+    // Project hooks config out of the layered Settings snapshot (ADR 0026).
+    // The in-process PermissionsHook still runs even when --no-hooks /
+    // --bare are set; the legacy `hooks.toml` loader is reachable through
+    // the `caliban-settings::compat` shim during the back-compat window.
+    let hooks_cfg = startup::load_hooks_config(&args, &settings_snapshot);
+    // The summary count includes the legacy-compat handler count when
+    // settings.json was silent and hooks.toml was loaded via the compat
+    // shim (preserved via `Settings::legacy_hook_handler_count`).
+    let total_handlers = hooks_cfg.total_handler_count()
+        + settings_snapshot.legacy_hook_handler_count().unwrap_or(0);
+    let hooks_cfg_summary = (total_handlers, hooks_cfg.disable_all_hooks || args.no_hooks);
 
     // Decide whether the TUI is the active mode (and therefore should provide
     // the interactive Ask modal).
@@ -202,7 +209,7 @@ async fn main() -> Result<()> {
         &model,
         &permission_mode,
         tui_mode_active,
-    )?;
+    );
 
     // When `--include-hook-events` is set, allocate a buffer so the
     // `HeadlessHookSink` can capture every emitted event for the

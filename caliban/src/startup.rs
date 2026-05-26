@@ -637,8 +637,14 @@ pub(crate) fn load_plugin_manager(
 /// Returns `(summaries, server_cfg)` — the latter is retained so the
 /// permissions setup downstream can fold `[server.X.permissions]` blocks
 /// into the global rule list.
+///
+/// Reads the MCP server map from the unified `Settings` snapshot (ADR 0026);
+/// the legacy `caliban_mcp_client::load_config` loader is reachable through
+/// the `caliban-settings` compat shim during the one-release deprecation
+/// window and is no longer called directly from the binary.
 pub(crate) async fn start_mcp(
     args: &Args,
+    settings_snapshot: &caliban_settings::Settings,
     registry: &mut ToolRegistry,
 ) -> (
     Vec<caliban_mcp_client::ServerSummary>,
@@ -647,38 +653,25 @@ pub(crate) async fn start_mcp(
     if args.no_mcp || args.bare {
         return (Vec::new(), std::collections::BTreeMap::new());
     }
-    let ws_root_for_mcp = args.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
-    match caliban_mcp_client::load_config(&ws_root_for_mcp) {
-        Ok(cfg) => {
-            let servers_for_perms = cfg.servers.clone();
-            match caliban_mcp_client::McpClientManager::start(&cfg).await {
-                Ok(mgr) => {
-                    mgr.register_all(registry);
-                    if mgr.enabled_count() > 0
-                        || mgr.skipped_disabled() > 0
-                        || mgr.failed_count() > 0
-                    {
-                        tracing::info!(
-                            target: caliban_common::tracing_targets::TARGET_MCP,
-                            connected = mgr.enabled_count(),
-                            failed = mgr.failed_count(),
-                            disabled = mgr.skipped_disabled(),
-                            "mcp manager started",
-                        );
-                    }
-                    (mgr.summaries().to_vec(), servers_for_perms)
-                }
-                Err(e) => {
-                    tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp manager start failed; continuing without MCP");
-                    (Vec::new(), servers_for_perms)
-                }
+    let cfg = settings_snapshot.mcp_config();
+    let servers_for_perms = cfg.servers.clone();
+    match caliban_mcp_client::McpClientManager::start(&cfg).await {
+        Ok(mgr) => {
+            mgr.register_all(registry);
+            if mgr.enabled_count() > 0 || mgr.skipped_disabled() > 0 || mgr.failed_count() > 0 {
+                tracing::info!(
+                    target: caliban_common::tracing_targets::TARGET_MCP,
+                    connected = mgr.enabled_count(),
+                    failed = mgr.failed_count(),
+                    disabled = mgr.skipped_disabled(),
+                    "mcp manager started",
+                );
             }
+            (mgr.summaries().to_vec(), servers_for_perms)
         }
         Err(e) => {
-            tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp config load failed; continuing without MCP");
-            (Vec::new(), std::collections::BTreeMap::new())
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp manager start failed; continuing without MCP");
+            (Vec::new(), servers_for_perms)
         }
     }
 }
@@ -785,23 +778,22 @@ pub(crate) fn install_sub_agent(
     ));
 }
 
-/// Load `hooks.toml` (project + user scope). Empty config when missing or
-/// when `--no-hooks` is set; the in-process `PermissionsHook` still runs.
-/// `--bare` (ADR 0025) suppresses `hooks.toml` load entirely.
-pub(crate) fn load_hooks_config(args: &Args) -> caliban_agent_core::HooksConfig {
-    let workspace_root_for_hooks = args.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
+/// Project the hooks configuration out of the layered `Settings` snapshot.
+/// Empty config when `--no-hooks` is set or `--bare` is in effect.
+///
+/// Reads from `Settings::hook_config()` (ADR 0026) instead of the legacy
+/// `caliban_agent_core::HooksConfig::load` loader; the latter is now
+/// `#[deprecated]` and remains reachable only through the
+/// `caliban-settings::compat` shim during the one-release back-compat
+/// window.
+pub(crate) fn load_hooks_config(
+    args: &Args,
+    settings_snapshot: &caliban_settings::Settings,
+) -> caliban_agent_core::HooksConfig {
     if args.no_hooks || args.bare {
         return caliban_agent_core::HooksConfig::default();
     }
-    match caliban_agent_core::HooksConfig::load(&workspace_root_for_hooks) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "hooks.toml load failed; continuing with empty hooks config");
-            caliban_agent_core::HooksConfig::default()
-        }
-    }
+    settings_snapshot.hook_config()
 }
 
 /// Outcome of [`build_permissions`]: the `Hooks` layer (or `None` when
@@ -815,9 +807,14 @@ pub(crate) struct PermissionsSetup {
 
 /// Build the permissions chain (rules → `ModeFilter` → `PermissionsHook`).
 ///
-/// Layers settings → CLI flags → per-feature `permissions.toml` → MCP
-/// per-server rules. Returns `PermissionsSetup::default`-equivalent
-/// (all-`None`) when `--no-permissions` is set.
+/// Layers CLI flags (`--allow` / `--deny` / `--ask`) on top of the rules
+/// projected from the layered `Settings` snapshot (`settings.json` plus
+/// the legacy `permissions.toml` compat fallback already folded in by
+/// `caliban-settings`), then appends the built-in `default_rules` tail
+/// and folds per-server `[server.X.permissions]` blocks.
+///
+/// Returns `PermissionsSetup::default`-equivalent (all-`None`) when
+/// `--no-permissions` is set.
 pub(crate) fn build_permissions(
     args: &Args,
     settings_snapshot: &caliban_settings::Settings,
@@ -826,18 +823,18 @@ pub(crate) fn build_permissions(
     model: &str,
     permission_mode: &caliban_agent_core::SharedPermissionMode,
     tui_mode_active: bool,
-) -> Result<PermissionsSetup> {
+) -> PermissionsSetup {
     use caliban_agent_core::{
         Action, AutoModeClassifier, AutoModeConfig, DEFAULTS_TOKEN, ModeFilter,
-        NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, load_rules,
+        NonInteractiveAskHandler, NoopHooks, PermissionsHook, Rule, default_rules,
     };
 
     if args.no_permissions {
-        return Ok(PermissionsSetup {
+        return PermissionsSetup {
             permissions_hook: None,
             tui_ask_rx: None,
             auto_mode_classifier: None,
-        });
+        };
     }
     let mut cli_rules: Vec<Rule> = Vec::new();
     for p in &args.allow {
@@ -861,18 +858,15 @@ pub(crate) fn build_permissions(
             comment: None,
         });
     }
-    // Layer settings.permissions into cli_rules at *higher* priority
-    // than the per-feature TOML fallback (load_rules already appends
-    // the project + user permissions.toml + defaults below). CLI
-    // flags still win because they were pushed first.
+    // Layer Settings permission rules (which already incorporate the
+    // legacy permissions.toml via the caliban-settings compat shim) at
+    // lower priority than CLI flags. The built-in default-rules tail
+    // closes the chain (catch-all `*` Ask).
+    let mut global_rules = cli_rules;
     for r in settings_snapshot.permission_rules() {
-        cli_rules.push(r);
+        global_rules.push(r);
     }
-    let workspace_root = args.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
-    let global_rules =
-        load_rules(cli_rules, &workspace_root).context("loading permissions rules")?;
+    global_rules.extend(default_rules());
     // Phase B: fold per-server `[server.X.permissions]` blocks into the
     // global rule list at the documented priority slot
     // (global deny → server deny/ask/allow → global ask/allow → default).
@@ -915,11 +909,11 @@ pub(crate) fn build_permissions(
         Some(Arc::clone(&classifier)),
         args.allow_dangerously_skip_permissions,
     ));
-    Ok(PermissionsSetup {
+    PermissionsSetup {
         permissions_hook: Some(filter),
         tui_ask_rx: ask_rx,
         auto_mode_classifier: Some(classifier),
-    })
+    }
 }
 
 /// Fire the `session_start` (or `session_end`) hook with the standard

@@ -206,6 +206,10 @@ pub fn discovery_paths(workspace_root: &Path) -> (Option<PathBuf>, PathBuf) {
 /// [`McpError::InvalidServerName`] if a server key violates the naming rule,
 /// or one of the transport-specific validation variants
 /// ([`McpError::InvalidUrl`], [`McpError::MissingUrl`], etc.).
+#[deprecated(
+    since = "0.0.1",
+    note = "load via caliban-settings; legacy loaders remove in v0.2"
+)]
 pub fn load_config(workspace_root: &Path) -> Result<McpConfig, McpError> {
     let (user, project) = discovery_paths(workspace_root);
     let mut merged: BTreeMap<String, ServerConfig> = BTreeMap::new();

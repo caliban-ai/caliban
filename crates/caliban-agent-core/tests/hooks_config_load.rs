@@ -1,4 +1,11 @@
 //! Integration tests for `hooks.toml` loading from project + user scope.
+//!
+//! These tests exercise the legacy `HooksConfig::load_one` / `HooksConfig::load`
+//! entry points, which are `#[deprecated]` in favor of `caliban-settings`.
+//! The legacy loaders remain functional for one release cycle, so we
+//! suppress the deprecation lint here.
+
+#![allow(deprecated)]
 
 use std::path::PathBuf;
 

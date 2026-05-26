@@ -47,6 +47,10 @@ impl SlashCommand for HooksCommand {
             .workspace
             .clone()
             .unwrap_or_else(|| ctx.app.cwd.clone());
+        // Legacy loader (deprecated) — kept here for the `/hooks` slash
+        // overlay which surfaces the typed handler list from `hooks.toml`.
+        // The canonical Settings-based summary lives in startup.rs.
+        #[allow(deprecated)]
         let cfg = caliban_agent_core::HooksConfig::load(&workspace_root).unwrap_or_default();
         if cfg.total_handler_count() == 0 {
             ctx.app.transcript.push(TranscriptLine::Info(

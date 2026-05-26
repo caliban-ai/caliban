@@ -48,8 +48,13 @@ pub use permission_mode::{
 };
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
-    default_rules, load_rules, load_rules_file,
+    default_rules,
 };
+// `load_rules` / `load_rules_file` are `#[deprecated]` in favor of
+// `caliban-settings` (PR-T3-B). Re-exported with `#[allow(deprecated)]`
+// so the consumer-side deprecation warning is the one that surfaces.
+#[allow(deprecated)]
+pub use permissions::{load_rules, load_rules_file};
 pub use plan_mode::{
     PLAN_MODE_ALLOWLIST, SharedPlanMode, is_allowed_in_plan_mode, new_shared_plan_mode,
 };

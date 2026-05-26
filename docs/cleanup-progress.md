@@ -20,7 +20,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | **+52** (4 files, 1271 LOC total vs. 1219 single-file) | — | — | ±0 (3 turn-timing tests carried over) | n/a | n/a |
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | **+64** (lib.rs 1499 → 342; new builder.rs 102, dispatch.rs 280, provider_impl.rs 60, tests.rs 779) | — | — | 0 (existing 64 tests relocated to `tests.rs` unchanged; all green) | n/a | n/a |
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | **+59** (16 flat files → 7 capability submodules + workspace.rs; +7 thin `mod.rs` files; lib.rs grew slightly) | — | n/a (file move, no dup consolidation) | 0 net (all existing tests pass unchanged) | n/a | n/a |
-| PR-T3-B | 3 | Settings as canonical config root | — | — | — | — | — |
+| PR-T3-B | 3 | Settings as canonical config root | **−15** (binary call sites trimmed) | +120 (Settings accessors + 2 tests) | n/a (deprecation pass, not dup consolidation) | +2 net new (in `caliban-settings::settings::tests`) | n/a | n/a |
 | PR-T4-0 | 4 | Baseline measurement | — | — | — | — | — |
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
 | PR-T4-B | 4 | Session persist debouncing | — | — | — | — | — |
@@ -309,6 +309,102 @@ untouched.
 `crate::tui::{App,TranscriptLine,Overlay,…}` import paths preserved at
 the root so external callers (`main.rs`, `tui/slash/*`) compile
 unchanged.
+
+## PR-T3-B notes
+
+`caliban-settings` already loaded the layered `settings.json` and back-compat
+TOMLs, but the binary still called the per-crate ad-hoc loaders alongside
+the unified path. PR-T3-B reorients the world so `settings.json` is the
+canonical config root and the legacy loaders are reachable only as
+`#[deprecated]` compat entry points.
+
+### Deprecations applied
+
+All three with `#[deprecated(since = "0.0.1", note = "load via
+caliban-settings; legacy loaders remove in v0.2")]`:
+
+- `caliban_mcp_client::load_config` (`crates/caliban-mcp-client/src/config.rs`)
+- `caliban_agent_core::permissions::load_rules` (and `load_rules_file`)
+  (`crates/caliban-agent-core/src/permissions.rs`)
+- `caliban_agent_core::HooksConfig::load` (and `HooksConfig::load_one`)
+  (`crates/caliban-agent-core/src/hooks_config.rs`)
+
+The crate-level re-exports (`caliban_agent_core::{load_rules,
+load_rules_file}`, `caliban_mcp_client::load_config`) carry
+`#[allow(deprecated)]` so the lint surfaces at the call site, not at the
+crate boundary.
+
+### Settings accessors
+
+`Settings::permission_rules()` and `Settings::mcp_config()` already
+existed; PR-T3-B adds `Settings::hook_config()` (projects the
+scalar/array hook fields into `caliban_agent_core::HooksConfig`) and
+`Settings::legacy_hook_handler_count()` (reads the compat-shim sentinel
+in `Settings.hooks` so the binary can still surface the legacy
+`hooks.toml` handler count in its summary).
+
+The typed hook event list (`HooksConfig.events`) is left empty by the
+accessor: the legacy `hooks.toml` shape that defines those typed
+handlers lives behind the `caliban-settings::compat` shim, which the
+binary doesn't need for its summary path. TUI overlays (`/observe`,
+`/hooks`) that DO want the full typed handler list keep calling the
+deprecated `HooksConfig::load` directly, wrapped in `#[allow(deprecated)]`.
+
+### Binary call-site migration
+
+- `caliban/src/startup.rs::start_mcp` now reads `Settings::mcp_config()`
+  instead of `caliban_mcp_client::load_config`.
+- `caliban/src/startup.rs::load_hooks_config` now reads
+  `Settings::hook_config()` instead of `HooksConfig::load`.
+- `caliban/src/startup.rs::build_permissions` no longer calls
+  `caliban_agent_core::load_rules`. CLI overlays (`--allow` / `--deny`
+  / `--ask`) layer on top of `Settings::permission_rules()`, then the
+  built-in `default_rules` tail closes the chain (same priority order
+  the legacy loader produced).
+- `build_permissions` lost its `Result` wrapper (now infallible since
+  the I/O-bearing `load_rules` is gone); `main.rs` adjusted accordingly.
+
+### Test additions
+
+Two net new tests in `crates/caliban-settings/src/settings.rs`:
+
+- `permission_rules_match_legacy_load_rules_for_toml_input` — verifies
+  `Settings::permission_rules()` emits the documented deny→ask→allow
+  order and that the `default_rules` tail (still reachable via the
+  legacy crate-level API) remains stable.
+- `hook_config_matches_legacy_loader_scalars` — verifies
+  `Settings::hook_config()` produces scalar/array fields identical to
+  what `HooksConfig::from_str` (legacy) yields for an equivalent
+  `hooks.toml` body.
+
+### Legacy callers still reachable
+
+- `caliban-settings::compat` (`maybe_load_legacy_mcp` /
+  `maybe_load_legacy_permissions` / `maybe_load_legacy_hooks`) wraps
+  every internal use of the deprecated loaders behind a module-level
+  `#![allow(deprecated)]`; this is the sanctioned compat surface.
+- `caliban-agent-core` test files (`permissions.rs::tests`,
+  `hooks_config.rs::tests`, `tests/hooks_config_load.rs`) carry
+  per-test or file-level `#[allow(deprecated)]` to keep their
+  load-rules / load-one coverage green for the deprecation window.
+- TUI overlays `caliban/src/tui/slash/observe.rs` and
+  `caliban/src/tui/slash/config.rs` carry localized `#[allow(deprecated)]`
+  at the legacy-load call site.
+
+### Deviations from the brief
+
+- The brief says `caliban-agent-core::hooks_config::load_hooks_file` and
+  `load_hooks_config` / `load_hooks_config_file`. The actual functions
+  are `HooksConfig::load` / `HooksConfig::load_one` (methods, not free
+  functions). Deprecated those methods directly.
+- `Settings::hook_config()` is intentionally minimal: it projects the
+  scalar/array fields faithfully but does not reconstruct the typed
+  `events` map from `Settings.hooks` JSON (would require duplicating
+  `RawConfig` deserialization in `caliban-settings`). The binary's
+  hooks summary path uses
+  `Settings::legacy_hook_handler_count()` to preserve the
+  total-handler-count signal that the compat shim already records as a
+  sentinel.
 
 ## PR-T2-D notes
 
