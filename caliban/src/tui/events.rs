@@ -26,6 +26,60 @@ use super::transcript_viewer;
 
 // === Agent event handlers ===
 
+/// Severity of a [`StoppedForSurface`] — controls whether the surface
+/// renders as a red transcript [`TranscriptLine::Error`] + toast or a
+/// neutral [`TranscriptLine::Info`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoppedForLevel {
+    /// Provider error / hook denial / compaction failure.
+    Error,
+    /// Max-turns / cancelled.
+    Info,
+}
+
+/// One-line description of a non-`EndOfTurn` [`caliban_agent_core::StopCondition`]
+/// suitable for the transcript / toast surface. Pure (no `App` dependency)
+/// so the mapping is unit-testable.
+#[derive(Debug, Clone)]
+pub(crate) struct StoppedForSurface {
+    /// The user-visible message, wrapped in `[caliban: …]` framing per the
+    /// 2026-05-25 LM Studio probe Findings 5 + 9.
+    pub(crate) line: String,
+    /// Whether to render this as a red error or a neutral info line.
+    pub(crate) level: StoppedForLevel,
+}
+
+/// Map a `StopCondition` to a transcript / toast surface. Returns `None`
+/// for `EndOfTurn` (the default natural stop) so callers can no-op.
+pub(crate) fn stopped_for_surface(
+    stopped_for: &caliban_agent_core::StopCondition,
+) -> Option<StoppedForSurface> {
+    use caliban_agent_core::StopCondition;
+    match stopped_for {
+        StopCondition::EndOfTurn => None,
+        StopCondition::ProviderError(msg) => Some(StoppedForSurface {
+            line: format!("[caliban: provider error: {msg}]"),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::HookDenied(msg) => Some(StoppedForSurface {
+            line: format!("[caliban: hook denied: {msg}]"),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::CompactionFailed(msg) => Some(StoppedForSurface {
+            line: format!("[caliban: compaction failed: {msg}]"),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::MaxTurnsReached(n) => Some(StoppedForSurface {
+            line: format!("[caliban: max-turns ({n}) reached]"),
+            level: StoppedForLevel::Info,
+        }),
+        StopCondition::Cancelled => Some(StoppedForSurface {
+            line: "[caliban: cancelled]".to_string(),
+            level: StoppedForLevel::Info,
+        }),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
     use caliban_agent_core::TurnEvent;
@@ -177,8 +231,25 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
             final_messages,
             total_usage,
             turn_count,
-            ..
+            stopped_for,
         } => {
+            // Surface non-EndOfTurn stop conditions so the user sees *why*
+            // the turn ended (Findings 5 + 9 from the 2026-05-25 LM Studio
+            // probe). The pure helper returns `None` for the EndOfTurn
+            // default; everything else becomes a transcript line + an
+            // optional toast.
+            if let Some(surface) = stopped_for_surface(&stopped_for) {
+                match surface.level {
+                    StoppedForLevel::Error => {
+                        app.transcript
+                            .push(TranscriptLine::Error(surface.line.clone()));
+                        app.toast = Some(toast::Toast::error(surface.line));
+                    }
+                    StoppedForLevel::Info => {
+                        app.transcript.push(TranscriptLine::Info(surface.line));
+                    }
+                }
+            }
             app.transcript.push(TranscriptLine::UsageSummary {
                 input_tokens: total_usage.input_tokens,
                 output_tokens: total_usage.output_tokens,
@@ -1320,4 +1391,66 @@ pub(crate) fn refresh_at_menu(app: &mut App) {
         })
         .collect();
     app.input.open_at_menu(start, ranked_with_full_insert);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caliban_agent_core::StopCondition;
+
+    // -------------------------------------------------------------------
+    // RunEnd.stopped_for surfacing (Findings 5 + 9 from the 2026-05-25
+    // LM Studio probe). The runloop populates `stopped_for` correctly;
+    // these tests cover the TUI's *mapping* from that field to a
+    // user-visible transcript / toast line. Driving a full `App` is
+    // high-friction (many required handles), so we test the pure
+    // helper that `handle_agent_event` delegates to.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn end_of_turn_is_silent() {
+        assert!(stopped_for_surface(&StopCondition::EndOfTurn).is_none());
+    }
+
+    #[test]
+    fn provider_error_surfaces_as_error_with_caliban_framing() {
+        let s = stopped_for_surface(&StopCondition::ProviderError(
+            "HTTP 400: context length exceeded".to_string(),
+        ))
+        .expect("provider error must surface");
+        assert_eq!(s.level, StoppedForLevel::Error);
+        assert_eq!(
+            s.line,
+            "[caliban: provider error: HTTP 400: context length exceeded]",
+        );
+    }
+
+    #[test]
+    fn hook_denied_and_compaction_failed_surface_as_error() {
+        let hd = stopped_for_surface(&StopCondition::HookDenied(
+            "policy: 'Bash' blocked".to_string(),
+        ))
+        .expect("hook denial must surface");
+        assert_eq!(hd.level, StoppedForLevel::Error);
+        assert_eq!(hd.line, "[caliban: hook denied: policy: 'Bash' blocked]");
+
+        let cf = stopped_for_surface(&StopCondition::CompactionFailed(
+            "out of budget".to_string(),
+        ))
+        .expect("compaction failure must surface");
+        assert_eq!(cf.level, StoppedForLevel::Error);
+        assert_eq!(cf.line, "[caliban: compaction failed: out of budget]");
+    }
+
+    #[test]
+    fn max_turns_and_cancelled_surface_as_info() {
+        let mt = stopped_for_surface(&StopCondition::MaxTurnsReached(7))
+            .expect("max-turns must surface");
+        assert_eq!(mt.level, StoppedForLevel::Info);
+        assert_eq!(mt.line, "[caliban: max-turns (7) reached]");
+
+        let c = stopped_for_surface(&StopCondition::Cancelled).expect("cancellation must surface");
+        assert_eq!(c.level, StoppedForLevel::Info);
+        assert_eq!(c.line, "[caliban: cancelled]");
+    }
 }

@@ -217,11 +217,11 @@ against both orderings.
 | 2 | `reasoning_content` dropped from reasoning models      | med-high      | `provider-openai`      | open   |
 | 3 | Leading-newline cosmetic noise in qwen3.5 responses    | cosmetic      | (model quirk; opt'l)   | noted  |
 | 4 | Qwen-XML tool calls in follow-up turns aren't parsed   | medium (qwen) | `provider-openai`      | open (severity downgraded after Finding 5) |
-| **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **open** (reproduced against LM Studio *and* hosted OpenAI) |
+| **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **fixed** (jf/fix/surface-stopped-for — TUI surfaces `RunEnd.stopped_for` as `[caliban: …]` transcript line + red toast for `ProviderError`/`HookDenied`/`CompactionFailed`; neutral info line for `MaxTurnsReached`/`Cancelled`) |
 | **6** | **GPT-5 / o-series reject `max_tokens` — caliban never sends `max_completion_tokens`** | **high** | **`provider-openai`** (ir_convert.rs:247-248) | **fixed** (jf/fix/openai-stream-and-completion-tokens — `uses_completion_tokens(model)` routes `gpt-5*`/`o1*`/`o3*`/`o4*` to `max_completion_tokens`) |
 | **7** | **Streaming `usage` chunk dropped — token counts always show 0** | **medium** | **`provider-openai`** (stream_parse.rs:97-108) | **open** |
 | **8** | **Duplicate `system/init` frame in stream-json output**         | **low-med**| **`caliban` bin / headless driver** (headless/mod.rs:301 + startup.rs:525) | **fixed** (jf/fix/headless-dedupe-init — dropped external `emit_init` in startup.rs; `HeadlessDriver::run` now drains hook buffer right after the canonical `emit_init` so frame order is preserved) |
-| **9** | **Headless mode swallows provider errors identically to TUI**   | **high** (= Finding 5 in headless) | **`caliban` bin / headless driver** (headless/mod.rs:457-475) | **open** |
+| **9** | **Headless mode swallows provider errors identically to TUI**   | **high** (= Finding 5 in headless) | **`caliban` bin / headless driver** (headless/mod.rs:457-475) | **fixed** (jf/fix/surface-stopped-for — `RunEnd` arm maps `ProviderError`/`HookDenied`/`CompactionFailed` to `subtype:"error"` + populated `error` field + exit 1, mirroring the schema-validation path from H-9) |
 | **10**| **`--input-format stream-json` consumes only the first user frame** | **medium** | **`caliban` bin** (startup.rs:374-383) | **open** |
 | - | `capabilities_for` fallback is 128k for unknown models | latent footgun| `provider-openai`      | noted  |
 
