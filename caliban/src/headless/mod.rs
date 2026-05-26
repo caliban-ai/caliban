@@ -89,6 +89,9 @@ pub(crate) enum HeadlessError {
     /// Generic configuration error (bad combination of flags).
     #[error("configuration error: {0}")]
     Configuration(String),
+    /// `--input-format stream-json` stdin contained no `user` frames.
+    #[error("no user frame found in stream-json stdin input")]
+    NoUserInput,
 }
 
 /// Map a [`HeadlessError`] to a process exit code per ADR 0025.
@@ -98,7 +101,9 @@ pub(crate) fn exit_code_for(err: &HeadlessError) -> i32 {
         HeadlessError::MaxTurnsExceeded(_) => 130,
         HeadlessError::BudgetExceeded { .. } => 137,
         HeadlessError::StdinTooLarge { .. } | HeadlessError::Configuration(_) => 78,
-        HeadlessError::ResumeNotFound(_) | HeadlessError::NoSessionsToContinue => 66,
+        HeadlessError::ResumeNotFound(_)
+        | HeadlessError::NoSessionsToContinue
+        | HeadlessError::NoUserInput => 66,
         HeadlessError::InputParse(_) | HeadlessError::SchemaParse(_) => 64,
         HeadlessError::SchemaValidation(_) => 2,
         HeadlessError::Cancelled => 124,
@@ -207,6 +212,24 @@ pub(crate) struct HeadlessDriver<W: Write> {
     config: HeadlessRunConfig,
 }
 
+/// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
+///
+/// The outer driver (single-frame `run` or multi-frame `run_frames`) decides
+/// how to surface it — typically by emitting one final `result` frame and
+/// returning the matching [`HeadlessError`].
+#[derive(Debug, Clone)]
+enum TerminalStop {
+    /// `--max-turns` (or the agent's own cap) was reached.
+    MaxTurns(u32),
+    /// Run was cancelled (Ctrl-C / SIGTERM).
+    Cancelled,
+    /// Provider error / hook denial / compaction failure surfaced as
+    /// `StopCondition::ProviderError | HookDenied | CompactionFailed`.
+    RunError(String),
+    /// `--max-budget-usd` was exceeded after a turn ended.
+    BudgetExceeded,
+}
+
 impl<W: Write> HeadlessDriver<W> {
     /// Construct a new driver writing to `writer`.
     pub(crate) fn new(writer: W, config: HeadlessRunConfig) -> Self {
@@ -288,10 +311,6 @@ impl<W: Write> HeadlessDriver<W> {
     /// # Errors
     /// Returns the first fatal error encountered. Successful runs return
     /// a summary whose `subtype` indicates the terminal condition.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "linear event-loop is clearer in one body"
-    )]
     pub(crate) async fn run(
         &mut self,
         agent: Arc<Agent>,
@@ -330,33 +349,25 @@ impl<W: Write> HeadlessDriver<W> {
             return Err(HeadlessError::MaxTurnsExceeded(0));
         }
 
-        let mut stream = agent.stream_until_done(messages, cancel);
         let mut final_text = String::new();
         let mut turns: u32 = 0;
         let mut at_column_zero = true;
 
-        while let Some(event_result) = stream.next().await {
-            let event = event_result.map_err(|e| HeadlessError::Run(e.to_string()))?;
-            self.handle_event(event, &mut final_text, &mut turns, &mut at_column_zero)?;
-            self.flush_hook_events()?;
-            // Budget check (the hook sink may push frames first).
-            if self.config.budget.is_exceeded() {
-                let (i_tok, o_tok) = self.config.budget.total_tokens();
-                let summary = HeadlessRunSummary {
-                    subtype: ResultSubtype::BudgetExceeded,
-                    final_text: final_text.clone(),
-                    turns,
-                    total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                    total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                    total_cost_usd: self.config.budget.total_cost_usd(),
-                    structured_output: None,
-                    error: None,
-                };
-                self.emit_result(&summary)?;
-                return Err(HeadlessError::BudgetExceeded {
-                    limit: self.config.budget.max_usd(),
-                });
-            }
+        let outcome = self
+            .run_single_pass(
+                Arc::clone(&agent),
+                messages,
+                cancel,
+                &mut final_text,
+                &mut turns,
+                &mut at_column_zero,
+            )
+            .await?;
+        if let Some(terminal) = outcome {
+            // The agent loop terminated for a reason other than `EndOfTurn`.
+            // Emit the matching final `result` frame and surface the error
+            // so the binary picks the right exit code.
+            return self.emit_terminal_result(&terminal, &final_text, turns);
         }
 
         // Structured-output validation.
@@ -396,17 +407,19 @@ impl<W: Write> HeadlessDriver<W> {
         Ok(summary)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "linear event-loop dispatch is clearer in one body"
-    )]
+    /// Handle one event from an in-flight agent stream.
+    ///
+    /// Returns `Ok(Some(stop))` when the event was a `RunEnd` with a
+    /// non-`EndOfTurn` stop condition. The caller (single-frame `run` or
+    /// multi-frame `run_frames`) is responsible for emitting the final
+    /// `result` frame for that stop. Returns `Ok(None)` otherwise.
     fn handle_event(
         &mut self,
         event: TurnEvent,
         final_text: &mut String,
         turns: &mut u32,
         at_column_zero: &mut bool,
-    ) -> Result<(), HeadlessError> {
+    ) -> Result<Option<TerminalStop>, HeadlessError> {
         match event {
             TurnEvent::AssistantTextDelta { text, .. } => {
                 final_text.push_str(&text);
@@ -463,41 +476,17 @@ impl<W: Write> HeadlessDriver<W> {
                 }
             }
             TurnEvent::RunEnd { stopped_for, .. } => {
-                // Each non-EndOfTurn variant maps to a final `result` frame
-                // + a specific exit code per ADR 0025. `EndOfTurn` falls
-                // through to the post-loop "natural completion" path, where
-                // structured-output validation (if any) sets the subtype.
+                // Each non-EndOfTurn variant terminates the run. We hand the
+                // matching `TerminalStop` up to the caller so a single final
+                // `result` frame can be emitted (correct for both single-frame
+                // and multi-frame stream-json input).
                 match stopped_for {
                     StopCondition::EndOfTurn => {}
                     StopCondition::MaxTurnsReached(n) => {
-                        let (i_tok, o_tok) = self.config.budget.total_tokens();
-                        let summary = HeadlessRunSummary {
-                            subtype: ResultSubtype::MaxTurns,
-                            final_text: final_text.clone(),
-                            turns: *turns,
-                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                            total_cost_usd: self.config.budget.total_cost_usd(),
-                            structured_output: None,
-                            error: None,
-                        };
-                        self.emit_result(&summary)?;
-                        return Err(HeadlessError::MaxTurnsExceeded(n));
+                        return Ok(Some(TerminalStop::MaxTurns(n)));
                     }
                     StopCondition::Cancelled => {
-                        let (i_tok, o_tok) = self.config.budget.total_tokens();
-                        let summary = HeadlessRunSummary {
-                            subtype: ResultSubtype::Cancelled,
-                            final_text: final_text.clone(),
-                            turns: *turns,
-                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                            total_cost_usd: self.config.budget.total_cost_usd(),
-                            structured_output: None,
-                            error: None,
-                        };
-                        self.emit_result(&summary)?;
-                        return Err(HeadlessError::Cancelled);
+                        return Ok(Some(TerminalStop::Cancelled));
                     }
                     StopCondition::ProviderError(msg)
                     | StopCondition::HookDenied(msg)
@@ -506,19 +495,7 @@ impl<W: Write> HeadlessDriver<W> {
                         // subtype=error + populated `error` field, and the
                         // process exits 1. Mirrors the schema-validation
                         // failure path (H-9 evidence).
-                        let (i_tok, o_tok) = self.config.budget.total_tokens();
-                        let summary = HeadlessRunSummary {
-                            subtype: ResultSubtype::Error,
-                            final_text: final_text.clone(),
-                            turns: *turns,
-                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                            total_cost_usd: self.config.budget.total_cost_usd(),
-                            structured_output: None,
-                            error: Some(msg.clone()),
-                        };
-                        self.emit_result(&summary)?;
-                        return Err(HeadlessError::Run(msg.clone()));
+                        return Ok(Some(TerminalStop::RunError(msg.clone())));
                     }
                 }
             }
@@ -530,7 +507,229 @@ impl<W: Write> HeadlessDriver<W> {
                 .flush()
                 .map_err(|e| HeadlessError::Io(e.to_string()))?;
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// Stream one agent pass to completion, updating shared accumulators.
+    ///
+    /// Returns `Ok(None)` when the stream ended with `StopCondition::EndOfTurn`
+    /// (the agent finished a turn naturally). Returns `Ok(Some(stop))` when
+    /// the agent reported a non-`EndOfTurn` terminal stop or the budget was
+    /// exceeded mid-stream — the caller decides how to surface it.
+    ///
+    /// Stream errors are mapped to [`HeadlessError::Run`].
+    async fn run_single_pass(
+        &mut self,
+        agent: Arc<Agent>,
+        messages: Vec<Message>,
+        cancel: CancellationToken,
+        final_text: &mut String,
+        turns: &mut u32,
+        at_column_zero: &mut bool,
+    ) -> Result<Option<TerminalStop>, HeadlessError> {
+        let mut stream = agent.stream_until_done(messages, cancel);
+        while let Some(event_result) = stream.next().await {
+            let event = event_result.map_err(|e| HeadlessError::Run(e.to_string()))?;
+            if let Some(stop) = self.handle_event(event, final_text, turns, at_column_zero)? {
+                return Ok(Some(stop));
+            }
+            self.flush_hook_events()?;
+            if self.config.budget.is_exceeded() {
+                return Ok(Some(TerminalStop::BudgetExceeded));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Emit the final `result` frame for a non-`EndOfTurn` terminal stop and
+    /// return the matching [`HeadlessError`] so the binary can pick an exit
+    /// code via [`exit_code_for`].
+    fn emit_terminal_result(
+        &mut self,
+        stop: &TerminalStop,
+        final_text: &str,
+        turns: u32,
+    ) -> Result<HeadlessRunSummary, HeadlessError> {
+        let (i_tok, o_tok) = self.config.budget.total_tokens();
+        let total_input_tokens = u32::try_from(i_tok).unwrap_or(u32::MAX);
+        let total_output_tokens = u32::try_from(o_tok).unwrap_or(u32::MAX);
+        let total_cost_usd = self.config.budget.total_cost_usd();
+        let (subtype, error) = match stop {
+            TerminalStop::MaxTurns(_) => (ResultSubtype::MaxTurns, None),
+            TerminalStop::Cancelled => (ResultSubtype::Cancelled, None),
+            TerminalStop::RunError(msg) => (ResultSubtype::Error, Some(msg.clone())),
+            TerminalStop::BudgetExceeded => (ResultSubtype::BudgetExceeded, None),
+        };
+        let summary = HeadlessRunSummary {
+            subtype,
+            final_text: final_text.to_string(),
+            turns,
+            total_input_tokens,
+            total_output_tokens,
+            total_cost_usd,
+            structured_output: None,
+            error,
+        };
+        self.emit_result(&summary)?;
+        match stop {
+            TerminalStop::MaxTurns(n) => Err(HeadlessError::MaxTurnsExceeded(*n)),
+            TerminalStop::Cancelled => Err(HeadlessError::Cancelled),
+            TerminalStop::RunError(msg) => Err(HeadlessError::Run(msg.clone())),
+            TerminalStop::BudgetExceeded => Err(HeadlessError::BudgetExceeded {
+                limit: self.config.budget.max_usd(),
+            }),
+        }
+    }
+
+    /// Multi-frame driver entry point for `--input-format stream-json`.
+    ///
+    /// Emits exactly one `system/init` frame at start and one final `result`
+    /// frame at end. Reads NDJSON lines from `input` and runs one agent pass
+    /// per `User` frame, accumulating turn counts across frames. `Control`
+    /// frames currently log a stderr warning (best-effort interrupt support
+    /// is deferred). EOF with zero `User` frames returns
+    /// [`HeadlessError::NoUserInput`]. A parse failure mid-stream flushes
+    /// the in-flight agent frames, emits a result frame with subtype=error,
+    /// and returns [`HeadlessError::InputParse`].
+    ///
+    /// Replaces the legacy single-shot `for ... break;` loop that processed
+    /// only the first user frame (lmstudio Finding 10).
+    ///
+    /// # Errors
+    /// See variants of [`HeadlessError`]. On success returns the cumulative
+    /// summary.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear stream-json loop is clearer in one body"
+    )]
+    pub(crate) async fn run_frames(
+        &mut self,
+        agent: Arc<Agent>,
+        base_messages: Vec<Message>,
+        input: &str,
+        cancel: CancellationToken,
+    ) -> Result<HeadlessRunSummary, HeadlessError> {
+        self.emit_init()?;
+        self.flush_hook_events()?;
+
+        let mut messages = base_messages;
+        let mut final_text = String::new();
+        let mut turns: u32 = 0;
+        let mut at_column_zero = true;
+        let mut consumed_user_frames: u32 = 0;
+
+        for raw_line in input.lines() {
+            // Parse one line at a time so prior turns' frames are already
+            // flushed before a parse error abort.
+            let parsed = match input::parse_input_line(raw_line) {
+                Ok(opt) => opt,
+                Err(HeadlessError::InputParse(msg)) => {
+                    // Flush prior turns + emit one final error result frame.
+                    let (i_tok, o_tok) = self.config.budget.total_tokens();
+                    let summary = HeadlessRunSummary {
+                        subtype: ResultSubtype::Error,
+                        final_text: final_text.clone(),
+                        turns,
+                        total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                        total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                        total_cost_usd: self.config.budget.total_cost_usd(),
+                        structured_output: None,
+                        error: Some(msg.clone()),
+                    };
+                    self.emit_result(&summary)?;
+                    return Err(HeadlessError::InputParse(msg));
+                }
+                Err(e) => return Err(e),
+            };
+            let Some(frame) = parsed else { continue };
+            match frame {
+                events::InputFrame::User { content } => {
+                    let text = events::InputFrame::extract_text(&content);
+                    self.emit_user_echo(&text)?;
+                    messages.push(Message::user_text(text));
+                    consumed_user_frames += 1;
+                    // Reset `final_text` per frame so the trailing `result`
+                    // frame reflects the *last* turn's assistant reply
+                    // (not a concatenation across every frame).
+                    final_text.clear();
+                    let outcome = self
+                        .run_single_pass(
+                            Arc::clone(&agent),
+                            messages.clone(),
+                            cancel.clone(),
+                            &mut final_text,
+                            &mut turns,
+                            &mut at_column_zero,
+                        )
+                        .await?;
+                    if let Some(terminal) = outcome {
+                        return self.emit_terminal_result(&terminal, &final_text, turns);
+                    }
+                }
+                events::InputFrame::Control { subtype } => {
+                    // Best-effort interrupt support is deferred (ADR 0025);
+                    // surface a stderr warning so operators don't think it
+                    // silently took effect.
+                    eprintln!(
+                        "[caliban] stream-json control/{subtype} frame received; \
+                         interrupts are not yet honored (ADR 0025 deferral)"
+                    );
+                }
+            }
+        }
+
+        if consumed_user_frames == 0 {
+            let (i_tok, o_tok) = self.config.budget.total_tokens();
+            let summary = HeadlessRunSummary {
+                subtype: ResultSubtype::Error,
+                final_text: String::new(),
+                turns: 0,
+                total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                total_cost_usd: self.config.budget.total_cost_usd(),
+                structured_output: None,
+                error: Some("no user frame found in stream-json stdin input".to_string()),
+            };
+            self.emit_result(&summary)?;
+            return Err(HeadlessError::NoUserInput);
+        }
+
+        // Structured-output validation runs on the cumulative `final_text`
+        // (i.e. the assistant's final-turn reply, since each pass resets it).
+        let (structured_output, schema_error) = match &self.config.json_schema {
+            Some(schema) => match schema::extract_json_object(&final_text) {
+                Some(candidate) => match schema.validate(&candidate) {
+                    Ok(()) => (Some(candidate), None),
+                    Err(e) => (None, Some(e)),
+                },
+                None => (
+                    None,
+                    Some("could not extract a JSON object from the assistant reply".to_string()),
+                ),
+            },
+            None => (None, None),
+        };
+
+        let (i_tok, o_tok) = self.config.budget.total_tokens();
+        let summary = HeadlessRunSummary {
+            subtype: if schema_error.is_some() {
+                ResultSubtype::Error
+            } else {
+                ResultSubtype::Success
+            },
+            final_text: final_text.clone(),
+            turns,
+            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+            total_cost_usd: self.config.budget.total_cost_usd(),
+            structured_output,
+            error: schema_error.clone(),
+        };
+        self.emit_result(&summary)?;
+        if let Some(e) = schema_error {
+            return Err(HeadlessError::SchemaValidation(e));
+        }
+        Ok(summary)
     }
 
     fn emit_result(&mut self, s: &HeadlessRunSummary) -> Result<(), HeadlessError> {
@@ -1032,5 +1231,234 @@ mod tests {
         let frame = parse_json_frame(&buf);
         assert_eq!(frame["subtype"], "cancelled");
         assert!(frame["error"].is_null());
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 10 — `--input-format stream-json` multi-frame loop.
+    //
+    // Tests for `HeadlessDriver::run_frames`, which iterates NDJSON `User`
+    // frames from stdin, runs the agent once per frame, and emits a single
+    // `system/init` + a single final `result` frame per stream-json run.
+    // -------------------------------------------------------------------
+
+    /// Build a single-turn assistant text stream that says `text`. Each
+    /// stream-json `User` frame triggers a fresh agent run that consumes
+    /// one of these enqueued streams.
+    fn text_turn_stream(text: &str) -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(text.into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]
+    }
+
+    /// Collect every NDJSON line in `buf` as a `serde_json::Value`.
+    fn parse_ndjson_lines(buf: &[u8]) -> Vec<serde_json::Value> {
+        let s = std::str::from_utf8(buf).expect("driver output not utf-8");
+        s.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("ndjson line not JSON"))
+            .collect()
+    }
+
+    /// Two `user` frames on stdin → two assistant turns + one final
+    /// `result` frame; the result records `turns: 2` and only one
+    /// `system/init` is emitted.
+    #[tokio::test]
+    async fn run_frames_two_user_frames_produces_two_turns_and_one_result() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(text_turn_stream("alpha"));
+        mock.enqueue_stream(text_turn_stream("beta"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(
+            &mut buf,
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+
+        let stdin = "{\"type\":\"user\",\"content\":\"first\"}\n\
+                     {\"type\":\"user\",\"content\":\"second\"}\n";
+        let summary = driver
+            .run_frames(agent, Vec::new(), stdin, CancellationToken::new())
+            .await
+            .expect("multi-frame run succeeded");
+
+        assert_eq!(summary.turns, 2, "two user frames must produce two turns");
+        assert_eq!(summary.subtype, ResultSubtype::Success);
+
+        let frames = parse_ndjson_lines(&buf);
+        let init_count = frames
+            .iter()
+            .filter(|v| v["type"] == "system" && v["subtype"] == "init")
+            .count();
+        assert_eq!(init_count, 1, "exactly one system/init frame per run");
+
+        let result_count = frames.iter().filter(|v| v["type"] == "result").count();
+        assert_eq!(result_count, 1, "exactly one final result frame per run");
+
+        // Final result frame is the last line.
+        let last = frames.last().expect("at least one frame");
+        assert_eq!(last["type"], "result");
+        assert_eq!(last["subtype"], "success");
+        assert_eq!(last["turns"], 2);
+
+        // Two assistant `message` frames should appear, one per turn.
+        let message_count = frames
+            .iter()
+            .filter(|v| v["type"] == "message" && v["role"] == "assistant")
+            .count();
+        assert_eq!(
+            message_count, 2,
+            "two assistant messages, one per user frame"
+        );
+    }
+
+    /// One `user` frame on stdin → one assistant turn + one final result
+    /// (regression: preserves the prior single-frame behavior).
+    #[tokio::test]
+    async fn run_frames_single_user_frame_produces_one_turn() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(text_turn_stream("only"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(
+            &mut buf,
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+
+        let stdin = "{\"type\":\"user\",\"content\":\"only one\"}\n";
+        let summary = driver
+            .run_frames(agent, Vec::new(), stdin, CancellationToken::new())
+            .await
+            .expect("single-frame run succeeded");
+
+        assert_eq!(summary.turns, 1);
+        assert_eq!(summary.subtype, ResultSubtype::Success);
+
+        let frames = parse_ndjson_lines(&buf);
+        let init_count = frames
+            .iter()
+            .filter(|v| v["type"] == "system" && v["subtype"] == "init")
+            .count();
+        assert_eq!(init_count, 1);
+        let result_count = frames.iter().filter(|v| v["type"] == "result").count();
+        assert_eq!(result_count, 1);
+    }
+
+    /// Empty stdin → no agent turn, init + result frame still emitted,
+    /// subtype indicates the absence of input, and the run surfaces an
+    /// error that maps to exit 66 (`EX_NOINPUT`).
+    #[tokio::test]
+    async fn run_frames_empty_stdin_emits_error_subtype_no_input() {
+        let mock = Arc::new(MockProvider::new());
+        // No streams enqueued — the agent should never be consulted.
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(
+            &mut buf,
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+
+        let err = driver
+            .run_frames(agent, Vec::new(), "", CancellationToken::new())
+            .await
+            .expect_err("empty stdin must surface as NoUserInput");
+        assert!(
+            matches!(err, HeadlessError::NoUserInput),
+            "expected NoUserInput, got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 66);
+
+        let frames = parse_ndjson_lines(&buf);
+        // init + result, in that order. Nothing else.
+        assert_eq!(frames.len(), 2, "init + result only, got {frames:?}");
+        assert_eq!(frames[0]["type"], "system");
+        assert_eq!(frames[0]["subtype"], "init");
+        assert_eq!(frames[1]["type"], "result");
+        assert_eq!(frames[1]["subtype"], "error");
+        assert_eq!(frames[1]["turns"], 0);
+        let error_str = frames[1]["error"].as_str().unwrap_or_default();
+        assert!(
+            error_str.contains("no user frame"),
+            "result.error should mention no user frame; got {error_str}",
+        );
+    }
+
+    /// Malformed frame mid-stream → prior turns' assistant frames are
+    /// already flushed; the driver emits a final `result` frame with
+    /// subtype=error + the parse error in `error`, and returns
+    /// `HeadlessError::InputParse` (exit 64).
+    #[tokio::test]
+    async fn run_frames_malformed_mid_stream_flushes_prior_turns_then_errors() {
+        let mock = Arc::new(MockProvider::new());
+        // Only the first user frame should reach the model. The second
+        // line is malformed and must abort the run before agent invocation.
+        mock.enqueue_stream(text_turn_stream("first"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(
+            &mut buf,
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+
+        let stdin = "{\"type\":\"user\",\"content\":\"good\"}\n\
+                     {bad json line\n";
+        let err = driver
+            .run_frames(agent, Vec::new(), stdin, CancellationToken::new())
+            .await
+            .expect_err("malformed mid-stream must surface as InputParse");
+        assert!(
+            matches!(err, HeadlessError::InputParse(_)),
+            "expected InputParse, got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 64);
+
+        let frames = parse_ndjson_lines(&buf);
+        // Prior turn's assistant `message` frame must already be in the
+        // stream (it was flushed before the parse error surfaced).
+        let message_count = frames
+            .iter()
+            .filter(|v| v["type"] == "message" && v["role"] == "assistant")
+            .count();
+        assert_eq!(message_count, 1, "prior assistant turn must be flushed");
+
+        // Single trailing result frame with subtype=error.
+        let result_frames: Vec<&serde_json::Value> =
+            frames.iter().filter(|v| v["type"] == "result").collect();
+        assert_eq!(result_frames.len(), 1);
+        assert_eq!(result_frames[0]["subtype"], "error");
+        assert_eq!(
+            result_frames[0]["turns"], 1,
+            "result must reflect the single completed turn"
+        );
+        let error_str = result_frames[0]["error"].as_str().unwrap_or_default();
+        assert!(
+            !error_str.is_empty(),
+            "result.error must carry the parse error message",
+        );
     }
 }

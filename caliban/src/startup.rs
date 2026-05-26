@@ -302,6 +302,15 @@ pub(crate) async fn run_and_render(
     Ok((final_messages, total_usage))
 }
 
+/// Source of user prompts for [`run_headless`]. Either a single explicit
+/// prompt (resolved from CLI args or plain stdin) or an unparsed NDJSON
+/// stream consumed frame-by-frame by [`headless::HeadlessDriver::run_frames`]
+/// (lmstudio Finding 10).
+enum PromptSource {
+    Single(String),
+    StreamJson(String),
+}
+
 /// Drive the agent loop in headless (`-p` / `--print`) mode and exit with
 /// the appropriate process exit code (ADR 0025).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -353,17 +362,22 @@ pub(crate) async fn run_headless(
         }
     }
 
-    // Resolve the prompt: --print "x" wins, then --prompt, then positional,
-    // then stdin (when --print was used with no value).
+    // Resolve the prompt source. Three shapes:
+    // - An explicit CLI prompt (`--print "x"` / `--prompt` / positional) →
+    //   single-frame path; `prompt_source` is `Single(text)`.
+    // - No explicit prompt, plain-text stdin → single-frame path with stdin
+    //   contents as the prompt.
+    // - No explicit prompt, `--input-format stream-json` → multi-frame path;
+    //   `prompt_source` is `StreamJson(stdin_input)` and is driven below by
+    //   `HeadlessDriver::run_frames` (Finding 10).
     let print_value = args.print.as_deref().filter(|s| !s.is_empty());
-    let prompt_text = match (
+    let prompt_source = match (
         print_value,
         args.prompt_flag.as_deref(),
         args.prompt.as_deref(),
     ) {
-        (Some(p), _, _) | (_, Some(p), _) | (_, _, Some(p)) => p.to_string(),
+        (Some(p), _, _) | (_, Some(p), _) | (_, _, Some(p)) => PromptSource::Single(p.to_string()),
         (None, None, None) => {
-            // No explicit prompt — read stdin (text or stream-json).
             let stdin_input = match headless::input::read_stdin_capped(&mut std::io::stdin()) {
                 Ok(s) => s,
                 Err(e) => {
@@ -372,30 +386,9 @@ pub(crate) async fn run_headless(
                 }
             };
             if matches!(args.input_format, headless::InputFormat::StreamJson) {
-                // Pick the first user frame as the prompt; emit a warning
-                // to stderr if there are control frames (best-effort).
-                match headless::input::parse_stream_json_payload(&stdin_input) {
-                    Ok(frames) => {
-                        let mut prompt = String::new();
-                        for frame in frames {
-                            if let headless::events::InputFrame::User { content } = frame {
-                                prompt = headless::events::InputFrame::extract_text(&content);
-                                break;
-                            }
-                        }
-                        if prompt.is_empty() {
-                            eprintln!("[caliban] no `user` frame found in stream-json stdin input");
-                            return 66;
-                        }
-                        prompt
-                    }
-                    Err(e) => {
-                        eprintln!("[caliban] {e}");
-                        return headless::exit_code_for(&e);
-                    }
-                }
+                PromptSource::StreamJson(stdin_input)
             } else {
-                stdin_input.trim_end_matches('\n').to_string()
+                PromptSource::Single(stdin_input.trim_end_matches('\n').to_string())
             }
         }
     };
@@ -429,7 +422,11 @@ pub(crate) async fn run_headless(
         None => None,
     };
 
-    // System prompt: install (possibly empty) on a fresh session.
+    // System prompt: install (possibly empty) on a fresh session. The
+    // single-frame path also appends the resolved user prompt here; the
+    // multi-frame stream-json path defers user-message construction to
+    // `HeadlessDriver::run_frames`, which pushes one user message per
+    // `User` frame parsed from stdin.
     let mut messages = session
         .as_ref()
         .map(|s| s.messages.clone())
@@ -441,7 +438,9 @@ pub(crate) async fn run_headless(
         let with_todos = system_prompt::append_todo_block(sp, &todo_snapshot);
         messages.insert(0, caliban_provider::Message::system_text(with_todos));
     }
-    messages.push(Message::user_text(prompt_text));
+    if let PromptSource::Single(ref prompt_text) = prompt_source {
+        messages.push(Message::user_text(prompt_text.clone()));
+    }
 
     // Setting source-chain — for now we synthesize a static chain that
     // mirrors what the binary loads. ADR 0026 (`settings.json` precedence)
@@ -527,7 +526,14 @@ pub(crate) async fn run_headless(
         // without a second `emit_init` call (Finding 8).
     }
 
-    let outcome = driver.run(Arc::clone(&agent), messages, cancel).await;
+    let outcome = match prompt_source {
+        PromptSource::Single(_) => driver.run(Arc::clone(&agent), messages, cancel).await,
+        PromptSource::StreamJson(stdin_input) => {
+            driver
+                .run_frames(Arc::clone(&agent), messages, &stdin_input, cancel)
+                .await
+        }
+    };
 
     // Fire SessionEnd hook (best-effort).
     {
