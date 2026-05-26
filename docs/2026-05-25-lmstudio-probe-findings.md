@@ -220,7 +220,7 @@ against both orderings.
 | **5** | **HTTP errors from streaming providers swallowed silently** | **high** | **`caliban` bin / `agent-core` runloop** | **open** (reproduced against LM Studio *and* hosted OpenAI) |
 | **6** | **GPT-5 / o-series reject `max_tokens` — caliban never sends `max_completion_tokens`** | **high** | **`provider-openai`** (ir_convert.rs:247-248) | **fixed** (jf/fix/openai-stream-and-completion-tokens — `uses_completion_tokens(model)` routes `gpt-5*`/`o1*`/`o3*`/`o4*` to `max_completion_tokens`) |
 | **7** | **Streaming `usage` chunk dropped — token counts always show 0** | **medium** | **`provider-openai`** (stream_parse.rs:97-108) | **open** |
-| **8** | **Duplicate `system/init` frame in stream-json output**         | **low-med**| **`caliban` bin / headless driver** (headless/mod.rs:301 + startup.rs:525) | **open** |
+| **8** | **Duplicate `system/init` frame in stream-json output**         | **low-med**| **`caliban` bin / headless driver** (headless/mod.rs:301 + startup.rs:525) | **fixed** (jf/fix/headless-dedupe-init — dropped external `emit_init` in startup.rs; `HeadlessDriver::run` now drains hook buffer right after the canonical `emit_init` so frame order is preserved) |
 | **9** | **Headless mode swallows provider errors identically to TUI**   | **high** (= Finding 5 in headless) | **`caliban` bin / headless driver** (headless/mod.rs:457-475) | **open** |
 | **10**| **`--input-format stream-json` consumes only the first user frame** | **medium** | **`caliban` bin** (startup.rs:374-383) | **open** |
 | - | `capabilities_for` fallback is 128k for unknown models | latent footgun| `provider-openai`      | noted  |

@@ -521,9 +521,10 @@ pub(crate) async fn run_headless(
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
             tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
         }
-        // Flush any hook frames the sink captured before the run begins.
-        let _ = driver.emit_init();
-        let _ = driver.flush_hook_events();
+        // `driver.run()` below emits the canonical `system/init` frame
+        // and then drains the hook buffer, so any frames captured here
+        // (e.g. `SessionStart`) are flushed in the correct order
+        // without a second `emit_init` call (Finding 8).
     }
 
     let outcome = driver.run(Arc::clone(&agent), messages, cancel).await;
