@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-use crate::bash_bg::{BashBgRegistry, global_registry, spawn_background};
+use super::bash_bg::{BashBgRegistry, global_registry, spawn_background};
 use crate::workspace::WorkspaceRoot;
 
 const STDOUT_CAP: usize = 30 * 1024;
@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn background_true_returns_immediately_with_shell_id() {
         let tmp = TempDir::new().unwrap();
-        let reg = crate::bash_bg::BashBgRegistry::new_for_test(1024 * 1024);
+        let reg = crate::shell::bash_bg::BashBgRegistry::new_for_test(1024 * 1024);
         let tool = BashTool::new(WorkspaceRoot::new(tmp.path())).with_bg_registry(reg.clone());
         let start = std::time::Instant::now();
         let out = tool

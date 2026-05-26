@@ -2,42 +2,38 @@
 //!
 //! Each tool implements `caliban_agent_core::Tool` with a JSON Schema for its
 //! input. All tools share a `WorkspaceRoot` for path resolution.
+//!
+//! Modules are grouped by capability:
+//!
+//! - [`fs`] — filesystem tools (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`).
+//! - [`shell`] — shell execution (`Bash`) plus background-job tools.
+//! - [`web`] — `WebFetch` / `WebSearch`.
+//! - [`memory`] — auto-memory `ReadMemoryTopic` / `WriteMemoryTopic`.
+//! - [`agent`] — sub-agent orchestration (`AgentTool`) and `TodoWrite`.
+//! - [`search`] — `Glob` and `Grep`.
+//! - [`plan`] — `EnterPlanMode` / `ExitPlanMode`.
+//! - [`workspace`] — shared `WorkspaceRoot` path-resolution type.
 
-pub mod agent_tool;
-pub mod bash;
-pub mod bash_bg;
-pub mod edit;
-pub mod glob_;
-pub mod grep;
+pub mod agent;
+pub mod fs;
 pub mod memory;
-pub mod multi_edit;
-pub mod notebook_edit;
-pub mod plan_mode_tools;
-pub mod read;
-pub mod todo_write;
-pub mod web_fetch;
-pub mod web_search;
+pub mod plan;
+pub mod search;
+pub mod shell;
+pub mod web;
 pub mod workspace;
-pub mod write;
 
-pub use agent_tool::{
+pub use agent::{
     AgentFactory, AgentTool, AgentToolInput, BackgroundSpawnResult, BackgroundSpawner,
-    IsolationMode, WorktreeOptions,
+    IsolationMode, TodoWriteTool, WorktreeOptions,
 };
-pub use bash::BashTool;
-pub use bash_bg::{
-    BashBgRegistry, BashJob, BashOutputTool, BashStatus, KillShellTool, RingBuffer, global_registry,
-};
-pub use edit::EditTool;
-pub use glob_::GlobTool;
-pub use grep::GrepTool;
+pub use fs::{EditTool, MultiEditTool, NotebookEditTool, ReadTool, WriteTool};
 pub use memory::{ReadMemoryTopicTool, WriteMemoryTopicTool};
-pub use multi_edit::MultiEditTool;
-pub use notebook_edit::NotebookEditTool;
-pub use plan_mode_tools::{EnterPlanModeTool, ExitPlanModeTool};
-pub use read::ReadTool;
-pub use todo_write::TodoWriteTool;
-pub use web_fetch::WebFetchTool;
-pub use web_search::{Provider as WebSearchProvider, SearchHit, WebSearchTool};
+pub use plan::{EnterPlanModeTool, ExitPlanModeTool};
+pub use search::{GlobTool, GrepTool};
+pub use shell::{
+    BashBgRegistry, BashJob, BashOutputTool, BashStatus, BashTool, KillShellTool, RingBuffer,
+    global_registry,
+};
+pub use web::{Provider as WebSearchProvider, SearchHit, WebFetchTool, WebSearchTool};
 pub use workspace::WorkspaceRoot;
-pub use write::WriteTool;

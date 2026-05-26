@@ -19,7 +19,7 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T2-B | 2 | Split `caliban/src/main.rs` (1844 LOC) | **+298** (2142 total / 1844 before; pure file split — no consumer-site delta) | n/a (no new crate) | n/a (split, no dup consolidation) | +0 (no new tests) | n/a | n/a |
 | PR-T2-C | 2 | Split `caliban-agent-core/src/stream.rs` (1219 LOC) | **+52** (4 files, 1271 LOC total vs. 1219 single-file) | — | — | ±0 (3 turn-timing tests carried over) | n/a | n/a |
 | PR-T2-D | 2 | Split `caliban-model-router/src/lib.rs` (1499 LOC) | **+64** (lib.rs 1499 → 342; new builder.rs 102, dispatch.rs 280, provider_impl.rs 60, tests.rs 779) | — | — | 0 (existing 64 tests relocated to `tests.rs` unchanged; all green) | n/a | n/a |
-| PR-T3-A | 3 | Group `caliban-tools-builtin` modules | — | — | — | — | — |
+| PR-T3-A | 3 | Group `caliban-tools-builtin` modules | **+59** (16 flat files → 7 capability submodules + workspace.rs; +7 thin `mod.rs` files; lib.rs grew slightly) | — | n/a (file move, no dup consolidation) | 0 net (all existing tests pass unchanged) | n/a | n/a |
 | PR-T3-B | 3 | Settings as canonical config root | — | — | — | — | — |
 | PR-T4-0 | 4 | Baseline measurement | — | — | — | — | — |
 | PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
@@ -28,6 +28,51 @@ Baselines (TBD — captured by PR-T4-0):
 | PR-T4-D | 4 | `CompositeHooks` short-circuit | — | — | — | — | — |
 | PR-T5-A | 5 | App builder | — | — | — | — | — |
 | PR-T5-B | 5 | `CalibanError` centralization | — | — | — | — | — |
+
+## PR-T3-A notes
+
+- `caliban-tools-builtin/src/` had 16 flat `.rs` files (~7800 LOC). Reorganized
+  into capability submodules — pure file move, zero semantic changes:
+  - `fs/` — `read`, `write`, `edit`, `multi_edit`, `notebook_edit`
+  - `shell/` — `bash`, `bash_bg`
+  - `web/` — `web_fetch`, `web_search`
+  - `memory/` — `mod.rs` (contains `ReadMemoryTopicTool`,
+    `WriteMemoryTopicTool` directly; collapsed from a `memory/memory.rs`
+    layout to avoid `clippy::module_inception`)
+  - `agent/` — `agent_tool`, `todo_write`
+  - `search/` — `glob_`, `grep` (the brief left this group optional;
+    grouping the two file-search tools matches the rest of the crate's
+    capability shape)
+  - `plan/` — `plan_mode_tools`
+  - `workspace.rs` — stays flat at the root (single-file shared
+    `WorkspaceRoot` type; nothing to group it with)
+- `lib.rs` now declares 7 capability submodules + `workspace`; all
+  public types are re-exported at the crate root so every external
+  consumer (`caliban/src/main.rs`, `caliban/src/startup.rs`,
+  `caliban/tests/agent_loop.rs`, the three `caliban-tools-builtin/tests/*.rs`
+  integration tests, etc.) compiles unchanged. Verified via `rg
+  "caliban_tools_builtin::"` across the workspace — every consumer uses
+  the flat re-exports.
+- Internal cross-references: `shell/bash.rs` referenced
+  `crate::bash_bg::{...}`; rewritten to `super::bash_bg::{...}` (and the
+  inner test-mod reference to `crate::shell::bash_bg::...`). Other
+  modules' `use crate::workspace::WorkspaceRoot` continue to resolve
+  unchanged because `workspace` stays at the crate root.
+- `git mv` preserved file history for all 16 moves; the diff shows pure
+  rename + small `mod.rs` adds.
+
+### Deviations from PR-T3-A brief
+
+- The brief listed `plan/` containing both `plan_mode_tools` *and*
+  `skill`. The crate has no `skill.rs` (skill discovery lives in
+  `caliban-skills`, not in `tools-builtin`). `plan/` contains only
+  `plan_mode_tools`.
+- The brief diagram showed `memory/memory.rs` alongside `memory/mod.rs`;
+  workspace lints (`clippy::module_inception`) reject that nesting.
+  Collapsed into a single `memory/mod.rs` holding the tool definitions.
+- The brief said `glob_` / `grep` *"stay flat or join `fs/` — your
+  call (suggest grouping as `search/`)"*. Took the suggestion and
+  grouped them under `search/`.
 
 ## PR-T1-A notes
 
