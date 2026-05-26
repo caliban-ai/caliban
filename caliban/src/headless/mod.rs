@@ -396,6 +396,10 @@ impl<W: Write> HeadlessDriver<W> {
         Ok(summary)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear event-loop dispatch is clearer in one body"
+    )]
     fn handle_event(
         &mut self,
         event: TurnEvent,
@@ -459,36 +463,63 @@ impl<W: Write> HeadlessDriver<W> {
                 }
             }
             TurnEvent::RunEnd { stopped_for, .. } => {
-                if let StopCondition::MaxTurnsReached(n) = stopped_for {
-                    // The run was bounded by max_turns; emit the result and signal.
-                    let (i_tok, o_tok) = self.config.budget.total_tokens();
-                    let summary = HeadlessRunSummary {
-                        subtype: ResultSubtype::MaxTurns,
-                        final_text: final_text.clone(),
-                        turns: *turns,
-                        total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                        total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                        total_cost_usd: self.config.budget.total_cost_usd(),
-                        structured_output: None,
-                        error: None,
-                    };
-                    self.emit_result(&summary)?;
-                    return Err(HeadlessError::MaxTurnsExceeded(n));
-                }
-                if let StopCondition::Cancelled = stopped_for {
-                    let (i_tok, o_tok) = self.config.budget.total_tokens();
-                    let summary = HeadlessRunSummary {
-                        subtype: ResultSubtype::Cancelled,
-                        final_text: final_text.clone(),
-                        turns: *turns,
-                        total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-                        total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-                        total_cost_usd: self.config.budget.total_cost_usd(),
-                        structured_output: None,
-                        error: None,
-                    };
-                    self.emit_result(&summary)?;
-                    return Err(HeadlessError::Cancelled);
+                // Each non-EndOfTurn variant maps to a final `result` frame
+                // + a specific exit code per ADR 0025. `EndOfTurn` falls
+                // through to the post-loop "natural completion" path, where
+                // structured-output validation (if any) sets the subtype.
+                match stopped_for {
+                    StopCondition::EndOfTurn => {}
+                    StopCondition::MaxTurnsReached(n) => {
+                        let (i_tok, o_tok) = self.config.budget.total_tokens();
+                        let summary = HeadlessRunSummary {
+                            subtype: ResultSubtype::MaxTurns,
+                            final_text: final_text.clone(),
+                            turns: *turns,
+                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                            total_cost_usd: self.config.budget.total_cost_usd(),
+                            structured_output: None,
+                            error: None,
+                        };
+                        self.emit_result(&summary)?;
+                        return Err(HeadlessError::MaxTurnsExceeded(n));
+                    }
+                    StopCondition::Cancelled => {
+                        let (i_tok, o_tok) = self.config.budget.total_tokens();
+                        let summary = HeadlessRunSummary {
+                            subtype: ResultSubtype::Cancelled,
+                            final_text: final_text.clone(),
+                            turns: *turns,
+                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                            total_cost_usd: self.config.budget.total_cost_usd(),
+                            structured_output: None,
+                            error: None,
+                        };
+                        self.emit_result(&summary)?;
+                        return Err(HeadlessError::Cancelled);
+                    }
+                    StopCondition::ProviderError(msg)
+                    | StopCondition::HookDenied(msg)
+                    | StopCondition::CompactionFailed(msg) => {
+                        // ADR 0025: error variants emit a `result` frame with
+                        // subtype=error + populated `error` field, and the
+                        // process exits 1. Mirrors the schema-validation
+                        // failure path (H-9 evidence).
+                        let (i_tok, o_tok) = self.config.budget.total_tokens();
+                        let summary = HeadlessRunSummary {
+                            subtype: ResultSubtype::Error,
+                            final_text: final_text.clone(),
+                            turns: *turns,
+                            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                            total_cost_usd: self.config.budget.total_cost_usd(),
+                            structured_output: None,
+                            error: Some(msg.clone()),
+                        };
+                        self.emit_result(&summary)?;
+                        return Err(HeadlessError::Run(msg.clone()));
+                    }
                 }
             }
             _ => {}
@@ -649,21 +680,26 @@ mod tests {
         assert_eq!(v[0]["text"], "hi");
     }
 
-    /// Regression test for Finding 8 (lmstudio probe, 2026-05-25):
-    /// `HeadlessDriver::run` must emit exactly one `system/init` frame
-    /// per stream-json run. Previously the bin emitted one externally
-    /// before calling `run()` and `run()` itself emitted a second.
-    #[tokio::test]
-    async fn run_emits_exactly_one_system_init_frame() {
-        use caliban_agent_core::ToolRegistry;
-        use caliban_provider::{
-            MockProvider, Provider, StopReason, StreamEvent, StreamingContentType, StreamingDelta,
-            Usage,
-        };
+    // -------------------------------------------------------------------
+    // Shared test-mod imports + helpers, used by both:
+    // - Finding 8 regression (`run_emits_exactly_one_system_init_frame`)
+    // - Findings 5 + 9 RunEnd.stopped_for surfacing tests
+    // -------------------------------------------------------------------
 
-        // Scripted single-turn assistant response.
-        let mock = Arc::new(MockProvider::new());
-        mock.enqueue_stream(vec![
+    use async_trait::async_trait;
+    use caliban_agent_core::{Agent, Compactor, Hooks, NoopHooks, RunCtx, ToolRegistry};
+    use caliban_provider::{
+        Capabilities, Message, MockProvider, Provider, StopReason, StreamEvent,
+        StreamingContentType, StreamingDelta, Usage,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// Stream that natively ends with `EndTurn`. Reused by the
+    /// `HookDenied` / `CompactionFailed` tests where the provider should
+    /// never be consulted, but enqueuing a benign response keeps the
+    /// agent loop from panicking if it ever advances past the gate.
+    fn benign_text_stream() -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
             Ok(StreamEvent::MessageStart {
                 id: "msg_1".into(),
                 model: "mock".into(),
@@ -687,7 +723,17 @@ mod tests {
                 }),
             }),
             Ok(StreamEvent::MessageStop),
-        ]);
+        ]
+    }
+
+    /// Regression test for Finding 8 (lmstudio probe, 2026-05-25):
+    /// `HeadlessDriver::run` must emit exactly one `system/init` frame
+    /// per stream-json run. Previously the bin emitted one externally
+    /// before calling `run()` and `run()` itself emitted a second.
+    #[tokio::test]
+    async fn run_emits_exactly_one_system_init_frame() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
 
         let provider_dyn: Arc<dyn Provider + Send + Sync> = mock;
         let agent = Agent::builder()
@@ -710,7 +756,6 @@ mod tests {
             .await
             .expect("driver run succeeded");
 
-        // Inspect the emitted NDJSON.
         let bytes = driver.writer;
         let text = String::from_utf8(bytes).expect("valid utf-8");
         let init_count = text
@@ -727,5 +772,265 @@ mod tests {
             "expected exactly one system/init frame per stream-json run, got {init_count}.\n\
              Output was:\n{text}",
         );
+    }
+
+    fn build_agent_with(
+        mock: Arc<MockProvider>,
+        hooks: Option<Arc<dyn Hooks + Send + Sync>>,
+        compactor: Option<Arc<dyn Compactor + Send + Sync>>,
+        max_turns: u32,
+    ) -> Arc<Agent> {
+        let provider: Arc<dyn Provider + Send + Sync> = mock;
+        let mut builder = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(max_turns);
+        if let Some(h) = hooks {
+            builder = builder.hooks(h);
+        }
+        if let Some(c) = compactor {
+            builder = builder.compactor(c);
+        }
+        Arc::new(builder.build().expect("agent builder"))
+    }
+
+    /// Parse the captured driver output into a single JSON value. The
+    /// JSON output format emits one object terminated by a newline.
+    fn parse_json_frame(buf: &[u8]) -> serde_json::Value {
+        let s = std::str::from_utf8(buf).expect("driver output not utf-8");
+        let line = s.trim_end_matches('\n');
+        serde_json::from_str(line).expect("driver output not valid JSON")
+    }
+
+    #[tokio::test]
+    async fn run_end_provider_error_emits_error_subtype_and_returns_run_err() {
+        let mock = Arc::new(MockProvider::new());
+        // Trigger ProviderError via a non-retryable Auth error.
+        mock.enqueue_stream_error(caliban_provider::Error::Auth("bad key".into()));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("provider error should surface as Run err");
+        assert!(
+            matches!(&err, HeadlessError::Run(msg) if msg.contains("authentication")),
+            "expected Run(authentication…), got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 1);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["type"], "result");
+        assert_eq!(frame["subtype"], "error");
+        assert!(
+            frame["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("authentication"),
+            "result.error should mention authentication, got {frame}",
+        );
+    }
+
+    /// Hook that fails `before_run` so the runloop surfaces a `HookDenied`
+    /// stop condition immediately (no provider call).
+    struct FailingBeforeRun;
+    #[async_trait]
+    impl Hooks for FailingBeforeRun {
+        async fn before_run(&self, _ctx: &RunCtx<'_>) -> caliban_agent_core::Result<()> {
+            Err(caliban_agent_core::Error::HookFailed(
+                "policy: run blocked".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_end_hook_denied_emits_error_subtype_and_returns_run_err() {
+        let mock = Arc::new(MockProvider::new());
+        // The provider should never be consulted, but enqueue a benign
+        // response so a regression that bypasses the hook doesn't panic.
+        mock.enqueue_stream(benign_text_stream());
+        let hooks: Arc<dyn Hooks + Send + Sync> = Arc::new(FailingBeforeRun);
+        let agent = build_agent_with(Arc::clone(&mock), Some(hooks), None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("hook denial should surface as Run err");
+        assert!(
+            matches!(&err, HeadlessError::Run(msg) if msg.contains("policy: run blocked")),
+            "expected Run(…policy: run blocked…), got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 1);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "error");
+        let error_str = frame["error"].as_str().unwrap_or_default();
+        assert!(
+            error_str.contains("policy: run blocked"),
+            "result.error should include hook message, got {error_str}",
+        );
+    }
+
+    /// Compactor that always fails. Triggers `StopCondition::CompactionFailed`
+    /// on the runloop's first compaction attempt (turn 0).
+    struct FailingCompactor;
+    #[async_trait]
+    impl Compactor for FailingCompactor {
+        async fn compact(
+            &self,
+            _messages: &[Message],
+            _capabilities: &Capabilities,
+        ) -> caliban_agent_core::Result<Option<Vec<Message>>> {
+            Err(caliban_agent_core::Error::Compaction(
+                "compactor: ran out of budget".into(),
+            ))
+        }
+        fn strategy_name(&self) -> &'static str {
+            "FailingCompactor"
+        }
+    }
+
+    #[tokio::test]
+    async fn run_end_compaction_failed_emits_error_subtype_and_returns_run_err() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let hooks: Arc<dyn Hooks + Send + Sync> = Arc::new(NoopHooks);
+        let compactor: Arc<dyn Compactor + Send + Sync> = Arc::new(FailingCompactor);
+        let agent = build_agent_with(Arc::clone(&mock), Some(hooks), Some(compactor), 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("compaction failure should surface as Run err");
+        assert!(
+            matches!(&err, HeadlessError::Run(msg) if msg.contains("ran out of budget")),
+            "expected Run(…ran out of budget…), got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 1);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "error");
+        assert!(
+            frame["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ran out of budget"),
+            "result.error should include compactor message, got {frame}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_end_max_turns_emits_max_turns_subtype_and_exits_130() {
+        // Drive max_turns=1 with a tool-using response so the loop wants
+        // to continue but hits the cap. The driver short-circuits when
+        // max_turns is configured to 0; max_turns=1 reaches the model
+        // call but breaks after the single turn.
+        let mock = Arc::new(MockProvider::new());
+        // Single turn that asks for a tool call; without a registered
+        // tool the runloop still records the turn, then sees max_turns
+        // exhausted on the second pass.
+        mock.enqueue_stream(vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg_1".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text("loop".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]);
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 1);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("max_turns should surface as MaxTurnsExceeded");
+        assert!(
+            matches!(&err, HeadlessError::MaxTurnsExceeded(1)),
+            "expected MaxTurnsExceeded(1), got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 130);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "max_turns");
+        assert!(
+            frame["error"].is_null(),
+            "max_turns frame should not carry error, got {frame}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_end_cancelled_emits_cancelled_subtype_and_exits_124() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let cancel = CancellationToken::new();
+        // Cancel before the run begins; before_run is invoked first, but
+        // the loop's first action after that is a cancellation check
+        // which transitions to StopCondition::Cancelled.
+        cancel.cancel();
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(agent, vec![Message::user_text("hi")], cancel)
+            .await
+            .expect_err("pre-cancelled run should surface as Cancelled");
+        assert!(
+            matches!(err, HeadlessError::Cancelled),
+            "expected Cancelled, got {err:?}",
+        );
+        assert_eq!(exit_code_for(&err), 124);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "cancelled");
+        assert!(frame["error"].is_null());
     }
 }
