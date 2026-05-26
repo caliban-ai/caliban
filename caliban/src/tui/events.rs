@@ -83,7 +83,14 @@ pub(crate) fn stopped_for_surface(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut App) {
     use caliban_agent_core::TurnEvent;
-    tracing::debug!(?evt, "agent event");
+    // Per-event hot path: each delta / tool-call boundary fires here. The
+    // `?evt` arg records a `&dyn Debug` over `TurnEvent` (which transitively
+    // walks `Vec<ContentBlock>` / `Vec<Message>` etc.), so even though
+    // `tracing` itself defers `Debug::fmt`, gate the macro entry behind the
+    // callsite check to skip the valueset construction when DEBUG is off.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(?evt, "agent event");
+    }
     match evt {
         TurnEvent::TurnStart { .. } => {
             // Keep the WaitingForModel activity; refreshed on first delta below.
@@ -516,7 +523,14 @@ pub(crate) fn handle_event(
     agent_stream: &mut Option<TurnEventStream>,
 ) {
     use crossterm::event::Event;
-    tracing::trace!(?event, "term event");
+    // Per-event hot path: each key / mouse move / resize fires here. The
+    // `?event` arg records a `&dyn Debug` over `crossterm::event::Event`
+    // (an enum with multi-field key/mouse variants); gate the macro entry
+    // behind the callsite check so the disabled path is a single atomic
+    // load with no valueset construction.
+    if tracing::enabled!(tracing::Level::TRACE) {
+        tracing::trace!(?event, "term event");
+    }
     match event {
         Event::Key(key) => {
             if key.kind != KeyEventKind::Press {

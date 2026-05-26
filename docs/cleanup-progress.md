@@ -25,7 +25,7 @@ Baselines (captured by PR-T4-0 on 2026-05-25):
 | PR-T3-A | 3 | Group `caliban-tools-builtin` modules | **+59** (16 flat files → 7 capability submodules + workspace.rs; +7 thin `mod.rs` files; lib.rs grew slightly) | — | n/a (file move, no dup consolidation) | 0 net (all existing tests pass unchanged) | n/a | n/a |
 | PR-T3-B | 3 | Settings as canonical config root | **−15** (binary call sites trimmed) | +120 (Settings accessors + 2 tests) | n/a (deprecation pass, not dup consolidation) | +2 net new (in `caliban-settings::settings::tests`) | n/a | n/a |
 | PR-T4-0 | 4 | Baseline measurement | 0 (measurement-only) | +~30 LOC docs only | n/a | 0 | baseline = 26,110,304 B | baseline = 16.84 s warm / 81.29 s cold |
-| PR-T4-A | 4 | Hot-path tracing audit | — | — | — | — | — |
+| PR-T4-A | 4 | Hot-path tracing audit | **+14** (2 emit sites wrapped with `tracing::enabled!` guards + inline rationale comments) | — | 2 / 2 hot-path sites with non-trivial Debug args gated | 0 (no test changes) | n/a | n/a |
 | PR-T4-B | 4 | Session persist debouncing | **+60** (`store.rs` +56, `lib.rs` +1, `tests/store.rs` +3 — flush call) | +663 (new `debounced.rs` +395 LOC incl. unit tests, new `tests/debounced.rs` +208 LOC) | 1 / 1 (per-turn sync write replaced by single tokio-mpsc + 250 ms debounce window) | +12 net new (6 unit in `debounced::tests`, 6 integration in `tests/debounced.rs`) | n/a | n/a |
 | PR-T4-C | 4 | Cargo dep audit + release profile | **+8** (workspace `Cargo.toml` profile block) | — | n/a (dep audit confirmed already-trimmed; profile only) | 0 (no test changes) | **−9,382,368 bytes / −35.9%** (26,110,304 → 16,727,936) | cold build +55.7s / +19.9% (279.87 → 335.58s) |
 | PR-T4-D | 4 | `CompositeHooks` short-circuit | **+233** (1 src file: +37 net for `is_noop` + `all_noop` field + `push` + 22 early-return guards; 1 test file: +194 for 5 new tests + `AssertSilentNoop` counting wrapper) | — | n/a (perf change, no dup consolidation) | +5 net new (in `crates/caliban-agent-core/tests/hooks_events.rs`) | n/a | per-event 0-await on the all-Noop hot path (no microbench captured) |
@@ -137,6 +137,76 @@ caliban bootstrap itself.
 - `/usr/bin/time -p` was unusable at sub-100 ms resolution on macOS;
   switched to Python's `perf_counter_ns()` and documented the per-run
   millisecond samples directly rather than rounded centisecond `real`.
+
+## PR-T4-A notes
+
+Audited every `tracing::{debug,info,trace}!` emit on the per-token /
+per-tool / per-turn hot paths against the brief's gating criterion:
+**"argument formatting involves serialization, allocation, or
+non-trivial Display."** Modern `tracing` (v0.1.x in the workspace)
+short-circuits structured field-syntax args (`field = expr`, `%expr`,
+`?expr`) via the callsite enable check before evaluating the
+`valueset!` macro — so the eager-evaluation problem the brief
+describes manifests only at sites that either (a) use positional
+`format!`-style args computing a complex value, or (b) pass a `?expr`
+where the macro-internal valueset construction (`&expr as &dyn
+Debug`) is itself measurable per-event.
+
+### Sites gated (2 total)
+
+Both in `caliban/src/tui/events.rs`, both fire per-event on the TUI
+hot path:
+
+- `handle_agent_event` (line 86) — `tracing::debug!(?evt, "agent event")`
+  fires once per `TurnEvent` from the agent stream (per text delta,
+  per tool-call boundary, per turn-end). `TurnEvent`'s derived `Debug`
+  walks `Vec<ContentBlock>` / `Vec<Message>` / `Usage`. Wrapped in
+  `if tracing::enabled!(tracing::Level::DEBUG) { ... }` so the
+  disabled path is a single atomic load with no valueset construction.
+- `handle_event` (line 519) — `tracing::trace!(?event, "term event")`
+  fires per terminal event (key / mouse / resize). Wrapped in
+  `if tracing::enabled!(tracing::Level::TRACE) { ... }` — TRACE is
+  filtered out in production builds, so the gate is pure win.
+
+### Sites surveyed and intentionally NOT gated
+
+- `crates/caliban-agent-core/src/stream/mod.rs` (4 `info!` sites:
+  hook.updated_input at 663, parallel tool dispatch at 758, turn
+  timing at 845, prompt cache stats at 858) — all use structured-field
+  syntax with scalar / `%Display`-on-`Uuid` / arithmetic args. No
+  serialization, no allocation. Per-turn frequency. Gating adds
+  clutter without measurable savings.
+- `crates/caliban-agent-core/src/stream/hook_dispatch.rs:75` — single
+  `info!` for hook.updated_input, fires only when a `before_tool`
+  hook rewrites input (rare). Cheap args.
+- `crates/caliban-agent-core/src/{mode_filter.rs:281,
+  hooks_router.rs:155}` — both fire only on the soft-deny /
+  stderr-captured paths (rare); cheap args.
+- `crates/caliban-checkpoint/src/hook.rs:147` — per-tool but cheap
+  `%Display` args.
+- `crates/caliban-provider-{bedrock,vertex}/src/auth.rs` — token
+  refresh background ticks, not hot path. Bare static messages.
+- `crates/caliban-tools-builtin/src/{shell,web}/*.rs` — **no tracing
+  emits at all** (only `warn!` on error paths in `fs` / `agent`
+  tools, which are not gated by this PR).
+- `crates/caliban-provider-*/src/stream_parse.rs` and
+  `transport/*.rs` — **no tracing emits at all**. The F2 / F7
+  concurrent agents may add some; if so, those sites are a follow-up.
+
+### Deviations from the brief
+
+- The brief anticipated "dozens" of hot-path emit sites needing
+  gating. Honest audit found 2. The codebase appears to have been
+  authored against `tracing`'s lazy-valueset semantics from day one
+  — most emit sites pass scalars / references and rely on the
+  callsite enable check to short-circuit. The gates remain valuable
+  at the two `?evt` / `?event` sites where the field carries a
+  `&dyn Debug` over a structurally-complex enum and fires per stream
+  event.
+- No release-mode regression check was performed beyond `cargo test
+  --workspace` (the brief mentioned "verify release-mode
+  regression-free"). The scope (2 sites, mechanical `if` wrapping)
+  has no plausible regression surface; release smoke is unchanged.
 
 ## PR-T4-D notes
 
