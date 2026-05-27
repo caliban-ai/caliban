@@ -1,10 +1,16 @@
 # Claude Code documented-capability inventory
 
+> **Static snapshot — captured 2026-05-24.**
+>
 > Structured snapshot of Claude Code's documented surface, captured from
-> the public docs at `docs.claude.com/en/docs/claude-code/*` on
-> **2026-05-24**. This is the source feeding
-> [`parity-gap-matrix.md`](parity-gap-matrix.md); refresh both together
-> when Claude Code ships new features.
+> the public docs at `docs.claude.com/en/docs/claude-code/*`. This is the
+> source feeding [`parity-gap-matrix.md`](parity-gap-matrix.md). It is
+> intentionally a point-in-time capture, not a live mirror.
+>
+> **Re-baseline cadence:** refresh manually before each parity-prioritization
+> review. When refreshing, re-fetch the upstream docs, update the sections
+> below, bump the snapshot date in this header, and propagate any new rows
+> into `parity-gap-matrix.md` in the same commit.
 >
 > Conventions: *surfaces* = user-visible primitives; "Config = X" lines
 > name the canonical configuration mechanism.

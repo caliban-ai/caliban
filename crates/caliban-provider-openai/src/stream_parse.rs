@@ -96,8 +96,7 @@ pub(crate) fn map_openai_sse_to_events(
                     // chunk fails NativeChunk deserialization, try parsing
                     // it as that error envelope and surface the upstream
                     // message verbatim instead of the layered chunk-parse
-                    // error. See `docs/2026-05-25-lmstudio-probe-findings.md`
-                    // Finding 12.
+                    // error.
                     if let Some(msg) = extract_upstream_error(&event.data) {
                         Err(ProviderError::from(OpenAIError::UpstreamError(msg)))?;
                         unreachable!();
@@ -345,7 +344,7 @@ fn map_finish_reason(r: NativeFinishReason) -> StopReason {
 /// otherwise. Used by the SSE parser to surface upstream-side problems
 /// (LM Studio context overflow, Ollama / vLLM error payloads, etc.) as a
 /// readable [`OpenAIError::UpstreamError`] instead of a nested chunk-parse
-/// error. See `docs/2026-05-25-lmstudio-probe-findings.md` Finding 12.
+/// error.
 fn extract_upstream_error(data: &str) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Envelope {

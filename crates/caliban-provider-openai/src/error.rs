@@ -33,7 +33,6 @@ pub enum OpenAIError {
     /// payload in the stream body. Surfacing the upstream message
     /// verbatim avoids the layered "stream parse / chunk parse / missing
     /// field 'id'" wrapping that the bare deserialization error produces.
-    /// See `docs/2026-05-25-lmstudio-probe-findings.md` Finding 12.
     #[error("upstream error: {0}")]
     UpstreamError(String),
 
