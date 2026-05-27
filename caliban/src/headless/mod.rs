@@ -25,6 +25,7 @@ pub(crate) mod input;
 pub(crate) mod schema;
 pub(crate) mod session_loader;
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -210,11 +211,28 @@ pub(crate) struct HeadlessRunSummary {
     pub(crate) error: Option<String>,
 }
 
+/// Per-call buffer used to defer the stream-json `tool_use` frame until
+/// the model has finished streaming the tool's input JSON. Without this,
+/// the frame was emitted at `ToolCallStart` time with `input: null`,
+/// which read like "the tool was called with no arguments" even though
+/// the matching `tool_result` would later confirm the real input.
+#[derive(Debug, Default)]
+struct ToolCallBuf {
+    /// Tool name, captured at `ToolCallStart`.
+    name: String,
+    /// Accumulated JSON fragments from `ToolCallInputDelta` events.
+    input_json: String,
+}
+
 /// Stateful headless driver. Owns the writer and the run config; takes
 /// ownership of the message vector and the agent.
 pub(crate) struct HeadlessDriver<W: Write> {
     writer: W,
     config: HeadlessRunConfig,
+    /// In-flight tool calls awaiting their full input JSON. Cleared at
+    /// the start of each `run_single_pass`; entries are removed on
+    /// `ToolCallEnd`.
+    pending_tool_calls: HashMap<String, ToolCallBuf>,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -238,7 +256,11 @@ enum TerminalStop {
 impl<W: Write> HeadlessDriver<W> {
     /// Construct a new driver writing to `writer`.
     pub(crate) fn new(writer: W, config: HeadlessRunConfig) -> Self {
-        Self { writer, config }
+        Self {
+            writer,
+            config,
+            pending_tool_calls: HashMap::new(),
+        }
     }
 
     /// Emit the `system/init` frame (stream-json mode only). No-op for
@@ -419,6 +441,10 @@ impl<W: Write> HeadlessDriver<W> {
     /// non-`EndOfTurn` stop condition. The caller (single-frame `run` or
     /// multi-frame `run_frames`) is responsible for emitting the final
     /// `result` frame for that stop. Returns `Ok(None)` otherwise.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the per-TurnEvent match is clearer as one body"
+    )]
     fn handle_event(
         &mut self,
         event: TurnEvent,
@@ -462,12 +488,28 @@ impl<W: Write> HeadlessDriver<W> {
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
             } => {
+                // Stash the tool name; the matching `tool_use` frame is
+                // emitted at `ToolCallEnd` time so it can carry the fully
+                // streamed input JSON instead of `null`.
                 if matches!(self.config.output_format, OutputFormat::StreamJson) {
-                    self.write_ndjson(&events::tool_use(
-                        &tool_use_id,
-                        &name,
-                        serde_json::Value::Null,
-                    ))?;
+                    self.pending_tool_calls.insert(
+                        tool_use_id,
+                        ToolCallBuf {
+                            name,
+                            input_json: String::new(),
+                        },
+                    );
+                }
+            }
+            TurnEvent::ToolCallInputDelta {
+                tool_use_id,
+                partial_json,
+                ..
+            } => {
+                if matches!(self.config.output_format, OutputFormat::StreamJson)
+                    && let Some(buf) = self.pending_tool_calls.get_mut(&tool_use_id)
+                {
+                    buf.input_json.push_str(&partial_json);
                 }
             }
             TurnEvent::ToolCallEnd {
@@ -477,6 +519,15 @@ impl<W: Write> HeadlessDriver<W> {
                 ..
             } => {
                 if matches!(self.config.output_format, OutputFormat::StreamJson) {
+                    // Pair the `tool_use` frame with the matching
+                    // `tool_result`: emit the deferred tool_use now that
+                    // the input JSON has finished streaming. Parse the
+                    // accumulated JSON; on parse failure fall back to a
+                    // string so the frame is never silently dropped.
+                    if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
+                        let input = parse_tool_input(&buf.input_json);
+                        self.write_ndjson(&events::tool_use(&tool_use_id, &buf.name, input))?;
+                    }
                     let content_value = content_blocks_to_json(&content);
                     self.write_ndjson(&events::tool_result(&tool_use_id, is_error, content_value))?;
                 }
@@ -534,7 +585,7 @@ impl<W: Write> HeadlessDriver<W> {
                     }
                 }
             }
-            _ => {}
+            TurnEvent::TurnStart { .. } => {}
         }
         if matches!(self.config.output_format, OutputFormat::Text) && !*at_column_zero {
             // Ensure deltas are flushed; final newline is added at run end.
@@ -562,6 +613,10 @@ impl<W: Write> HeadlessDriver<W> {
         turns: &mut u32,
         at_column_zero: &mut bool,
     ) -> Result<Option<TerminalStop>, HeadlessError> {
+        // Drop any stale pending tool-call buffers from a prior pass. New
+        // IDs are unique per run in practice, but clearing here keeps the
+        // state machine local.
+        self.pending_tool_calls.clear();
         let mut stream = agent.stream_until_done(messages, cancel);
         while let Some(event_result) = stream.next().await {
             let event = event_result.map_err(|e| HeadlessError::Run(e.to_string()))?;
@@ -858,6 +913,17 @@ fn split_model_summary(summary: &str) -> (&str, &str) {
     summary.split_once('/').unwrap_or((summary, ""))
 }
 
+/// Parse the accumulated tool-call input JSON for emission in a
+/// `tool_use` frame. Empty input becomes `{}` (the model called a
+/// zero-argument tool); parse failures fall back to wrapping the raw
+/// string so the frame is never silently dropped.
+fn parse_tool_input(json: &str) -> serde_json::Value {
+    if json.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(json).unwrap_or_else(|_| serde_json::Value::String(json.to_string()))
+}
+
 fn extract_user_text(msg: &Message) -> String {
     let mut out = String::new();
     for b in &msg.content {
@@ -900,6 +966,23 @@ mod tests {
             exit_code_for(&HeadlessError::SchemaValidation("e".into())),
             2,
         );
+    }
+
+    #[test]
+    fn parse_tool_input_handles_empty_and_object_and_garbage() {
+        // Empty input → zero-arg tool, represented as `{}`.
+        let v = parse_tool_input("");
+        assert!(v.is_object() && v.as_object().unwrap().is_empty());
+        // Whitespace-only is treated the same as empty.
+        let v = parse_tool_input("   \n  ");
+        assert!(v.is_object() && v.as_object().unwrap().is_empty());
+        // Well-formed JSON parses to the corresponding Value.
+        let v = parse_tool_input(r#"{"path":"README.md"}"#);
+        assert_eq!(v["path"], "README.md");
+        // Garbage falls back to a string so the frame still carries the
+        // raw payload instead of being silently dropped.
+        let v = parse_tool_input("not json {{{");
+        assert_eq!(v, serde_json::Value::String("not json {{{".into()));
     }
 
     #[test]

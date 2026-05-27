@@ -17,7 +17,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
@@ -100,8 +100,12 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
         }
         Ollama => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
+            // `from_env` already returns the local default when
+            // `OLLAMA_BASE_URL` is unset. Only the case where the env var is
+            // set but unparseable yields `Err`, and that should reach the
+            // operator instead of silently retargeting localhost.
             Arc::new(OllamaProvider::direct(
-                DirectConfig::from_env().unwrap_or_else(|_| DirectConfig::local()),
+                DirectConfig::from_env().context("invalid OLLAMA_BASE_URL")?,
             )?)
         }
         Google => {

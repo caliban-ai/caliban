@@ -50,14 +50,6 @@ pub(crate) struct Diagnostics {
 impl Diagnostics {
     /// Run all (non-deep) checks. Deep checks gated by `opts.deep`.
     /// Returns a [`Diagnostics`] populated with one row per check.
-    ///
-    /// The signature is `async` so future deep checks (provider pings)
-    /// can `.await` without changing callers; today the body is
-    /// synchronous and clippy is intentionally silenced.
-    #[allow(
-        clippy::unused_async,
-        reason = "kept async so deep provider checks can land without changing callers"
-    )]
     pub(crate) async fn run(opts: DiagOpts) -> Self {
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut out = Self::default();
@@ -68,13 +60,11 @@ impl Diagnostics {
         out.checks.push(check_skills(&workspace));
         out.checks.push(check_claudemd(&workspace));
         out.checks.push(check_workspace(&workspace));
-        if opts.deep {
-            out.checks.push(DiagCheck {
-                name: "providers",
-                status: CheckStatus::Warn,
-                hint: "deep provider pings not wired yet \u{2014} run with creds set".to_string(),
-            });
-        }
+        // `ollama` runs unconditionally: when `OLLAMA_BASE_URL` is set we
+        // ping `/api/tags` to confirm the URL is reachable and surface
+        // the model list. When it's unset we skip the network and just
+        // report that no override was provided.
+        out.checks.push(check_ollama(opts.deep).await);
         out
     }
 
@@ -252,6 +242,95 @@ fn check_workspace(workspace: &Path) -> DiagCheck {
     }
 }
 
+/// Probe Ollama for reachability + installed-model list.
+///
+/// Behavior:
+/// - `OLLAMA_BASE_URL` set but unparseable → `Fail` (matches the binary's
+///   behavior at provider construction).
+/// - `OLLAMA_BASE_URL` set and reachable → `Pass`, hint lists URL + model count.
+/// - `OLLAMA_BASE_URL` set and unreachable → `Warn` (might just not be
+///   running yet; we don't want to fail the whole `doctor` run for it).
+/// - Unset + `deep=false` → `Pass`, "no override; deep probe will check
+///   localhost".
+/// - Unset + `deep=true` → ping `http://localhost:11434/api/tags` and
+///   report the result there too.
+async fn check_ollama(deep: bool) -> DiagCheck {
+    use caliban_provider_ollama::config::DirectConfig;
+
+    let env_set = std::env::var("OLLAMA_BASE_URL").is_ok();
+    let cfg = match DirectConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            return DiagCheck {
+                name: "ollama",
+                status: CheckStatus::Fail,
+                hint: format!("invalid OLLAMA_BASE_URL: {e}"),
+            };
+        }
+    };
+
+    if !env_set && !deep {
+        return DiagCheck {
+            name: "ollama",
+            status: CheckStatus::Pass,
+            hint: "OLLAMA_BASE_URL unset (no probe attempted; use --deep to ping localhost)".into(),
+        };
+    }
+
+    // Build a `/api/tags` URL by joining onto the configured base.
+    let tags_url = match cfg.base_url.join("api/tags") {
+        Ok(u) => u,
+        Err(e) => {
+            return DiagCheck {
+                name: "ollama",
+                status: CheckStatus::Fail,
+                hint: format!("could not build /api/tags URL: {e}"),
+            };
+        }
+    };
+
+    // Short timeout — the doctor should never block a long-running model
+    // load. Just a reachability check.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return DiagCheck {
+                name: "ollama",
+                status: CheckStatus::Fail,
+                hint: format!("could not build http client: {e}"),
+            };
+        }
+    };
+
+    match client.get(tags_url.clone()).send().await {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let models = body
+                .get("models")
+                .and_then(|v| v.as_array())
+                .map_or(0, std::vec::Vec::len);
+            DiagCheck {
+                name: "ollama",
+                status: CheckStatus::Pass,
+                hint: format!("{} ({} model(s) reachable)", cfg.base_url, models),
+            }
+        }
+        Ok(r) => DiagCheck {
+            name: "ollama",
+            status: CheckStatus::Warn,
+            hint: format!("{tags_url} returned HTTP {}", r.status().as_u16()),
+        },
+        Err(e) => DiagCheck {
+            name: "ollama",
+            status: CheckStatus::Warn,
+            hint: format!("{tags_url} unreachable: {e}"),
+        },
+    }
+}
+
 /// Render the diagnostics table as a list of plain text lines, one row
 /// per check. Used by the headless `caliban doctor` entry point.
 pub(crate) fn print_diagnostics_text(diag: &Diagnostics) {
@@ -282,5 +361,18 @@ mod tests {
         if no_failures {
             assert_eq!(r.exit_code(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn ollama_check_is_always_present() {
+        // Regression: previously `doctor` exposed no provider-side check
+        // at all, so operators couldn't tell whether their configured
+        // OLLAMA_BASE_URL was reachable. The `ollama` row should always
+        // appear, even when the env var is unset.
+        let r = Diagnostics::run(DiagOpts { deep: false }).await;
+        assert!(
+            r.checks.iter().any(|c| c.name == "ollama"),
+            "expected an `ollama` check row in doctor output"
+        );
     }
 }

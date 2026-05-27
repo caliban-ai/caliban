@@ -25,6 +25,11 @@ on:
       - 'crates/caliban-provider-openai/src/config.rs'
       - 'Cargo.lock'
       - '.github/workflows/ci-cloud.yml'
+  # Manual re-trigger — useful when a PR touched the `caliban` binary's
+  # provider-construction wiring (which the path filter above doesn't
+  # match) and the cloud-features build needs a fresh run against the
+  # current branch tip.
+  workflow_dispatch:
 
 concurrency:
   group: ci-cloud-${{ github.ref }}
