@@ -1,0 +1,145 @@
+//! Stage A: one-shot budget escalation when a turn ends in `MaxTokens` with
+//! no `tool_use`. Stage B: meta-continuation prompt. Stage C: surrender.
+
+#![allow(missing_docs)]
+
+use std::sync::Arc;
+
+use caliban_agent_core::{Agent, AgentConfig, StopCondition, TurnEvent};
+use caliban_provider::{Message, MockProvider};
+use futures::StreamExt as _;
+use tokio_util::sync::CancellationToken;
+
+fn agent_with(provider: MockProvider, cfg: AgentConfig) -> Arc<Agent> {
+    let mut cfg = cfg;
+    if cfg.model.is_empty() {
+        cfg.model = "mock".into();
+    }
+    Arc::new(
+        Agent::builder()
+            .provider(Arc::new(provider))
+            .config(cfg)
+            .build()
+            .expect("agent"),
+    )
+}
+
+#[tokio::test]
+async fn stage_a_escalates_then_succeeds() {
+    let provider = MockProvider::builder()
+        // turn 1: stop_reason MaxTokens, output 1024 tokens, no tool_use
+        .with_response_max_tokens(1024)
+        // turn 2 (after Stage A retry with escalated budget): natural EndTurn
+        .with_response_end_turn("All done.")
+        .build();
+
+    let cfg = AgentConfig {
+        max_tokens: 1024,
+        max_tokens_recovery: true,
+        escalated_max_tokens: 16_384,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+
+    let mut stream = agent.stream_until_done(
+        vec![Message::user_text("write a haiku")],
+        CancellationToken::new(),
+    );
+
+    let mut last_stop = None;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd { stopped_for, .. } = ev {
+            last_stop = Some(stopped_for);
+        }
+    }
+    assert!(
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "expected EndOfTurn, got {last_stop:?}"
+    );
+}
+
+#[tokio::test]
+async fn stage_b_injects_meta_then_continues() {
+    let provider = MockProvider::builder()
+        // turn 1: MaxTokens (Stage A escalates)
+        .with_response_max_tokens(1024)
+        // turn 1 retry: still MaxTokens → Stage B fires, inject meta msg
+        .with_response_max_tokens(16_384)
+        // turn 2: EndTurn after the meta msg
+        .with_response_end_turn("Resumed.")
+        .build();
+
+    let cfg = AgentConfig {
+        max_tokens: 1024,
+        max_meta_continuations: 3,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut final_history = Vec::new();
+    let mut last_stop = None;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd {
+            final_messages,
+            stopped_for,
+            ..
+        } = ev
+        {
+            final_history = final_messages;
+            last_stop = Some(stopped_for);
+        }
+    }
+    assert!(
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "expected EndOfTurn, got {last_stop:?}"
+    );
+    let injected = final_history
+        .iter()
+        .filter(|m| {
+            m.role == caliban_provider::Role::User
+                && m.content.iter().any(|b| {
+                    matches!(b, caliban_provider::ContentBlock::Text(t)
+                        if t.text.starts_with("Output token limit hit"))
+                })
+        })
+        .count();
+    assert_eq!(
+        injected, 1,
+        "exactly one meta-continuation message injected"
+    );
+}
+
+#[tokio::test]
+async fn stage_c_surrenders_after_cap() {
+    let mut builder = MockProvider::builder();
+    // Each "MaxTokens turn" consumes two provider calls (initial hit +
+    // Stage A retry). With `max_meta_continuations=3`, the loop runs
+    // 4 turns (initial + 3 meta injections) × 2 calls = 8 provider calls
+    // before Stage C surrenders. Add a small headroom.
+    for _ in 0..10 {
+        builder = builder.with_response_max_tokens(16_384);
+    }
+    let provider = builder.build();
+
+    let cfg = AgentConfig {
+        max_tokens: 1024,
+        max_meta_continuations: 3,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd { stopped_for, .. } = ev {
+            last_stop = Some(stopped_for);
+        }
+    }
+    assert!(
+        matches!(last_stop, Some(StopCondition::MaxTokensExhausted)),
+        "expected MaxTokensExhausted, got {last_stop:?}"
+    );
+}

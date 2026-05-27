@@ -3,7 +3,8 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use caliban_provider::{Provider, ThinkingConfig, ToolChoice};
+use arc_swap::ArcSwap;
+use caliban_provider::{Effort, Provider, ThinkingConfig, ToolChoice};
 
 use crate::error::{Error, Result};
 use crate::hooks::{Hooks, NoopHooks};
@@ -50,6 +51,30 @@ pub struct AgentConfig {
     pub max_turns: u32,
     /// Tool-choice policy sent to the provider.
     pub tool_choice: ToolChoice,
+    // ── Plan A (turn-loop resilience) ────────────────────────────
+    /// Stage A escalated `max_tokens` budget (used once per `MaxTokens` hit).
+    pub escalated_max_tokens: u32,
+    /// Stage B meta-continuation cap (per-run).
+    pub max_meta_continuations: u8,
+    /// Stream idle timeout (ms). 0 disables the watchdog.
+    pub stream_idle_timeout_ms: u32,
+    /// Master switch for `MaxTokens` recovery (Stage A + B).
+    pub max_tokens_recovery: bool,
+    // ── Plan B (context-window management) ───────────────────────
+    /// Pre-turn autocompaction threshold (utilization in 0..=1). `None` disables.
+    pub auto_compact_threshold: Option<f32>,
+    /// Enable the per-turn microcompact janitor pass.
+    pub micro_compact_enabled: bool,
+    /// Global per-tool-result cap in chars. `0` disables.
+    pub tool_result_cap_chars: usize,
+    /// Minimum estimated tokens on the last user message to merit a cache marker.
+    pub min_cache_block_tokens: usize,
+    // ── Plan C (TUI slash & UX polish) ───────────────────────────
+    /// Reasoning-effort level, swapped at runtime by `/effort`. Lock-free
+    /// reads via [`arc_swap::ArcSwap`]; the per-turn request builder
+    /// snapshots this with `load_full()` and copies into
+    /// `CompletionRequest.effort`. Default is [`Effort::Auto`].
+    pub effort: Arc<ArcSwap<Effort>>,
 }
 
 impl Default for AgentConfig {
@@ -64,7 +89,33 @@ impl Default for AgentConfig {
             user_id: None,
             max_turns: 50,
             tool_choice: ToolChoice::default(),
+            // Plan A
+            escalated_max_tokens: 16_384,
+            max_meta_continuations: 3,
+            stream_idle_timeout_ms: 90_000,
+            max_tokens_recovery: true,
+            // Plan B
+            auto_compact_threshold: Some(0.75),
+            micro_compact_enabled: true,
+            tool_result_cap_chars: 50_000,
+            min_cache_block_tokens: 1024,
+            // Plan C
+            effort: Arc::new(ArcSwap::from_pointee(Effort::Auto)),
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_recovery_knobs() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.escalated_max_tokens, 16_384);
+        assert_eq!(cfg.max_meta_continuations, 3);
+        assert_eq!(cfg.stream_idle_timeout_ms, 90_000);
+        assert!(cfg.max_tokens_recovery);
     }
 }
 
@@ -77,6 +128,13 @@ pub struct Agent {
     pub(crate) provider: Arc<dyn Provider + Send + Sync>,
     pub(crate) tools: ToolRegistry,
     pub(crate) config: AgentConfig,
+    /// Runtime-swappable model id, seeded from `config.model` at
+    /// construction time. Read via [`Agent::active_model`] (lock-free
+    /// snapshot); swapped via [`Agent::try_swap_model`] (typically by
+    /// the `/model` TUI command). The streaming loop reads this in three
+    /// hot sites — instrument span, capabilities probe, request build —
+    /// so a swap takes effect on the next turn without restart.
+    pub(crate) active_model: Arc<ArcSwap<String>>,
     pub(crate) compactor: Arc<dyn crate::compact::Compactor + Send + Sync>,
     pub(crate) retry: crate::retry::RetryPolicy,
     pub(crate) hooks: Arc<dyn Hooks + Send + Sync>,
@@ -98,6 +156,23 @@ pub struct Agent {
     /// before the message is appended to the conversation history.
     /// Defaults to [`NoopPostProcessor`], which is a zero-cost identity.
     pub(crate) post_processor: Arc<dyn AssistantPostProcessor>,
+}
+
+/// Error returned by [`Agent::try_swap_model`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ModelSwapError {
+    /// The requested model id is not exposed by the active provider's
+    /// `list_models()`. Heuristic: we accept the swap when the model is
+    /// either in `list_models()` *or* the list is empty (mocks/tests).
+    #[error("model `{0}` is not available on the active provider")]
+    UnsupportedByProvider(String),
+    /// The requested model would require a different provider than the
+    /// one currently driving the Agent. Hot-swap across providers is
+    /// deferred; surface a remediation hint instead.
+    #[error(
+        "model `{0}` requires provider `{1}`, but active provider is `{2}`; restart with --provider {1}"
+    )]
+    CrossProvider(String, String, String),
 }
 
 impl std::fmt::Debug for Agent {
@@ -152,6 +227,38 @@ impl Agent {
     #[must_use]
     pub fn compactor(&self) -> Arc<dyn crate::compact::Compactor + Send + Sync> {
         Arc::clone(&self.compactor)
+    }
+
+    /// Return the current active model id as a lock-free `Arc<String>`
+    /// snapshot. Reads inside the streaming loop go through this so a
+    /// runtime `/model` swap takes effect on the next turn.
+    #[must_use]
+    pub fn active_model(&self) -> Arc<String> {
+        self.active_model.load_full()
+    }
+
+    /// Swap the active model in place (same-provider only). Returns
+    /// [`ModelSwapError::UnsupportedByProvider`] if the model isn't
+    /// recognised by the active provider's `list_models()` (when that
+    /// list is non-empty). Mocks / test providers that return an empty
+    /// model list accept any id, which keeps unit tests honest without
+    /// requiring a fixture per provider.
+    ///
+    /// # Errors
+    ///
+    /// See [`ModelSwapError`]. Cross-provider swap is deferred and
+    /// surfaces [`ModelSwapError::CrossProvider`] via the
+    /// `/model` picker when the operator selects a non-selectable row.
+    pub fn try_swap_model(&self, new_model: &str) -> std::result::Result<(), ModelSwapError> {
+        let list = self.provider.list_models();
+        let known = list
+            .iter()
+            .any(|m| m.id == new_model || m.native_id == new_model);
+        if !list.is_empty() && !known {
+            return Err(ModelSwapError::UnsupportedByProvider(new_model.to_string()));
+        }
+        self.active_model.store(Arc::new(new_model.to_string()));
+        Ok(())
     }
 }
 
@@ -329,10 +436,12 @@ impl AgentBuilder {
         if self.config.max_tokens == 0 {
             return Err(Error::Misconfigured("Agent::max_tokens must be > 0".into()));
         }
+        let active_model = Arc::new(ArcSwap::from_pointee(self.config.model.clone()));
         Ok(Agent {
             provider,
             tools: self.tools,
             config: self.config,
+            active_model,
             compactor: self
                 .compactor
                 .unwrap_or_else(|| Arc::new(crate::compact::NoopCompactor)),
@@ -400,5 +509,48 @@ mod parallel_tools_config_tests {
         let pp: Arc<dyn AssistantPostProcessor> = Arc::new(NoopPostProcessor);
         let b = AgentBuilder::default().post_processor(pp);
         assert!(b.post_processor.is_some());
+    }
+}
+
+#[cfg(test)]
+mod context_config_tests {
+    use super::AgentConfig;
+
+    #[test]
+    fn default_context_knobs() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.auto_compact_threshold, Some(0.75));
+        assert!(cfg.micro_compact_enabled);
+        assert_eq!(cfg.tool_result_cap_chars, 50_000);
+        assert_eq!(cfg.min_cache_block_tokens, 1024);
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    #[test]
+    fn openai_mapping() {
+        assert_eq!(Effort::Low.as_openai(), Some("low"));
+        assert_eq!(Effort::Medium.as_openai(), Some("medium"));
+        assert_eq!(Effort::High.as_openai(), Some("high"));
+        assert_eq!(Effort::Max.as_openai(), Some("high"));
+        assert_eq!(Effort::Auto.as_openai(), None);
+    }
+
+    #[test]
+    fn anthropic_budget_mapping() {
+        assert_eq!(Effort::Low.as_anthropic_budget(), Some(2_048));
+        assert_eq!(Effort::Medium.as_anthropic_budget(), Some(8_192));
+        assert_eq!(Effort::High.as_anthropic_budget(), Some(24_576));
+        assert_eq!(Effort::Max.as_anthropic_budget(), Some(64_000));
+        assert_eq!(Effort::Auto.as_anthropic_budget(), None);
+    }
+
+    #[test]
+    fn config_default_effort_is_auto() {
+        let cfg = AgentConfig::default();
+        assert_eq!(*cfg.effort.load_full(), Effort::Auto);
     }
 }

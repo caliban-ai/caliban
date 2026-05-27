@@ -49,6 +49,7 @@ mod overlay;
 mod schema;
 mod scope;
 mod settings;
+mod statusline;
 mod watcher;
 
 pub use api_key_helper::{ApiKeyHelperPool, ApiKeyHelperSpec, AuthOutcome};
@@ -59,6 +60,7 @@ pub use overlay::{ConfigRow, get, render_rows, render_text};
 pub use schema::{SCHEMA_JSON, validate_value};
 pub use scope::{Scope, ScopePaths};
 pub use settings::{ApiKeyHelperRaw, McpServerSetting, ModelSelector, Permissions, Settings};
+pub use statusline::{StatuslineConfig, StatuslineContext, StatuslineRunner};
 pub use watcher::{SettingsWatcher, WatcherEvent, is_settings_path, watch_paths_from_sources};
 
 use std::sync::Arc;

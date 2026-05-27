@@ -110,9 +110,34 @@
       ]
     },
     "enable_telemetry":      { "type": "boolean" },
+    "auto_compact_threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "default": 0.75 },
+    "micro_compact_enabled":  { "type": "boolean", "default": true },
+    "tool_result_cap_chars":  { "type": "integer", "minimum": 0, "default": 50000 },
+    "min_cache_block_tokens": { "type": "integer", "minimum": 0, "default": 1024 },
     "parent_settings_behavior": { "type": "string", "enum": ["block", "augment"] },
     "additional_directories":   { "type": "array", "items": { "type": "string" } },
     "claude_md_excludes":       { "type": "array", "items": { "type": "string" } },
-    "env": { "type": "object", "additionalProperties": { "type": "string" } }
+    "env": { "type": "object", "additionalProperties": { "type": "string" } },
+    "effort": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "max", "auto"]
+    },
+    "statusLine": {
+      "type": "object",
+      "properties": {
+        "command":    { "type": "string" },
+        "timeout_ms": { "type": "integer", "minimum": 50, "maximum": 5000 },
+        "padding":    { "type": "integer", "minimum": 0, "maximum": 8 }
+      },
+      "required": ["command"],
+      "additionalProperties": false
+    },
+    "tui": {
+      "type": "object",
+      "properties": {
+        "showCostInStatusline": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
   }
 }

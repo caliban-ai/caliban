@@ -9,8 +9,8 @@ use caliban_provider::{
 use crate::models::uses_completion_tokens;
 use crate::schema::request::{
     NativeContent, NativeContentPart, NativeFunctionCall, NativeImageUrl, NativeMessage,
-    NativeRequest, NativeStreamOptions, NativeTool, NativeToolCall, NativeToolChoice,
-    NativeToolFunction, NativeToolFunctionName,
+    NativeReasoning, NativeRequest, NativeStreamOptions, NativeTool, NativeToolCall,
+    NativeToolChoice, NativeToolFunction, NativeToolFunctionName,
 };
 use crate::schema::response::{NativeFinishReason, NativeResponse};
 
@@ -258,6 +258,16 @@ pub fn ir_to_native_request(
         None
     };
 
+    // Map the IR Effort hint to OpenAI's `reasoning.effort` field. Auto
+    // (and a fully-absent field) both omit the block entirely; Low/Med/
+    // High pass through verbatim and Max clamps to "high".
+    let reasoning = req
+        .effort
+        .and_then(caliban_provider::Effort::as_openai)
+        .map(|level| NativeReasoning {
+            effort: level.to_string(),
+        });
+
     Ok(NativeRequest {
         model: req.model,
         messages: native_messages,
@@ -271,6 +281,7 @@ pub fn ir_to_native_request(
         user: req.metadata.user_id,
         stream,
         stream_options,
+        reasoning,
     })
 }
 
@@ -384,6 +395,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: RequestMetadata::default(),
         }
     }
@@ -457,5 +469,70 @@ mod tests {
                 "{model} should send max_completion_tokens"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod effort_plumbing {
+    use super::*;
+    use caliban_provider::{CompletionRequest, Effort, RequestMetadata};
+
+    fn build_test_request() -> CompletionRequest {
+        CompletionRequest {
+            model: "gpt-5".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text(IrTextBlock {
+                    text: "hi".into(),
+                    cache_control: None,
+                })],
+            }],
+            tools: vec![],
+            tool_choice: IrToolChoice::default(),
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: RequestMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn effort_low_sets_reasoning_effort_low() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::Low);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let reasoning = native.reasoning.expect("reasoning block emitted");
+        assert_eq!(reasoning.effort, "low");
+    }
+
+    #[test]
+    fn effort_max_clamps_to_high() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::Max);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let reasoning = native.reasoning.expect("reasoning block emitted");
+        assert_eq!(reasoning.effort, "high");
+    }
+
+    #[test]
+    fn effort_auto_omits_reasoning_field() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::Auto);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert!(
+            native.reasoning.is_none(),
+            "reasoning field omitted on Auto"
+        );
+    }
+
+    #[test]
+    fn effort_unset_omits_reasoning_field() {
+        let req = build_test_request();
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert!(native.reasoning.is_none(), "reasoning omitted when unset");
     }
 }

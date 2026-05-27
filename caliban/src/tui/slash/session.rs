@@ -113,7 +113,12 @@ pub(crate) mod init {
     }
 }
 
-/// `/resume` — list persisted sessions sorted by mtime.
+/// `/resume [query]` — list persisted sessions sorted by mtime, with
+/// an optional case-insensitive substring filter on the session name.
+/// The full overlay picker (Up/Down/Enter to swap session in place)
+/// is deferred until the Overlay enum gains a non-Copy variant; until
+/// then this command emits the matching list inline so the operator
+/// can paste a name into `caliban --session <name>`.
 pub(crate) struct ResumeCommand;
 
 #[async_trait]
@@ -121,12 +126,13 @@ impl SlashCommand for ResumeCommand {
     fn meta(&self) -> &SlashCommandMeta {
         &SlashCommandMeta {
             name: "/resume",
-            description: "list persisted sessions for the current project",
-            args_hint: "",
+            description: "list persisted sessions (optional substring filter)",
+            args_hint: "[query]",
             hidden: false,
         }
     }
-    async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
+    async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
+        let query = args.trim().to_ascii_lowercase();
         match ctx.app.store.as_ref() {
             None => {
                 ctx.app
@@ -141,22 +147,37 @@ impl SlashCommand for ResumeCommand {
                 }
                 Ok(mut list) => {
                     list.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
-                    ctx.app.transcript.push(TranscriptLine::Info(format!(
-                        "{} session(s) (newest first):",
-                        list.len()
-                    )));
-                    for m in list {
+                    let total = list.len();
+                    let filtered: Vec<_> = list
+                        .into_iter()
+                        .filter(|m| {
+                            query.is_empty() || m.name.to_ascii_lowercase().contains(&query)
+                        })
+                        .collect();
+                    if filtered.is_empty() {
                         ctx.app.transcript.push(TranscriptLine::Info(format!(
-                            "  {} \u{2014} {} turns, {} tokens \u{2014} {}",
-                            m.name,
-                            m.turn_count,
-                            m.total_tokens,
-                            m.updated_at.format("%Y-%m-%d %H:%M:%S"),
+                            "{total} session(s); 0 match `{query}`"
                         )));
+                    } else {
+                        let header = if query.is_empty() {
+                            format!("{} session(s) (newest first):", filtered.len())
+                        } else {
+                            format!("{} of {total} session(s) match `{query}`:", filtered.len())
+                        };
+                        ctx.app.transcript.push(TranscriptLine::Info(header));
+                        for m in filtered {
+                            ctx.app.transcript.push(TranscriptLine::Info(format!(
+                                "  {} \u{2014} {} turns, {} tokens \u{2014} {}",
+                                m.name,
+                                m.turn_count,
+                                m.total_tokens,
+                                m.updated_at.format("%Y-%m-%d %H:%M:%S"),
+                            )));
+                        }
+                        ctx.app.transcript.push(TranscriptLine::Info(
+                            "full overlay picker (in-place swap) lands in a follow-up".into(),
+                        ));
                     }
-                    ctx.app.transcript.push(TranscriptLine::Info(
-                        "full picker overlay arrives with the Sessions UI spec".into(),
-                    ));
                 }
                 Err(e) => {
                     ctx.app
@@ -322,6 +343,7 @@ pub(crate) mod btw {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: RequestMetadata {
                 user_id: None,
                 purpose: Some(RequestPurpose::FastClassifier),
@@ -335,6 +357,66 @@ pub(crate) fn register(registry: &mut SlashCommandRegistry) {
     registry.register(Arc::new(ResumeCommand));
     registry.register(Arc::new(RecapCommand));
     registry.register(Arc::new(BtwCommand));
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::tui::app::App;
+
+    fn seed_store(app: &mut App, names: &[&str]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = caliban_sessions::SessionStore::new(tmp.path().to_path_buf());
+        for name in names {
+            let sess = caliban_sessions::PersistedSession::new(*name, "mock", "mock");
+            store.save(&sess).unwrap();
+        }
+        store.flush();
+        app.store = Some(store);
+        // Leak the tempdir so files live as long as the test.
+        std::mem::forget(tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_with_no_query_lists_all() {
+        let mut app = App::for_tests();
+        seed_store(&mut app, &["foo", "bar", "baz"]);
+        let mut ctx = app.slash_ctx_for_tests();
+        let outcome = ResumeCommand.execute("", &mut ctx).await.unwrap();
+        assert!(matches!(outcome, SlashOutcome::Continue));
+        let body: String = app
+            .transcript
+            .iter()
+            .filter_map(|l| match l {
+                TranscriptLine::Info(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("foo"));
+        assert!(body.contains("bar"));
+        assert!(body.contains("baz"));
+    }
+
+    #[tokio::test]
+    async fn resume_with_query_narrows_list() {
+        let mut app = App::for_tests();
+        seed_store(&mut app, &["foo-bar", "baz-quux", "foo-baz"]);
+        let mut ctx = app.slash_ctx_for_tests();
+        let _ = ResumeCommand.execute("foo", &mut ctx).await.unwrap();
+        let body: String = app
+            .transcript
+            .iter()
+            .filter_map(|l| match l {
+                TranscriptLine::Info(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("foo-bar"));
+        assert!(body.contains("foo-baz"));
+        assert!(!body.contains("baz-quux"), "filter should drop non-match");
+    }
 }
 
 #[cfg(test)]

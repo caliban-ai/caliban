@@ -26,6 +26,7 @@ fn req_with_image(source: ImageSource) -> CompletionRequest {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: RequestMetadata::default(),
     }
 }

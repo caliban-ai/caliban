@@ -161,7 +161,7 @@ impl Hooks for ModeFilter {
         &self,
         ctx: &crate::hooks::TurnCtx<'_>,
         outcome: &crate::TurnOutcome,
-    ) -> Result<()> {
+    ) -> Result<crate::hooks::TurnDecision> {
         self.inner.after_turn(ctx, outcome).await
     }
 

@@ -57,6 +57,10 @@ pub enum Error {
     /// An adapter-specific error that does not fit other categories.
     #[error("adapter error: {0}")]
     Adapter(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The streaming response went silent past the idle timeout.
+    #[error("stream idle for {0:?}")]
+    StreamIdle(std::time::Duration),
 }
 
 /// Convenience alias for `Result<T, Error>`.

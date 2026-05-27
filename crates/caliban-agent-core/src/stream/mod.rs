@@ -11,7 +11,15 @@
 
 mod hook_dispatch;
 mod parallel;
+mod recovery;
 mod turn;
+
+/// Maximum number of `TurnDecision::ContinueWith` injections per run.
+///
+/// `after_turn` hooks can ask the loop to take another turn with injected
+/// user messages; this cap prevents death-spirals where a hook unconditionally
+/// requests continuation.
+pub const MAX_FORCED_CONTINUATIONS: u8 = 3;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,6 +40,7 @@ use crate::agent::Agent;
 use crate::error::Result;
 use crate::hooks::{
     CompactCtx, CompactOutcome, HookDecision, RunCtx, RunHookOutcome, ToolCtx, TurnCtx,
+    TurnDecision,
 };
 use crate::retry::with_retry;
 use crate::tool::ToolError;
@@ -180,6 +189,51 @@ pub enum StopCondition {
     HookDenied(String),
     /// Context compaction failed and the run cannot continue.
     CompactionFailed(String),
+    /// `MaxTokens` hit and Stage A + Stage B recovery both surrendered.
+    MaxTokensExhausted,
+    /// `stop_reason: Refusal` from the provider; synthetic message already in `final_messages`.
+    Refusal(String),
+    /// `stop_reason: ContentFilter` from the provider; synthetic message already in `final_messages`.
+    ContentFilter(String),
+    /// SSE/HTTP stream went silent past the idle timeout.
+    StreamIdle(std::time::Duration),
+}
+
+impl StopCondition {
+    /// True for stop conditions that indicate failure, not natural completion.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderError(_)
+                | Self::HookDenied(_)
+                | Self::CompactionFailed(_)
+                | Self::MaxTokensExhausted
+                | Self::Refusal(_)
+                | Self::ContentFilter(_)
+                | Self::StreamIdle(_)
+        )
+    }
+}
+
+#[cfg(test)]
+mod stop_condition_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn is_failure_classifies_correctly() {
+        assert!(!StopCondition::EndOfTurn.is_failure());
+        assert!(!StopCondition::MaxTurnsReached(5).is_failure());
+        assert!(!StopCondition::Cancelled.is_failure());
+        assert!(StopCondition::ProviderError("x".into()).is_failure());
+        assert!(StopCondition::HookDenied("x".into()).is_failure());
+        assert!(StopCondition::CompactionFailed("x".into()).is_failure());
+        assert!(StopCondition::MaxTokensExhausted.is_failure());
+        assert!(StopCondition::Refusal("x".into()).is_failure());
+        assert!(StopCondition::ContentFilter("x".into()).is_failure());
+        assert!(StopCondition::StreamIdle(Duration::from_secs(90)).is_failure());
+    }
 }
 
 /// Boxed, pinned stream of `TurnEvent` results.
@@ -252,7 +306,7 @@ impl Agent {
     #[allow(clippy::too_many_lines)]
     #[instrument(
         skip(self, messages, cancel, settings),
-        fields(model = %self.config.model, session = %settings.session_id, prompt = settings.prompt_index)
+        fields(model = %self.active_model(), session = %settings.session_id, prompt = settings.prompt_index)
     )]
     pub fn stream_until_done_with_settings(
         self: Arc<Self>,
@@ -295,7 +349,37 @@ impl Agent {
             let max_turns = self.config.max_turns;
             let mut turns_completed: u32 = 0;
 
+            // ---- Per-run state (Plan A recovery + Plan B autocompact) ----
+            // Plan A — recovery state (Tasks 4–7 + 11):
+            // Stage A budget escalation: tracks whether we already retried THIS
+            // turn with `escalated_max_tokens`. Reset on every fresh turn.
+            let mut stage_a_attempted_this_turn = false;
+            // Per-turn override for `max_tokens` on the next request build. None
+            // means "use `self.config.max_tokens`".
+            let mut override_max_tokens_for_request: Option<u32> = None;
+            // Stage B meta-continuation count (per-run, not per-turn).
+            let mut meta_continuation_count: u8 = 0;
+            // One-shot reactive compaction guard (Task 7).
+            let mut attempted_reactive_compact = false;
+            // T11: cap on `TurnDecision::ContinueWith` injections per run.
+            let mut forced_continuations: u8 = 0;
+
+            // Plan B — autocompact tracking (per-run):
+            const MAX_CONSECUTIVE_COMPACT_FAILURES: u8 = 2;
+            #[derive(Debug, Default)]
+            struct AutoCompactTracking {
+                consecutive_failures: u8,
+                disabled: bool,
+            }
+            let mut auto_tracking = AutoCompactTracking::default();
+
             'outer: for turn_index in 0..max_turns {
+                // The inner loop lets recovery flows (Stage A budget
+                // escalation, reactive compaction) re-enter the turn body
+                // without consuming a slot from the outer turn counter. The
+                // body breaks `'inner` once it has produced a turn outcome;
+                // it `continue 'inner` to redo the turn with adjusted state.
+                'inner: loop {
                 // ---- Cancellation check ----
                 if cancel.is_cancelled() {
                     stopped_for = StopCondition::Cancelled;
@@ -315,52 +399,96 @@ impl Agent {
                     }
                 }
 
-                // ---- Compaction ----
-                {
+                // ---- Microcompact (per-turn, LLM-free) ----
+                if self.config.micro_compact_enabled {
+                    use crate::compact::Compactor as _;
                     let caps = self.provider.capabilities(&self.config.model);
-                    let token_count_before = crate::compact::estimate_tokens(&history);
-                    let strategy = self.compactor.strategy_name();
-                    let compact_ctx = CompactCtx {
-                        session_id: "",
-                        token_count_before,
-                        strategy,
-                    };
-                    if let Err(e) = self.hooks.pre_compact(&compact_ctx).await {
-                        tracing::warn!(error = %e, "pre_compact hook error (non-fatal)");
+                    if let Ok(Some(new)) = crate::compact::MicroCompactor::new()
+                        .compact(&history, &caps)
+                        .await
+                    {
+                        let freed = crate::compact::estimate_tokens(&history)
+                            .saturating_sub(crate::compact::estimate_tokens(&new));
+                        tracing::debug!(
+                            target: "caliban::compact",
+                            freed_tokens = freed,
+                            "microcompact",
+                        );
+                        history = new;
                     }
-                    match self.compactor.compact(&history, &caps).await {
-                        Err(e) => {
-                            stopped_for = StopCondition::CompactionFailed(e.to_string());
-                            break 'outer;
+                }
+
+                // ---- Compaction (threshold-gated autocompact) ----
+                {
+                    let active_model_snapshot = self.active_model();
+                    let caps = self.provider.capabilities(active_model_snapshot.as_str());
+                    let token_count_before = crate::compact::estimate_tokens(&history);
+                    let threshold = self.config.auto_compact_threshold;
+                    let should_attempt = threshold.is_some_and(|t| {
+                        #[allow(
+                            clippy::cast_precision_loss,
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss
+                        )]
+                        let utilization =
+                            token_count_before as f32 / caps.max_input_tokens.max(1) as f32;
+                        !auto_tracking.disabled && utilization >= t
+                    });
+                    if should_attempt {
+                        let strategy = self.compactor.strategy_name();
+                        let compact_ctx = CompactCtx {
+                            session_id: "",
+                            token_count_before,
+                            strategy,
+                        };
+                        if let Err(e) = self.hooks.pre_compact(&compact_ctx).await {
+                            tracing::warn!(error = %e, "pre_compact hook error (non-fatal)");
                         }
-                        Ok(Some(new)) => {
-                            let token_count_after = crate::compact::estimate_tokens(&new);
-                            history = new;
-                            let outcome = CompactOutcome {
-                                token_count_after,
-                                compacted: true,
-                            };
-                            if let Err(e) =
-                                self.hooks.post_compact(&compact_ctx, &outcome).await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "post_compact hook error (non-fatal)"
-                                );
+                        match self.compactor.compact(&history, &caps).await {
+                            Err(e) => {
+                                tracing::warn!(error = %e, "autocompact failed");
+                                auto_tracking.consecutive_failures =
+                                    auto_tracking.consecutive_failures.saturating_add(1);
+                                if auto_tracking.consecutive_failures
+                                    >= MAX_CONSECUTIVE_COMPACT_FAILURES
+                                {
+                                    auto_tracking.disabled = true;
+                                    tracing::warn!(
+                                        "autocompact disabled after {MAX_CONSECUTIVE_COMPACT_FAILURES} consecutive failures"
+                                    );
+                                }
                             }
-                        }
-                        Ok(None) => {
-                            let outcome = CompactOutcome {
-                                token_count_after: token_count_before,
-                                compacted: false,
-                            };
-                            if let Err(e) =
-                                self.hooks.post_compact(&compact_ctx, &outcome).await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "post_compact hook error (non-fatal)"
-                                );
+                            Ok(Some(new)) => {
+                                auto_tracking.consecutive_failures = 0;
+                                let token_count_after = crate::compact::estimate_tokens(&new);
+                                history = new;
+                                let outcome = CompactOutcome {
+                                    token_count_after,
+                                    compacted: true,
+                                };
+                                if let Err(e) =
+                                    self.hooks.post_compact(&compact_ctx, &outcome).await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "post_compact hook error (non-fatal)"
+                                    );
+                                }
+                            }
+                            Ok(None) => {
+                                auto_tracking.consecutive_failures = 0;
+                                let outcome = CompactOutcome {
+                                    token_count_after: token_count_before,
+                                    compacted: false,
+                                };
+                                if let Err(e) =
+                                    self.hooks.post_compact(&compact_ctx, &outcome).await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "post_compact hook error (non-fatal)"
+                                    );
+                                }
                             }
                         }
                     }
@@ -370,19 +498,35 @@ impl Agent {
                 let mut req_messages = history.clone();
                 let mut req_tools = self.tools.to_caliban_tools();
                 if self.prompt_cache {
-                    crate::cache::apply_prompt_cache(&mut req_messages, &mut req_tools);
+                    crate::cache::apply_prompt_cache(
+                        &mut req_messages,
+                        &mut req_tools,
+                        self.config.min_cache_block_tokens,
+                    );
                 }
+                // Plan A: Stage A override → escalated max_tokens for retry.
+                let effective_max_tokens =
+                    override_max_tokens_for_request.unwrap_or(self.config.max_tokens);
+                // Plan C: snapshot the swappable effort level once per turn
+                // so the in-flight request sees a single coherent value even
+                // if `/effort` lands between turns.
+                let effort_snapshot = self.config.effort.load_full();
+                // Plan C: likewise for the model id — a `/model` swap that
+                // lands between request build and provider call must not
+                // split model + capabilities + effort across two ids.
+                let active_model_for_req = self.active_model();
                 let req = CompletionRequest {
-                    model: self.config.model.clone(),
+                    model: active_model_for_req.as_str().to_string(),
                     messages: req_messages,
                     tools: req_tools,
                     tool_choice: self.config.tool_choice.clone(),
-                    max_tokens: self.config.max_tokens,
+                    max_tokens: effective_max_tokens,
                     temperature: self.config.temperature,
                     top_p: self.config.top_p,
                     top_k: None,
                     stop_sequences: self.config.stop_sequences.clone(),
                     thinking: self.config.thinking,
+                    effort: Some(*effort_snapshot),
                     metadata: RequestMetadata {
                         user_id: self.config.user_id.clone(),
                         purpose: Some(caliban_provider::RequestPurpose::MainLoop),
@@ -405,19 +549,64 @@ impl Agent {
                 })
                 .await;
 
-                let mut provider_stream = match stream_result {
+                let provider_stream = match stream_result {
                     Ok(s) => s,
-                    Err(e) => {
-                        if matches!(e, caliban_provider::Error::Cancelled) {
+                    Err(e) => match e {
+                        caliban_provider::Error::Cancelled => {
                             stopped_for = StopCondition::Cancelled;
-                        } else {
-                            stopped_for = StopCondition::ProviderError(e.to_string());
+                            break 'outer;
                         }
-                        break 'outer;
-                    }
+                        caliban_provider::Error::StreamIdle(d) => {
+                            stopped_for = StopCondition::StreamIdle(d);
+                            break 'outer;
+                        }
+                        caliban_provider::Error::ContextTooLong { .. }
+                            if !attempted_reactive_compact =>
+                        {
+                            tracing::warn!(
+                                target: "caliban::recovery",
+                                "recovery.reactive_compact.fired"
+                            );
+                            attempted_reactive_compact = true;
+                            let caps = self.provider.capabilities(&self.config.model);
+                            if let Ok(Some(new)) =
+                                self.compactor.compact(&history, &caps).await
+                            {
+                                history = new;
+                                // Redo this turn with the compacted
+                                // history; don't consume a turn slot.
+                                continue 'inner;
+                            }
+                            stopped_for = StopCondition::ProviderError(
+                                "context too long; compactor declined".into(),
+                            );
+                            break 'outer;
+                        }
+                        other => {
+                            stopped_for = StopCondition::ProviderError(other.to_string());
+                            break 'outer;
+                        }
+                    },
                 };
 
                 // ---- Drain provider stream ----
+                //
+                // Wrap the provider's `MessageStream` in `WatchedStream` when
+                // an idle timeout is configured (>0). The watchdog yields
+                // `Err(Error::StreamIdle(d))` when no chunk arrives within
+                // `stream_idle_timeout_ms`, which the per-event error arm
+                // below maps to `StopCondition::StreamIdle(d)`. The wrapper
+                // is a no-op on the hot path (single comparison per chunk).
+                let mut provider_stream: Pin<
+                    Box<dyn Stream<Item = caliban_provider::Result<StreamEvent>> + Send>,
+                > = if self.config.stream_idle_timeout_ms > 0 {
+                    Box::pin(caliban_provider::stream::WatchedStream::new(
+                        provider_stream,
+                        Duration::from_millis(self.config.stream_idle_timeout_ms.into()),
+                    ))
+                } else {
+                    provider_stream
+                };
                 let mut acc = MessageAccumulator::new();
 
                 while let Some(evt_result) = provider_stream.next().await {
@@ -427,6 +616,10 @@ impl Agent {
                     }
                     let evt = match evt_result {
                         Ok(e) => e,
+                        Err(caliban_provider::Error::StreamIdle(d)) => {
+                            stopped_for = StopCondition::StreamIdle(d);
+                            break 'outer;
+                        }
                         Err(e) => {
                             stopped_for = StopCondition::ProviderError(e.to_string());
                             break 'outer;
@@ -811,6 +1004,26 @@ impl Agent {
                     tool_result_blocks.push(ContentBlock::ToolResult(slot));
                 }
 
+                // ---- Tool-result size cap (context-management spec) ----
+                if self.config.tool_result_cap_chars > 0 && !tool_result_blocks.is_empty() {
+                    let overflow_dir = directories::ProjectDirs::from("dev", "caliban", "caliban")
+                        .map_or_else(
+                            || std::path::PathBuf::from("/tmp/caliban-tool-overflows"),
+                            |d| d.cache_dir().join("tool-overflows"),
+                        );
+                    let cap = crate::post_process::ToolResultCap {
+                        max_chars: self.config.tool_result_cap_chars,
+                        overflow_dir,
+                        session_id: settings.session_id.clone(),
+                    };
+                    if let Err(e) = cap.cap(&mut tool_result_blocks).await {
+                        tracing::warn!(
+                            error = %e,
+                            "ToolResultCap io error (non-fatal); inline content kept",
+                        );
+                    }
+                }
+
                 // Build the tool-results message (if any tools were called).
                 let tool_results: Vec<Message> = if tool_result_blocks.is_empty() {
                     vec![]
@@ -827,7 +1040,18 @@ impl Agent {
                     history.push(tr_msg.clone());
                 }
 
-                // ---- after_turn hook ----
+                // T11: scratch slot for the after_turn hook's decision; the
+                // loop reads this AFTER yielding TurnEnd so the consumer sees
+                // the turn data before any injected continuation messages.
+                #[allow(unused_assignments)]
+                let mut after_turn_decision_for_loop: TurnDecision = TurnDecision::Continue;
+
+                // ---- after_turn / after_turn_failure hook ----
+                //
+                // Plan A T10: failing turn outcomes (Refusal, ContentFilter,
+                // and MaxTokens at cap) route to `after_turn_failure` so
+                // observability hooks can distinguish recoverable turns from
+                // crashes without driving death spirals.
                 {
                     let turn_outcome = TurnOutcome {
                         assistant_message: assistant_message.clone(),
@@ -841,24 +1065,56 @@ impl Agent {
                         messages: &history,
                         config: &self.config,
                     };
-                    let hook_result = self.hooks.after_turn(&turn_ctx, &turn_outcome).await;
-                    if let Err(e) = hook_result {
-                        stopped_for =
-                            StopCondition::HookDenied(format!("after_turn: {e}"));
-                        // Emit TurnEnd before aborting so callers have the data.
-                        yield TurnEvent::TurnEnd {
-                            turn_index,
-                            assistant_message,
-                            tool_results,
-                            stop_reason: turn_stop_reason,
-                            usage: turn_usage,
-                            ttft: timing.ttft(),
-                            tbt: timing.tbt(),
-                        };
-                        total_usage.merge(turn_usage);
-                        turns_completed += 1;
-                        break 'outer;
-                    }
+                    // Failure signal: Refusal / ContentFilter always fail; a
+                    // MaxTokens turn fails only when Stage B has exhausted
+                    // its budget (cap reached) — i.e. there are no more
+                    // recoveries to attempt.
+                    let turn_is_failure = matches!(
+                        turn_stop_reason,
+                        StopReason::Refusal | StopReason::ContentFilter
+                    ) || (turn_stop_reason == StopReason::MaxTokens
+                        && self.config.max_tokens_recovery
+                        && stage_a_attempted_this_turn
+                        && meta_continuation_count >= self.config.max_meta_continuations);
+                    // Drive the hook. `after_turn_failure` returns `Result<()>`
+                    // (no decision surface for failure paths); `after_turn`
+                    // returns `Result<TurnDecision>`.
+                    let after_turn_decision: TurnDecision = if turn_is_failure {
+                        match self.hooks.after_turn_failure(&turn_ctx, &turn_outcome).await {
+                            Ok(()) => TurnDecision::Continue,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "after_turn_failure hook error (non-fatal)");
+                                TurnDecision::Continue
+                            }
+                        }
+                    } else {
+                        match self.hooks.after_turn(&turn_ctx, &turn_outcome).await {
+                            Ok(d) => d,
+                            Err(e) => {
+                                // Preserve original behavior: hook errors on
+                                // `after_turn` are fatal (HookDenied path).
+                                stopped_for =
+                                    StopCondition::HookDenied(format!("after_turn: {e}"));
+                                yield TurnEvent::TurnEnd {
+                                    turn_index,
+                                    assistant_message,
+                                    tool_results,
+                                    stop_reason: turn_stop_reason,
+                                    usage: turn_usage,
+                                    ttft: timing.ttft(),
+                                    tbt: timing.tbt(),
+                                };
+                                total_usage.merge(turn_usage);
+                                turns_completed += 1;
+                                break 'outer;
+                            }
+                        }
+                    };
+
+                    // Apply the decision once the TurnEnd event has been
+                    // emitted further below. Save it for the post-TurnEnd
+                    // dispatch block.
+                    after_turn_decision_for_loop = after_turn_decision;
                 }
 
                 let ttft = timing.ttft();
@@ -900,26 +1156,130 @@ impl Agent {
                 total_usage.merge(turn_usage);
                 turns_completed += 1;
 
-                // ---- Decide whether to continue ----
-                if turn_stop_reason != StopReason::ToolUse {
-                    stopped_for = StopCondition::EndOfTurn;
-                    break 'outer;
+                // ---- T11: TurnDecision from `after_turn` ----
+                match after_turn_decision_for_loop {
+                    TurnDecision::Continue => {
+                        // Fall through to the natural continue/halt logic.
+                    }
+                    TurnDecision::ContinueWith(msgs) => {
+                        if forced_continuations < MAX_FORCED_CONTINUATIONS {
+                            history.extend(msgs);
+                            forced_continuations += 1;
+                            // Reset Stage A so the forced turn has a fresh
+                            // budget-escalation slot.
+                            stage_a_attempted_this_turn = false;
+                            override_max_tokens_for_request = None;
+                            break 'inner; // advance to next turn_index
+                        }
+                        tracing::warn!(
+                            forced_continuations,
+                            "after_turn ContinueWith ignored (cap reached)"
+                        );
+                    }
+                    TurnDecision::Stop => {
+                        stopped_for = StopCondition::HookDenied("after_turn: Stop".into());
+                        break 'outer;
+                    }
                 }
-                // stop_reason == ToolUse → continue loop
+
+                // ---- Decide whether to continue (Tasks 4–6 dispatch) ----
+                match turn_stop_reason {
+                    StopReason::ToolUse => {
+                        // Tool calls came back; reset Stage-A flag so the next
+                        // turn has a fresh budget-escalation budget.
+                        stage_a_attempted_this_turn = false;
+                        override_max_tokens_for_request = None;
+                        break 'inner;
+                    }
+                    StopReason::MaxTokens if self.config.max_tokens_recovery => {
+                        if !stage_a_attempted_this_turn {
+                            // Stage A: re-issue the same request with the
+                            // escalated max_tokens budget, without consuming
+                            // a turn-index slot.
+                            tracing::warn!(
+                                target: "caliban::recovery",
+                                from = self.config.max_tokens,
+                                to = self.config.escalated_max_tokens,
+                                "recovery.max_tokens.stage_a"
+                            );
+                            stage_a_attempted_this_turn = true;
+                            override_max_tokens_for_request =
+                                Some(self.config.escalated_max_tokens);
+                            continue 'inner;
+                        }
+                        if meta_continuation_count < self.config.max_meta_continuations {
+                            // Stage B: inject the meta-continuation prompt
+                            // and advance to the next turn.
+                            tracing::warn!(
+                                target: "caliban::recovery",
+                                meta_continuation = meta_continuation_count + 1,
+                                "recovery.max_tokens.stage_b"
+                            );
+                            history.push(Message::user_text(
+                                crate::stream::recovery::META_CONTINUATION_PROMPT,
+                            ));
+                            meta_continuation_count += 1;
+                            stage_a_attempted_this_turn = false;
+                            override_max_tokens_for_request = None;
+                            break 'inner; // next turn iteration
+                        }
+                        // Stage C: surrender.
+                        tracing::error!(
+                            target: "caliban::recovery",
+                            "recovery.max_tokens.stage_c"
+                        );
+                        stopped_for = StopCondition::MaxTokensExhausted;
+                        break 'outer;
+                    }
+                    StopReason::Refusal => {
+                        tracing::warn!(
+                            target: "caliban::recovery",
+                            "recovery.refusal"
+                        );
+                        history.push(Message::assistant_text(
+                            crate::stream::recovery::REFUSAL_SYNTHETIC,
+                        ));
+                        stopped_for = StopCondition::Refusal(
+                            crate::stream::recovery::REFUSAL_SYNTHETIC.into(),
+                        );
+                        break 'outer;
+                    }
+                    StopReason::ContentFilter => {
+                        tracing::warn!(
+                            target: "caliban::recovery",
+                            "recovery.content_filter"
+                        );
+                        history.push(Message::assistant_text(
+                            crate::stream::recovery::CONTENT_FILTER_SYNTHETIC,
+                        ));
+                        stopped_for = StopCondition::ContentFilter(
+                            crate::stream::recovery::CONTENT_FILTER_SYNTHETIC.into(),
+                        );
+                        break 'outer;
+                    }
+                    _ => {
+                        // EndTurn, StopSequence, or MaxTokens with recovery
+                        // disabled — natural completion.
+                        stopped_for = StopCondition::EndOfTurn;
+                        break 'outer;
+                    }
+                }
+                } // end 'inner loop
             }
 
-            // ---- after_run hook (ADR 0028) ----
+            // ---- after_run / after_run_failure hook (ADR 0028 + Plan A T10) ----
             //
             // Best-effort: errors logged but not allowed to override an
-            // existing terminal `stopped_for` (the loop already decided why
-            // it stopped; the hook is observability for that decision).
+            // existing terminal `stopped_for`. Failure paths route through
+            // `after_run_failure` so observability hooks can distinguish
+            // crashes from natural completions without driving death spirals.
             {
-                let success = matches!(stopped_for, StopCondition::EndOfTurn);
+                let is_failure = stopped_for.is_failure();
                 let outcome = RunHookOutcome {
                     turn_count: turns_completed,
                     input_tokens: total_usage.input_tokens,
                     output_tokens: total_usage.output_tokens,
-                    success,
+                    success: !is_failure,
                 };
                 let run_ctx = RunCtx {
                     session_id: &settings.session_id,
@@ -928,8 +1288,13 @@ impl Agent {
                     prompt_index: settings.prompt_index,
                     cancel: cancel.clone(),
                 };
-                if let Err(e) = self.hooks.after_run(&run_ctx, &outcome).await {
-                    tracing::warn!(error = %e, "after_run hook error (non-fatal)");
+                let dispatch = if is_failure {
+                    self.hooks.after_run_failure(&run_ctx, &outcome).await
+                } else {
+                    self.hooks.after_run(&run_ctx, &outcome).await
+                };
+                if let Err(e) = dispatch {
+                    tracing::warn!(error = %e, "after_run* hook error (non-fatal)");
                 }
             }
 

@@ -13,9 +13,19 @@
 
 use caliban_provider::{CacheControl, ContentBlock, Message, Role, Tool};
 
-/// Set `cache_control: Ephemeral` on the last system-message `TextBlock`
-/// and on the last tool def. Mutates in place.
-pub(crate) fn apply_prompt_cache(messages: &mut [Message], tools: &mut [Tool]) {
+/// Set `cache_control: Ephemeral` on the stable prefix (last system
+/// `TextBlock` + last tool def) and on the last block of the last user
+/// message when that message's estimated token count is at least
+/// `min_cache_block_tokens`. Mutates in place.
+///
+/// The user-message marker is the conversation-level cache breakpoint:
+/// it makes turn N+1 reuse turn N's prefix on Anthropic, turning the
+/// `cache_read` curve from flat to linear-with-history.
+pub fn apply_prompt_cache(
+    messages: &mut [Message],
+    tools: &mut [Tool],
+    min_cache_block_tokens: usize,
+) {
     if let Some(sys) = messages.iter_mut().find(|m| m.role == Role::System)
         && let Some(last_text) = sys.content.iter_mut().rev().find_map(|b| match b {
             ContentBlock::Text(t) => Some(t),
@@ -26,6 +36,27 @@ pub(crate) fn apply_prompt_cache(messages: &mut [Message], tools: &mut [Tool]) {
     }
     if let Some(last_tool) = tools.last_mut() {
         last_tool.cache_control = Some(CacheControl::Ephemeral);
+    }
+    // NEW: mark last block of last user message, if it's big enough.
+    if let Some(idx) = messages.iter().rposition(|m| m.role == Role::User) {
+        let tokens = crate::compact::estimate_tokens(&messages[idx..=idx]);
+        if (tokens as usize) >= min_cache_block_tokens
+            && let Some(last_block) = messages[idx].content.last_mut()
+        {
+            set_cache_control_on_block(last_block, CacheControl::Ephemeral);
+        }
+    }
+}
+
+/// Set `cache_control` on a block when the variant supports it. Today only
+/// `TextBlock` carries the field in the user-message position; other
+/// variants (`Image`, `Thinking`, `ToolUse`, `ToolResult`) are no-ops
+/// because the wire IR doesn't expose `cache_control` on them.
+fn set_cache_control_on_block(block: &mut ContentBlock, cc: CacheControl) {
+    // Other variants don't carry cache_control in the current IR; leaving
+    // them unmarked is the right wire-noop behavior.
+    if let ContentBlock::Text(t) = block {
+        t.cache_control = Some(cc);
     }
 }
 
@@ -48,7 +79,7 @@ mod tests {
     fn empty_inputs_do_not_panic() {
         let mut msgs: Vec<Message> = Vec::new();
         let mut tools: Vec<Tool> = Vec::new();
-        apply_prompt_cache(&mut msgs, &mut tools);
+        apply_prompt_cache(&mut msgs, &mut tools, usize::MAX);
         assert!(msgs.is_empty());
         assert!(tools.is_empty());
     }
@@ -69,7 +100,7 @@ mod tests {
             ],
         }];
         let mut tools: Vec<Tool> = Vec::new();
-        apply_prompt_cache(&mut msgs, &mut tools);
+        apply_prompt_cache(&mut msgs, &mut tools, usize::MAX);
         match (&msgs[0].content[0], &msgs[0].content[1]) {
             (ContentBlock::Text(a), ContentBlock::Text(b)) => {
                 assert!(a.cache_control.is_none(), "first text should be unmarked");
@@ -86,7 +117,7 @@ mod tests {
     fn marks_last_tool() {
         let mut msgs: Vec<Message> = Vec::new();
         let mut tools = vec![tool("a"), tool("b"), tool("c")];
-        apply_prompt_cache(&mut msgs, &mut tools);
+        apply_prompt_cache(&mut msgs, &mut tools, usize::MAX);
         assert!(tools[0].cache_control.is_none());
         assert!(tools[1].cache_control.is_none());
         assert!(matches!(
@@ -102,7 +133,7 @@ mod tests {
             content: Vec::new(),
         }];
         let mut tools = vec![tool("a")];
-        apply_prompt_cache(&mut msgs, &mut tools);
+        apply_prompt_cache(&mut msgs, &mut tools, usize::MAX);
         assert!(matches!(
             tools[0].cache_control,
             Some(CacheControl::Ephemeral)
@@ -122,7 +153,7 @@ mod tests {
             Message::user_text("hello"),
         ];
         let mut tools: Vec<Tool> = Vec::new();
-        apply_prompt_cache(&mut msgs, &mut tools);
+        apply_prompt_cache(&mut msgs, &mut tools, usize::MAX);
         let user = &msgs[1];
         match &user.content[0] {
             ContentBlock::Text(t) => assert!(

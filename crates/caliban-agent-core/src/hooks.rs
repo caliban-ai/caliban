@@ -30,6 +30,21 @@ pub enum HookDecision {
     UpdatedInput(serde_json::Value),
 }
 
+/// Outcome of [`Hooks::after_turn`] / [`Hooks::after_turn_failure`].
+///
+/// `ContinueWith` allows a hook to inject additional user messages and force
+/// the loop to take another turn; the agent caps this to
+/// `MAX_FORCED_CONTINUATIONS = 3` per run to avoid death-spirals.
+#[derive(Debug, Clone)]
+pub enum TurnDecision {
+    /// Let the agent loop decide whether to continue (the default).
+    Continue,
+    /// Inject `Vec<Message>` into history and force another turn (capped).
+    ContinueWith(Vec<caliban_provider::Message>),
+    /// Halt the run immediately with `StopCondition::HookDenied`.
+    Stop,
+}
+
 /// Per-run context for the `before_run` / `after_run` lifecycle events
 /// (ADR 0028). Fires once at the start / end of each `Agent::run` invocation.
 #[derive(Debug)]
@@ -327,6 +342,16 @@ pub trait Hooks: Send + Sync {
         Ok(())
     }
 
+    /// Called **instead of** [`Hooks::after_run`] when the run ended in
+    /// failure (any [`crate::StopCondition::is_failure`] variant).
+    ///
+    /// Default is a no-op; observability for failure modes. Implementors
+    /// should NOT mutate session state from this method to avoid death
+    /// spirals where the failure-cleanup itself triggers another run.
+    async fn after_run_failure(&self, _ctx: &RunCtx<'_>, _outcome: &RunHookOutcome) -> Result<()> {
+        Ok(())
+    }
+
     /// Called before each turn begins (before compaction and the provider call).
     async fn before_turn(&self, _ctx: &TurnCtx<'_>) -> Result<()> {
         Ok(())
@@ -334,7 +359,26 @@ pub trait Hooks: Send + Sync {
 
     /// Called after each turn completes (after tool dispatch, before the next
     /// turn or the final `RunEnd` event).
-    async fn after_turn(&self, _ctx: &TurnCtx<'_>, _outcome: &crate::TurnOutcome) -> Result<()> {
+    ///
+    /// Returns a [`TurnDecision`] so hooks can request continuation
+    /// (`ContinueWith(messages)`) or halt the run (`Stop`). The default is
+    /// `Continue`, which preserves existing behavior. `ContinueWith` is
+    /// capped to 3 forced continuations per run.
+    async fn after_turn(
+        &self,
+        _ctx: &TurnCtx<'_>,
+        _outcome: &crate::TurnOutcome,
+    ) -> Result<TurnDecision> {
+        Ok(TurnDecision::Continue)
+    }
+
+    /// Called **instead of** [`Hooks::after_turn`] when the turn ended in
+    /// failure.
+    async fn after_turn_failure(
+        &self,
+        _ctx: &TurnCtx<'_>,
+        _outcome: &crate::TurnOutcome,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -576,6 +620,16 @@ impl Hooks for CompositeHooks {
         Ok(())
     }
 
+    async fn after_run_failure(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
+        if self.all_noop {
+            return Ok(());
+        }
+        for h in self.layers.iter().rev() {
+            h.after_run_failure(ctx, outcome).await?;
+        }
+        Ok(())
+    }
+
     async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()> {
         if self.all_noop {
             return Ok(());
@@ -586,12 +640,40 @@ impl Hooks for CompositeHooks {
         Ok(())
     }
 
-    async fn after_turn(&self, ctx: &TurnCtx<'_>, outcome: &crate::TurnOutcome) -> Result<()> {
+    async fn after_turn(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<TurnDecision> {
+        if self.all_noop {
+            return Ok(TurnDecision::Continue);
+        }
+        // First non-`Continue` decision wins (Stop short-circuits;
+        // ContinueWith bubbles up immediately). LIFO so the most recently
+        // added observer's vote takes precedence.
+        let mut latest = TurnDecision::Continue;
+        for h in self.layers.iter().rev() {
+            match h.after_turn(ctx, outcome).await? {
+                TurnDecision::Continue => {}
+                d @ (TurnDecision::ContinueWith(_) | TurnDecision::Stop) => {
+                    latest = d;
+                    break;
+                }
+            }
+        }
+        Ok(latest)
+    }
+
+    async fn after_turn_failure(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<()> {
         if self.all_noop {
             return Ok(());
         }
         for h in self.layers.iter().rev() {
-            h.after_turn(ctx, outcome).await?;
+            h.after_turn_failure(ctx, outcome).await?;
         }
         Ok(())
     }

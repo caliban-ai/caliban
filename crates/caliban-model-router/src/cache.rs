@@ -79,6 +79,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: Default::default(),
         }
     }
@@ -109,6 +110,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: Default::default(),
         };
         assert_eq!(strip_cache_markers(&mut req), 0);

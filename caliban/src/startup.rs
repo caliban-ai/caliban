@@ -348,6 +348,12 @@ fn stopped_for_surface_line(stopped_for: &caliban_agent_core::StopCondition) -> 
         }
         StopCondition::MaxTurnsReached(n) => Some(format!("[caliban: max-turns ({n}) reached]")),
         StopCondition::Cancelled => Some("[caliban: cancelled]".to_string()),
+        StopCondition::MaxTokensExhausted => {
+            Some("[caliban: max-tokens recovery exhausted]".to_string())
+        }
+        StopCondition::Refusal(msg) => Some(format!("[caliban: model refusal: {msg}]")),
+        StopCondition::ContentFilter(msg) => Some(format!("[caliban: content filter: {msg}]")),
+        StopCondition::StreamIdle(d) => Some(format!("[caliban: stream idle for {d:?}]")),
     }
 }
 

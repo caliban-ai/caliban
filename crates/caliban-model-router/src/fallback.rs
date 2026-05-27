@@ -14,7 +14,8 @@ pub fn is_fatal_for_route(err: &ProviderError) -> bool {
         | ProviderError::RateLimit { .. }
         | ProviderError::ContextTooLong { .. }
         | ProviderError::ServerError { .. }
-        | ProviderError::Network(_) => true,
+        | ProviderError::Network(_)
+        | ProviderError::StreamIdle(_) => true,
         // Adapter errors are opaque — treat as non-fatal so we don't mask
         // configuration bugs by silently retrying.
         ProviderError::Auth(_)

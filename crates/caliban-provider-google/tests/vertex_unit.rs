@@ -70,6 +70,7 @@ fn minimal_request_with_url_image(url: &str) -> CompletionRequest {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: RequestMetadata::default(),
     }
 }

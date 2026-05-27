@@ -246,9 +246,9 @@ async fn composite_after_turn_runs_lifo() {
             &self,
             _: &caliban_agent_core::TurnCtx<'_>,
             _: &caliban_agent_core::TurnOutcome,
-        ) -> Result<()> {
+        ) -> Result<caliban_agent_core::TurnDecision> {
             ORDER.lock().unwrap().push("A");
-            Ok(())
+            Ok(caliban_agent_core::TurnDecision::Continue)
         }
     }
     struct B;
@@ -258,9 +258,9 @@ async fn composite_after_turn_runs_lifo() {
             &self,
             _: &caliban_agent_core::TurnCtx<'_>,
             _: &caliban_agent_core::TurnOutcome,
-        ) -> Result<()> {
+        ) -> Result<caliban_agent_core::TurnDecision> {
             ORDER.lock().unwrap().push("B");
-            Ok(())
+            Ok(caliban_agent_core::TurnDecision::Continue)
         }
     }
     let composite = CompositeHooks::new(vec![
@@ -678,9 +678,9 @@ impl Hooks for AssertSilentNoop {
         &self,
         _: &caliban_agent_core::TurnCtx<'_>,
         _: &caliban_agent_core::TurnOutcome,
-    ) -> Result<()> {
+    ) -> Result<caliban_agent_core::TurnDecision> {
         self.bump();
-        Ok(())
+        Ok(caliban_agent_core::TurnDecision::Continue)
     }
     async fn before_tool(&self, _: &ToolCtx<'_>) -> Result<HookDecision> {
         self.bump();

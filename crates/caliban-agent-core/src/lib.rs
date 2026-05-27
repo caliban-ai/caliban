@@ -4,7 +4,7 @@
 
 pub mod agent;
 pub mod auto_mode;
-pub(crate) mod cache;
+pub mod cache;
 pub mod compact;
 pub mod error;
 pub mod hooks;
@@ -23,7 +23,7 @@ pub mod todos;
 pub mod tool;
 pub mod turn;
 
-pub use agent::{Agent, AgentBuilder, AgentConfig, default_parallel_tool_limit};
+pub use agent::{Agent, AgentBuilder, AgentConfig, ModelSwapError, default_parallel_tool_limit};
 pub use auto_mode::{
     AutoModeClassifier, AutoModeConfig, AutoModeDecision, AutoVerdict, CLASSIFIER_INPUT_CAP,
     DEFAULTS_TOKEN, DecisionSource, DefaultsKind, build_prompt as auto_mode_build_prompt,
@@ -31,14 +31,15 @@ pub use auto_mode::{
     parse_classifier_response as auto_mode_parse_classifier_response,
 };
 pub use compact::{
-    Compactor, DropOldestCompactor, NoopCompactor, SummarizingCompactor, estimate_tokens,
+    Compactor, DropOldestCompactor, MicroCompactor, NoopCompactor, SummarizingCompactor,
+    estimate_tokens,
 };
 pub use error::{Error, Result};
 pub use hooks::{
     CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,
     FileChangedCtx, HookDecision, Hooks, NoopHooks, NotificationCtx, NotificationLevel, PermCtx,
     PromptCtx, RunCtx, RunHookOutcome, SessionCtx, SessionOutcome, SubagentCtx, SubagentOutcome,
-    TaskCtx, TaskOutcome, ToolCtx, TurnCtx, build_envelope, envelope_with_cwd,
+    TaskCtx, TaskOutcome, ToolCtx, TurnCtx, TurnDecision, build_envelope, envelope_with_cwd,
 };
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
 pub use hooks_router::{AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook};
@@ -48,7 +49,7 @@ pub use permission_mode::{
 };
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
-    default_rules,
+    RuntimeRule, RuntimeRuleStore, default_rules, derive_pattern,
 };
 // `load_rules` / `load_rules_file` are `#[deprecated]` in favor of
 // `caliban-settings` (PR-T3-B). Re-exported with `#[allow(deprecated)]`
@@ -69,5 +70,5 @@ pub use tool::{Tool, ToolContext, ToolError};
 // Re-export from caliban-provider so callers can construct messages without
 // pulling that crate explicitly.
 pub use caliban_provider::{
-    CompletionRequest, ContentBlock, Message, Role, StopReason, TextBlock, Usage,
+    CompletionRequest, ContentBlock, Effort, Message, Role, StopReason, TextBlock, Usage,
 };

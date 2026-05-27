@@ -196,6 +196,7 @@ pub(crate) fn run_debug(
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: caliban_provider::RequestMetadata {
             user_id: None,
             purpose: Some(purpose),

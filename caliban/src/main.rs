@@ -5,6 +5,7 @@
 
 mod agents_cli;
 mod args;
+mod diagnostics;
 mod headless;
 mod plugin_cli;
 mod router;
@@ -54,6 +55,15 @@ async fn main() -> Result<()> {
     if let Some(CalibanCommand::Router { inner }) = &args.command {
         subcommands::run_router_debug(inner, args.config_path.as_deref())?;
         return Ok(());
+    }
+
+    // `caliban doctor [--deep]` — run health checks and exit with
+    // status 1 if anything failed, else 0. Wired ahead of provider
+    // construction so it runs even when auth/network is broken.
+    if let Some(CalibanCommand::Doctor { deep }) = &args.command {
+        let diag = diagnostics::Diagnostics::run(diagnostics::DiagOpts { deep: *deep }).await;
+        diagnostics::print_diagnostics_text(&diag);
+        std::process::exit(diag.exit_code());
     }
 
     // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed

@@ -166,6 +166,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: Default::default(),
         }
     }

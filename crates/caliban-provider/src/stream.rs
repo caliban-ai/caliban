@@ -1,6 +1,8 @@
 //! Streaming events.
 
 use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::stream::Stream;
@@ -206,4 +208,116 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
         stop,
         usage,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// WatchedStream — stream-idle watchdog (ADR Plan A, Task 8)
+// ---------------------------------------------------------------------------
+
+/// Wraps a `Stream` and aborts with [`Error::StreamIdle`] when no chunk
+/// arrives within `idle`.
+///
+/// Emits a `tracing::warn` at half-time (helpful operational signal for
+/// observability dashboards) and `Err(Error::StreamIdle)` on full timeout.
+///
+/// `S` must be `Unpin` because we hold the inner stream in a `Box<dyn ...>`
+/// behind a `Pin<&mut Self>`-style `poll_next`. The concrete provider streams
+/// (`MessageStream = Pin<Box<dyn Stream + Send>>`) are already pinned at
+/// construction; `WatchedStream` owns the pointer directly so projection
+/// stays simple without pulling in `pin_project_lite`.
+pub struct WatchedStream<S> {
+    inner: S,
+    idle: Duration,
+    last_chunk_at: Instant,
+    warned: bool,
+}
+
+impl<S> WatchedStream<S> {
+    /// Build a new `WatchedStream`. `idle` is the maximum time the inner
+    /// stream may stay silent before [`Error::StreamIdle`] is surfaced.
+    pub fn new(inner: S, idle: Duration) -> Self {
+        Self {
+            inner,
+            idle,
+            last_chunk_at: Instant::now(),
+            warned: false,
+        }
+    }
+}
+
+impl<S> Stream for WatchedStream<S>
+where
+    S: Stream<Item = Result<StreamEvent>> + Unpin,
+{
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                self.last_chunk_at = Instant::now();
+                self.warned = false;
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => {
+                let elapsed = self.last_chunk_at.elapsed();
+                if elapsed >= self.idle {
+                    tracing::error!(
+                        target: "caliban::stream",
+                        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                        "recovery.stream_idle.abort"
+                    );
+                    return Poll::Ready(Some(Err(Error::StreamIdle(elapsed))));
+                }
+                if !self.warned && elapsed >= self.idle / 2 {
+                    self.warned = true;
+                    tracing::warn!(
+                        target: "caliban::stream",
+                        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                        "recovery.stream_idle.warning"
+                    );
+                }
+                // Schedule a wakeup at the remaining time so we can fire the
+                // abort even if `inner` stays Pending. The spawned future is
+                // a single sleep + wake; it self-terminates.
+                let remaining = self.idle.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+                let waker = cx.waker().clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(remaining + Duration::from_millis(1)).await;
+                    waker.wake();
+                });
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod watched_tests {
+    use super::*;
+    use futures::stream;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn passes_through_normal_data() {
+        let inner = stream::iter(vec![
+            Ok(StreamEvent::MessageStop),
+            Ok(StreamEvent::MessageStop),
+        ]);
+        let mut w = WatchedStream::new(inner, Duration::from_secs(1));
+        let mut seen = 0;
+        while let Some(item) = w.next().await {
+            item.unwrap();
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+    }
+
+    #[tokio::test]
+    async fn aborts_after_idle_timeout() {
+        let inner = stream::pending::<Result<StreamEvent>>();
+        let mut w = WatchedStream::new(inner, Duration::from_millis(20));
+        let r = w.next().await.expect("Some(_)");
+        assert!(matches!(r, Err(Error::StreamIdle(_))));
+    }
 }

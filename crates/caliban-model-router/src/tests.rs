@@ -25,6 +25,7 @@ fn req_main_loop() -> CompletionRequest {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: Default::default(),
     };
     r.metadata.purpose = Some(RequestPurpose::MainLoop);

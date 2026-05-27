@@ -77,7 +77,11 @@ pub(crate) async fn run_supervisor_command(cmd: &CalibanCommand) -> Option<i32> 
             )
             .await,
         ),
-        CalibanCommand::Router { .. } => None,
+        // `caliban router` / `doctor` are dispatched in main.rs ahead
+        // of the supervisor entry points (no supervisor needed for
+        // diagnostics). Skip them here so we don't accidentally spawn
+        // the daemon.
+        CalibanCommand::Router { .. } | CalibanCommand::Doctor { .. } => None,
     }
 }
 

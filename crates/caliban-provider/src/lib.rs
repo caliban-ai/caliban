@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod capabilities;
+pub mod effort;
 pub mod error;
 pub mod message;
 pub mod provider;
@@ -20,6 +21,7 @@ pub use cache::CacheControl;
 pub use capabilities::{
     Capabilities, ModelInfo, PromptCachingCapability, SystemPromptCapability, ToolUseCapability,
 };
+pub use effort::Effort;
 pub use error::{Error, Result};
 pub use message::{ContentBlock, ImageBlock, ImageSource, Message, Role, TextBlock};
 pub use provider::Provider;
@@ -32,4 +34,4 @@ pub use thinking::{ThinkingBlock, ThinkingConfig};
 pub use tool::{Tool, ToolChoice, ToolResultBlock, ToolUseBlock};
 
 #[cfg(feature = "mock")]
-pub use mock::MockProvider;
+pub use mock::{MockProvider, MockProviderBuilder};

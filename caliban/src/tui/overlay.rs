@@ -234,8 +234,22 @@ pub(crate) fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
         Span::raw(req.input_summary.clone()),
     ]));
     out.push(Line::raw(""));
+    out.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled("Pattern: ", bold),
+        Span::raw(req.always_pattern.clone()),
+    ]));
+    out.push(Line::raw(""));
     out.push(Line::styled(
-        "   [y] Allow once     [n] / [Esc] Deny",
+        "   [y] Allow once       [A] Always allow this pattern",
+        Style::default().fg(Color::Cyan),
+    ));
+    out.push(Line::styled(
+        "   [n] Reject once      [R] Always reject this pattern",
+        Style::default().fg(Color::Cyan),
+    ));
+    out.push(Line::styled(
+        "   [Esc] Deny",
         Style::default().fg(Color::Cyan),
     ));
     out.push(Line::raw(""));

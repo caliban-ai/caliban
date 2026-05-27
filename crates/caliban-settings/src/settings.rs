@@ -182,6 +182,18 @@ pub struct Settings {
     /// `OTel` / cost emitter toggle.
     pub enable_telemetry: Option<bool>,
 
+    // ----- context-window management (Plan B) -------------------------------
+    /// Pre-turn autocompaction threshold (utilization in 0..=1).
+    /// `None` disables autocompact; `Some(0.75)` is the documented default.
+    pub auto_compact_threshold: Option<f32>,
+    /// Enable the per-turn microcompact (LLM-free supersession) pass.
+    pub micro_compact_enabled: Option<bool>,
+    /// Global per-tool-result cap in characters. `0` disables.
+    pub tool_result_cap_chars: Option<usize>,
+    /// Minimum estimated tokens on the last user message to merit the
+    /// conversation-level cache marker.
+    pub min_cache_block_tokens: Option<usize>,
+
     // ----- managed-scope escape hatch ---------------------------------------
     /// When set in the managed scope, flips the managed layer to the top
     /// of the merge chain (enterprise lockdown). The string value
@@ -296,6 +308,25 @@ impl Settings {
             allowed_http_hook_urls: self.allowed_http_hook_urls.clone(),
             http_hook_allowed_env_vars: self.http_hook_allowed_env_vars.clone(),
             events: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Apply context-window management knobs onto a fresh
+    /// [`caliban_agent_core::AgentConfig`]. Only fields explicitly set in
+    /// `settings.json` override the defaults; everything else is left at
+    /// the upstream default (see `AgentConfig::default()`).
+    pub fn apply_context_management(&self, cfg: &mut caliban_agent_core::AgentConfig) {
+        if let Some(v) = self.auto_compact_threshold {
+            cfg.auto_compact_threshold = Some(v);
+        }
+        if let Some(v) = self.micro_compact_enabled {
+            cfg.micro_compact_enabled = v;
+        }
+        if let Some(v) = self.tool_result_cap_chars {
+            cfg.tool_result_cap_chars = v;
+        }
+        if let Some(v) = self.min_cache_block_tokens {
+            cfg.min_cache_block_tokens = v;
         }
     }
 

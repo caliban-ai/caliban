@@ -40,17 +40,32 @@ pub(crate) struct AskRequest {
     pub(crate) tool_name: String,
     /// Pretty summary of the tool input for display in the modal.
     pub(crate) input_summary: String,
+    /// Pattern shown in the "Always" branches so the user knows what
+    /// they're committing to. Computed via
+    /// [`caliban_agent_core::derive_pattern`].
+    pub(crate) always_pattern: String,
     /// Oneshot to resolve when the user picks an answer.
     pub(crate) respond: oneshot::Sender<AskResponse>,
 }
 
-/// User's choice in the Ask modal.
+/// User's choice in the Ask modal. Adds the "Always allow / Always
+/// reject" branches per the TUI slash UX spec; the event handler turns
+/// these into a [`caliban_agent_core::RuntimeRule`] inserted into the
+/// session-scoped store before resolving the oneshot.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AskResponse {
     /// Allow this invocation only.
     AllowOnce,
+    /// Allow this invocation and append a runtime rule matching the
+    /// derived pattern so subsequent matching invocations auto-allow
+    /// without prompting.
+    AlwaysAllow,
     /// Deny this invocation.
     Deny,
+    /// Deny this invocation and append a runtime rule matching the
+    /// derived pattern so subsequent matching invocations auto-deny
+    /// without prompting.
+    AlwaysReject,
 }
 
 /// `AskHandler` impl that bridges Ask rules to a ratatui modal via an
@@ -108,6 +123,7 @@ impl AskHandler for TuiAskHandler {
         let req = AskRequest {
             tool_name: ctx.tool_name.to_string(),
             input_summary: input_summary(ctx.input),
+            always_pattern: caliban_agent_core::derive_pattern(ctx.tool_name, ctx.input),
             respond: respond_tx,
         };
         if self.tx.send(req).is_err() {
@@ -120,8 +136,8 @@ impl AskHandler for TuiAskHandler {
         // 10-minute hard timeout (matches the longest Bash deadline).
         let result = tokio::time::timeout(ASK_TIMEOUT, respond_rx).await;
         match result {
-            Ok(Ok(AskResponse::AllowOnce)) => HookDecision::Allow,
-            Ok(Ok(AskResponse::Deny) | Err(_)) => {
+            Ok(Ok(AskResponse::AllowOnce | AskResponse::AlwaysAllow)) => HookDecision::Allow,
+            Ok(Ok(AskResponse::Deny | AskResponse::AlwaysReject) | Err(_)) => {
                 HookDecision::Deny(format!("permission denied for tool '{}'", ctx.tool_name))
             }
             Err(_elapsed) => HookDecision::Deny(format!(

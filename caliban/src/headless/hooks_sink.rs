@@ -14,7 +14,7 @@ use caliban_agent_core::{
     Hooks, NotificationCtx, PermCtx, PromptCtx, SessionCtx, SessionOutcome, SubagentCtx,
     SubagentOutcome, TaskCtx, TaskOutcome, ToolCtx, TurnCtx,
 };
-use caliban_agent_core::{Result as HookResult, TurnOutcome};
+use caliban_agent_core::{Result as HookResult, TurnDecision, TurnOutcome};
 use caliban_provider::ContentBlock;
 use serde_json::{Map, Value};
 
@@ -68,11 +68,15 @@ impl Hooks for HeadlessHookSink {
         Ok(())
     }
 
-    async fn after_turn(&self, ctx: &TurnCtx<'_>, _outcome: &TurnOutcome) -> HookResult<()> {
+    async fn after_turn(
+        &self,
+        ctx: &TurnCtx<'_>,
+        _outcome: &TurnOutcome,
+    ) -> HookResult<TurnDecision> {
         let mut m = Map::new();
         m.insert("turn_index".into(), Value::from(ctx.turn_index));
         self.push("PostTurn", Value::Object(m));
-        Ok(())
+        Ok(TurnDecision::Continue)
     }
 
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> HookResult<HookDecision> {

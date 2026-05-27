@@ -354,6 +354,14 @@ pub(crate) enum CalibanCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Run health checks against the local caliban install (settings,
+    /// MCP, sandbox, stores, providers).
+    Doctor {
+        /// Include deep checks (provider auth pings — costs an API call
+        /// per configured provider).
+        #[arg(long)]
+        deep: bool,
+    },
 }
 
 /// `caliban agents <verb>` verbs.

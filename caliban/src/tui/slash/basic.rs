@@ -29,6 +29,10 @@ impl SlashCommand for ClearCommand {
         if let Some(sess) = ctx.app.session.as_mut() {
             sess.messages.clear();
         }
+        // Reset the context-window tracker so the statusline doesn't lie
+        // until the next turn end. Calling record_history with an empty
+        // slice clears the recorded token estimate.
+        ctx.app.context_window.record_history(&[]);
         Ok(SlashOutcome::Continue)
     }
 }
@@ -87,4 +91,24 @@ pub(crate) fn register(registry: &mut SlashCommandRegistry) {
     registry.register(Arc::new(HelpCommand));
     registry.register(Arc::new(QuitCommand { name: "/quit" }));
     registry.register(Arc::new(QuitCommand { name: "/exit" }));
+}
+
+#[cfg(test)]
+mod clear_tests {
+    use super::*;
+    use crate::tui::app::App;
+    use caliban_provider::Message;
+
+    #[tokio::test]
+    async fn clear_resets_context_window() {
+        let mut app = App::for_tests();
+        app.context_window.set_capacity(200_000);
+        app.context_window
+            .record_history(&[Message::user_text("x".repeat(20_000))]);
+        let used_before = app.context_window.utilization();
+        assert!(used_before > 0.0, "precondition");
+        let mut ctx = app.slash_ctx_for_tests();
+        ClearCommand.execute("", &mut ctx).await.unwrap();
+        assert!((app.context_window.utilization() - 0.0).abs() < f32::EPSILON);
+    }
 }

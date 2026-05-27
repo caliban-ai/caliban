@@ -83,16 +83,38 @@ pub fn ir_to_native_request(
         top_p: req.top_p,
         top_k: req.top_k,
         stop_sequences: req.stop_sequences,
-        thinking: req.thinking.map(|t| NativeThinking {
-            kind: "enabled".into(),
-            budget_tokens: t.budget_tokens,
-        }),
+        thinking: thinking_from_request(req.thinking, req.effort),
         metadata: Some(NativeMetadata {
             user_id: req.metadata.user_id,
         }),
         stream,
         anthropic_version: None,
     }
+}
+
+/// Derive the Anthropic `thinking` block from the per-request
+/// `ThinkingConfig` (legacy explicit budget) plus the new `Effort` hint.
+///
+/// Precedence: an explicit `ThinkingConfig` wins (keeps callers that
+/// already set a budget working as-is); otherwise we look at `Effort`
+/// and map Low/Medium/High/Max to a budget. `Effort::Auto` / `None`
+/// omits the field entirely so the model picks its own default.
+fn thinking_from_request(
+    explicit: Option<caliban_provider::ThinkingConfig>,
+    effort: Option<caliban_provider::Effort>,
+) -> Option<NativeThinking> {
+    if let Some(t) = explicit {
+        return Some(NativeThinking {
+            kind: "enabled".into(),
+            budget_tokens: t.budget_tokens,
+        });
+    }
+    effort
+        .and_then(caliban_provider::Effort::as_anthropic_budget)
+        .map(|budget_tokens| NativeThinking {
+            kind: "enabled".into(),
+            budget_tokens,
+        })
 }
 
 fn ir_content_block_to_native(b: ContentBlock) -> NativeContentBlock {
@@ -253,4 +275,75 @@ fn native_block_to_ir(b: NativeContentBlock) -> Result<ContentBlock> {
             signature: Some(data),
         }),
     })
+}
+
+#[cfg(test)]
+mod effort_plumbing {
+    use super::*;
+    use caliban_provider::{CompletionRequest, Effort, RequestMetadata};
+
+    fn build_test_request() -> CompletionRequest {
+        CompletionRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text(IrTextBlock {
+                    text: "hi".into(),
+                    cache_control: None,
+                })],
+            }],
+            tools: vec![],
+            tool_choice: caliban_provider::ToolChoice::default(),
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: RequestMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn effort_low_sets_thinking_budget_2048() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::Low);
+        let native = ir_to_native_request(req, false);
+        let thinking = native.thinking.expect("thinking block emitted");
+        assert_eq!(thinking.kind, "enabled");
+        assert_eq!(thinking.budget_tokens, 2_048);
+    }
+
+    #[test]
+    fn effort_high_sets_thinking_budget_24576() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::High);
+        let native = ir_to_native_request(req, false);
+        let thinking = native.thinking.expect("thinking block emitted");
+        assert_eq!(thinking.budget_tokens, 24_576);
+    }
+
+    #[test]
+    fn effort_auto_omits_thinking_field() {
+        let mut req = build_test_request();
+        req.effort = Some(Effort::Auto);
+        let native = ir_to_native_request(req, false);
+        assert!(native.thinking.is_none(), "thinking field omitted on Auto");
+    }
+
+    #[test]
+    fn explicit_thinking_config_wins_over_effort() {
+        let mut req = build_test_request();
+        req.thinking = Some(caliban_provider::ThinkingConfig {
+            budget_tokens: 1234,
+        });
+        req.effort = Some(Effort::High);
+        let native = ir_to_native_request(req, false);
+        let thinking = native.thinking.expect("thinking block emitted");
+        assert_eq!(
+            thinking.budget_tokens, 1234,
+            "explicit config takes precedence"
+        );
+    }
 }

@@ -834,29 +834,25 @@ mod tests {
         assert!(matches!(app.view, ViewState::Overlay(Overlay::Mcp)));
     }
 
-    #[test]
-    fn doctor_command_runs_all_checks() {
-        let app = make_test_app();
-        let workspace = app
-            .args
-            .workspace
-            .clone()
-            .unwrap_or_else(|| app.cwd.clone());
-        let checks = slash::observe::doctor::run_checks(&workspace, &app);
+    #[tokio::test]
+    async fn doctor_command_runs_all_checks() {
+        // The legacy slash::observe::doctor::run_checks helper was
+        // replaced by the shared crate::diagnostics module (Plan C
+        // Task 7). Exercise that instead so the test stays meaningful.
+        let diag =
+            crate::diagnostics::Diagnostics::run(crate::diagnostics::DiagOpts { deep: false })
+                .await;
         assert!(
-            !checks.is_empty(),
+            !diag.checks.is_empty(),
             "expected at least one health check to run"
         );
-        // Each check has a name and a detail.
-        for c in &checks {
+        for c in &diag.checks {
             assert!(!c.name.is_empty());
-            assert!(!c.detail.is_empty());
+            assert!(!c.hint.is_empty());
         }
-        // Skills, hooks, mcp, provider, workspace — five expected checks.
-        let names: Vec<&str> = checks.iter().map(|c| c.name).collect();
+        let names: Vec<&str> = diag.checks.iter().map(|c| c.name).collect();
         assert!(names.contains(&"skills"));
-        assert!(names.contains(&"hooks"));
-        assert!(names.contains(&"provider"));
+        assert!(names.contains(&"workspace"));
     }
 
     #[test]
@@ -949,7 +945,7 @@ mod tests {
             .take_while(|n| n.starts_with("/co"))
             .copied()
             .collect();
-        assert_eq!(prefixes, vec!["/compact", "/config", "/context"]);
+        assert_eq!(prefixes, vec!["/compact", "/config", "/context", "/cost"]);
     }
 
     #[test]
@@ -1112,7 +1108,8 @@ mod tests {
             ("/heapdump", "jemalloc-prof"),
             ("/feedback", "feedback_url"),
             ("/agents", "Sub-agent isolation"),
-            ("/effort", "model router v2"),
+            // /effort is no longer a stub — it sets reasoning effort via
+            // AgentConfig.effort (Plan C, Task 3). Removed from this list.
             ("/statusline", "Settings hierarchy"),
             ("/permissions", "Settings hierarchy"),
             ("/tui", "TUI ergonomics"),

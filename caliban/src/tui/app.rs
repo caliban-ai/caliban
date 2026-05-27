@@ -235,11 +235,19 @@ pub(crate) struct App {
     /// and surfaced as a toast / transcript info line. Stored here so the
     /// TUI status bar can render it for a single frame.
     pub(crate) last_status_message: Option<String>,
+    /// Timestamp of the most recent token / tool delta. Used by the renderer
+    /// (Plan A T12) to surface a stalled-tokens hint when the SSE stream
+    /// goes quiet for >3s without an active tool dispatch.
+    pub(crate) last_delta_at: std::time::Instant,
+    /// Session-scoped runtime rules added via the Ask modal's "Always
+    /// allow / Always reject" branches (Plan C T11). Consulted by the
+    /// modal flow before re-prompting; never persisted to disk in v1.
+    pub(crate) runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
 }
 
 impl App {
     /// Construct initial `App` state from CLI args and an optional loaded session.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) fn new(
         agent: Arc<Agent>,
         session: Option<PersistedSession>,
@@ -359,6 +367,8 @@ impl App {
             settings_sources,
             slash_registry: slash::register_builtin(),
             last_status_message: None,
+            last_delta_at: std::time::Instant::now(),
+            runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
         }
     }
 
@@ -374,6 +384,91 @@ impl App {
     ) -> Self {
         self.checkpoint_store = Some(store);
         self
+    }
+
+    /// Test-only constructor — builds a minimal `App` backed by a
+    /// `MockProvider` so slash-command tests can dispatch without network
+    /// or auth. Mirrors the in-binary `make_test_app` helper used by the
+    /// slash registry integration tests.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        use caliban_agent_core::{Agent, ToolRegistry};
+        use caliban_provider::{MockProvider, Provider};
+        use clap::Parser;
+
+        let mock: Arc<MockProvider> = Arc::new(MockProvider::new());
+        let provider: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new())
+            .model("mock")
+            .max_tokens(64)
+            .max_turns(10)
+            .build()
+            .expect("agent builder");
+
+        let args = crate::Args::parse_from(["caliban"]);
+        Self::new(
+            Arc::new(agent),
+            None,
+            None,
+            args,
+            None,
+            caliban_agent_core::SharedTodos::default(),
+            caliban_agent_core::SharedPlanMode::default(),
+            caliban_agent_core::SharedPermissionMode::default(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        )
+    }
+
+    /// Test-only helper — borrow a `SlashCtx` against this `App`.
+    #[cfg(test)]
+    pub(crate) fn slash_ctx_for_tests(&mut self) -> slash::SlashCtx<'_> {
+        slash::SlashCtx { app: self }
+    }
+
+    /// Test-only constructor — like `for_tests` but seeds the
+    /// `MockProvider` with a specific list of model ids and seeds the
+    /// agent's `active_model` to the first id in the list.
+    #[cfg(test)]
+    pub(crate) fn for_tests_with_models(ids: &[&str]) -> Self {
+        use caliban_agent_core::{Agent, ToolRegistry};
+        use caliban_provider::{MockProvider, Provider};
+        use clap::Parser;
+
+        let mock: Arc<MockProvider> = Arc::new(MockProvider::for_tests_with_models(ids));
+        let provider: Arc<dyn Provider + Send + Sync> = mock;
+        let model_id = ids.first().copied().unwrap_or("mock").to_string();
+        let agent = Agent::builder()
+            .provider(provider)
+            .tools(ToolRegistry::new())
+            .model(model_id)
+            .max_tokens(64)
+            .max_turns(10)
+            .build()
+            .expect("agent builder");
+        let args = crate::Args::parse_from(["caliban"]);
+        Self::new(
+            Arc::new(agent),
+            None,
+            None,
+            args,
+            None,
+            caliban_agent_core::SharedTodos::default(),
+            caliban_agent_core::SharedPlanMode::default(),
+            caliban_agent_core::SharedPermissionMode::default(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        )
     }
 
     /// Return the current working directory as a tilde-collapsed display string.

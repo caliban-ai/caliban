@@ -17,8 +17,10 @@ use async_trait::async_trait;
 
 pub(crate) mod basic;
 pub(crate) mod config;
+pub(crate) mod cost;
 pub(crate) mod dx;
 pub(crate) mod existing;
+pub(crate) mod export;
 pub(crate) mod model;
 pub(crate) mod observe;
 pub(crate) mod perms;
@@ -208,6 +210,8 @@ pub(crate) fn register_builtin() -> SlashCommandRegistry {
     session::register(&mut registry);
     observe::register(&mut registry);
     config::register(&mut registry);
+    cost::register(&mut registry);
+    export::register(&mut registry);
     model::register(&mut registry);
     perms::register(&mut registry);
     dx::register(&mut registry);

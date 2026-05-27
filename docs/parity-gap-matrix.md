@@ -18,8 +18,11 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-05-24 (after the 2026-05-24 design sweep — 18 new
-ADRs + 19 new specs).
+**Last refreshed:** 2026-05-26 (after Plan C "TUI slash & UX polish" landed:
+`/clear` resets context_window, `/effort` runtime, `/model` runtime swap,
+`/cost` breakdown, `/doctor` real checks + `caliban doctor` headless,
+`/resume` filter, `/context` top-N, `/export`, permission-modal 4-button
++ runtime rules, custom statusline runner).
 
 ## Design coverage
 
@@ -89,6 +92,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `claudeMdExcludes` for monorepos | ✅ | ADR-0036 |
 | Auto-checkpoint per prompt + `/rewind` | ✅ | ADR-0028; new crate `caliban-checkpoint`; `before_run`/`after_run` hooks + `CheckpointHook` snapshots file-tool pre-images per prompt under `~/.caliban/projects/<cwd>/checkpoints/<session>/prompt-N/`; `/rewind` slash command opens the overlay |
 | Esc-Esc / fork-from-checkpoint | ✅ | ADR-0028 — Esc-Esc on empty input opens the rewind overlay (`is_esc_chord` policy, 400 ms window). Fork-from-checkpoint stays 🔴 (sub-agent fleet spec) |
+| MicroCompact (LLM-free per-tool supersession janitor) | ✅ | Plan B (`2026-05-26-context-management`); `MicroCompactor` strategy walks history each turn replacing superseded `ToolResult` blocks (per-tool key: `Read`→file_path, `Grep`/`Glob`→exact args, `WebFetch`→url; `Bash` never supersedable) with `[superseded: <tool>(<key>)]` placeholders |
+| Tool-result size cap with overflow persistence | ✅ | Plan B; `ToolResultCap` (default 50_000 chars) writes overflow to `~/Library/Caches/caliban/tool-overflows/<session>/<tool_use_id>.txt`, replaces inline content with `[truncated: N chars, full at <path>]` + head/tail 2KB preview |
 
 ## D. Configuration / settings
 
@@ -114,7 +119,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Background bash (`Ctrl+B`) | ✅ | `Bash{background:true}` + `BashOutput` + `KillShell`; TUI `Ctrl+B` follow-on |
 | Image / vision input | ✅ | ADR-0039; `caliban-images` ingest (clipboard, `@path`, DnD), per-adapter wire shapes, capability filter + strict-routing fallback, blob storage, graphics-protocol detection |
 | Slash-menu typeahead | 🟡 | |
-| Permission Ask modal | ✅ | ADR-0027; `TuiAskHandler` + modal overlay; Esc → Deny; 10-min timeout |
+| Permission Ask modal | ✅ | ADR-0027 + Plan C 2026-05-26: 4-button modal — `y` Allow once / `A` Always allow / `n` Reject once / `R` Always reject / Esc Deny. "Always" branches append session-scoped `RuntimeRule` via `RuntimeRuleStore` (no disk persistence). Pattern derived per-tool with `caliban_agent_core::derive_pattern`. |
 | Reverse history search (`Ctrl+R` / `Ctrl+S`) | ✅ | ADR-0027; session → project → all-projects scopes; persisted per project |
 | Multi-line input (`\`+Enter, Option+Enter, Shift+Enter native) | 🟡 | |
 | Voice dictation | 🔴 | |
@@ -196,11 +201,14 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `/context` slash | ✅ | ADR-0033; per-message-kind breakdown + 80% warning |
 | `/usage` slash + per-session token + $ | ✅ | ADR-0033; per-model breakdown + cache savings |
 | `/compact` slash + manual trigger | ✅ | ADR-0033; routes through configured `Compactor` |
+| Proactive autocompact (threshold-based + 2-strike backoff) | ✅ | Plan B (`2026-05-26-context-management`); fires when `estimate_tokens(history) / max_input_tokens >= auto_compact_threshold` (default 0.75); 2 consecutive failures disable autocompact for the run |
+| Conversation-level prompt cache marker | ✅ | Plan B; `apply_prompt_cache` marks the last user message with `cache_control: Ephemeral` when its estimated tokens >= `min_cache_block_tokens` (default 1024), turning `cache_read` curve from flat to linear-with-history on Anthropic |
 | Cost ($) tracking | ✅ | ADR-0033; `rust_decimal` math against vendored `rates.yaml` |
 | OpenTelemetry export (OTLP metrics / logs / traces) | ✅ | ADR-0033; gated by `CALIBAN_ENABLE_TELEMETRY=1`, `OTEL_*` env contract honored; OTLP transport behind the `otlp` cargo feature |
 | Metric set (`session.count`, `lines_of_code.count`, `cost.usage`, `token.usage`, etc.) | ✅ | ADR-0033; `caliban-telemetry::MetricEmitter` mirrors Claude Code's `claude_code.*` names |
-| `/doctor`, `/heapdump` diagnostics | 🔴 | |
-| Status line (custom script) | 🔴 | |
+| Turn-loop resilience (MaxTokens 2-stage recovery, stream-idle watchdog, refusal/content-filter surfacing, reactive-compact on ContextTooLong, failure-aware hook dispatch, TurnDecision) | ✅ | Plan A 2026-05-26; counter names exposed via `caliban_telemetry::metrics::RECOVERY_*` |
+| `/doctor`, `/heapdump` diagnostics | 🟡 | `/doctor` real checks + `caliban doctor` headless shipped 2026-05-26 (Plan C Task 7); `/heapdump` still a stub naming the jemalloc-prof feature. |
+| Status line (custom script) | 🟡 | `StatuslineRunner` shipped 2026-05-26 (Plan C Task 12) in `caliban-settings`; schema + claude-code-compatible context wired; TUI render-prefix integration deferred. |
 | `feedbackSurveyRate` + `/feedback` | 🔴 | |
 
 ## L. Output styles
@@ -220,8 +228,9 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `/plugin`, `/plugins` | ✅ | ADR-0030; text overlay lists installed plugins with enable/disable status. Full interactive UI lands with the Plugin Manager overlay spec. |
 | `/clear`, `/help`, `/init` | ✅ | ADR 0040; `/init` writes `CLAUDE.draft.md` from `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `README.md` / `git status`. |
 | `/context`, `/usage`, `/compact` | ✅ | ADR-0033 logic; surfaced through the registry as of ADR 0040. |
-| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | ✅ | ADR 0040; `/config` overlay also surfaces ADR 0026 settings scope chain; `/mcp` opens overlay; `/hooks` lists configured handlers; `/agents`/`/model`/`/effort` are registered stubs whose deeper UI lands with their respective specs. |
-| `/resume`, `/recap`, `/btw`, `/loop` | ✅ | ADR 0040; `/btw` uses `RequestPurpose::FastClassifier`, `/loop` is bounded by `--max-turns`. |
+| `/config`, `/hooks`, `/mcp`, `/agents`, `/model`, `/effort` | ✅ | ADR 0040 + Plan C 2026-05-26: `/model <id>` now runtime-swaps via `Agent::try_swap_model` (same-provider in v1); `/effort low|medium|high|max|auto` writes `Arc<ArcSwap<Effort>>` consumed by OpenAI `reasoning.effort` and Anthropic `thinking.budget_tokens` on the next turn. `/agents` remains a stub. |
+| `/resume`, `/recap`, `/btw`, `/loop` | ✅ | ADR 0040 + Plan C 2026-05-26: `/resume [query]` accepts a name substring filter; full picker-overlay swap-in-place deferred until Overlay enum supports non-Copy variants. |
+| `/cost`, `/export` | ✅ | Plan C 2026-05-26 (Tasks 6 + 10): `/cost` prints cumulative + per-(provider,model) USD; `/export [path] [--format json]` writes the in-memory session transcript. |
 | `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay; also reachable via `/rewind` through the ADR 0040 registry. |
 | `/doctor`, `/heapdump`, `/feedback` | ✅ | ADR 0040; `/doctor` runs health checks (skills, hooks, MCP, provider, workspace); `/heapdump`/`/feedback` are stubs naming their ETA path. |
 | `/login`, `/logout`, `/status` | ✅ | ADR 0040; stubs that name the Auth spec where each is wired. |

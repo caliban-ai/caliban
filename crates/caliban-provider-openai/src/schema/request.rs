@@ -40,6 +40,19 @@ pub struct NativeRequest {
     /// Options for streaming (e.g. `include_usage`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<NativeStreamOptions>,
+    /// Reasoning configuration for `o1`-family models. Carries an
+    /// `effort` field today (`low`/`medium`/`high`). Omitted when the
+    /// caller passes [`caliban_provider::Effort::Auto`] or a non-reasoning
+    /// model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<NativeReasoning>,
+}
+
+/// `reasoning` block sent alongside an `OpenAI` chat-completions request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeReasoning {
+    /// Effort hint: `"low"`, `"medium"`, or `"high"`.
+    pub effort: String,
 }
 
 /// Options passed alongside a streaming request.

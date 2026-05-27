@@ -46,6 +46,7 @@
 #![allow(clippy::missing_panics_doc)]
 
 pub mod attrs;
+pub mod compaction;
 pub mod context;
 pub mod cost;
 pub mod error;

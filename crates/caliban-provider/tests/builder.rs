@@ -48,6 +48,7 @@ fn rejects_system_after_user() {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: RequestMetadata::default(),
     };
     let err = req.validate().unwrap_err();
@@ -81,6 +82,7 @@ fn rejects_image_in_system() {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: RequestMetadata::default(),
     };
     let err = req.validate().unwrap_err();
@@ -100,6 +102,7 @@ fn rejects_no_user_or_assistant() {
         top_k: None,
         stop_sequences: vec![],
         thinking: None,
+        effort: None,
         metadata: RequestMetadata::default(),
     };
     let err = req.validate().unwrap_err();

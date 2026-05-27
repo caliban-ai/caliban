@@ -470,6 +470,29 @@ pub(crate) fn format_cache_suffix(cache_read: Option<u32>, cache_creation: Optio
     }
 }
 
+/// Format the running-activity label, surfacing a "no tokens for Ns" hint
+/// when the SSE stream has been idle for ≥10s and no tool is running.
+///
+/// Plan A T12: gives operators a visible signal that the model went quiet
+/// instead of leaving the spinner alone, which is indistinguishable from a
+/// normal slow turn.
+#[must_use]
+pub(crate) fn format_spinner_cell(
+    active_tools: bool,
+    last_delta_at: std::time::Instant,
+    now: std::time::Instant,
+) -> String {
+    let elapsed = now.duration_since(last_delta_at);
+    if !active_tools && elapsed >= std::time::Duration::from_secs(3) {
+        let secs = elapsed.as_secs();
+        if secs >= 10 {
+            return format!("Thinking\u{2026} (no tokens for {secs}s)");
+        }
+        return "Thinking\u{2026}".to_string();
+    }
+    "Thinking\u{2026}".to_string()
+}
+
 pub(crate) fn render_status(app: &App) -> Line<'static> {
     let provider = match app.args.provider {
         crate::ProviderKind::Anthropic => "anthropic",
@@ -493,11 +516,22 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         let elapsed = running.activity.since().elapsed();
         let secs = elapsed.as_secs();
         let spinner = spinner_frame(elapsed);
-        format!(
-            " \u{00B7} {spinner} {} ({}s)",
-            running.activity.label(),
-            secs,
-        )
+        // Plan A T12: surface a "no tokens for Ns" hint when the SSE stream
+        // has been silent past the stall threshold. `active_tools` is derived
+        // from the running activity so tool dispatches don't trip the hint.
+        let active_tools = matches!(
+            running.activity,
+            super::app::Activity::DispatchingTool { .. }
+        );
+        let hint = format_spinner_cell(active_tools, app.last_delta_at, std::time::Instant::now());
+        let label = if hint.contains("no tokens") {
+            // Replace the default "Thinking…" label with the hint while
+            // preserving the regular label for non-stalled states.
+            hint
+        } else {
+            running.activity.label()
+        };
+        format!(" \u{00B7} {spinner} {label} ({secs}s)")
     } else {
         String::new()
     };
@@ -535,4 +569,40 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
     ))
+}
+
+#[cfg(test)]
+mod stalled_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn render_spinner_stalled_when_idle_over_3s_no_tools() {
+        let now = Instant::now();
+        let last_delta = now
+            .checked_sub(Duration::from_secs(12))
+            .expect("monotonic clock 12s back");
+        let label = format_spinner_cell(false, last_delta, now);
+        assert!(label.contains("no tokens for 12s"));
+    }
+
+    #[test]
+    fn render_spinner_normal_under_3s() {
+        let now = Instant::now();
+        let last_delta = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("monotonic clock 1s back");
+        let label = format_spinner_cell(false, last_delta, now);
+        assert!(!label.contains("no tokens"));
+    }
+
+    #[test]
+    fn render_spinner_normal_when_tools_active() {
+        let now = Instant::now();
+        let last_delta = now
+            .checked_sub(Duration::from_secs(30))
+            .expect("monotonic clock 30s back");
+        let label = format_spinner_cell(true, last_delta, now);
+        assert!(!label.contains("no tokens"));
+    }
 }

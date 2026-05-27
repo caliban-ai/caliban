@@ -27,6 +27,114 @@ pub trait Compactor: Send + Sync {
     }
 }
 
+/// Janitor compactor: replaces older `ToolResult` blocks with a one-line
+/// placeholder when a newer invocation of the same logical action exists.
+/// LLM-free; O(n) per call.
+#[derive(Debug, Default)]
+pub struct MicroCompactor;
+
+impl MicroCompactor {
+    /// Construct a new [`MicroCompactor`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Compactor for MicroCompactor {
+    async fn compact(
+        &self,
+        messages: &[Message],
+        _capabilities: &Capabilities,
+    ) -> Result<Option<Vec<Message>>> {
+        // First pass: find the latest tool_use_id for each (tool, key).
+        let mut latest: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        for m in messages {
+            for cb in &m.content {
+                if let caliban_provider::ContentBlock::ToolUse(tu) = cb
+                    && let Some(k) = supersession_key(&tu.name, &tu.input)
+                {
+                    latest.insert((tu.name.clone(), k), tu.id.clone());
+                }
+            }
+        }
+        // Build a map tool_use_id → (tool_name, key) for older invocations.
+        let mut superseded: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        for m in messages {
+            for cb in &m.content {
+                if let caliban_provider::ContentBlock::ToolUse(tu) = cb
+                    && let Some(k) = supersession_key(&tu.name, &tu.input)
+                    && let Some(latest_id) = latest.get(&(tu.name.clone(), k.clone()))
+                    && latest_id != &tu.id
+                {
+                    superseded.insert(tu.id.clone(), (tu.name.clone(), k));
+                }
+            }
+        }
+        if superseded.is_empty() {
+            return Ok(None);
+        }
+        // Second pass: rewrite ToolResult blocks whose id is superseded.
+        let new: Vec<Message> = messages
+            .iter()
+            .map(|m| {
+                let new_content: Vec<_> = m
+                    .content
+                    .iter()
+                    .map(|cb| match cb {
+                        caliban_provider::ContentBlock::ToolResult(tr) => {
+                            if let Some((tool, key)) = superseded.get(&tr.tool_use_id) {
+                                let placeholder = format!("[superseded: {tool}({key})]");
+                                caliban_provider::ContentBlock::ToolResult(
+                                    caliban_provider::ToolResultBlock {
+                                        tool_use_id: tr.tool_use_id.clone(),
+                                        content: vec![caliban_provider::ContentBlock::Text(
+                                            caliban_provider::TextBlock {
+                                                text: placeholder,
+                                                cache_control: None,
+                                            },
+                                        )],
+                                        is_error: tr.is_error,
+                                    },
+                                )
+                            } else {
+                                cb.clone()
+                            }
+                        }
+                        _ => cb.clone(),
+                    })
+                    .collect();
+                caliban_provider::Message {
+                    role: m.role.clone(),
+                    content: new_content,
+                }
+            })
+            .collect();
+        Ok(Some(new))
+    }
+
+    fn strategy_name(&self) -> &'static str {
+        "MicroCompactor"
+    }
+}
+
+/// Per-tool predicate for "newer invocation of this same logical action".
+/// Returns the supersession key; `None` means this tool is never supersedable.
+pub(crate) fn supersession_key(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "Read" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        "Grep" | "Glob" => Some(input.to_string()),
+        "WebFetch" => input.get("url").and_then(|v| v.as_str()).map(String::from),
+        _ => None,
+    }
+}
+
 /// Estimate token count using a chars/4 heuristic.
 #[must_use]
 pub fn estimate_tokens(messages: &[Message]) -> u32 {
@@ -221,6 +329,7 @@ impl Compactor for SummarizingCompactor {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: caliban_provider::RequestMetadata {
                 user_id: None,
                 purpose: Some(caliban_provider::RequestPurpose::Summarization),
@@ -260,5 +369,34 @@ impl Compactor for SummarizingCompactor {
 
     fn strategy_name(&self) -> &'static str {
         "Summarizing"
+    }
+}
+
+#[cfg(test)]
+mod supersession_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_key_is_file_path() {
+        let k = supersession_key("Read", &json!({"file_path": "/x.rs"}));
+        assert_eq!(k.as_deref(), Some("/x.rs"));
+    }
+    #[test]
+    fn grep_key_is_exact_args() {
+        let a = supersession_key("Grep", &json!({"pattern": "foo", "path": "."}));
+        let b = supersession_key("Grep", &json!({"pattern": "foo", "path": "."}));
+        let c = supersession_key("Grep", &json!({"pattern": "bar", "path": "."}));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+    #[test]
+    fn bash_is_never_supersedable() {
+        assert!(supersession_key("Bash", &json!({"command": "ls"})).is_none());
+    }
+    #[test]
+    fn webfetch_keys_by_url() {
+        let k = supersession_key("WebFetch", &json!({"url": "https://x", "prompt": "…"}));
+        assert_eq!(k.as_deref(), Some("https://x"));
     }
 }

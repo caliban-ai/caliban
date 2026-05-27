@@ -388,6 +388,7 @@ impl AutoModeClassifier {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: RequestMetadata {
                 user_id: None,
                 purpose: Some(RequestPurpose::FastClassifier),

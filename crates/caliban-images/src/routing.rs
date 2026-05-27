@@ -86,6 +86,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: RequestMetadata::default(),
         }
     }
@@ -118,6 +119,7 @@ mod tests {
             top_k: None,
             stop_sequences: vec![],
             thinking: None,
+            effort: None,
             metadata: RequestMetadata::default(),
         };
         let n = rewrite_for_text_fallback(&mut req);

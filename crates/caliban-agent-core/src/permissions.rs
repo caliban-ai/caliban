@@ -40,6 +40,102 @@ pub struct Rule {
     pub comment: Option<String>,
 }
 
+/// Runtime-only rule added during a session via the "Always allow/reject"
+/// Ask modal branches. Composes with config rules under existing
+/// precedence (runtime > project > user > managed); session-scoped only,
+/// never persisted to disk.
+#[derive(Debug, Clone)]
+pub struct RuntimeRule {
+    /// Pattern of the form `Tool` or `Tool:first-arg-glob`.
+    pub pattern: String,
+    /// Action to take when the pattern matches. Only `Allow` and `Deny`
+    /// are meaningful here — `Ask` would loop back into the modal.
+    pub action: Action,
+}
+
+/// Session-scoped runtime-rule store. Interior-mutable so existing
+/// `Arc<dyn Hooks>` callers can add rules without re-building the hook
+/// chain. Always consulted before config rules so an "Always allow"
+/// added in the modal beats a project-level `Ask`.
+#[derive(Debug, Default)]
+pub struct RuntimeRuleStore {
+    rules: std::sync::Mutex<Vec<RuntimeRule>>,
+}
+
+impl RuntimeRuleStore {
+    /// Empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a runtime rule. Newer rules win when patterns overlap
+    /// because [`Self::evaluate`] checks them in insertion order from
+    /// the back of the list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a previous panic
+    /// while holding the lock). In practice this only happens if a
+    /// modal-side caller panicked mid-add.
+    pub fn add(&self, rule: RuntimeRule) {
+        self.rules
+            .lock()
+            .expect("RuntimeRuleStore mutex poisoned")
+            .push(rule);
+    }
+
+    /// Evaluate against a `ToolCtx`. Returns `Some(Action::Allow|Deny)`
+    /// if a runtime rule matches; `None` otherwise. The caller falls
+    /// back to the config rule set when this returns `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn evaluate(&self, ctx: &ToolCtx<'_>) -> Option<Action> {
+        let rules = self.rules.lock().expect("RuntimeRuleStore mutex poisoned");
+        for r in rules.iter().rev() {
+            let synth = Rule {
+                tool: r.pattern.clone(),
+                action: r.action,
+                comment: None,
+            };
+            if rule_matches(&synth, ctx) {
+                return Some(r.action);
+            }
+        }
+        None
+    }
+}
+
+/// Derive an "Always-allow / Always-reject" rule pattern from one
+/// invocation. The plan calls for one canonical shape per tool kind so
+/// the modal can show what the user is committing to before they
+/// confirm. Pure function; unit-tested.
+#[must_use]
+pub fn derive_pattern(tool: &str, input: &serde_json::Value) -> String {
+    if tool == "Bash" {
+        let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let first = cmd.split_whitespace().next().unwrap_or("*");
+        return format!("Bash({first} *)");
+    }
+    if matches!(tool, "Edit" | "Read" | "Write") {
+        let path = input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/*");
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map_or_else(|| "/".into(), |p| p.display().to_string());
+        return format!("{tool}({dir}/*)");
+    }
+    if tool.starts_with("mcp__") {
+        return format!("{tool}(*)");
+    }
+    format!("{tool}(*)")
+}
+
 #[derive(Debug, Deserialize)]
 struct RulesFile {
     #[serde(default, rename = "rule")]
@@ -371,7 +467,7 @@ impl Hooks for PermissionsHook {
         &self,
         ctx: &crate::hooks::TurnCtx<'_>,
         outcome: &crate::TurnOutcome,
-    ) -> Result<()> {
+    ) -> Result<crate::hooks::TurnDecision> {
         self.inner.after_turn(ctx, outcome).await
     }
 
@@ -623,5 +719,88 @@ action = "bogus"
         .unwrap();
         let err = load_rules_file(&f).unwrap_err();
         assert!(matches!(err, PermissionsLoadError::Parse { .. }));
+    }
+}
+
+#[cfg(test)]
+mod derive_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn bash_pattern_derives_first_token() {
+        let p = derive_pattern("Bash", &serde_json::json!({"command": "gh pr view 42"}));
+        assert_eq!(p, "Bash(gh *)");
+    }
+
+    #[test]
+    fn read_pattern_uses_parent_dir() {
+        let p = derive_pattern(
+            "Read",
+            &serde_json::json!({"file_path": "/home/me/proj/src/foo.rs"}),
+        );
+        assert!(p.starts_with("Read(/home/me/proj/src/"));
+        assert!(p.ends_with("/*)"));
+    }
+
+    #[test]
+    fn mcp_pattern_glob_all_args() {
+        let p = derive_pattern("mcp__server__tool", &serde_json::json!({}));
+        assert_eq!(p, "mcp__server__tool(*)");
+    }
+
+    #[test]
+    fn other_pattern_glob_all_args() {
+        let p = derive_pattern("WebFetch", &serde_json::json!({"url": "https://x"}));
+        assert_eq!(p, "WebFetch(*)");
+    }
+}
+
+#[cfg(test)]
+mod runtime_rule_tests {
+    use super::*;
+
+    fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
+        ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t",
+            tool_name: name,
+            input,
+        }
+    }
+
+    #[test]
+    fn empty_store_returns_none() {
+        let store = RuntimeRuleStore::new();
+        let input = serde_json::json!({"command": "ls"});
+        assert!(store.evaluate(&ctx("Bash", &input)).is_none());
+    }
+
+    #[test]
+    fn always_allow_matches_subsequent_invocation() {
+        let store = RuntimeRuleStore::new();
+        store.add(RuntimeRule {
+            pattern: "Bash:ls *".into(),
+            action: Action::Allow,
+        });
+        let input = serde_json::json!({"command": "ls -al"});
+        let outcome = store.evaluate(&ctx("Bash", &input));
+        assert_eq!(outcome, Some(Action::Allow));
+    }
+
+    #[test]
+    fn always_reject_overrides_a_later_allow() {
+        let store = RuntimeRuleStore::new();
+        // First add an allow, then a deny — most recent wins.
+        store.add(RuntimeRule {
+            pattern: "Bash:rm *".into(),
+            action: Action::Allow,
+        });
+        store.add(RuntimeRule {
+            pattern: "Bash:rm *".into(),
+            action: Action::Deny,
+        });
+        let input = serde_json::json!({"command": "rm -rf /tmp"});
+        let outcome = store.evaluate(&ctx("Bash", &input));
+        assert_eq!(outcome, Some(Action::Deny));
     }
 }

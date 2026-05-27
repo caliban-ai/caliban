@@ -77,6 +77,22 @@ pub(crate) fn stopped_for_surface(
             line: "[caliban: cancelled]".to_string(),
             level: StoppedForLevel::Info,
         }),
+        StopCondition::MaxTokensExhausted => Some(StoppedForSurface {
+            line: "[caliban: max output tokens exhausted — try /effort low]".to_string(),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::Refusal(msg) => Some(StoppedForSurface {
+            line: format!("[caliban: model refusal: {msg}]"),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::ContentFilter(msg) => Some(StoppedForSurface {
+            line: format!("[caliban: content filter: {msg}]"),
+            level: StoppedForLevel::Error,
+        }),
+        StopCondition::StreamIdle(d) => Some(StoppedForSurface {
+            line: format!("[caliban: stream idle for {}s]", d.as_secs()),
+            level: StoppedForLevel::Error,
+        }),
     }
 }
 
@@ -96,6 +112,7 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
             // Keep the WaitingForModel activity; refreshed on first delta below.
         }
         TurnEvent::AssistantTextDelta { text, .. } => {
+            app.last_delta_at = std::time::Instant::now();
             // First delta of this stream → transition to Streaming activity.
             if let Some(running) = app.running.as_mut()
                 && !matches!(running.activity, Activity::Streaming { .. })
@@ -112,6 +129,7 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
             }
         }
         TurnEvent::AssistantThinkingDelta { text, .. } => {
+            app.last_delta_at = std::time::Instant::now();
             if let Some(running) = app.running.as_mut()
                 && !matches!(running.activity, Activity::Thinking { .. })
             {
@@ -128,6 +146,7 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
         TurnEvent::ToolCallStart {
             tool_use_id, name, ..
         } => {
+            app.last_delta_at = std::time::Instant::now();
             if let Some(running) = app.running.as_mut() {
                 running.activity = Activity::DispatchingTool {
                     name: name.clone(),
@@ -146,6 +165,7 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
             partial_json,
             ..
         } => {
+            app.last_delta_at = std::time::Instant::now();
             for entry in app.transcript.iter_mut().rev() {
                 if let TranscriptLine::ToolCall {
                     tool_use_id: id,
@@ -1224,6 +1244,15 @@ pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
         (KeyCode::Char('y'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
             Some(ask::AskResponse::AllowOnce)
         }
+        // Capital A / R bind to "Always allow / Always reject" — match
+        // the spec's modal layout. The "Always" branches append a
+        // session-scoped runtime rule via the agent's RuntimeRuleStore.
+        (KeyCode::Char('A'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+            Some(ask::AskResponse::AlwaysAllow)
+        }
+        (KeyCode::Char('R'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+            Some(ask::AskResponse::AlwaysReject)
+        }
         (KeyCode::Char('n'), KeyModifiers::NONE)
         | (KeyCode::Esc, _)
         | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(ask::AskResponse::Deny),
@@ -1232,6 +1261,25 @@ pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
     if let Some(r) = response
         && let Some(req) = app.ask_modal.take()
     {
+        // Persist the derived pattern as a session-scoped runtime rule
+        // when the user chose an "Always" branch. The store lives on
+        // App (added in Task 11) so plain hooks composition keeps
+        // working — no need to rewire PermissionsHook.
+        match r {
+            ask::AskResponse::AlwaysAllow => {
+                app.runtime_rules.add(caliban_agent_core::RuntimeRule {
+                    pattern: req.always_pattern.clone(),
+                    action: caliban_agent_core::Action::Allow,
+                });
+            }
+            ask::AskResponse::AlwaysReject => {
+                app.runtime_rules.add(caliban_agent_core::RuntimeRule {
+                    pattern: req.always_pattern.clone(),
+                    action: caliban_agent_core::Action::Deny,
+                });
+            }
+            _ => {}
+        }
         let _ = req.respond.send(r);
         app.view = ViewState::Main;
     }

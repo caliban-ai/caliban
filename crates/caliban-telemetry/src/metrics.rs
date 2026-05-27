@@ -15,6 +15,26 @@
 //! - `caliban.token.usage` (counter)
 //! - `caliban.code_edit_tool.decision` (counter)
 //! - `caliban.active_time.total` (gauge, seconds)
+//!
+//! Plan A — turn-loop resilience adds the following counters; the constants
+//! are exposed here so downstream telemetry sinks can subscribe by name:
+//!
+//! - [`RECOVERY_MAX_TOKENS_RECOVERED`]
+//! - [`RECOVERY_STREAM_IDLE_ABORTED`]
+//! - [`RECOVERY_REACTIVE_COMPACTED`]
+//! - [`RECOVERY_REFUSALS_SURFACED`]
+
+/// Counter: a MaxTokens turn was recovered via Stage A / Stage B.
+pub const RECOVERY_MAX_TOKENS_RECOVERED: &str = "caliban.recovery.max_tokens_recovered";
+/// Counter: a streaming run aborted because the SSE stream went idle past
+/// the configured timeout (`WatchedStream` fired).
+pub const RECOVERY_STREAM_IDLE_ABORTED: &str = "caliban.recovery.stream_idle_aborted";
+/// Counter: a `ContextTooLong` provider error was rescued by reactive
+/// compaction.
+pub const RECOVERY_REACTIVE_COMPACTED: &str = "caliban.recovery.reactive_compacted";
+/// Counter: a turn ended in `Refusal` or `ContentFilter` and was surfaced to
+/// the caller via a synthetic assistant message.
+pub const RECOVERY_REFUSALS_SURFACED: &str = "caliban.recovery.refusals_surfaced";
 
 use std::sync::{Arc, Mutex};
 

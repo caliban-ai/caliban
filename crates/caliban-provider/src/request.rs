@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::effort::Effort;
 use crate::error::{Error, Result};
 use crate::message::{ContentBlock, Message, Role};
 use crate::thinking::ThinkingConfig;
@@ -37,6 +38,10 @@ pub struct CompletionRequest {
     /// Extended-thinking configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    /// Reasoning-effort level. `None` (or `Some(Effort::Auto)`) means the
+    /// provider's default behavior; adapters skip writing the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     /// Optional per-request metadata.
     #[serde(default)]
     pub metadata: RequestMetadata,
@@ -89,6 +94,7 @@ impl CompletionRequest {
             top_k: None,
             stop_sequences: Vec::new(),
             thinking: None,
+            effort: None,
             metadata: RequestMetadata::default(),
         }
     }
@@ -158,6 +164,7 @@ pub struct CompletionRequestBuilder {
     top_k: Option<u32>,
     stop_sequences: Vec<String>,
     thinking: Option<ThinkingConfig>,
+    effort: Option<Effort>,
     metadata: RequestMetadata,
 }
 
@@ -244,6 +251,14 @@ impl CompletionRequestBuilder {
         self
     }
 
+    /// Set the reasoning-effort level. Passing `Effort::Auto` keeps the
+    /// field non-`None`; adapters still treat `Auto` as "omit from the
+    /// wire request".
+    pub fn effort(mut self, e: Effort) -> Self {
+        self.effort = Some(e);
+        self
+    }
+
     /// Attach an opaque user identifier.
     pub fn user_id(mut self, id: impl Into<String>) -> Self {
         self.metadata.user_id = Some(id.into());
@@ -268,6 +283,7 @@ impl CompletionRequestBuilder {
             top_k: self.top_k,
             stop_sequences: self.stop_sequences,
             thinking: self.thinking,
+            effort: self.effort,
             metadata: self.metadata,
         };
         req.validate()?;
