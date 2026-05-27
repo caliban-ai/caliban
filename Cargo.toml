@@ -78,6 +78,15 @@ rmcp   = { version = "1.7", features = [
     "transport-child-process",
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest",
+    # `transport-streamable-http-client-reqwest` only enables `__reqwest`
+    # (pulls reqwest as a dep). The separate `reqwest` feature is what
+    # enables `reqwest?/rustls` so rmcp's default reqwest::Client speaks
+    # https. Without it, the streamable-http worker rejects any https URL
+    # with hyper-util's "invalid URL, scheme is not http" connect error.
+    # rmcp 1.7 pins reqwest 0.13 transitively, so our workspace
+    # `reqwest = "0.12"` rustls-tls feature does not unify across the
+    # major bump and cannot fix this from the outside.
+    "reqwest",
 ] }
 oauth2  = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
