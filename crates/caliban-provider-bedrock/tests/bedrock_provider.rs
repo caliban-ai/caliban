@@ -116,8 +116,8 @@ async fn provider_name_returns_bedrock() {
 #[tokio::test]
 async fn provider_capabilities_match_anthropic() {
     let p = BedrockProvider::from_config(test_config()).await.unwrap();
-    let bedrock_caps: Capabilities = p.capabilities("anthropic.claude-3-5-sonnet-20241022-v2:0");
-    let anthropic_caps = caliban_provider_anthropic::models::capabilities_for("claude-3-5-sonnet");
+    let bedrock_caps: Capabilities = p.capabilities("anthropic.claude-sonnet-4-6-v1:0");
+    let anthropic_caps = caliban_provider_anthropic::models::capabilities_for("claude-sonnet-4-6");
     assert_eq!(bedrock_caps, anthropic_caps);
     assert!(bedrock_caps.vision);
 }
@@ -151,11 +151,11 @@ fn strip_platform_suffix_drops_region_and_version() {
 #[test]
 fn vendored_bedrock_models_format() {
     let models = vendored_bedrock_models();
-    let opus = models
+    let haiku = models
         .iter()
-        .find(|m| m.id == "claude-3-opus")
-        .expect("3-opus present");
-    assert_eq!(opus.native_id, "anthropic.claude-3-opus-20240229-v1:0");
+        .find(|m| m.id == "claude-haiku-4-5")
+        .expect("haiku-4-5 present");
+    assert_eq!(haiku.native_id, "anthropic.claude-haiku-4-5-v1:0");
 }
 
 /// Live AWS Bedrock test. Only runs if `CALIBAN_LIVE_BEDROCK=1`.

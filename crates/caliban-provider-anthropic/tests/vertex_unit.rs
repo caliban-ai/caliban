@@ -29,34 +29,31 @@ fn vertex_wire_model_id(canonical: &str) -> String {
 }
 
 #[test]
-fn vertex_id_for_claude_3_5_sonnet() {
+fn vertex_id_for_claude_opus_4_7() {
+    // Current Claude 4.x native IDs are dateless and pass through unchanged.
+    assert_eq!(vertex_wire_model_id("claude-opus-4-7"), "claude-opus-4-7");
+}
+
+#[test]
+fn vertex_id_for_claude_sonnet_4_6() {
     assert_eq!(
-        vertex_wire_model_id("claude-3-5-sonnet"),
-        "claude-3-5-sonnet@20241022"
+        vertex_wire_model_id("claude-sonnet-4-6"),
+        "claude-sonnet-4-6"
     );
 }
 
 #[test]
-fn vertex_id_for_claude_3_5_haiku() {
-    assert_eq!(
-        vertex_wire_model_id("claude-3-5-haiku"),
-        "claude-3-5-haiku@20241022"
-    );
+fn vertex_id_for_claude_haiku_4_5() {
+    assert_eq!(vertex_wire_model_id("claude-haiku-4-5"), "claude-haiku-4-5");
 }
 
 #[test]
-fn vertex_id_for_claude_3_opus() {
+fn vertex_id_date_suffix_converts_to_at_form() {
+    // An 8-digit date suffix on a non-table ID should be converted via the
+    // canonical "-YYYYMMDD" → "@YYYYMMDD" rewrite.
     assert_eq!(
-        vertex_wire_model_id("claude-3-opus"),
-        "claude-3-opus@20240229"
-    );
-}
-
-#[test]
-fn vertex_id_for_claude_3_7_sonnet() {
-    assert_eq!(
-        vertex_wire_model_id("claude-3-7-sonnet"),
-        "claude-3-7-sonnet@20250219"
+        vertex_wire_model_id("claude-opus-4-7-20251115"),
+        "claude-opus-4-7@20251115"
     );
 }
 

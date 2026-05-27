@@ -7,44 +7,41 @@
 
 use caliban_provider_anthropic::models::models;
 
-/// Verify the models table contains the expected native IDs for models that
-/// map to Bedrock v2 wire IDs.
 #[test]
-fn bedrock_model_id_format_sonnet_35() {
+fn bedrock_model_id_format_opus_47() {
     let model_table = models();
-    let sonnet_35 = model_table
+    let opus = model_table
         .iter()
-        .find(|m| m.id == "claude-3-5-sonnet")
-        .expect("claude-3-5-sonnet in table");
-    assert_eq!(sonnet_35.native_id, "claude-3-5-sonnet-20241022");
-    // Bedrock wire ID: "anthropic.claude-3-5-sonnet-20241022-v2:0"
-    let expected = format!("anthropic.{}-v2:0", sonnet_35.native_id);
-    assert_eq!(expected, "anthropic.claude-3-5-sonnet-20241022-v2:0");
+        .find(|m| m.id == "claude-opus-4-7")
+        .expect("claude-opus-4-7 in table");
+    assert_eq!(opus.native_id, "claude-opus-4-7");
+    // Current Claude 4 native IDs are dateless and map to v1:0.
+    let expected = format!("anthropic.{}-v1:0", opus.native_id);
+    assert_eq!(expected, "anthropic.claude-opus-4-7-v1:0");
 }
 
 #[test]
-fn bedrock_model_id_format_sonnet_37() {
+fn bedrock_model_id_format_sonnet_46() {
     let model_table = models();
-    let sonnet_37 = model_table
+    let sonnet = model_table
         .iter()
-        .find(|m| m.id == "claude-3-7-sonnet")
-        .expect("claude-3-7-sonnet in table");
-    assert_eq!(sonnet_37.native_id, "claude-3-7-sonnet-20250219");
-    let expected = format!("anthropic.{}-v2:0", sonnet_37.native_id);
-    assert_eq!(expected, "anthropic.claude-3-7-sonnet-20250219-v2:0");
+        .find(|m| m.id == "claude-sonnet-4-6")
+        .expect("claude-sonnet-4-6 in table");
+    assert_eq!(sonnet.native_id, "claude-sonnet-4-6");
+    let expected = format!("anthropic.{}-v1:0", sonnet.native_id);
+    assert_eq!(expected, "anthropic.claude-sonnet-4-6-v1:0");
 }
 
 #[test]
-fn bedrock_model_id_format_haiku_v1() {
+fn bedrock_model_id_format_haiku_45() {
     let model_table = models();
     let haiku = model_table
         .iter()
-        .find(|m| m.id == "claude-3-haiku")
-        .expect("claude-3-haiku in table");
-    assert_eq!(haiku.native_id, "claude-3-haiku-20240307");
-    // Models that don't match the v2 criteria get v1:0.
+        .find(|m| m.id == "claude-haiku-4-5")
+        .expect("claude-haiku-4-5 in table");
+    assert_eq!(haiku.native_id, "claude-haiku-4-5");
     let expected = format!("anthropic.{}-v1:0", haiku.native_id);
-    assert_eq!(expected, "anthropic.claude-3-haiku-20240307-v1:0");
+    assert_eq!(expected, "anthropic.claude-haiku-4-5-v1:0");
 }
 
 #[test]

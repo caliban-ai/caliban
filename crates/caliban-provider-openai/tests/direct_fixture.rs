@@ -63,7 +63,7 @@ async fn o1_uses_developer_role() {
             "id": "chatcmpl-O1",
             "object": "chat.completion",
             "created": 1_700_000_000_u64,
-            "model": "o1-preview",
+            "model": "o1",
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": "OK", "refusal": null, "tool_calls": []},
@@ -86,7 +86,7 @@ async fn o1_uses_developer_role() {
         timeout: std::time::Duration::from_secs(10),
     };
     let provider = OpenAIProvider::direct(cfg).unwrap();
-    let req = CompletionRequest::builder("o1-preview")
+    let req = CompletionRequest::builder("o1")
         .system("Be brief.")
         .user_text("Hi!")
         .max_tokens(64)

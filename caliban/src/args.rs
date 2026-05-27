@@ -26,8 +26,8 @@ pub(crate) enum ProviderKind {
 
 pub(crate) fn default_model_for(p: ProviderKind) -> &'static str {
     match p {
-        ProviderKind::Anthropic => "claude-3-5-sonnet",
-        ProviderKind::Openai => "gpt-4o",
+        ProviderKind::Anthropic => "claude-sonnet-4-6",
+        ProviderKind::Openai => "gpt-5.5",
         ProviderKind::Ollama => "llama3.1",
         ProviderKind::Google => "gemini-2.0-flash",
     }

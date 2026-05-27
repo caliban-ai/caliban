@@ -123,25 +123,27 @@ mod tests {
     #[test]
     fn vendored_bedrock_models_have_wire_ids() {
         let models = vendored_bedrock_models();
+        // Current Claude 4.x native IDs are dateless and map to v1:0 via
+        // `to_bedrock_wire_id`.
+        let opus = models
+            .iter()
+            .find(|m| m.id == "claude-opus-4-7")
+            .expect("opus-4-7 present");
+        assert_eq!(opus.native_id, "anthropic.claude-opus-4-7-v1:0");
         let sonnet = models
             .iter()
-            .find(|m| m.id == "claude-3-5-sonnet")
-            .expect("3-5-sonnet present");
-        assert_eq!(
-            sonnet.native_id,
-            "anthropic.claude-3-5-sonnet-20241022-v2:0"
-        );
-        let haiku = models
-            .iter()
-            .find(|m| m.id == "claude-3-haiku")
-            .expect("3-haiku present");
-        assert_eq!(haiku.native_id, "anthropic.claude-3-haiku-20240307-v1:0");
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .expect("sonnet-4-6 present");
+        assert_eq!(sonnet.native_id, "anthropic.claude-sonnet-4-6-v1:0");
     }
 
     #[test]
     fn capabilities_for_bedrock_matches_anthropic() {
-        let bedrock_caps = capabilities_for_bedrock("anthropic.claude-3-5-sonnet-20241022-v2:0");
-        let anthropic_caps = capabilities_for("claude-3-5-sonnet");
+        // Use a current model so the lookup hits the Anthropic table on both
+        // sides — comparison to the fallback caps would be uninformative.
+        let bedrock_caps = capabilities_for_bedrock("anthropic.claude-sonnet-4-6-v1:0");
+        let anthropic_caps = capabilities_for("claude-sonnet-4-6");
         assert_eq!(bedrock_caps, anthropic_caps);
+        assert!(bedrock_caps.vision);
     }
 }

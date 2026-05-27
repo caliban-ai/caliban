@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn o_series_models_route_to_max_completion_tokens() {
-        for model in ["o1-mini", "o3-mini", "o4-mini"] {
+        for model in ["o1", "o3-mini", "o4-mini"] {
             let native = ir_to_native_request(minimal_request(model), false, "system")
                 .expect("ir_to_native");
             assert_eq!(

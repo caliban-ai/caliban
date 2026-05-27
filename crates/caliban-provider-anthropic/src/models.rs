@@ -22,38 +22,30 @@ const fn caps(max_input: u32, max_output: u32, vision: bool, thinking: bool) -> 
 }
 
 /// Return the full list of known Anthropic Claude models.
+///
+/// Sourced from <https://docs.anthropic.com/en/docs/about-claude/models>.
+/// All Claude 3.x snapshots were retired by Feb 2026; only the Claude 4.x
+/// family remains active.
 #[must_use]
 pub fn models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
-            id: "claude-3-5-sonnet".into(),
-            native_id: "claude-3-5-sonnet-20241022".into(),
-            display_name: "Claude 3.5 Sonnet".into(),
-            capabilities: caps(200_000, 8_192, true, false),
+            id: "claude-opus-4-7".into(),
+            native_id: "claude-opus-4-7".into(),
+            display_name: "Claude Opus 4.7".into(),
+            capabilities: caps(200_000, 32_000, true, true),
         },
         ModelInfo {
-            id: "claude-3-5-haiku".into(),
-            native_id: "claude-3-5-haiku-20241022".into(),
-            display_name: "Claude 3.5 Haiku".into(),
-            capabilities: caps(200_000, 8_192, true, false),
+            id: "claude-sonnet-4-6".into(),
+            native_id: "claude-sonnet-4-6".into(),
+            display_name: "Claude Sonnet 4.6".into(),
+            capabilities: caps(200_000, 64_000, true, true),
         },
         ModelInfo {
-            id: "claude-3-opus".into(),
-            native_id: "claude-3-opus-20240229".into(),
-            display_name: "Claude 3 Opus".into(),
-            capabilities: caps(200_000, 4_096, true, false),
-        },
-        ModelInfo {
-            id: "claude-3-haiku".into(),
-            native_id: "claude-3-haiku-20240307".into(),
-            display_name: "Claude 3 Haiku".into(),
-            capabilities: caps(200_000, 4_096, true, false),
-        },
-        ModelInfo {
-            id: "claude-3-7-sonnet".into(),
-            native_id: "claude-3-7-sonnet-20250219".into(),
-            display_name: "Claude 3.7 Sonnet".into(),
-            capabilities: caps(200_000, 8_192, true, true),
+            id: "claude-haiku-4-5".into(),
+            native_id: "claude-haiku-4-5".into(),
+            display_name: "Claude Haiku 4.5".into(),
+            capabilities: caps(200_000, 32_000, true, true),
         },
     ]
 }

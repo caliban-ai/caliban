@@ -166,13 +166,15 @@ mod tests {
     }
 
     #[test]
-    fn vendored_vertex_models_use_at_format() {
+    fn vendored_vertex_models_pass_through_dateless_ids() {
         let models = vendored_vertex_models();
+        // Claude 4.x native IDs are dateless; the Vertex wire-id helper
+        // passes them through unchanged.
         let sonnet = models
             .iter()
-            .find(|m| m.id == "claude-3-5-sonnet")
-            .expect("3-5-sonnet present");
-        assert_eq!(sonnet.native_id, "claude-3-5-sonnet@20241022");
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .expect("sonnet-4-6 present");
+        assert_eq!(sonnet.native_id, "claude-sonnet-4-6");
     }
 
     #[test]
@@ -180,12 +182,12 @@ mod tests {
         let body = serde_json::json!({
             "models": [
                 {
-                    "name": "publishers/anthropic/models/claude-3-5-sonnet@20241022",
-                    "display_name": "Claude 3.5 Sonnet"
+                    "name": "publishers/anthropic/models/claude-sonnet-4-6@20260101",
+                    "display_name": "Claude Sonnet 4.6"
                 },
                 {
-                    "name": "publishers/anthropic/models/claude-3-haiku@20240307",
-                    "display_name": "Claude 3 Haiku"
+                    "name": "publishers/anthropic/models/claude-haiku-4-5@20251001",
+                    "display_name": "Claude Haiku 4.5"
                 }
             ]
         });
@@ -194,10 +196,10 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         let sonnet = parsed
             .iter()
-            .find(|m| m.id == "claude-3-5-sonnet")
-            .expect("3-5-sonnet present");
-        assert_eq!(sonnet.native_id, "claude-3-5-sonnet@20241022");
-        assert_eq!(sonnet.display_name, "Claude 3.5 Sonnet");
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .expect("sonnet-4-6 present");
+        assert_eq!(sonnet.native_id, "claude-sonnet-4-6@20260101");
+        assert_eq!(sonnet.display_name, "Claude Sonnet 4.6");
     }
 
     #[test]

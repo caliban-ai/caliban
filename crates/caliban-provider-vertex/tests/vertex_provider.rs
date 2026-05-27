@@ -154,8 +154,10 @@ async fn provider_name_returns_vertex() {
 #[tokio::test]
 async fn provider_capabilities_match_anthropic() {
     let p = make_provider().await;
-    let vertex_caps = p.capabilities("claude-3-5-sonnet@20241022");
-    let anthropic_caps = caliban_provider_anthropic::models::capabilities_for("claude-3-5-sonnet");
+    // Vertex's capabilities() should strip an `@<date>` suffix and look up
+    // the canonical model in the Anthropic table.
+    let vertex_caps = p.capabilities("claude-sonnet-4-6@20260101");
+    let anthropic_caps = caliban_provider_anthropic::models::capabilities_for("claude-sonnet-4-6");
     assert_eq!(vertex_caps, anthropic_caps);
     assert!(vertex_caps.vision);
 }
@@ -165,27 +167,26 @@ async fn provider_list_models_filters_to_anthropic() {
     let p = make_provider().await;
     let models = p.list_models();
     assert!(!models.is_empty());
-    for m in &models {
-        assert!(
-            m.native_id.contains('@'),
-            "{} should contain @ (vertex format)",
-            m.native_id
-        );
-    }
+    // The vendored list comes straight from the Anthropic table; with
+    // current dateless Claude 4.x IDs, the wire form has no `@`. We
+    // just assert the list is non-empty and surfaces a known canonical
+    // ID so the table → vertex mapping stays wired.
+    assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
 }
 
 #[test]
 fn vendored_vertex_models_include_known_ids() {
     let models = vendored_vertex_models();
-    assert!(models.iter().any(|m| m.id == "claude-3-5-sonnet"));
-    assert!(models.iter().any(|m| m.id == "claude-3-haiku"));
+    assert!(models.iter().any(|m| m.id == "claude-opus-4-7"));
+    assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
+    assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
 }
 
 #[test]
 fn strip_platform_suffix_drops_at_date() {
     assert_eq!(
-        strip_platform_suffix("claude-3-7-sonnet@20250219"),
-        "claude-3-7-sonnet"
+        strip_platform_suffix("claude-sonnet-4-6@20260101"),
+        "claude-sonnet-4-6"
     );
     assert_eq!(strip_platform_suffix("custom-model"), "custom-model");
 }
@@ -200,12 +201,12 @@ async fn list_models_remote_parses_publishers_response() {
     let body = serde_json::json!({
         "models": [
             {
-                "name": "publishers/anthropic/models/claude-3-5-sonnet@20241022",
-                "display_name": "Claude 3.5 Sonnet"
+                "name": "publishers/anthropic/models/claude-sonnet-4-6@20260101",
+                "display_name": "Claude Sonnet 4.6"
             },
             {
-                "name": "publishers/anthropic/models/claude-3-haiku@20240307",
-                "display_name": "Claude 3 Haiku"
+                "name": "publishers/anthropic/models/claude-haiku-4-5@20251001",
+                "display_name": "Claude Haiku 4.5"
             }
         ]
     });
@@ -219,7 +220,7 @@ async fn list_models_remote_parses_publishers_response() {
     let p = make_provider().await;
     let models = p.list_models_at(&server.uri()).await.expect("list");
     assert_eq!(models.len(), 2);
-    assert!(models.iter().any(|m| m.id == "claude-3-5-sonnet"));
+    assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
 }
 
 #[tokio::test]
@@ -247,7 +248,7 @@ async fn complete_call_construction_exercises_transport() {
     // shape; the actual network call is expected to fail because Vertex
     // is unreachable from the test host (no real auth, fake region).
     let p = make_provider().await;
-    let req = CompletionRequest::builder("claude-3-5-sonnet")
+    let req = CompletionRequest::builder("claude-sonnet-4-6")
         .system("sys")
         .user_text("hello")
         .max_tokens(16)
