@@ -33,6 +33,10 @@ pub struct NativeMessage {
     pub role: String,
     /// The text content of the message.
     pub content: String,
+    /// Reasoning trace emitted by thinking-capable models (e.g. qwen3.5).
+    /// Streamed chunk-by-chunk; surfaced into the IR as a `Thinking` block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     /// Base64-encoded images (no MIME prefix — Ollama infers type).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
@@ -44,6 +48,12 @@ pub struct NativeMessage {
 /// A tool call made by the assistant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeToolCall {
+    /// Upstream-assigned call ID (newer Ollama builds emit one per call,
+    /// e.g. `"call_xoh1i8k9"`). Preserved verbatim so that tool-result
+    /// correlation stays consistent across the agent loop. Older builds
+    /// omit the field; the adapter then synthesizes `tool_{idx}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// The function that was called.
     pub function: NativeFunctionCall,
 }

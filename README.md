@@ -185,7 +185,7 @@ Ctrl-D at an empty prompt exits cleanly.
 | Anthropic Claude | ✅ default | ✅ `bedrock` feature | ✅ `vertex` feature | — |
 | OpenAI | ✅ default | — | — | ✅ `azure` feature |
 | Gemini | ✅ default (AI Studio) | — | ✅ `vertex` feature | — |
-| Ollama (OpenAI-compat, local) | ✅ default | — | — | — |
+| Ollama (native `/api/chat`, local) | ✅ default | — | — | — |
 
 Cargo feature flags gate cloud transports per-crate. To enable Bedrock-Claude + Vertex-Gemini + Azure-OpenAI:
 

@@ -2,7 +2,8 @@
 
 use caliban_provider::{
     ContentBlock, Error, ImageSource as IrImageSource, Message, Result, Role, StopReason,
-    TextBlock as IrTextBlock, Tool as IrTool, ToolUseBlock as IrToolUseBlock, Usage as IrUsage,
+    TextBlock as IrTextBlock, ThinkingBlock as IrThinkingBlock, Tool as IrTool,
+    ToolUseBlock as IrToolUseBlock, Usage as IrUsage,
 };
 
 use crate::schema::request::{
@@ -50,6 +51,7 @@ pub fn ir_to_native_request(
         native_messages.push(NativeMessage {
             role: "system".into(),
             content: system_texts.join("\n\n"),
+            thinking: None,
             images: Vec::new(),
             tool_calls: Vec::new(),
         });
@@ -76,6 +78,7 @@ pub fn ir_to_native_request(
                 native_messages.push(NativeMessage {
                     role: "system".into(),
                     content: text,
+                    thinking: None,
                     images: Vec::new(),
                     tool_calls: Vec::new(),
                 });
@@ -125,6 +128,7 @@ pub fn ir_to_native_request(
                             tool_result_msgs.push(NativeMessage {
                                 role: "tool".into(),
                                 content: content_text,
+                                thinking: None,
                                 images: Vec::new(),
                                 tool_calls: Vec::new(),
                             });
@@ -139,6 +143,7 @@ pub fn ir_to_native_request(
                     native_messages.push(NativeMessage {
                         role: "user".into(),
                         content: text_parts.join(""),
+                        thinking: None,
                         images,
                         tool_calls: Vec::new(),
                     });
@@ -149,6 +154,7 @@ pub fn ir_to_native_request(
             }
             Role::Assistant => {
                 let mut text_parts: Vec<String> = Vec::new();
+                let mut thinking_parts: Vec<String> = Vec::new();
                 let mut tool_calls: Vec<NativeToolCall> = Vec::new();
 
                 for cb in msg.content {
@@ -156,25 +162,41 @@ pub fn ir_to_native_request(
                         ContentBlock::Text(tb) => {
                             text_parts.push(tb.text);
                         }
+                        ContentBlock::Thinking(t) => {
+                            thinking_parts.push(t.thinking);
+                        }
                         ContentBlock::ToolUse(tu) => {
                             // Ollama arguments is a JSON Value object, NOT a string.
+                            // Preserve the IR call id so multi-turn correlation
+                            // round-trips faithfully when the model produced one.
+                            let id = if tu.id.starts_with("tool_") {
+                                None
+                            } else {
+                                Some(tu.id)
+                            };
                             tool_calls.push(NativeToolCall {
+                                id,
                                 function: NativeFunctionCall {
                                     name: tu.name,
                                     arguments: tu.input,
                                 },
                             });
                         }
-                        // Thinking, Image, and unexpected ToolResult in assistant messages are dropped.
-                        ContentBlock::Thinking(_)
-                        | ContentBlock::Image(_)
-                        | ContentBlock::ToolResult(_) => {}
+                        // Image and unexpected ToolResult in assistant messages are dropped.
+                        ContentBlock::Image(_) | ContentBlock::ToolResult(_) => {}
                     }
                 }
+
+                let thinking = if thinking_parts.is_empty() {
+                    None
+                } else {
+                    Some(thinking_parts.join(""))
+                };
 
                 native_messages.push(NativeMessage {
                     role: "assistant".into(),
                     content: text_parts.join(""),
+                    thinking,
                     images: Vec::new(),
                     tool_calls,
                 });
@@ -221,8 +243,19 @@ pub fn ir_to_native_request(
 /// This function currently does not fail, but returns `Result` for API consistency.
 pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::CompletionResponse> {
     let msg = r.message;
+    let has_tool_calls = !msg.tool_calls.is_empty();
 
     let mut content_blocks: Vec<caliban_provider::ContentBlock> = Vec::new();
+
+    // Map reasoning content (qwen3.5 and similar) into a Thinking block.
+    // Emit it before the text block so the IR reflects the order the model
+    // produced it (reasoning first, then the final answer).
+    if let Some(thinking) = msg.thinking.filter(|t| !t.is_empty()) {
+        content_blocks.push(caliban_provider::ContentBlock::Thinking(IrThinkingBlock {
+            thinking,
+            signature: None,
+        }));
+    }
 
     // Map text content.
     if !msg.content.is_empty() {
@@ -232,16 +265,24 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
         }));
     }
 
-    // Map tool calls.
+    // Map tool calls, preserving the upstream id when present.
     for (idx, tc) in msg.tool_calls.into_iter().enumerate() {
+        let id = tc.id.unwrap_or_else(|| format!("tool_{idx}"));
         content_blocks.push(caliban_provider::ContentBlock::ToolUse(IrToolUseBlock {
-            id: format!("tool_{idx}"),
+            id,
             name: tc.function.name,
             input: tc.function.arguments,
         }));
     }
 
-    let stop_reason = map_done_reason(r.done_reason.as_deref());
+    // Ollama reports `done_reason: "stop"` even on tool-calling turns; the
+    // presence of tool_calls is the authoritative signal that the agent
+    // loop must continue.
+    let stop_reason = if has_tool_calls {
+        StopReason::ToolUse
+    } else {
+        map_done_reason(r.done_reason.as_deref())
+    };
 
     Ok(caliban_provider::CompletionResponse {
         id: String::new(),
@@ -262,6 +303,12 @@ pub fn native_response_to_ir(r: NativeResponse) -> Result<caliban_provider::Comp
 }
 
 /// Map Ollama's `done_reason` string to the IR `StopReason`.
+///
+/// Note: `done_reason: "stop"` is **not** a reliable end-of-turn signal when
+/// the chunk also carries `tool_calls` — Ollama uses `"stop"` in both cases.
+/// Callers that have access to the full message must check for `tool_calls`
+/// and prefer `StopReason::ToolUse` in that case; this helper only maps the
+/// raw string.
 pub(crate) fn map_done_reason(reason: Option<&str>) -> StopReason {
     match reason {
         Some("length") => StopReason::MaxTokens,

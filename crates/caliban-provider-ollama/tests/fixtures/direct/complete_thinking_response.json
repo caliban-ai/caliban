@@ -1,0 +1,13 @@
+{
+  "model": "qwen3.5:9b",
+  "created_at": "2026-05-27T17:52:44.086432108Z",
+  "message": {
+    "role": "assistant",
+    "content": "caliban is a Rust agent harness.",
+    "thinking": "The project is a Rust agent harness."
+  },
+  "done": true,
+  "done_reason": "stop",
+  "prompt_eval_count": 383,
+  "eval_count": 45
+}

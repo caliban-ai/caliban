@@ -24,10 +24,27 @@ use crate::schema::response::NativeResponse;
 struct StreamState {
     /// Whether we have emitted `MessageStart` yet.
     started: bool,
-    /// Whether the text content block (index 0) is currently open.
-    text_block_open: bool,
-    /// The number of tool-call content blocks opened.
-    tool_blocks_opened: u32,
+    /// Whether a text content block is currently open, and its index.
+    text_block: Option<u32>,
+    /// Whether a thinking content block is currently open, and its index.
+    thinking_block: Option<u32>,
+    /// Number of tool-call content blocks emitted so far (for synthesizing
+    /// fallback `tool_{n}` ids when the wire omits one).
+    tool_calls_emitted: u32,
+    /// Whether at least one `tool_call` was emitted across the whole message;
+    /// used to override `done_reason: "stop"` → `ToolUse` so the agent loop
+    /// continues.
+    saw_tool_calls: bool,
+    /// Monotonically increasing block index allocator.
+    next_block_index: u32,
+}
+
+impl StreamState {
+    fn alloc_block_index(&mut self) -> u32 {
+        let i = self.next_block_index;
+        self.next_block_index += 1;
+        i
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,37 +98,86 @@ pub(crate) fn map_ndjson_to_events(
                     };
                 }
 
-                // 2. Text content delta.
-                if !resp.message.content.is_empty() {
-                    if !state.text_block_open {
-                        state.text_block_open = true;
+                // 2. Reasoning (thinking) delta — emitted before text so the
+                //    IR reflects the model's natural order. If a text block is
+                //    somehow already open (text appearing before thinking in a
+                //    chunk), close it first; reasoning and content may interleave.
+                if let Some(thinking) = resp
+                    .message
+                    .thinking
+                    .as_ref()
+                    .filter(|t| !t.is_empty())
+                {
+                    if let Some(idx) = state.text_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
+                    }
+                    let idx = if let Some(idx) = state.thinking_block {
+                        idx
+                    } else {
+                        let idx = state.alloc_block_index();
+                        state.thinking_block = Some(idx);
                         yield StreamEvent::ContentBlockStart {
-                            index: 0,
+                            index: idx,
+                            content_type: StreamingContentType::Thinking,
+                        };
+                        idx
+                    };
+                    yield StreamEvent::Delta {
+                        index: idx,
+                        delta: StreamingDelta::Thinking(thinking.clone()),
+                    };
+                }
+
+                // 3. Text content delta.
+                if !resp.message.content.is_empty() {
+                    if let Some(idx) = state.thinking_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
+                    }
+                    let idx = if let Some(idx) = state.text_block {
+                        idx
+                    } else {
+                        let idx = state.alloc_block_index();
+                        state.text_block = Some(idx);
+                        yield StreamEvent::ContentBlockStart {
+                            index: idx,
                             content_type: StreamingContentType::Text,
                         };
-                    }
+                        idx
+                    };
                     yield StreamEvent::Delta {
-                        index: 0,
+                        index: idx,
                         delta: StreamingDelta::Text(resp.message.content.clone()),
                     };
                 }
 
-                // 3. Tool calls — emit each as a complete block in one shot.
-                // Ollama typically delivers all tool_calls on the final done:true chunk.
+                // 4. Tool calls — emit each as a complete block in one shot.
+                //    Ollama typically delivers all tool_calls on the final done:true chunk.
                 for tc in &resp.message.tool_calls {
-                    // Close the text block before opening tool blocks.
-                    if state.text_block_open {
-                        yield StreamEvent::ContentBlockStop { index: 0 };
-                        state.text_block_open = false;
+                    // Close any open content blocks before opening a tool block.
+                    if let Some(idx) = state.thinking_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
+                    }
+                    if let Some(idx) = state.text_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
                     }
 
-                    let block_index = 1 + state.tool_blocks_opened;
-                    state.tool_blocks_opened += 1;
+                    let block_index = state.alloc_block_index();
+                    let call_idx = state.tool_calls_emitted;
+                    state.tool_calls_emitted += 1;
+                    state.saw_tool_calls = true;
+
+                    // Preserve the wire id if Ollama emitted one (newer builds
+                    // do, e.g. "call_xoh1i8k9"); fall back to a synthesized
+                    // `tool_{n}` for older builds that omit it.
+                    let id = tc
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("tool_{call_idx}"));
 
                     yield StreamEvent::ContentBlockStart {
                         index: block_index,
                         content_type: StreamingContentType::ToolUse {
-                            id: format!("tool_{}", block_index - 1),
+                            id,
                             name: tc.function.name.clone(),
                         },
                     };
@@ -130,13 +196,23 @@ pub(crate) fn map_ndjson_to_events(
                     yield StreamEvent::ContentBlockStop { index: block_index };
                 }
 
-                // 4. Final chunk: close open blocks and emit MessageDelta + MessageStop.
+                // 5. Final chunk: close open blocks and emit MessageDelta + MessageStop.
                 if resp.done {
-                    if state.text_block_open {
-                        yield StreamEvent::ContentBlockStop { index: 0 };
+                    if let Some(idx) = state.thinking_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
+                    }
+                    if let Some(idx) = state.text_block.take() {
+                        yield StreamEvent::ContentBlockStop { index: idx };
                     }
 
-                    let stop_reason: StopReason = map_done_reason(resp.done_reason.as_deref());
+                    // Ollama reports `done_reason: "stop"` even on tool-calling
+                    // turns; the presence of any tool_call across the message
+                    // is the authoritative signal to keep the agent loop alive.
+                    let stop_reason: StopReason = if state.saw_tool_calls {
+                        StopReason::ToolUse
+                    } else {
+                        map_done_reason(resp.done_reason.as_deref())
+                    };
 
                     yield StreamEvent::MessageDelta {
                         stop_reason: Some(stop_reason),
@@ -155,11 +231,19 @@ pub(crate) fn map_ndjson_to_events(
         }
 
         // If the stream ended without a done:true line, close any open blocks.
-        if state.text_block_open {
-            yield StreamEvent::ContentBlockStop { index: 0 };
+        if let Some(idx) = state.thinking_block.take() {
+            yield StreamEvent::ContentBlockStop { index: idx };
         }
+        if let Some(idx) = state.text_block.take() {
+            yield StreamEvent::ContentBlockStop { index: idx };
+        }
+        let stop_reason = if state.saw_tool_calls {
+            StopReason::ToolUse
+        } else {
+            StopReason::EndTurn
+        };
         yield StreamEvent::MessageDelta {
-            stop_reason: Some(StopReason::EndTurn),
+            stop_reason: Some(stop_reason),
             usage_delta: None,
         };
         yield StreamEvent::MessageStop;
