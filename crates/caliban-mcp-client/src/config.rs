@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::McpError;
@@ -75,7 +75,7 @@ impl OauthMode {
 /// compared against the *unprefixed* tool name. The mcp client transforms
 /// these into full `mcp__<server>__<tool>` patterns when handing them to the
 /// global permissions engine.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ServerPermissions {
     /// Patterns to allow without prompting.
     #[serde(default)]
@@ -184,11 +184,36 @@ pub fn is_valid_server_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Resolve the standard discovery paths for `mcp.toml`. Returns
-/// `(user_path, project_path)`; either may not exist.
+/// Resolve the standard discovery paths for `mcp.toml`.
+///
+/// Returns `(user_candidates, project_path)`. The `user_candidates` vec is
+/// an ordered, deduplicated list of user-scope candidates:
+///
+/// 1. `$XDG_CONFIG_HOME/caliban/mcp.toml` if `XDG_CONFIG_HOME` is set,
+///    else `$HOME/.config/caliban/mcp.toml` (the "XDG path").
+/// 2. `dirs::config_dir().join("caliban/mcp.toml")` (the "platform-native
+///    path"). On Linux this equals the XDG path and is deduped; on macOS
+///    it resolves to `~/Library/Application Support/caliban/mcp.toml` and
+///    on Windows to `%APPDATA%\caliban\mcp.toml`.
+///
+/// `load_config` consults these in order with **first-found wins** semantics
+/// at the user tier — XDG, when present, takes precedence over the
+/// platform-native path; we never merge both. This avoids surprising silent
+/// merges when stale data exists in both locations.
 #[must_use]
-pub fn discovery_paths(workspace_root: &Path) -> (Option<PathBuf>, PathBuf) {
-    let user = dirs::config_dir().map(|d| d.join("caliban").join("mcp.toml"));
+pub fn discovery_paths(workspace_root: &Path) -> (Vec<PathBuf>, PathBuf) {
+    let mut user: Vec<PathBuf> = Vec::new();
+    // 1. XDG path. `caliban_common::xdg_config_home` already implements the
+    //    "$XDG_CONFIG_HOME ? : $HOME/.config" rule.
+    let xdg = caliban_common::paths::xdg_config_home("caliban").join("mcp.toml");
+    user.push(xdg);
+    // 2. Platform-native path via `dirs::config_dir`. On Linux this is the
+    //    same as the XDG path — dedupe.
+    if let Some(native) = dirs::config_dir().map(|d| d.join("caliban").join("mcp.toml"))
+        && !user.iter().any(|p| p == &native)
+    {
+        user.push(native);
+    }
     let project = workspace_root.join(".caliban").join("mcp.toml");
     (user, project)
 }
@@ -196,6 +221,8 @@ pub fn discovery_paths(workspace_root: &Path) -> (Option<PathBuf>, PathBuf) {
 /// Load and merge MCP config from the user file and the project file.
 ///
 /// Either file may be missing — both missing is a no-op (`Ok(empty config)`).
+/// At the user tier, the first existing path in [`discovery_paths`]'s
+/// `user_candidates` list wins (XDG first, platform-native as fallback).
 /// Project entries replace user entries with the same name wholesale.
 ///
 /// `${VAR}` / `${VAR:-default}` / `${CLAUDE_PROJECT_DIR}` expansion is applied
@@ -211,10 +238,19 @@ pub fn discovery_paths(workspace_root: &Path) -> (Option<PathBuf>, PathBuf) {
     note = "load via caliban-settings; legacy loaders remove in v0.2"
 )]
 pub fn load_config(workspace_root: &Path) -> Result<McpConfig, McpError> {
-    let (user, project) = discovery_paths(workspace_root);
+    let (user_candidates, project) = discovery_paths(workspace_root);
     let mut merged: BTreeMap<String, ServerConfig> = BTreeMap::new();
-    if let Some(p) = user.as_deref() {
-        merge_from(&mut merged, p, workspace_root)?;
+    // First existing user-scope path wins.
+    for candidate in &user_candidates {
+        if candidate.exists() {
+            merge_from(&mut merged, candidate, workspace_root)?;
+            tracing::debug!(
+                target: caliban_common::tracing_targets::TARGET_MCP,
+                path = %candidate.display(),
+                "loaded user-scope mcp.toml",
+            );
+            break;
+        }
     }
     merge_from(&mut merged, &project, workspace_root)?;
     Ok(McpConfig { servers: merged })
@@ -879,5 +915,144 @@ ask   = ["create_*"]
         let raw = parse_one(body);
         let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
         assert!(cfg.disabled);
+    }
+
+    // -----------------------------------------------------------------
+    // discovery_paths — XDG-first / platform-native fallback / dedupe
+    // -----------------------------------------------------------------
+    //
+    // These tests mutate `XDG_CONFIG_HOME`, so they serialize behind a
+    // process-wide mutex. `std::env::set_var` was marked `unsafe` in
+    // Rust 2024 (racy across threads); we follow the same RAII guard
+    // pattern as `caliban_common::paths::tests`.
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(unsafe_code)]
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            // SAFETY: serialized via ENV_LOCK in EnvGuard below.
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            // SAFETY: serialized via ENV_LOCK in EnvGuard below.
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    struct EnvGuard {
+        key: String,
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &str, val: Option<&str>) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev = std::env::var(key).ok();
+            set_env(key, val);
+            Self {
+                key: key.into(),
+                prev,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            set_env(&self.key, self.prev.as_deref());
+        }
+    }
+
+    #[test]
+    fn discovery_paths_returns_at_least_one_user_candidate() {
+        // We don't care about the specific path content here — just that
+        // `discovery_paths` is contract-stable: always >= 1 user candidate
+        // and always returns the project path with the expected suffix.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (user, project) = discovery_paths(tmp.path());
+        assert!(!user.is_empty(), "expected at least one user candidate");
+        assert!(project.ends_with(".caliban/mcp.toml"));
+    }
+
+    #[test]
+    fn discovery_paths_xdg_override_honored() {
+        // When XDG_CONFIG_HOME is set, the first user candidate must use it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let xdg_root = tmp.path().join("xdg-config");
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", xdg_root.to_str());
+        let (user, _project) = discovery_paths(tmp.path());
+        assert!(
+            user[0].starts_with(&xdg_root),
+            "first user candidate should be under XDG_CONFIG_HOME, got {:?}",
+            user[0]
+        );
+        assert!(user[0].ends_with("caliban/mcp.toml"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_paths_linux_dedupes_when_xdg_equals_native() {
+        // On Linux with XDG_CONFIG_HOME unset, dirs::config_dir() and the
+        // XDG fallback both resolve to $HOME/.config/caliban — dedupe.
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
+        let (user, _project) = discovery_paths(std::path::Path::new("/tmp/ws"));
+        assert_eq!(
+            user.len(),
+            1,
+            "expected dedupe on Linux when XDG defaults to $HOME/.config; got {user:?}",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn discovery_paths_macos_returns_xdg_and_native_when_distinct() {
+        // On macOS, $HOME/.config/caliban/mcp.toml and
+        // ~/Library/Application Support/caliban/mcp.toml are distinct.
+        // Without an XDG override, the XDG fallback is $HOME/.config and
+        // the platform-native path is Application Support — expect both.
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
+        let (user, _project) = discovery_paths(std::path::Path::new("/tmp/ws"));
+        assert_eq!(
+            user.len(),
+            2,
+            "expected XDG + Application Support on macOS; got {user:?}",
+        );
+        // Order is XDG first, platform-native second.
+        assert!(
+            user[0].to_string_lossy().contains(".config/caliban"),
+            "first should be XDG path, got {:?}",
+            user[0],
+        );
+        assert!(
+            user[1]
+                .to_string_lossy()
+                .contains("Application Support/caliban"),
+            "second should be platform-native, got {:?}",
+            user[1],
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn load_config_prefers_xdg_when_both_user_paths_exist() {
+        // First-found wins at the user tier. We can't easily construct a
+        // realistic "two user paths" world via dirs::config_dir, but we
+        // can verify the loop logic by setting XDG_CONFIG_HOME to a
+        // populated tempdir and observing the result is taken from it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let xdg_root = tmp.path().join("xdg");
+        let xdg_mcp = xdg_root.join("caliban").join("mcp.toml");
+        write(&xdg_mcp, "[server.fromxdg]\ncommand = \"x\"\n");
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", xdg_root.to_str());
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let cfg = load_config(&ws).unwrap();
+        assert!(
+            cfg.servers.contains_key("fromxdg"),
+            "expected XDG entry; got {:?}",
+            cfg.servers.keys().collect::<Vec<_>>(),
+        );
     }
 }

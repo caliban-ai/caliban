@@ -75,17 +75,45 @@ impl ModelSelector {
 /// The crate wraps rather than re-exports the foreign type so we don't
 /// take a hard dependency on `mcp-client`'s serde shape changing (and so
 /// the MCP v2 sibling work can evolve the foreign struct independently).
+///
+/// **Field naming**: the transport selector field is named `r#type` to
+/// match `~/.claude.json` / Claude Desktop's `mcpServers.X.type`. The
+/// existing legacy `mcp.toml` schema spells it `transport`; both are
+/// accepted on deserialization via `#[serde(alias = "transport")]`.
+/// Serialization always writes `type`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct McpServerSetting {
-    /// Executable command.
+    // ---- transport selector ----
+    /// Transport selector: `"stdio"` (default), `"http"`, or `"sse"`.
+    /// Accepts both `type` and `transport` keys on input.
+    #[serde(
+        rename = "type",
+        alias = "transport",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub r#type: Option<String>,
+    // ---- stdio ----
+    /// Executable command (stdio only).
     pub command: String,
-    /// Argv after the command.
+    /// Argv after the command (stdio only).
     pub args: Vec<String>,
-    /// Environment variables.
+    /// Environment variables (stdio only).
     pub env: BTreeMap<String, String>,
-    /// Working directory override.
+    /// Working directory override (stdio only).
     pub cwd: Option<PathBuf>,
+    // ---- http / sse ----
+    /// Absolute http/https URL for http/sse transports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Static request headers (http/sse only).
+    pub headers: BTreeMap<String, String>,
+    /// OAuth mode: `"off"` (default), `"auto"`, `"manual"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<String>,
+    // ---- common ----
+    /// Per-server permission scoping (composes with global rules).
+    pub permissions: caliban_mcp_client::ServerPermissions,
     /// Mark this server as disabled.
     pub disabled: bool,
 }
@@ -222,24 +250,47 @@ impl Settings {
     /// We construct the type via its public fields so the conversion
     /// continues to compile even when the foreign crate evolves
     /// independently (per the MCP v2 sibling spec).
+    ///
+    /// String fields (`type`, `oauth`) are matched against the canonical
+    /// values defined in `caliban_mcp_client::config`. Unrecognized values
+    /// fall back to the safest default (`stdio` / `off`) with a `warn!`
+    /// log to surface the misconfiguration during a restart.
     #[must_use]
     pub fn mcp_config(&self) -> caliban_mcp_client::McpConfig {
         let mut servers = std::collections::BTreeMap::new();
         for (name, s) in &self.mcp_servers {
+            let transport = parse_transport(name, s.r#type.as_deref());
+            let oauth = parse_oauth(name, s.oauth.as_deref());
+            // Parse URL string into the typed `url::Url`. Bad input
+            // surfaces as `None` here; downstream the manager will
+            // refuse to start a remote transport without a valid url.
+            let url = s.url.as_deref().and_then(|raw| match url::Url::parse(raw) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    tracing::warn!(
+                        target: caliban_common::tracing_targets::TARGET_MCP,
+                        server = name.as_str(),
+                        url = raw,
+                        error = %e,
+                        "invalid MCP server url; ignoring",
+                    );
+                    None
+                }
+            });
             servers.insert(
                 name.clone(),
                 caliban_mcp_client::ServerConfig {
-                    transport: caliban_mcp_client::TransportKind::Stdio,
+                    transport,
                     command: s.command.clone(),
                     args: s.args.clone(),
                     env: s.env.clone(),
                     cwd: s.cwd.clone(),
-                    url: None,
-                    headers: std::collections::BTreeMap::new(),
-                    oauth: caliban_mcp_client::OauthMode::Off,
+                    url,
+                    headers: s.headers.clone(),
+                    oauth,
                     manual_oauth: caliban_mcp_client::ManualOauthConfig::default(),
                     disabled: s.disabled,
-                    permissions: caliban_mcp_client::ServerPermissions::default(),
+                    permissions: s.permissions.clone(),
                 },
             );
         }
@@ -340,6 +391,55 @@ impl Settings {
             .and_then(|v| v.get("handler_count"))
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for mcp_config()
+// ---------------------------------------------------------------------------
+
+/// Map the `type`/`transport` string to `TransportKind`. Unknown values
+/// warn and fall back to stdio (the safest default — it requires a
+/// `command`, so a downstream "missing command" error will surface).
+fn parse_transport(server: &str, raw: Option<&str>) -> caliban_mcp_client::TransportKind {
+    match raw {
+        None => caliban_mcp_client::TransportKind::Stdio,
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "stdio" => caliban_mcp_client::TransportKind::Stdio,
+            "http" => caliban_mcp_client::TransportKind::Http,
+            "sse" => caliban_mcp_client::TransportKind::Sse,
+            other => {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_MCP,
+                    server = server,
+                    value = other,
+                    "unknown MCP server transport; falling back to stdio",
+                );
+                caliban_mcp_client::TransportKind::Stdio
+            }
+        },
+    }
+}
+
+/// Map the `oauth` string to `OauthMode`. Unknown values warn and fall
+/// back to `off`.
+fn parse_oauth(server: &str, raw: Option<&str>) -> caliban_mcp_client::OauthMode {
+    match raw {
+        None => caliban_mcp_client::OauthMode::Off,
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "off" => caliban_mcp_client::OauthMode::Off,
+            "auto" => caliban_mcp_client::OauthMode::Auto,
+            "manual" => caliban_mcp_client::OauthMode::Manual,
+            other => {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_MCP,
+                    server = server,
+                    value = other,
+                    "unknown MCP oauth mode; falling back to off",
+                );
+                caliban_mcp_client::OauthMode::Off
+            }
+        },
     }
 }
 

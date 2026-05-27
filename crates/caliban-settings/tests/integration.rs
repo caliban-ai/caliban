@@ -71,6 +71,41 @@ fn cli_overlay_layers_above_local() {
 }
 
 #[test]
+fn http_mcp_loaded_end_to_end_via_load_settings_and_mcp_config() {
+    // Drop a legacy mcp.toml with an HTTP server into a fake project
+    // workspace, run `load_settings` (no settings.json), and confirm the
+    // resulting `Settings::mcp_config()` exposes the HTTP server with
+    // the right transport + url. This is the end-to-end proof that the
+    // compat shim is wired into the production loader path.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = tmp.path().to_path_buf();
+    write(
+        &ws.join(".caliban/mcp.toml"),
+        r#"
+[server.silverbullet]
+transport = "http"
+url = "https://mcp.silverbullet.hexadecimate.net/mcp"
+headers = { X-Workspace = "demo" }
+"#,
+    );
+    let opts = LoadOptions {
+        workspace_root: ws,
+        paths: fake_paths(tmp.path()),
+        ..LoadOptions::default()
+    };
+    let outcome = load_settings(&opts).unwrap();
+    assert!(outcome.settings.mcp_servers.contains_key("silverbullet"));
+    let cfg = outcome.settings.mcp_config();
+    let server = cfg.servers.get("silverbullet").unwrap();
+    assert_eq!(server.transport, caliban_mcp_client::TransportKind::Http);
+    assert_eq!(
+        server.url.as_ref().map(ToString::to_string),
+        Some("https://mcp.silverbullet.hexadecimate.net/mcp".to_string()),
+    );
+    assert_eq!(server.headers.get("X-Workspace"), Some(&"demo".to_string()),);
+}
+
+#[test]
 fn backward_compat_loads_mcp_when_unified_absent() {
     let tmp = tempfile::TempDir::new().unwrap();
     let ws = tmp.path();
@@ -189,6 +224,7 @@ fn settings_round_trip_mcp_server_setting() {
             env: std::collections::BTreeMap::new(),
             cwd: Some(PathBuf::from("/tmp")),
             disabled: true,
+            ..Default::default()
         },
     );
     let s = Settings {

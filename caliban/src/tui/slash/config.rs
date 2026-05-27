@@ -54,7 +54,7 @@ impl SlashCommand for HooksCommand {
         let cfg = caliban_agent_core::HooksConfig::load(&workspace_root).unwrap_or_default();
         if cfg.total_handler_count() == 0 {
             ctx.app.transcript.push(TranscriptLine::Info(
-                "no hooks configured (drop a hooks.toml under .caliban/ or ~/.config/caliban/)"
+                "no hooks configured (drop a hooks.toml under .caliban/ or your platform's user config dir for caliban)"
                     .into(),
             ));
         } else {

@@ -476,22 +476,38 @@ pub(crate) fn mcp_lines(app: &App) -> Vec<Line<'static>> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut out = vec![Line::raw("")];
 
+    // Resolve the actual mcp.toml discovery paths so the help text and
+    // the empty-state hint stay in sync with the loader's real behavior
+    // (XDG-first with platform-native fallback; see
+    // `caliban_mcp_client::config::discovery_paths`).
+    let (user_candidates, project_path) = caliban_mcp_client::discovery_paths(app.cwd.as_path());
+    let project_path_display = project_path.display().to_string();
+
     if app.mcp_servers.is_empty() {
         out.push(Line::raw("   No MCP servers configured."));
         out.push(Line::raw(""));
-        out.push(Line::raw(
-            "   Configure servers in ~/.config/caliban/mcp.toml or",
-        ));
-        out.push(Line::raw(
-            "   <workspace>/.caliban/mcp.toml. Minimal stdio example:",
-        ));
+        out.push(Line::raw("   Configure servers at one of:"));
+        for p in &user_candidates {
+            out.push(Line::raw(format!("     {} (user)", p.display())));
+        }
+        out.push(Line::raw(format!("     {project_path_display} (project)")));
+        out.push(Line::raw(""));
+        out.push(Line::raw("   Minimal stdio example:"));
         out.push(Line::raw(""));
         out.push(Line::raw("     [server.silverbullet]"));
         out.push(Line::raw("     command = \"sb-mcp\""));
         out.push(Line::raw("     args = [\"--vault\", \"~/notes\"]"));
         out.push(Line::raw(""));
+        out.push(Line::raw("   HTTP example:"));
+        out.push(Line::raw(""));
+        out.push(Line::raw("     [server.silverbullet]"));
+        out.push(Line::raw("     type = \"http\""));
+        out.push(Line::raw(
+            "     url  = \"https://mcp.silverbullet.example/mcp\"",
+        ));
+        out.push(Line::raw(""));
         out.push(Line::styled(
-            "   See `caliban-mcp-client` and ADR 0023 (Phase A: stdio).",
+            "   See `caliban-mcp-client` and ADR 0023 (transports + OAuth).",
             dim,
         ));
         out.push(Line::raw(""));
@@ -537,6 +553,15 @@ pub(crate) fn mcp_lines(app: &App) -> Vec<Line<'static>> {
         out.push(line);
     }
 
+    out.push(Line::raw(""));
+    out.push(Line::styled("   Config paths:", dim));
+    for p in &user_candidates {
+        out.push(Line::styled(format!("     {} (user)", p.display()), dim));
+    }
+    out.push(Line::styled(
+        format!("     {project_path_display} (project)"),
+        dim,
+    ));
     out.push(Line::raw(""));
     out.push(Line::styled(
         "   Glyphs: \u{25CF} connected · \u{25D0} needs reauth · \u{25CB} disabled/failed",

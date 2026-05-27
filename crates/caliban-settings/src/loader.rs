@@ -270,7 +270,24 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
     }
 
     // Step 6: deserialize.
-    let settings: Settings = serde_json::from_value(accumulated).map_err(LoadError::Final)?;
+    let mut settings: Settings = serde_json::from_value(accumulated).map_err(LoadError::Final)?;
+
+    // Step 7: legacy `.toml` compat shims.
+    //
+    // The unified `settings.json` does not always contain mcp/perm/hook
+    // data; the per-feature TOML files (legacy paths under
+    // `<workspace>/.caliban/` or `$XDG_CONFIG_HOME/caliban/`) layer in only
+    // when the unified scopes left the corresponding slice empty. This
+    // matches the documented one-release deprecation window of the
+    // per-feature loaders (see `crate::compat`).
+    //
+    // Wired here so the production binary picks up legacy MCP / perms /
+    // hooks files automatically. Without this call, MCP servers
+    // configured in `mcp.toml` never reach `Settings::mcp_servers`.
+    crate::compat::maybe_load_legacy_mcp(&mut settings, &opts.workspace_root);
+    crate::compat::maybe_load_legacy_permissions(&mut settings, &opts.workspace_root);
+    crate::compat::maybe_load_legacy_hooks(&mut settings, &opts.workspace_root);
+
     Ok(LoadOutcome {
         settings,
         sources,
@@ -626,6 +643,44 @@ mod tests {
         let outcome = load_settings(&opts).unwrap();
         assert!(outcome.settings.model.is_none());
         assert!(outcome.sources.is_empty());
+    }
+
+    #[test]
+    fn load_settings_invokes_legacy_mcp_compat_shim() {
+        // No settings.json anywhere — only a legacy `.caliban/mcp.toml`
+        // with an HTTP server. After `load_settings`, the http server
+        // must be present in `Settings.mcp_servers` AND survive into
+        // `Settings::mcp_config()`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(
+            &ws.join(".caliban/mcp.toml"),
+            r#"
+[server.silverbullet]
+transport = "http"
+url = "https://example.com/mcp"
+"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let outcome = load_settings(&opts).unwrap();
+        let sb = outcome
+            .settings
+            .mcp_servers
+            .get("silverbullet")
+            .expect("compat shim should have folded legacy mcp.toml into settings.mcp_servers");
+        assert_eq!(sb.r#type.as_deref(), Some("http"));
+        assert_eq!(sb.url.as_deref(), Some("https://example.com/mcp"));
+        let cfg = outcome.settings.mcp_config();
+        let server = cfg.servers.get("silverbullet").unwrap();
+        assert_eq!(server.transport, caliban_mcp_client::TransportKind::Http);
+        assert_eq!(
+            server.url.as_ref().map(ToString::to_string),
+            Some("https://example.com/mcp".to_string()),
+        );
     }
 
     #[test]

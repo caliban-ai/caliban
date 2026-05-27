@@ -20,6 +20,7 @@ anyhow           = { workspace = true }
 tracing          = { workspace = true }
 arc-swap         = { workspace = true }
 dirs             = { workspace = true }
+url              = { workspace = true }
 jsonschema       = { workspace = true }
 notify           = { workspace = true }
 tokio            = { workspace = true }

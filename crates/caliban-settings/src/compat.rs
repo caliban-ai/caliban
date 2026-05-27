@@ -25,7 +25,10 @@ use crate::Settings;
 /// `settings.mcp_servers` **only when** the unified settings did not
 /// already define any MCP servers.
 ///
-/// Returns `true` when legacy data was layered in.
+/// Returns `true` when legacy data was layered in. The full transport
+/// surface (HTTP/SSE/OAuth/per-server permissions) is preserved on the
+/// round-trip — see `caliban_mcp_client::config::ServerConfig` for the
+/// canonical shape.
 pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> bool {
     if !settings.mcp_servers.is_empty() {
         return false;
@@ -33,13 +36,26 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
     match caliban_mcp_client::load_config(workspace_root) {
         Ok(cfg) if !cfg.servers.is_empty() => {
             for (name, sc) in cfg.servers {
+                let r#type = match sc.transport {
+                    caliban_mcp_client::TransportKind::Stdio => None,
+                    other => Some(other.as_str().to_string()),
+                };
+                let oauth = match sc.oauth {
+                    caliban_mcp_client::OauthMode::Off => None,
+                    other => Some(other.as_str().to_string()),
+                };
                 settings.mcp_servers.insert(
                     name,
                     crate::McpServerSetting {
+                        r#type,
                         command: sc.command,
                         args: sc.args,
                         env: sc.env,
                         cwd: sc.cwd,
+                        url: sc.url.map(|u| u.to_string()),
+                        headers: sc.headers,
+                        oauth,
+                        permissions: sc.permissions,
                         disabled: sc.disabled,
                     },
                 );
@@ -146,7 +162,12 @@ mod tests {
         .unwrap();
         let mut s = Settings::default();
         assert!(maybe_load_legacy_mcp(&mut s, ws));
-        assert_eq!(s.mcp_servers.len(), 1);
+        // The project mcp.toml entry must be present; a developer's real
+        // user-scope mcp.toml may also load (we don't sandbox $HOME here
+        // because the env-mutation infra adds noise for what is a
+        // pre-existing test fixture), so we assert presence rather than
+        // exact count.
+        assert!(s.mcp_servers.contains_key("linear"));
         assert_eq!(s.mcp_servers["linear"].command, "npx");
     }
 
@@ -171,6 +192,62 @@ mod tests {
         assert!(!maybe_load_legacy_mcp(&mut s, ws));
         assert_eq!(s.mcp_servers.len(), 1);
         assert!(s.mcp_servers.contains_key("existing"));
+    }
+
+    #[test]
+    fn legacy_mcp_http_round_trip_preserves_full_surface() {
+        // Load a legacy mcp.toml with an HTTP server (incl. headers,
+        // oauth, per-server permissions); confirm every field survives
+        // through the compat shim AND through Settings::mcp_config().
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join(".caliban")).unwrap();
+        fs::write(
+            ws.join(".caliban/mcp.toml"),
+            r#"
+[server.silverbullet]
+transport = "http"
+url = "https://mcp.silverbullet.hexadecimate.net/mcp"
+headers = { Authorization = "Bearer xyz" }
+
+[server.silverbullet.permissions]
+allow = ["read_*"]
+deny = ["delete_*"]
+"#,
+        )
+        .unwrap();
+        let mut s = Settings::default();
+        assert!(maybe_load_legacy_mcp(&mut s, ws));
+
+        // First: the projection landed on McpServerSetting correctly.
+        let sb = &s.mcp_servers["silverbullet"];
+        assert_eq!(sb.r#type.as_deref(), Some("http"));
+        assert_eq!(
+            sb.url.as_deref(),
+            Some("https://mcp.silverbullet.hexadecimate.net/mcp"),
+        );
+        assert_eq!(sb.headers.get("Authorization"), Some(&"Bearer xyz".into()));
+        assert_eq!(sb.permissions.allow, vec!["read_*".to_string()]);
+        assert_eq!(sb.permissions.deny, vec!["delete_*".to_string()]);
+
+        // Second: round-tripped through Settings::mcp_config(), the
+        // typed ServerConfig has the same transport/url/headers/perms.
+        let cfg = s.mcp_config();
+        let server_cfg = &cfg.servers["silverbullet"];
+        assert_eq!(
+            server_cfg.transport,
+            caliban_mcp_client::TransportKind::Http,
+        );
+        assert_eq!(
+            server_cfg.url.as_ref().map(ToString::to_string),
+            Some("https://mcp.silverbullet.hexadecimate.net/mcp".to_string()),
+        );
+        assert_eq!(
+            server_cfg.headers.get("Authorization"),
+            Some(&"Bearer xyz".to_string()),
+        );
+        assert_eq!(server_cfg.permissions.allow, vec!["read_*".to_string()]);
+        assert_eq!(server_cfg.permissions.deny, vec!["delete_*".to_string()]);
     }
 
     #[test]
