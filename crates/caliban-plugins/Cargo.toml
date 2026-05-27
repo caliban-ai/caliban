@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-plugins"
-version     = "0.0.0"
+version.workspace = true
 description = "Plugin packaging orchestrator (ADR 0030) — skill / hook / agent / MCP / output-style bundles"
 edition.workspace      = true
 license.workspace      = true

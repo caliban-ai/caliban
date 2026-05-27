@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-agent-core"
-version     = "0.0.0"
+version.workspace = true
 description = "Agent loop, tool dispatch, cancellation, retry, compaction, and hooks for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true

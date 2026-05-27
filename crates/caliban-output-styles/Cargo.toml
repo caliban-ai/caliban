@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-output-styles"
-version     = "0.0.0"
+version.workspace = true
 description = "Output-style loader + system-prompt splice for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true

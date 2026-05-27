@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-common"
-version     = "0.0.0"
+version.workspace = true
 description = "Cross-crate plumbing (paths, env-var expansion, atomic writes, globs, tracing targets) for caliban"
 edition.workspace      = true
 license.workspace      = true

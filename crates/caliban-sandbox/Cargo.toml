@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-sandbox"
-version     = "0.0.0"
+version.workspace = true
 description = "OS-level sandbox (macOS Seatbelt + Linux bubblewrap) for caliban subprocess tools"
 edition.workspace      = true
 license.workspace      = true

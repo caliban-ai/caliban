@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-supervisor"
-version     = "0.0.0"
+version.workspace = true
 description = "Per-repo supervisor daemon for caliban background sub-agents (ADR 0037)"
 edition.workspace      = true
 license.workspace      = true

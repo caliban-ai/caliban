@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 
 use crate::agents_cli;
-use crate::args::{AgentsCommand, CalibanCommand, RouterCommand};
+use crate::args::{AgentsCommand, CalibanCommand, ConfigCommand, RouterCommand};
 use crate::plugin_cli;
 use crate::router;
 
@@ -77,11 +77,15 @@ pub(crate) async fn run_supervisor_command(cmd: &CalibanCommand) -> Option<i32> 
             )
             .await,
         ),
-        // `caliban router` / `doctor` are dispatched in main.rs ahead
-        // of the supervisor entry points (no supervisor needed for
-        // diagnostics). Skip them here so we don't accidentally spawn
-        // the daemon.
-        CalibanCommand::Router { .. } | CalibanCommand::Doctor { .. } => None,
+        // `caliban router` / `doctor` / `config` / `plugin` are
+        // dispatched in main.rs ahead of the supervisor entry points
+        // (no supervisor needed for diagnostics, config inspection, or
+        // plugin management). Skip them here so we don't accidentally
+        // spawn the daemon.
+        CalibanCommand::Router { .. }
+        | CalibanCommand::Doctor { .. }
+        | CalibanCommand::Config { .. }
+        | CalibanCommand::Plugin { .. } => None,
     }
 }
 
@@ -92,4 +96,76 @@ pub(crate) async fn run_bg_shortcut(task: &str) -> Result<i32> {
     let cwd = std::env::current_dir().context("could not get cwd")?;
     let repo = agents_cli::discover_repo_root(&cwd);
     Ok(agents_cli::run_bg(task, &repo).await)
+}
+
+/// Handle `caliban config <verb>` (ADR 0026). Reads the layered
+/// settings, then either prints them or migrates legacy per-feature
+/// TOMLs into the project-scope `settings.json`.
+pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
+    let workspace = std::env::current_dir().context("could not get cwd")?;
+    let mut opts = caliban_settings::LoadOptions::new(workspace.clone());
+    // `print` and `migrate` both reflect what would *actually* load in
+    // a normal run, so we don't override scope_filter / overlay here.
+    opts.bare = false;
+    let outcome = caliban_settings::load_settings(&opts)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("load layered settings")?;
+    match cmd {
+        ConfigCommand::Print => {
+            // Emit the merged Settings as pretty JSON plus a comment-
+            // free `_sources` array recording where each scope file
+            // lived.
+            let settings_json =
+                serde_json::to_value(&outcome.settings).context("serialize Settings")?;
+            let sources_json: Vec<_> = outcome
+                .sources
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "scope": s.scope.label(),
+                        "path": s.path,
+                        "format": s.format,
+                    })
+                })
+                .collect();
+            let envelope = serde_json::json!({
+                "settings": settings_json,
+                "_sources": sources_json,
+            });
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            Ok(0)
+        }
+        ConfigCommand::Migrate { dry_run } => {
+            let mut migrated = outcome.settings.clone();
+            let mut touched = Vec::new();
+            if caliban_settings::compat::maybe_load_legacy_mcp(&mut migrated, &workspace) {
+                touched.push("mcp.toml → settings.mcp_servers");
+            }
+            if caliban_settings::compat::maybe_load_legacy_permissions(&mut migrated, &workspace) {
+                touched.push("permissions.toml → settings.permissions");
+            }
+            if caliban_settings::compat::maybe_load_legacy_hooks(&mut migrated, &workspace) {
+                touched.push("hooks.toml → settings.hooks");
+            }
+            if touched.is_empty() {
+                eprintln!("[caliban] no legacy TOMLs to migrate (already on settings.json)");
+                return Ok(0);
+            }
+            let serialized =
+                serde_json::to_string_pretty(&migrated).context("serialize migrated Settings")?;
+            if *dry_run {
+                println!("{serialized}");
+                eprintln!("[caliban] dry-run; would migrate: {}", touched.join(", "));
+                return Ok(0);
+            }
+            let dest_dir = workspace.join(".caliban");
+            std::fs::create_dir_all(&dest_dir)
+                .with_context(|| format!("create {}", dest_dir.display()))?;
+            let dest = dest_dir.join("settings.json");
+            std::fs::write(&dest, serialized)
+                .with_context(|| format!("write {}", dest.display()))?;
+            println!("migrated to {}: {}", dest.display(), touched.join(", "));
+            Ok(0)
+        }
+    }
 }

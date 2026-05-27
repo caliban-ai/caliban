@@ -146,6 +146,10 @@ pub(crate) struct HeadlessRunConfig {
     pub(crate) setting_sources: Vec<String>,
     /// Tool names (alphabetical) for the `system/init` frame.
     pub(crate) tools: Vec<String>,
+    /// Plugin descriptors `{name, version, source}` for the
+    /// `system/init` frame (ADR 0030). Empty when `--bare` /
+    /// `--no-plugins` or no plugins are loaded.
+    pub(crate) plugins: Vec<serde_json::Value>,
     /// "<provider>/<model>" summary.
     pub(crate) model_summary: String,
     /// Current working directory at run start.
@@ -173,6 +177,7 @@ impl HeadlessRunConfig {
             session_id: "test-session".into(),
             setting_sources: Vec::new(),
             tools: Vec::new(),
+            plugins: Vec::new(),
             model_summary: "mock/mock".into(),
             cwd: ".".into(),
             hook_buffer: None,
@@ -249,6 +254,7 @@ impl<W: Write> HeadlessDriver<W> {
             &self.config.session_id,
             &self.config.model_summary,
             self.config.tools.clone(),
+            self.config.plugins.clone(),
             self.config.setting_sources.clone(),
             self.config.bare_mode,
             &self.config.cwd,

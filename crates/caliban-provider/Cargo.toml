@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-provider"
-version     = "0.0.0"
+version.workspace = true
 description = "Provider-neutral message IR and trait for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true

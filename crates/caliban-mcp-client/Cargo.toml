@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-mcp-client"
-version     = "0.0.0"
+version.workspace = true
 description = "MCP client (stdio v1) — connects to MCP servers and surfaces their tools as caliban Tools"
 edition.workspace      = true
 license.workspace      = true

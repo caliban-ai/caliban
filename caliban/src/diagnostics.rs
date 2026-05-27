@@ -178,10 +178,27 @@ fn check_session_store() -> DiagCheck {
 fn check_skills(workspace: &Path) -> DiagCheck {
     let roots = caliban_skills::default_roots(workspace);
     let skills = caliban_skills::load_skills(&roots);
+    let roots_present: Vec<_> = roots
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| p.display().to_string())
+        .collect();
+    let suffix = if roots_present.is_empty() {
+        format!(
+            " (no skill roots present; expected one of {})",
+            roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!(" (scanned: {})", roots_present.join(", "))
+    };
     DiagCheck {
         name: "skills",
         status: CheckStatus::Pass,
-        hint: format!("{} skill(s) loaded", skills.len()),
+        hint: format!("{} skill(s) loaded{suffix}", skills.len()),
     }
 }
 

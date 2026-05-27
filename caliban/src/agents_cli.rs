@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use caliban_supervisor::proto::{AgentRecord, AgentStatus, CtlRequest, SpawnSpec};
+use caliban_supervisor::proto::{AgentRecord, AgentStatus, SpawnSpec};
 use caliban_supervisor::{ClientError, SupervisorClient, repo_socket_path};
 
 /// Discover the repo root containing `start_dir`. Walks up looking for
@@ -153,23 +153,17 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             }
             Err(e) => map_client_error(e),
         },
-        crate::AgentsCommand::Attach { id } => {
-            match client.request(&CtlRequest::Attach { id: id.clone() }).await {
-                Ok(caliban_supervisor::CtlReply::AttachAck { socket_path }) => {
-                    println!(
-                        "attach: per-agent socket at {} (no live attach loop in this build; \
+        crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
+            Ok(socket_path) => {
+                println!(
+                    "attach: per-agent socket at {} (no live attach loop in this build; \
                      stream via `caliban logs {id}`)",
-                        socket_path.display(),
-                    );
-                    0
-                }
-                Ok(other) => {
-                    eprintln!("caliban: unexpected reply: {other:?}");
-                    1
-                }
-                Err(e) => map_client_error(e),
+                    socket_path.display(),
+                );
+                0
             }
-        }
+            Err(e) => map_client_error(e),
+        },
         crate::AgentsCommand::Logs { id } => {
             // Logs live at <agent-store>/<id>/session.json. The
             // supervisor's `Attach` reply gives us the per-agent socket,
@@ -190,7 +184,9 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                             }
                         }
                     } else {
-                        eprintln!("caliban: agent {id} not found");
+                        // Same spelling the supervisor's NotFound thiserror
+                        // emits, so the user sees one canonical phrase.
+                        eprintln!("caliban: daemon: agent not found: {id}");
                         1
                     }
                 }
@@ -240,14 +236,26 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
 }
 
 /// Handle `caliban daemon <verb>`.
+///
+/// Neither `status` nor `stop` auto-spawn the daemon — querying state
+/// or asking it to shut down shouldn't side-effect-start a fresh one.
+/// When the socket is absent we report "not running" and exit cleanly
+/// (status: 0 with a "not running" line, stop: 0 with a "no daemon"
+/// line — both are valid steady states).
 pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> i32 {
-    let client = match ensure_daemon(repo_root).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("caliban: could not start daemon: {e}");
-            return 1;
+    let socket_path = caliban_supervisor::repo_socket_path(repo_root);
+    if !socket_path.exists() {
+        match cmd {
+            crate::DaemonCommand::Status => {
+                println!("daemon not running (socket={})", socket_path.display());
+            }
+            crate::DaemonCommand::Stop => {
+                println!("no daemon to stop (socket={})", socket_path.display());
+            }
         }
-    };
+        return 0;
+    }
+    let client = caliban_supervisor::SupervisorClient::new(socket_path);
     match cmd {
         crate::DaemonCommand::Status => match client.status().await {
             Ok(s) => {

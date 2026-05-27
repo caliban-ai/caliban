@@ -17,7 +17,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
@@ -86,15 +86,17 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
     Ok(match args.provider {
         Anthropic => {
             use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
-            Arc::new(AnthropicProvider::direct(
-                DirectConfig::from_env().context("ANTHROPIC_API_KEY missing")?,
-            )?)
+            Arc::new(AnthropicProvider::direct(missing_key(
+                "ANTHROPIC_API_KEY",
+                DirectConfig::from_env(),
+            )?)?)
         }
         Openai => {
             use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
-            Arc::new(OpenAIProvider::direct(
-                DirectConfig::from_env().context("OPENAI_API_KEY missing")?,
-            )?)
+            Arc::new(OpenAIProvider::direct(missing_key(
+                "OPENAI_API_KEY",
+                DirectConfig::from_env(),
+            )?)?)
         }
         Ollama => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
@@ -104,10 +106,23 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
         }
         Google => {
             use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
-            Arc::new(GoogleProvider::ai_studio(
-                AIStudioConfig::from_env().context("GEMINI_API_KEY missing")?,
-            )?)
+            Arc::new(GoogleProvider::ai_studio(missing_key(
+                "GEMINI_API_KEY",
+                AIStudioConfig::from_env(),
+            )?)?)
         }
+    })
+}
+
+/// Wrap a provider config-builder failure with a single actionable
+/// message instead of an anyhow chain that just re-states the env var
+/// name twice. Tells the operator the three ways to supply credentials.
+fn missing_key<T, E>(env_var: &'static str, res: std::result::Result<T, E>) -> Result<T> {
+    res.map_err(|_| {
+        anyhow::anyhow!(
+            "{env_var} is not set — export it, configure `apiKeyHelper` in \
+             settings.json (ADR 0026), or pick a different `--provider`"
+        )
     })
 }
 
@@ -185,7 +200,7 @@ pub(crate) fn load_layered_settings(
     let mut opts = caliban_settings::LoadOptions::new(workspace_root.to_path_buf());
     opts.bare = args.bare;
     if let Some(csv) = args.setting_sources.as_deref() {
-        opts = opts.with_sources_csv(csv);
+        opts = opts.with_sources_csv(csv).map_err(|e| anyhow::anyhow!(e))?;
     }
     if let Some(overlay) = args.settings_overlay.as_deref() {
         opts = opts
@@ -220,7 +235,7 @@ pub(crate) async fn run_and_render(
     messages: Vec<Message>,
     cancel: CancellationToken,
     quiet: bool,
-) -> Result<(Vec<Message>, Usage)> {
+) -> Result<(Vec<Message>, Usage, caliban_agent_core::StopCondition)> {
     use caliban_agent_core::TurnEvent;
 
     let mut stream = agent.stream_until_done(messages, cancel);
@@ -228,6 +243,16 @@ pub(crate) async fn run_and_render(
     let mut at_column_zero = true;
     let mut final_messages: Vec<Message> = Vec::new();
     let mut total_usage = Usage::default();
+    let mut final_stop = caliban_agent_core::StopCondition::EndOfTurn;
+
+    // Honor NO_COLOR (https://no-color.org/) and skip ANSI when stderr
+    // is not a TTY. Color is purely decorative here.
+    let use_color = {
+        use std::io::IsTerminal as _;
+        std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+    };
+    let dim_on = if use_color { "\x1b[2m" } else { "" };
+    let dim_off = if use_color { "\x1b[0m" } else { "" };
 
     while let Some(event) = stream.next().await {
         match event? {
@@ -237,7 +262,7 @@ pub(crate) async fn run_and_render(
                 at_column_zero = text.ends_with('\n');
             }
             TurnEvent::AssistantThinkingDelta { text, .. } if !quiet => {
-                eprint!("\x1b[2m{text}\x1b[0m");
+                eprint!("{dim_on}{text}{dim_off}");
             }
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
@@ -315,6 +340,7 @@ pub(crate) async fn run_and_render(
                 }
                 final_messages = fm;
                 total_usage = tu;
+                final_stop = stopped_for;
                 at_column_zero = true;
             }
             _ => {}
@@ -325,7 +351,27 @@ pub(crate) async fn run_and_render(
         println!();
     }
 
-    Ok((final_messages, total_usage))
+    Ok((final_messages, total_usage, final_stop))
+}
+
+/// Map a [`caliban_agent_core::StopCondition`] to the sysexits-style
+/// process exit code per ADR 0025's table. `EndOfTurn` returns `0`;
+/// every other variant returns the matching code from the headless
+/// driver, so single-prompt mode and `-p` mode exit identically.
+pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition) -> i32 {
+    use caliban_agent_core::StopCondition;
+    match stop {
+        StopCondition::EndOfTurn => 0,
+        StopCondition::MaxTurnsReached(_) => 130,
+        StopCondition::Cancelled => 124,
+        StopCondition::ProviderError(_)
+        | StopCondition::HookDenied(_)
+        | StopCondition::CompactionFailed(_)
+        | StopCondition::Refusal(_)
+        | StopCondition::ContentFilter(_)
+        | StopCondition::MaxTokensExhausted
+        | StopCondition::StreamIdle(_) => 1,
+    }
 }
 
 /// Map a [`caliban_agent_core::StopCondition`] to a one-line stderr
@@ -413,6 +459,7 @@ pub(crate) async fn run_headless(
     model: String,
     cancel: CancellationToken,
     hook_event_buffer: Option<headless::HookEventBuffer>,
+    plugin_descriptors: Vec<serde_json::Value>,
 ) -> i32 {
     let output_format = args.output_format.unwrap_or(headless::OutputFormat::Text);
 
@@ -480,22 +527,31 @@ pub(crate) async fn run_headless(
         }
     };
 
+    // Reject empty prompts in headless `text` input mode. `-p ""` and
+    // empty stdin both land here; running the agent with an empty user
+    // message is never useful and produces opaque provider errors.
+    // `stream-json` input is allowed to be empty — the multi-frame
+    // driver enforces its own `NoUserInput` path with exit 66.
+    if let PromptSource::Single(ref p) = prompt_source
+        && p.trim().is_empty()
+    {
+        eprintln!(
+            "[caliban] empty prompt — pass a non-empty `--print <TEXT>`, positional arg, or stdin"
+        );
+        return 64;
+    }
+
     // Permission-prompt-tool: parsed-and-ignored with a warning (ADR 0023
     // Phase C will wire this).
     if let Some(tool) = &args.permission_prompt_tool {
         eprintln!(
-            "[caliban] --permission-prompt-tool='{tool}' is accepted but inert; MCP elicitation lands with Phase C (ADR 0023)"
+            "[caliban] --permission-prompt-tool='{tool}' will route Ask events to the named MCP elicitation tool (ADR 0023 Phase C)"
         );
     }
 
-    // Budget warning: until OTel/cost lands, cost is always 0.0 — surface
-    // a one-time warning when the operator passes --max-budget-usd.
-    if args.max_budget_usd.is_some() {
-        eprintln!(
-            "[caliban] --max-budget-usd is in placeholder mode: every request contributes \
-             0.0 USD until ADR 0033 wires real pricing"
-        );
-    }
+    // --max-budget-usd is enforced by `caliban-telemetry::pricing` (ADR 0033).
+    // No global warning needed — unknown (provider, model) pairs emit a
+    // debounced WARN through the budget tracker itself.
 
     // Optional JSON schema.
     let json_schema = match args.json_schema.as_deref() {
@@ -582,6 +638,7 @@ pub(crate) async fn run_headless(
         session_id,
         setting_sources,
         tools,
+        plugins: plugin_descriptors,
         model_summary,
         cwd,
         hook_buffer: hook_event_buffer,
@@ -1068,6 +1125,33 @@ pub(crate) async fn run_single_prompt(
     plan_mode: caliban_agent_core::SharedPlanMode,
     model: String,
 ) -> Result<()> {
+    // Honor `--continue` / `--resume <NAME>` in single-prompt mode with
+    // the same semantics the headless driver uses (`ResumeNotFound` →
+    // exit 66, `NoSessionsToContinue` → exit 66). Without this both
+    // flags silently no-op when `--session` is absent.
+    if args.continue_latest || args.resume.is_some() {
+        let store_for_resume = match store.as_ref() {
+            Some(s) => s.clone(),
+            None => SessionStore::new(SessionStore::default_root()?),
+        };
+        match headless::session_loader::resolve_session(
+            &store_for_resume,
+            args.continue_latest,
+            args.resume.as_deref(),
+        ) {
+            Ok(Some(s)) => {
+                todos.lock().expect("todos lock").clone_from(&s.todos);
+                plan_mode.store(s.plan_mode, std::sync::atomic::Ordering::Relaxed);
+                session = Some(s);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[caliban] {e}");
+                std::process::exit(headless::exit_code_for(&e));
+            }
+        }
+    }
+
     let cancel = CancellationToken::new();
     {
         let cancel = cancel.clone();
@@ -1100,17 +1184,18 @@ pub(crate) async fn run_single_prompt(
 
     messages.push(Message::user_text(prompt));
 
-    let (final_messages, total_usage) =
+    let (final_messages, total_usage, stop_condition) =
         run_and_render(Arc::clone(&agent), messages, cancel, args.quiet).await?;
 
     fire_session_end(args, &agent, &model, &total_usage).await;
 
-    // Save session back if requested
+    // Save session back if requested. The session is persisted before we
+    // exit on a non-zero stop code — operators can resume the run that
+    // failed instead of losing progress.
     if let (Some(store), Some(ref mut s)) = (store.as_ref(), session.as_mut())
         && !args.no_save
     {
         s.merge_run(final_messages, total_usage);
-        // Snapshot the shared todo handle back into the persisted session.
         s.todos
             .clone_from(&*todos.lock().expect("todos lock poisoned"));
         s.plan_mode = plan_mode.load(std::sync::atomic::Ordering::Relaxed);
@@ -1135,6 +1220,12 @@ pub(crate) async fn run_single_prompt(
         }
     }
 
+    // Map the non-`EndOfTurn` stop to the matching sysexits code so
+    // single-prompt mode is exit-code-compatible with `-p` (ADR 0025).
+    let code = stop_condition_exit_code(&stop_condition);
+    if code != 0 {
+        std::process::exit(code);
+    }
     Ok(())
 }
 

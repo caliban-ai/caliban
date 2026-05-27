@@ -317,28 +317,63 @@ fn cmd_enable(args: &[String], enable: bool) -> i32 {
         eprintln!("caliban plugin {verb}: missing <name>");
         return 2;
     };
-    // v1: just emit a hint that this is env-only. settings.json lands with
-    // ADR 0026; until then we tell the operator what env var to set.
-    let mut current: Vec<String> = std::env::var("CALIBAN_ENABLED_PLUGINS")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if enable {
-        if !current.iter().any(|n| n == name) {
-            current.push(name.clone());
+    match update_user_settings_plugins_enabled(name, enable) {
+        Ok(path) => {
+            println!("plugin '{name}' {verb}d in {}", path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("caliban plugin {verb}: {e}");
+            1
+        }
+    }
+}
+
+/// Toggle `plugins.enabled` for `name` inside the user-scope
+/// `settings.json`. Creates the file if missing, preserves any other
+/// keys, and writes pretty-printed JSON. Returns the path written.
+fn update_user_settings_plugins_enabled(name: &str, enable: bool) -> Result<PathBuf, String> {
+    let dir = dirs::config_dir()
+        .ok_or_else(|| "no user config dir".to_string())?
+        .join("caliban");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("settings.json");
+    let mut root: serde_json::Value = if path.exists() {
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if raw.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?
         }
     } else {
-        current.retain(|n| n != name);
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not a JSON object", path.display()))?;
+    let plugins_entry = obj
+        .entry("plugins")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let plugins_obj = plugins_entry
+        .as_object_mut()
+        .ok_or_else(|| format!("plugins must be a JSON object in {}", path.display()))?;
+    let enabled_entry = plugins_obj
+        .entry("enabled")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let arr = enabled_entry
+        .as_array_mut()
+        .ok_or_else(|| format!("plugins.enabled must be an array in {}", path.display()))?;
+    let already = arr.iter().any(|v| v.as_str() == Some(name));
+    if enable {
+        if !already {
+            arr.push(serde_json::Value::String(name.to_string()));
+        }
+    } else {
+        arr.retain(|v| v.as_str() != Some(name));
     }
-    println!(
-        "set CALIBAN_ENABLED_PLUGINS={} to {verb} plugin '{name}'",
-        current.join(",")
-    );
-    println!("(settings.json keys land with ADR 0026; until then env-var only)");
-    0
+    let serialized =
+        serde_json::to_string_pretty(&root).map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
 }

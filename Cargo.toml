@@ -29,11 +29,14 @@ members = [
 ]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 authors = ["John Ford <john.ford2002@gmail.com>"]
 rust-version = "1.95"
-# repository = TODO: set once the GitHub repo exists
+# `repository` is set when the GitHub repo is made public; today the
+# project is private. Crates inherit `.workspace = true` so adding the
+# field here propagates without per-crate edits.
 
 [workspace.dependencies]
 tokio     = { version = "1", features = ["full"] }

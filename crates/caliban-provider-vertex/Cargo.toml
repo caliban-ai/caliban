@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-provider-vertex"
-version     = "0.0.0"
+version.workspace = true
 description = "Google Vertex AI provider (Claude on Vertex) for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true

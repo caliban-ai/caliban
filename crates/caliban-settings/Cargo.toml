@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-settings"
-version     = "0.0.0"
+version.workspace = true
 description = "Unified layered settings (managed > user > project > local) for caliban (ADR 0026)"
 edition.workspace      = true
 license.workspace      = true

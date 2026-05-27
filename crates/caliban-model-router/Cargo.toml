@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-model-router"
-version     = "0.0.0"
+version.workspace = true
 description = "Provider-impl router that dispatches completion requests to different (provider, model) pairs by RequestPurpose"
 edition.workspace      = true
 license.workspace      = true

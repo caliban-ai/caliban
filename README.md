@@ -119,9 +119,13 @@ ANTHROPIC_API_KEY=$KEY caliban --session research "Now look at Cargo.toml"
 caliban --session research --no-save "what was the first thing I asked?"
 ```
 
-Sessions are saved as pretty-printed JSON under
-`~/.local/share/caliban/sessions/<name>.json` (override with
-`--sessions-dir`).
+Sessions are saved as pretty-printed JSON under the per-OS session
+directory (override with `--sessions-dir`):
+
+- **Linux:** `$XDG_DATA_HOME/caliban/sessions/<name>.json`
+  (default `~/.local/share/caliban/sessions/<name>.json`)
+- **macOS:** `~/Library/Application Support/caliban/sessions/<name>.json`
+- **Windows:** `%LOCALAPPDATA%\caliban\sessions\<name>.json`
 
 ### Interactive TUI
 
@@ -140,7 +144,7 @@ Invoke `caliban` with no prompt + a TTY stdin to enter the TUI:
 ├────────────────────────────────────────────────────────────────┤
 │ > █                                                            │
 ├────────────────────────────────────────────────────────────────┤
-│ ~/dev/personal/iron-orrery · openai gpt-4o · session: research │
+│ ~/dev/personal/caliban · openai gpt-4o · session: research     │
 └────────────────────────────────────────────────────────────────┘
 ```
 

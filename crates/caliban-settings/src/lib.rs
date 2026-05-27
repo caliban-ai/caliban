@@ -42,7 +42,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod api_key_helper;
-mod compat;
+pub mod compat;
 mod loader;
 mod merge;
 mod overlay;

@@ -76,18 +76,26 @@ impl LoadOptions {
     }
 
     /// Apply `--setting-sources <CSV>`.
-    #[must_use]
-    pub fn with_sources_csv(mut self, csv: &str) -> Self {
+    ///
+    /// # Errors
+    /// Returns [`LoadError::UnknownScope`] when any CSV token is not one
+    /// of `{managed, user, project, local, cli}`. Silently dropping
+    /// unknown entries is misleading — operators expect the scope chain
+    /// they typed to be the one that was loaded.
+    pub fn with_sources_csv(mut self, csv: &str) -> Result<Self, LoadError> {
         let mut filter = Vec::new();
         for part in csv.split(',') {
-            if let Some(scope) = Scope::parse(part) {
-                filter.push(scope);
-            } else {
-                tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, entry = part, "unknown --setting-sources entry; ignoring");
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match Scope::parse(trimmed) {
+                Some(scope) => filter.push(scope),
+                None => return Err(LoadError::UnknownScope(trimmed.to_string())),
             }
         }
         self.scope_filter = Some(filter);
-        self
+        Ok(self)
     }
 
     /// Apply `--settings <FILE|JSON>`. The argument may be a path to a
@@ -151,6 +159,9 @@ pub enum LoadError {
     /// CLI overlay couldn't be interpreted as JSON or as a path.
     #[error("settings: --settings argument is neither a file nor inline JSON: {0}")]
     CliOverlay(String),
+    /// `--setting-sources` named a scope that doesn't exist.
+    #[error("settings: --setting-sources entry '{0}' is not one of managed/user/project/local/cli")]
+    UnknownScope(String),
 }
 
 /// Drive the layered load.

@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-images"
-version     = "0.0.0"
+version.workspace = true
 description = "Image ingest pipeline + graphics-protocol detection for caliban"
 edition.workspace      = true
 license.workspace      = true

@@ -223,7 +223,9 @@ pub(crate) struct ResultFrame {
     pub(crate) result: String,
     /// Session identifier.
     pub(crate) session_id: String,
-    /// Cumulative cost in USD (0.0 until OTel/cost lands per ADR 0033).
+    /// Cumulative cost in USD computed by `caliban-telemetry::pricing`
+    /// against the active rate card (ADR 0033). `0.0` for unknown
+    /// `(provider, model)` pairs.
     pub(crate) total_cost_usd: f64,
     /// Number of completed turns.
     pub(crate) turns: u32,
@@ -250,6 +252,7 @@ pub(crate) fn system_init(
     session_id: impl Into<String>,
     model: impl Into<String>,
     tools: Vec<String>,
+    plugins: Vec<Value>,
     setting_sources: Vec<String>,
     bare_mode: bool,
     cwd: impl Into<String>,
@@ -260,7 +263,7 @@ pub(crate) fn system_init(
         session_id: session_id.into(),
         model: model.into(),
         tools,
-        plugins: Vec::new(),
+        plugins,
         setting_sources,
         mcp_servers: Vec::new(),
         bare_mode,
@@ -447,6 +450,7 @@ mod tests {
             "sess-1",
             "anthropic/claude",
             vec!["Read".into(), "Write".into()],
+            vec![serde_json::json!({"name": "skill-pack", "version": "0.2.0", "source": "user"})],
             vec!["managed".into(), "user".into(), "project".into()],
             false,
             "/tmp",
@@ -460,6 +464,7 @@ mod tests {
         assert_eq!(json["settingSources"][2], "project");
         assert_eq!(json["bare_mode"], false);
         assert_eq!(json["cwd"], "/tmp");
+        assert_eq!(json["plugins"][0]["name"], "skill-pack");
     }
 
     #[test]

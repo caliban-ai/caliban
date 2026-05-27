@@ -204,7 +204,8 @@ fn setting_sources_csv_filter() {
         paths: fake_paths(tmp.path()),
         ..LoadOptions::default()
     }
-    .with_sources_csv("user,project");
+    .with_sources_csv("user,project")
+    .expect("known scopes parse");
     let outcome = load_settings(&opts).unwrap();
     assert_eq!(
         outcome.settings.editor_mode.as_deref(),

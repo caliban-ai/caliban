@@ -130,6 +130,16 @@ impl SupervisorClient {
         }
     }
 
+    /// Convenience: attach to an existing agent. Returns the per-agent
+    /// socket path the caller can stream from.
+    pub async fn attach(&self, id: impl Into<String>) -> Result<PathBuf, ClientError> {
+        match self.request(&CtlRequest::Attach { id: id.into() }).await? {
+            CtlReply::AttachAck { socket_path } => Ok(socket_path),
+            CtlReply::Error { error } => Err(error.into()),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
     /// Convenience: ask the daemon to shut down.
     pub async fn shutdown(&self) -> Result<(), ClientError> {
         match self.request(&CtlRequest::Shutdown).await? {

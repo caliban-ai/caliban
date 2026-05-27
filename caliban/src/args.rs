@@ -58,48 +58,78 @@ pub(crate) struct Args {
     /// non-interactively and emits text / JSON / NDJSON output. Accepts an
     /// optional prompt argument; otherwise reads from `--prompt`, the
     /// positional `PROMPT`, or stdin (capped at 10 MiB).
-    #[arg(short = 'p', long = "print", value_name = "PROMPT", num_args = 0..=1, default_missing_value = "")]
+    #[arg(short = 'p', long = "print", value_name = "PROMPT", num_args = 0..=1, default_missing_value = "", help_heading = "Headless / -p mode (ADR 0025)")]
     pub(crate) print: Option<String>,
 
     /// Stream-output format (headless mode only).
-    #[arg(long = "output-format", value_enum, value_name = "FMT")]
+    #[arg(
+        long = "output-format",
+        value_enum,
+        value_name = "FMT",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) output_format: Option<headless::OutputFormat>,
+
+    /// Suppress the ADR 0025 auto-headless dispatch when stdout is
+    /// piped or stdin is non-TTY. Explicit `--print` / `--output-format`
+    /// always wins; this flag only governs the implicit fall-through.
+    #[arg(long = "no-auto-print", help_heading = "Headless / -p mode (ADR 0025)")]
+    pub(crate) no_auto_print: bool,
 
     /// Stdin format (headless mode only).
     #[arg(
         long = "input-format",
         value_enum,
         value_name = "FMT",
-        default_value = "text"
+        default_value = "text",
+        help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) input_format: headless::InputFormat,
 
     /// Maximum cumulative cost in USD before the run aborts (exit 137).
-    /// Placeholder enforcement until ADR 0033 wires real cost.
-    #[arg(long = "max-budget-usd", value_name = "USD")]
+    /// Cost is computed against the rate card in `caliban-telemetry::pricing`;
+    /// unknown `(provider, model)` pairs contribute 0.0 and emit a warning.
+    #[arg(
+        long = "max-budget-usd",
+        value_name = "USD",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) max_budget_usd: Option<f64>,
 
     /// Skip hooks/skills/plugins/MCP/auto-memory/CLAUDE.md discovery
     /// (deterministic CI mode; ADR 0025).
-    #[arg(long = "bare")]
+    #[arg(long = "bare", help_heading = "Headless / -p mode (ADR 0025)")]
     pub(crate) bare: bool,
 
     /// Force structured final output matching the given JSON Schema. Value
     /// can be inline JSON or a path to a `.json` file.
-    #[arg(long = "json-schema", value_name = "FILE_OR_JSON")]
+    #[arg(
+        long = "json-schema",
+        value_name = "FILE_OR_JSON",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) json_schema: Option<String>,
 
     /// Emit assistant text deltas as separate `text` frames in
     /// stream-json mode (default: aggregate into one `message` frame).
-    #[arg(long = "include-partial-messages")]
+    #[arg(
+        long = "include-partial-messages",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) include_partial_messages: bool,
 
     /// Emit a `hook_event` frame per fired hook event in stream-json mode.
-    #[arg(long = "include-hook-events")]
+    #[arg(
+        long = "include-hook-events",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) include_hook_events: bool,
 
     /// Echo each user prompt as a `user` frame in stream-json mode.
-    #[arg(long = "replay-user-messages")]
+    #[arg(
+        long = "replay-user-messages",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) replay_user_messages: bool,
 
     /// Resume the most recently updated session.
@@ -110,13 +140,14 @@ pub(crate) struct Args {
     #[arg(short = 'r', long = "resume", value_name = "NAME")]
     pub(crate) resume: Option<String>,
 
-    /// Fallback model to use when the primary model errors. Router v2
-    /// wires this end-to-end; v1 records and surfaces it in init frames.
+    /// Fallback model to use when the primary model errors. Wired
+    /// end-to-end through `caliban-model-router` (ADR 0038); also
+    /// surfaced in the headless `system/init` frame.
     #[arg(long = "fallback-model", value_name = "MODEL")]
     pub(crate) fallback_model: Option<String>,
 
-    /// Route permission `Ask` events to the named MCP tool. Parsed for
-    /// forward-compat; MCP elicitation lands with Phase C (ADR 0023).
+    /// Route permission `Ask` events to the named MCP tool via the MCP
+    /// elicitation channel (ADR 0023 Phase C).
     #[arg(long = "permission-prompt-tool", value_name = "MCP_TOOL")]
     pub(crate) permission_prompt_tool: Option<String>,
 
@@ -128,16 +159,19 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) model: Option<String>,
 
-    /// Per-turn output token limit
-    #[arg(long, default_value_t = 2048)]
+    /// Per-turn output token limit (must be ≥ 1).
+    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) max_tokens: u32,
 
     /// Maximum agent loop iterations
     #[arg(long, default_value_t = 50)]
     pub(crate) max_turns: u32,
 
-    /// Sampling temperature
-    #[arg(long)]
+    /// Sampling temperature in `[0.0, 2.0]`. Above 2.0 is rejected
+    /// rather than silently clamped — providers disagree on the
+    /// max-acceptable value, and passing a bad temperature through
+    /// would surface as an opaque mid-stream provider error.
+    #[arg(long, value_parser = parse_temperature, allow_negative_numbers = true)]
     pub(crate) temperature: Option<f32>,
 
     /// Workspace root for file/shell tools
@@ -181,7 +215,9 @@ pub(crate) struct Args {
     pub(crate) no_system: bool,
 
     /// Append-log events + draws to ~/.cache/caliban/debug.log
-    #[arg(long)]
+    /// (`~/Library/Caches/caliban/debug.log` on macOS). `CALIBAN_DEBUG`
+    /// is also honored — any non-empty value turns it on.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
     pub(crate) debug: bool,
 
     /// Maximum size of a single `@`-attachment in bytes (default 256 KB).
@@ -208,7 +244,8 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_SKILLS")]
     pub(crate) no_skills: bool,
 
-    /// Disable MCP server discovery (skip loading `mcp.toml`).
+    /// Disable MCP server discovery (skip the unified `settings.json`
+    /// `mcp.servers` block and the legacy `mcp.toml` compat shim).
     #[arg(long, env = "CALIBAN_NO_MCP")]
     pub(crate) no_mcp: bool,
 
@@ -268,9 +305,10 @@ pub(crate) struct Args {
     #[arg(long, env = "CALIBAN_NO_SUB_AGENT")]
     pub(crate) no_sub_agent: bool,
 
-    /// Bypass every external hook handler (debugging escape hatch). Mirrors
-    /// the `disable_all_hooks` field in `hooks.toml` but applies one-off.
-    /// In-process hooks (`PermissionsHook`, audit) still run.
+    /// Bypass every external hook handler (debugging escape hatch).
+    /// Mirrors the `hooks.disable_all_hooks` field in `settings.json`
+    /// but applies one-off. In-process hooks (`PermissionsHook`, audit)
+    /// still run.
     #[arg(long, env = "CALIBAN_NO_HOOKS")]
     pub(crate) no_hooks: bool,
 
@@ -362,6 +400,43 @@ pub(crate) enum CalibanCommand {
         #[arg(long)]
         deep: bool,
     },
+    /// Inspect / migrate settings (ADR 0026).
+    Config {
+        #[command(subcommand)]
+        inner: ConfigCommand,
+    },
+    /// Manage plugin packages (ADR 0030).
+    ///
+    /// Verbs: `list`, `info <name>`, `install <name>@<marketplace>
+    /// [--yes]`, `install --dir <path>`, `update <name> [--yes]`,
+    /// `remove <name>`, `enable <name>`, `disable <name>`.
+    /// Run `caliban plugin help` for the full reference.
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
+    Plugin {
+        /// Plugin sub-verb plus its arguments. The plugin CLI parses
+        /// these directly (mirrors how `cargo` forwards positional
+        /// args to subcommands).
+        #[arg(value_name = "ARGS")]
+        args: Vec<String>,
+    },
+}
+
+/// `caliban config <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum ConfigCommand {
+    /// Print the merged effective settings as JSON, including the per-
+    /// key scope chain. Honors `--settings` / `--setting-sources`.
+    Print,
+    /// Round-trip legacy per-feature TOMLs (`permissions.toml`,
+    /// `mcp.toml`, `hooks.toml`) under the workspace into a single
+    /// project-scope `settings.json`. Writes to
+    /// `<workspace>/.caliban/settings.json`. Existing keys in that file
+    /// are preserved; the migrated keys are merged on top.
+    Migrate {
+        /// Print the migration result to stdout without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// `caliban agents <verb>` verbs.
@@ -425,6 +500,21 @@ pub(crate) enum RouterCommand {
     Debug(router::RouterDebugArgs),
 }
 
+/// clap `value_parser` for `--temperature`. Validates the input is a
+/// finite `f32` in `[0.0, 2.0]`.
+fn parse_temperature(s: &str) -> Result<f32, String> {
+    let n: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if !n.is_finite() {
+        return Err(format!("`{s}` is not finite"));
+    }
+    if !(0.0..=2.0).contains(&n) {
+        return Err(format!(
+            "temperature `{s}` is outside [0.0, 2.0]; pass a value the provider supports"
+        ));
+    }
+    Ok(n)
+}
+
 pub(crate) fn read_prompt(args: &Args) -> Result<String> {
     use std::io::Read as _;
     let raw = args
@@ -432,13 +522,19 @@ pub(crate) fn read_prompt(args: &Args) -> Result<String> {
         .as_deref()
         .or(args.prompt.as_deref())
         .context("no prompt given (use positional argument or --prompt)")?;
-    if raw == "-" {
+    let text = if raw == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
-        Ok(buf)
+        buf
     } else {
-        Ok(raw.to_string())
+        raw.to_string()
+    };
+    if text.trim().is_empty() {
+        anyhow::bail!(
+            "empty prompt — pass non-empty text via positional argument, --prompt, or stdin"
+        );
     }
+    Ok(text)
 }
 
 pub(crate) fn summarize(s: &str, max: usize) -> String {

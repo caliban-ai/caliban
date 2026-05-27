@@ -30,8 +30,9 @@ pub(crate) struct RouterWiring {
 /// if no config is found anywhere; the caller falls back to the single-
 /// provider path.
 pub(crate) fn try_load(explicit: Option<&Path>, start_dir: &Path) -> Result<Option<RouterWiring>> {
-    let Some(discovered) =
-        discover_caliban_toml(explicit, start_dir).context("loading caliban.toml")?
+    // The discovery error already names the path and the parse failure;
+    // no extra context is needed (M5 doc-chain dedup).
+    let Some(discovered) = discover_caliban_toml(explicit, start_dir).map_err(|e| anyhow!(e))?
     else {
         return Ok(None);
     };
@@ -166,16 +167,55 @@ pub(crate) fn parse_effort(s: &str) -> Result<EffortLevel> {
     })
 }
 
+/// Render the "no caliban.toml present" diagnostic. Kept separate from
+/// [`run_debug`] so its main body stays under clippy's 100-line cap.
+fn render_no_config(args: &RouterDebugArgs) -> Result<String> {
+    use std::fmt::Write as _;
+    let purpose = parse_purpose(&args.purpose)?;
+    let needs = DerivedNeeds {
+        vision: args.has_vision,
+        tool_use: args.has_tools,
+        thinking: args.has_thinking,
+    };
+    let mut out = String::new();
+    writeln!(out, "no caliban.toml found — router unconfigured")?;
+    writeln!(out, "purpose: {purpose:?}")?;
+    writeln!(
+        out,
+        "derived needs: vision={} tools={} thinking={}",
+        needs.vision, needs.tool_use, needs.thinking,
+    )?;
+    writeln!(
+        out,
+        "fallback: single-provider via --provider/--model \
+         (default: anthropic/claude-3-5-sonnet)",
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "drop a `caliban.toml` into the repo root with a [router] section to enable \
+         fallback / hedging / capability filtering (ADR 0038).",
+    )?;
+    Ok(out)
+}
+
 /// Execute `caliban router debug` — print the resolved candidate list for a
 /// synthetic request matching the CLI flags.
+///
+/// When no `caliban.toml` is present the command still succeeds — instead
+/// of erroring it prints the single-provider fallback the binary would
+/// use, so the debug subcommand stays useful for the common no-router
+/// case. The resolved purpose, derived needs, and effort hint still
+/// show even without a router config.
 pub(crate) fn run_debug(
     args: &RouterDebugArgs,
     explicit_config: Option<&Path>,
     start_dir: &Path,
 ) -> Result<String> {
     use std::fmt::Write as _;
-    let wiring = try_load(explicit_config, start_dir)?
-        .ok_or_else(|| anyhow!("no caliban.toml found (router unconfigured)"))?;
+    let Some(wiring) = try_load(explicit_config, start_dir)? else {
+        return render_no_config(args);
+    };
 
     let purpose = parse_purpose(&args.purpose)?;
     let needs = DerivedNeeds {

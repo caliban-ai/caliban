@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-provider-bedrock"
-version     = "0.0.0"
+version.workspace = true
 description = "AWS Bedrock provider (Claude on Bedrock) for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true

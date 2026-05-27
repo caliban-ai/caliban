@@ -38,17 +38,16 @@ pub(crate) use crate::args::{
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
-    // Early dispatch: `caliban plugin <subcommand>` runs the plugin CLI and
-    // exits, bypassing the agent loop. The dispatcher accepts the first
-    // positional arg only — `caliban --debug plugin list` is not supported
-    // (mirrors how Cargo subcommands work).
-    let raw_args: Vec<String> = std::env::args().collect();
-    if raw_args.len() >= 2 && raw_args[1] == "plugin" {
-        let code = subcommands::run_plugin_cli(&raw_args[2..]).await;
+    let args = Args::parse();
+
+    // `caliban plugin <verb> ...` — plugin manager (ADR 0030). The clap
+    // declaration uses `trailing_var_arg`, so the plugin CLI parses
+    // its own verbs directly. Dispatched ahead of provider construction
+    // so plugin management works even when auth/network is broken.
+    if let Some(CalibanCommand::Plugin { args: plugin_args }) = &args.command {
+        let code = subcommands::run_plugin_cli(plugin_args).await;
         std::process::exit(code);
     }
-
-    let args = Args::parse();
 
     // Diagnostic subcommands run before any provider construction or hook
     // wiring — they only need to read config.
@@ -64,6 +63,13 @@ async fn main() -> Result<()> {
         let diag = diagnostics::Diagnostics::run(diagnostics::DiagOpts { deep: *deep }).await;
         diagnostics::print_diagnostics_text(&diag);
         std::process::exit(diag.exit_code());
+    }
+
+    // `caliban config <verb>` — settings inspection / migration. No
+    // provider or daemon needed (ADR 0026).
+    if let Some(CalibanCommand::Config { inner }) = &args.command {
+        let code = subcommands::run_config(inner)?;
+        std::process::exit(code);
     }
 
     // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed
@@ -84,22 +90,35 @@ async fn main() -> Result<()> {
     startup::init_debug_tracing(&args).await;
 
     let workspace = match &args.workspace {
-        Some(p) => WorkspaceRoot::new(p.clone()),
+        Some(p) => {
+            // Fail-fast if the path is bogus rather than deferring to
+            // the first tool call. Exit 64 (`EX_USAGE`) per ADR 0025.
+            match std::fs::metadata(p) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    eprintln!("[caliban] --workspace {}: not a directory", p.display());
+                    std::process::exit(64);
+                }
+                Err(e) => {
+                    eprintln!("[caliban] --workspace {}: {e}", p.display());
+                    std::process::exit(64);
+                }
+            }
+            WorkspaceRoot::new(p.clone())
+        }
         None => WorkspaceRoot::current_dir().context("could not get cwd")?,
     };
 
     // Load layered settings (ADR 0026). `--bare` mode short-circuits.
-    // Failures here are non-fatal: invalid scope files log a warning
-    // and the binary falls back to the per-feature TOML loaders.
+    // Parse / CLI-overlay / unknown-scope failures are fatal with
+    // EX_CONFIGURATION_ERROR (78) — see ADR 0025's exit-code table.
+    // IO errors on a single scope file still abort; the loader returns
+    // an error rather than degrading silently.
     let settings_outcome = match startup::load_layered_settings(&args, workspace.root()) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, error = %e, "settings load failed; continuing with empty settings");
-            caliban_settings::LoadOutcome {
-                settings: caliban_settings::Settings::default(),
-                sources: Vec::new(),
-                validation_warnings: Vec::new(),
-            }
+            eprintln!("[caliban] {e}");
+            std::process::exit(78);
         }
     };
     for w in &settings_outcome.validation_warnings {
@@ -157,6 +176,19 @@ async fn main() -> Result<()> {
     // is constructed before any of those subsystems init.
     let plugin_manager = startup::load_plugin_manager(&args, workspace.root());
     let plugin_skill_roots = plugin_manager.skill_roots();
+    // Build the plugin descriptors that surface in the headless
+    // `system/init` frame. Empty when `--bare` / `--no-plugins`.
+    let plugin_descriptors: Vec<serde_json::Value> = plugin_manager
+        .loaded()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.manifest.name,
+                "version": p.manifest.version,
+                "source": p.source.as_str(),
+            })
+        })
+        .collect();
 
     let mut registry = startup::build_registry(
         &args,
@@ -203,7 +235,10 @@ async fn main() -> Result<()> {
     let tui_mode_active = {
         use std::io::IsTerminal as _;
         let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
-        let headless_active = args.print.is_some() || args.output_format.is_some();
+        let headless_explicit = args.print.is_some() || args.output_format.is_some();
+        let auto_headless = !args.no_auto_print
+            && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal());
+        let headless_active = headless_explicit || (has_prompt && auto_headless);
         !has_prompt && !headless_active && std::io::stdin().is_terminal()
     };
 
@@ -279,11 +314,22 @@ async fn main() -> Result<()> {
     }
 
     // --- Headless / print-mode dispatch (ADR 0025).
-    // Triggered explicitly by -p / --print, or by --output-format. Other
-    // flags (--max-budget-usd, --bare, --json-schema, --include-…, etc.)
-    // are only meaningful in headless mode but do not by themselves switch
-    // drivers — operators must opt in via -p / --output-format.
-    let headless_active = args.print.is_some() || args.output_format.is_some();
+    //
+    // Three triggers:
+    // 1. Explicit `-p` / `--print` or `--output-format`.
+    // 2. Auto-headless: a prompt is given AND (stdout is piped OR stdin
+    //    is not a TTY), unless `--no-auto-print` is passed.
+    //
+    // Implicit auto-headless never fires for the TUI path (no prompt +
+    // stdin TTY) — that case is unambiguously interactive.
+    let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
+    let auto_headless = {
+        use std::io::IsTerminal as _;
+        !args.no_auto_print
+            && has_prompt
+            && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
+    };
+    let headless_active = args.print.is_some() || args.output_format.is_some() || auto_headless;
     if headless_active {
         let cancel = CancellationToken::new();
         {
@@ -307,6 +353,7 @@ async fn main() -> Result<()> {
             model,
             cancel,
             hook_event_buffer,
+            plugin_descriptors,
         )
         .await;
         std::process::exit(exit);
@@ -317,7 +364,6 @@ async fn main() -> Result<()> {
     drop(hook_event_buffer);
 
     // --- TUI dispatch: no prompt + stdin is a TTY → enter interactive TUI.
-    let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
     let stdin_is_tty = std::io::stdin().is_terminal();
     if !has_prompt {
         if stdin_is_tty {

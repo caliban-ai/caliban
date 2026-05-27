@@ -1,6 +1,6 @@
 [package]
 name        = "caliban-provider-google"
-version     = "0.0.0"
+version.workspace = true
 description = "Google Gemini schema family for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true
