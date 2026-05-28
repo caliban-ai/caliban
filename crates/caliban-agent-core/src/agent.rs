@@ -93,7 +93,12 @@ impl Default for AgentConfig {
             escalated_max_tokens: 16_384,
             max_meta_continuations: 3,
             stream_idle_timeout_ms: 90_000,
-            max_tokens_recovery: true,
+            // Default off: Stage A budget escalation + Stage B meta-continuation
+            // currently re-enter the inner turn body and re-emit `TurnEnd`,
+            // which makes the headless driver report `turns > 1` and silently
+            // exceed the user's `--max-tokens` cap. Opt-in via `AgentConfig`
+            // until the recovery flows account for the turn counter cleanly.
+            max_tokens_recovery: false,
             // Plan B
             auto_compact_threshold: Some(0.75),
             micro_compact_enabled: true,
@@ -115,7 +120,8 @@ mod recovery_config_tests {
         assert_eq!(cfg.escalated_max_tokens, 16_384);
         assert_eq!(cfg.max_meta_continuations, 3);
         assert_eq!(cfg.stream_idle_timeout_ms, 90_000);
-        assert!(cfg.max_tokens_recovery);
+        // Recovery is opt-in until Stage A/B account for turn counting.
+        assert!(!cfg.max_tokens_recovery);
     }
 }
 

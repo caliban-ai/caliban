@@ -1257,9 +1257,19 @@ impl Agent {
                         );
                         break 'outer;
                     }
+                    StopReason::MaxTokens => {
+                        // Recovery disabled — surface as a distinct stop
+                        // condition so the TUI / headless driver can tell a
+                        // budget blowout from a clean end-of-turn.
+                        tracing::warn!(
+                            target: "caliban::recovery",
+                            "max_tokens.halt"
+                        );
+                        stopped_for = StopCondition::MaxTokensExhausted;
+                        break 'outer;
+                    }
                     _ => {
-                        // EndTurn, StopSequence, or MaxTokens with recovery
-                        // disabled — natural completion.
+                        // EndTurn or StopSequence — natural completion.
                         stopped_for = StopCondition::EndOfTurn;
                         break 'outer;
                     }

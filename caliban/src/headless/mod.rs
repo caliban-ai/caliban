@@ -251,6 +251,10 @@ enum TerminalStop {
     RunError(String),
     /// `--max-budget-usd` was exceeded after a turn ended.
     BudgetExceeded,
+    /// `StopCondition::MaxTokensExhausted` — the per-turn `max_tokens`
+    /// budget was hit and recovery is disabled. Distinct from `RunError`
+    /// so callers see a clean `subtype=max_tokens` result frame.
+    MaxTokens,
 }
 
 impl<W: Write> HeadlessDriver<W> {
@@ -574,9 +578,7 @@ impl<W: Write> HeadlessDriver<W> {
                         return Ok(Some(TerminalStop::RunError(msg.clone())));
                     }
                     StopCondition::MaxTokensExhausted => {
-                        return Ok(Some(TerminalStop::RunError(
-                            "max output token budget exhausted".into(),
-                        )));
+                        return Ok(Some(TerminalStop::MaxTokens));
                     }
                     StopCondition::StreamIdle(d) => {
                         return Ok(Some(TerminalStop::RunError(format!(
@@ -649,6 +651,10 @@ impl<W: Write> HeadlessDriver<W> {
             TerminalStop::Cancelled => (ResultSubtype::Cancelled, None),
             TerminalStop::RunError(msg) => (ResultSubtype::Error, Some(msg.clone())),
             TerminalStop::BudgetExceeded => (ResultSubtype::BudgetExceeded, None),
+            // MaxTokens emits the partial output we collected (via `final_text`)
+            // and uses a dedicated subtype so the TUI/statusline can tell a
+            // budget blowout from a clean end-of-turn. No `error` field.
+            TerminalStop::MaxTokens => (ResultSubtype::MaxTokens, None),
         };
         let summary = HeadlessRunSummary {
             subtype,
@@ -668,6 +674,13 @@ impl<W: Write> HeadlessDriver<W> {
             TerminalStop::BudgetExceeded => Err(HeadlessError::BudgetExceeded {
                 limit: self.config.budget.max_usd(),
             }),
+            // Surface as a `Run` error so the binary exits non-zero — partial
+            // output is already in `final_text`, which the result frame
+            // carries. Distinct subtype (`max_tokens`) keeps the failure mode
+            // visible to callers without conflating with provider errors.
+            TerminalStop::MaxTokens => Err(HeadlessError::Run(
+                "max output token budget exhausted".into(),
+            )),
         }
     }
 

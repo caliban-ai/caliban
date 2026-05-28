@@ -71,6 +71,7 @@ async fn stage_b_injects_meta_then_continues() {
 
     let cfg = AgentConfig {
         max_tokens: 1024,
+        max_tokens_recovery: true,
         max_meta_continuations: 3,
         ..Default::default()
     };
@@ -125,6 +126,7 @@ async fn stage_c_surrenders_after_cap() {
 
     let cfg = AgentConfig {
         max_tokens: 1024,
+        max_tokens_recovery: true,
         max_meta_continuations: 3,
         ..Default::default()
     };
@@ -141,5 +143,178 @@ async fn stage_c_surrenders_after_cap() {
     assert!(
         matches!(last_stop, Some(StopCondition::MaxTokensExhausted)),
         "expected MaxTokensExhausted, got {last_stop:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Default-off halt: with recovery disabled (the default), a `MaxTokens` turn
+// must end the run in exactly one turn and surface `StopCondition::MaxTokensExhausted`.
+// This is the regression test for the LMStudio + Ollama probe finding F6.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn max_tokens_halts_in_one_turn_when_recovery_off() {
+    let provider = MockProvider::builder()
+        // Single turn that ends in MaxTokens. If the loop continued past
+        // this, the queue would underflow and the test would error out.
+        .with_response_max_tokens(8)
+        .build();
+
+    let cfg = AgentConfig {
+        max_tokens: 8,
+        // Explicit even though it's the default — guards against future flips.
+        max_tokens_recovery: false,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut turn_count = 0u32;
+    let mut turn_end_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        match ev {
+            TurnEvent::TurnEnd { .. } => turn_end_count += 1,
+            TurnEvent::RunEnd {
+                stopped_for,
+                turn_count: tc,
+                ..
+            } => {
+                last_stop = Some(stopped_for);
+                turn_count = tc;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(turn_count, 1, "expected exactly one turn, got {turn_count}");
+    assert_eq!(
+        turn_end_count, 1,
+        "expected exactly one TurnEnd event, got {turn_end_count}",
+    );
+    assert!(
+        matches!(last_stop, Some(StopCondition::MaxTokensExhausted)),
+        "expected MaxTokensExhausted, got {last_stop:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Other halt paths still terminate cleanly. These guard against the catch-all
+// `_` arm in the stop-reason match growing teeth that swallow these reasons.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn end_turn_halts_with_end_of_turn() {
+    let provider = MockProvider::builder()
+        .with_response_end_turn("done")
+        .build();
+    let agent = agent_with(provider, AgentConfig::default());
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut turn_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd {
+            stopped_for,
+            turn_count: tc,
+            ..
+        } = ev
+        {
+            last_stop = Some(stopped_for);
+            turn_count = tc;
+        }
+    }
+    assert_eq!(turn_count, 1);
+    assert!(
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "expected EndOfTurn, got {last_stop:?}"
+    );
+}
+
+#[tokio::test]
+async fn stop_sequence_halts_with_end_of_turn() {
+    let provider = MockProvider::builder()
+        .with_response_stop_reason(caliban_provider::StopReason::StopSequence, "halt!")
+        .build();
+    let agent = agent_with(provider, AgentConfig::default());
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut turn_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd {
+            stopped_for,
+            turn_count: tc,
+            ..
+        } = ev
+        {
+            last_stop = Some(stopped_for);
+            turn_count = tc;
+        }
+    }
+    assert_eq!(turn_count, 1);
+    assert!(
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "expected EndOfTurn for StopSequence, got {last_stop:?}"
+    );
+}
+
+#[tokio::test]
+async fn refusal_halts_with_refusal_stop_condition() {
+    let provider = MockProvider::builder()
+        .with_response_stop_reason(caliban_provider::StopReason::Refusal, "")
+        .build();
+    let agent = agent_with(provider, AgentConfig::default());
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut turn_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd {
+            stopped_for,
+            turn_count: tc,
+            ..
+        } = ev
+        {
+            last_stop = Some(stopped_for);
+            turn_count = tc;
+        }
+    }
+    assert_eq!(turn_count, 1);
+    assert!(
+        matches!(last_stop, Some(StopCondition::Refusal(_))),
+        "expected Refusal, got {last_stop:?}"
+    );
+}
+
+#[tokio::test]
+async fn content_filter_halts_with_content_filter_stop_condition() {
+    let provider = MockProvider::builder()
+        .with_response_stop_reason(caliban_provider::StopReason::ContentFilter, "")
+        .build();
+    let agent = agent_with(provider, AgentConfig::default());
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut turn_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd {
+            stopped_for,
+            turn_count: tc,
+            ..
+        } = ev
+        {
+            last_stop = Some(stopped_for);
+            turn_count = tc;
+        }
+    }
+    assert_eq!(turn_count, 1);
+    assert!(
+        matches!(last_stop, Some(StopCondition::ContentFilter(_))),
+        "expected ContentFilter, got {last_stop:?}"
     );
 }

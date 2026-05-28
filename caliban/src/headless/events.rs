@@ -48,6 +48,11 @@ pub(crate) enum ResultSubtype {
     BudgetExceeded,
     /// Cancelled (Ctrl-C / SIGTERM).
     Cancelled,
+    /// Per-turn `max_tokens` budget exhausted with recovery disabled. Distinct
+    /// from `Error` so callers can tell a clean budget blowout (the model ran
+    /// long, output is partial) from a genuine failure (provider 5xx, hook
+    /// denial, tool crash).
+    MaxTokens,
 }
 
 impl ResultSubtype {
@@ -60,6 +65,7 @@ impl ResultSubtype {
             Self::MaxTurns => "max_turns",
             Self::BudgetExceeded => "budget_exceeded",
             Self::Cancelled => "cancelled",
+            Self::MaxTokens => "max_tokens",
         }
     }
 }
@@ -573,6 +579,7 @@ mod tests {
             (ResultSubtype::MaxTurns, "max_turns"),
             (ResultSubtype::BudgetExceeded, "budget_exceeded"),
             (ResultSubtype::Cancelled, "cancelled"),
+            (ResultSubtype::MaxTokens, "max_tokens"),
         ] {
             let frame = result_frame(subtype, "answer", "s1", 0.0, 1, 10, 20, None, None);
             let json = serde_json::to_value(&frame).unwrap();
@@ -588,6 +595,7 @@ mod tests {
         assert_eq!(ResultSubtype::Success.as_str(), "success");
         assert_eq!(ResultSubtype::MaxTurns.as_str(), "max_turns");
         assert_eq!(ResultSubtype::BudgetExceeded.as_str(), "budget_exceeded");
+        assert_eq!(ResultSubtype::MaxTokens.as_str(), "max_tokens");
     }
 
     #[test]
