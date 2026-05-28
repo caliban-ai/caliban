@@ -47,6 +47,41 @@ downstream consumers can drop in. Divergences (provider-specific token
 fields, etc.) are documented in the README; we do not commit to
 byte-identical compatibility because caliban is provider-agnostic.
 
+#### Tool calls appear in two frames; the `message` frame is authoritative
+
+Each successful tool call surfaces in the stream-json output as **two
+frames**, by design:
+
+```ndjson
+{"type":"tool_use","id":"toolu_01ABC","name":"Glob","input":{"pattern":"**/*.toml"}}
+{"type":"tool_result","tool_use_id":"toolu_01ABC","is_error":false,"content":[...]}
+{"type":"message","role":"assistant","content":[
+  {"type":"text","text":"Searching for TOML files…"},
+  {"type":"tool_use","id":"toolu_01ABC","name":"Glob","input":{"pattern":"**/*.toml"}}
+]}
+```
+
+1. A top-level **short `tool_use` frame** emitted at the moment the
+   model finishes streaming the tool's input JSON (paired with a
+   `tool_result` frame once the tool completes). This is a *progress
+   indicator* — useful for live UIs that want to show "Glob is
+   running" before the assistant's final message is assembled.
+2. The same `tool_use` block embedded inside the subsequent
+   **`message` frame** (full assistant message, content-block array)
+   emitted at `TurnEnd`. This is the **authoritative record** — the
+   serialized assistant turn as the agent would replay it from a
+   session log.
+
+Operators reconstructing the transcript from the stream should read
+**the `message` frame** and treat the short `tool_use`/`tool_result`
+frames as progress signal. Tools that count `tool_use` blocks must
+not double-count (one short frame + one inside `message` = one tool
+call, not two).
+
+This mirrors Claude Code, where the assistant `message` event is the
+authoritative full content and per-block progress frames are advisory.
+The duplication is intentional; do not dedupe.
+
 ### Structured input is also NDJSON
 
 `--input-format stream-json` makes stdin a chat transcript: each line is
@@ -55,6 +90,42 @@ feeds the agent one message per turn. EOF gracefully drains.
 
 This makes caliban scriptable from any language that can emit JSON
 lines, without juggling pseudo-TTYs.
+
+#### Input frame schema (canonical)
+
+The simple, caliban-canonical shape:
+
+```ndjson
+{"type":"user","content":"hello"}
+{"type":"user","content":[{"type":"text","text":"hello"}]}
+{"type":"control","subtype":"interrupt"}
+```
+
+`user.content` accepts either a JSON string or an array of content
+blocks (each `{"type":"text","text":"…"}`). Both flatten to the same
+text on the way into the agent.
+
+Unknown `type` values, malformed JSON, or extra unrecognized fields
+on `user`/`control` frames are **hard parse errors** (exit 64,
+`EX_USAGE`). The driver flushes any in-flight assistant frames first,
+emits one final `result` frame with `subtype: "error"`, and only then
+returns. This is to avoid the failure mode where an operator sends a
+Claude-Code-shaped envelope (`{"type":"user","message":{"role":"user",
+"content":[...]}}`) and the driver silently runs the agent with a
+blank prompt because `serde` accepted the unknown `message` field.
+
+#### `--input-format stream-json` requires stdin
+
+When `--input-format stream-json` is in effect, an explicit prompt is
+**incompatible** with the stream-json input path. The binary rejects
+the combination at clap-parse time with `EX_USAGE` (exit 64) so
+operators can't accidentally bypass the frame parser via a positional
+prompt or `--prompt …`. The allowed entry points are:
+
+- No prompt args at all (stdin is read as the NDJSON stream); or
+- `-p -` / `--print -` / `--prompt -` (the `-` sentinel explicitly
+  delegates to stdin and is treated as a no-op alongside
+  `--input-format stream-json`).
 
 ### `--bare` is opt-in, not the CI default
 

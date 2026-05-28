@@ -96,6 +96,13 @@ pub(crate) struct SystemInit {
     pub(crate) bare_mode: bool,
     /// Current working directory at run start.
     pub(crate) cwd: String,
+    /// Effective permission mode for this run (camelCase per ADR 0029:
+    /// `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`,
+    /// `bypassPermissions`). The literal string `"disabled"` is emitted
+    /// when `--no-permissions` is in effect (no `PermissionsHook` at all).
+    /// Surfaces the resolved mode so operators can audit which gate
+    /// actually ran (lmstudio Finding 15).
+    pub(crate) permission_mode: String,
 }
 
 /// `system/api_retry` payload.
@@ -303,6 +310,7 @@ pub(crate) struct ResultFrame {
 
 /// Build a `system/init` frame.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn system_init(
     session_id: impl Into<String>,
     model: impl Into<String>,
@@ -311,6 +319,7 @@ pub(crate) fn system_init(
     setting_sources: Vec<String>,
     bare_mode: bool,
     cwd: impl Into<String>,
+    permission_mode: impl Into<String>,
 ) -> SystemInit {
     SystemInit {
         kind: "system".into(),
@@ -323,6 +332,7 @@ pub(crate) fn system_init(
         mcp_servers: Vec::new(),
         bare_mode,
         cwd: cwd.into(),
+        permission_mode: permission_mode.into(),
     }
 }
 
@@ -500,20 +510,40 @@ pub(crate) fn result_frame(
 // ---------------------------------------------------------------------------
 
 /// A parsed line from stdin in `--input-format stream-json` mode.
+///
+/// Each variant's payload is `deny_unknown_fields` so the driver fails
+/// loud on non-caliban shapes (e.g. a Claude-Code-style
+/// `{"type":"user","message":{...}}` envelope) rather than silently
+/// running the agent with a blank prompt (lmstudio Finding 13). serde
+/// doesn't accept `deny_unknown_fields` on enum variants directly, so
+/// each variant payload is a named struct and the enum carries the
+/// `tag` + `content` discriminator.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum InputFrame {
     /// A user message; the driver runs one agent loop pass per `user` frame.
-    User {
-        /// Either a JSON string or an array of content blocks. Both are
-        /// accepted; we flatten to text in `extract_text`.
-        content: Value,
-    },
+    User(InputUser),
     /// A `control` frame (best-effort interrupt support).
-    Control {
-        /// Control subtype (only `"interrupt"` is recognized today).
-        subtype: String,
-    },
+    Control(InputControl),
+}
+
+/// Payload of an `InputFrame::User` variant. Standalone struct so
+/// `deny_unknown_fields` actually applies (serde rejects it on enum
+/// variants).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InputUser {
+    /// Either a JSON string or an array of content blocks. Both are
+    /// accepted; we flatten to text in [`InputFrame::extract_text`].
+    pub(crate) content: Value,
+}
+
+/// Payload of an `InputFrame::Control` variant.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InputControl {
+    /// Control subtype (only `"interrupt"` is recognized today).
+    pub(crate) subtype: String,
 }
 
 impl InputFrame {
@@ -556,6 +586,7 @@ mod tests {
             vec!["managed".into(), "user".into(), "project".into()],
             false,
             "/tmp",
+            "default",
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "system");
@@ -567,6 +598,7 @@ mod tests {
         assert_eq!(json["bare_mode"], false);
         assert_eq!(json["cwd"], "/tmp");
         assert_eq!(json["plugins"][0]["name"], "skill-pack");
+        assert_eq!(json["permission_mode"], "default");
     }
 
     #[test]
@@ -796,10 +828,10 @@ mod tests {
         let line = r#"{"type":"user","content":"hello"}"#;
         let frame: InputFrame = serde_json::from_str(line).unwrap();
         match frame {
-            InputFrame::User { content } => {
-                assert_eq!(InputFrame::extract_text(&content), "hello");
+            InputFrame::User(user) => {
+                assert_eq!(InputFrame::extract_text(&user.content), "hello");
             }
-            InputFrame::Control { .. } => panic!("expected user"),
+            InputFrame::Control(_) => panic!("expected user"),
         }
     }
 
@@ -808,10 +840,10 @@ mod tests {
         let line = r#"{"type":"user","content":[{"type":"text","text":"abc"},{"type":"text","text":"def"}]}"#;
         let frame: InputFrame = serde_json::from_str(line).unwrap();
         match frame {
-            InputFrame::User { content } => {
-                assert_eq!(InputFrame::extract_text(&content), "abcdef");
+            InputFrame::User(user) => {
+                assert_eq!(InputFrame::extract_text(&user.content), "abcdef");
             }
-            InputFrame::Control { .. } => panic!("expected user"),
+            InputFrame::Control(_) => panic!("expected user"),
         }
     }
 
@@ -819,7 +851,7 @@ mod tests {
     fn input_frame_parses_control_interrupt() {
         let line = r#"{"type":"control","subtype":"interrupt"}"#;
         let frame: InputFrame = serde_json::from_str(line).unwrap();
-        assert!(matches!(frame, InputFrame::Control { subtype } if subtype == "interrupt"));
+        assert!(matches!(frame, InputFrame::Control(ctrl) if ctrl.subtype == "interrupt"));
     }
 
     #[test]
@@ -827,5 +859,33 @@ mod tests {
         let line = r#"{"type":"banana","content":"x"}"#;
         let res: Result<InputFrame, _> = serde_json::from_str(line);
         assert!(res.is_err());
+    }
+
+    /// Regression for lmstudio Finding 13: a Claude-Code-shaped envelope
+    /// (`{"type":"user","message":{...}}`) must NOT silently parse to a
+    /// blank `User` frame. We rely on `#[serde(deny_unknown_fields)]` on
+    /// each variant to surface the unknown `message` field as a hard
+    /// parse error.
+    #[test]
+    fn input_frame_rejects_claude_code_envelope_shape() {
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let err = serde_json::from_str::<InputFrame>(line)
+            .expect_err("unknown `message` field must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("message") || msg.contains("unknown field"),
+            "error must name the unknown field; got: {msg}",
+        );
+    }
+
+    /// Defensive: an extra unrecognized field on a `user` frame is
+    /// rejected as well, so consumers can rely on caliban surfacing
+    /// shape-drift instead of dropping data.
+    #[test]
+    fn input_frame_rejects_extra_field_on_user() {
+        let line = r#"{"type":"user","content":"hi","extra":"field"}"#;
+        let res: Result<InputFrame, _> = serde_json::from_str(line);
+        assert!(res.is_err(), "extra field on user frame must error");
     }
 }

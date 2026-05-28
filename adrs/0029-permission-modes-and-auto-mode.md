@@ -147,3 +147,40 @@ to the data they need.
 **Revisit if** auto-mode grows a second consumer (e.g., a non-agent
 classifier client), or if the dispatch path becomes a measurable
 compile-time burden on `caliban-agent-core`.
+
+## Headless `-p` defaults — what actually runs
+
+When `caliban -p` is invoked without `--permission-mode`,
+`--no-permissions`, or any explicit allow/deny/ask flag, the resolved
+mode is `PermissionMode::Default` (per `resolve_startup_mode` in
+`permission_mode.rs`). Static rule evaluation still runs: the built-in
+default-rules tail (`default_rules()` in `permissions.rs`) Allows
+read-only tools (`Read`, `Grep`, `Glob`, `TodoWrite`,
+`EnterPlanMode`/`ExitPlanMode`), Asks for mutating ones (`Write`,
+`Edit`, `Bash`, `WebFetch`), and catch-alls to Ask.
+
+In headless mode, there is no TTY to prompt, so `Ask` verdicts are
+routed to `NonInteractiveAskHandler` (in agent-core's
+`permissions.rs`). Its behavior:
+
+- `auto_allow: false` (the default) — `Ask` becomes a hard deny. The
+  tool call fails with a permission error.
+- `auto_allow: true` (set via `--auto-allow` /
+  `CALIBAN_AUTO_ALLOW`) — `Ask` becomes Allow. Equivalent to running
+  in `dontAsk` mode for the duration of the run.
+
+The net effect: a tool-using prompt that touches only read-only tools
+(`Read`, `Glob`, `Grep`) runs to completion silently because each tool
+hits an explicit Allow. A prompt that needs `Write`/`Edit`/`Bash`
+without `--auto-allow` or an explicit `--allow`/`--permission-mode`
+flag will fail on the first such tool call. The lmstudio 2026-05-27
+probe (Finding 15) observed the read-only case and reported it as
+"auto-dispatch without prompting" — that's accurate, but only because
+`Read` is on the default Allow list.
+
+`--no-permissions` is the only way to skip the static rule layer
+entirely; the resolved mode surfaces in the `system/init` frame's
+`permission_mode` field as the literal string `"disabled"` to make
+this state observable (lmstudio Finding 15). All other modes surface
+under their camelCase name (`default`, `acceptEdits`, `plan`, `auto`,
+`dontAsk`, `bypassPermissions`).

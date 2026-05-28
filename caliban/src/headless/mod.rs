@@ -167,6 +167,14 @@ pub(crate) struct HeadlessRunConfig {
     /// Optional buffer of hook events accumulated by an outer
     /// [`HeadlessHookSink`]. The driver drains this after each turn.
     pub(crate) hook_buffer: Option<HookEventBuffer>,
+    /// Effective permission mode for this run, surfaced verbatim in the
+    /// `system/init` frame's `permission_mode` field (ADR 0029 spelling:
+    /// `default` / `acceptEdits` / `plan` / `auto` / `dontAsk` /
+    /// `bypassPermissions`, plus the literal `"disabled"` when
+    /// `--no-permissions` is in effect). Computed by the binary so the
+    /// driver stays decoupled from `caliban-agent-core::PermissionMode`.
+    /// lmstudio Finding 15.
+    pub(crate) permission_mode: String,
 }
 
 impl HeadlessRunConfig {
@@ -192,6 +200,7 @@ impl HeadlessRunConfig {
             requested_model: "mock".into(),
             cwd: ".".into(),
             hook_buffer: None,
+            permission_mode: "default".into(),
         }
     }
 }
@@ -338,6 +347,7 @@ impl<W: Write> HeadlessDriver<W> {
             self.config.setting_sources.clone(),
             self.config.bare_mode,
             &self.config.cwd,
+            &self.config.permission_mode,
         );
         self.write_ndjson(&frame)
     }
@@ -863,8 +873,8 @@ impl<W: Write> HeadlessDriver<W> {
             };
             let Some(frame) = parsed else { continue };
             match frame {
-                events::InputFrame::User { content } => {
-                    let text = events::InputFrame::extract_text(&content);
+                events::InputFrame::User(user) => {
+                    let text = events::InputFrame::extract_text(&user.content);
                     self.emit_user_echo(&text)?;
                     messages.push(Message::user_text(text));
                     consumed_user_frames += 1;
@@ -886,10 +896,11 @@ impl<W: Write> HeadlessDriver<W> {
                         return self.emit_terminal_result(&terminal, &final_text, turns);
                     }
                 }
-                events::InputFrame::Control { subtype } => {
+                events::InputFrame::Control(ctrl) => {
                     // Best-effort interrupt support is deferred (ADR 0025);
                     // surface a stderr warning so operators don't think it
                     // silently took effect.
+                    let subtype = ctrl.subtype;
                     eprintln!(
                         "[caliban] stream-json control/{subtype} frame received; \
                          interrupts are not yet honored (ADR 0025 deferral)"
@@ -2226,5 +2237,252 @@ mod tests {
             !any_warning,
             "matching models should not produce a warning frame: {frames:#?}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 14 — `result.result` must verbatim-concatenate
+    // `AssistantTextDelta` events, with no whitespace inserted or dropped
+    // between deltas. Confirms the aggregation logic is faithful; if the
+    // probe ever sees `"feel" + "free"` → `"feelfree"` again, the bug is
+    // upstream of the headless driver (in the streaming layer or the
+    // model itself), not here.
+    // -------------------------------------------------------------------
+
+    /// Build a single-turn stream that emits two adjacent text deltas
+    /// with no whitespace between them, mirroring the probe scenario E4.
+    fn two_text_deltas_stream(
+        a: &str,
+        b: &str,
+    ) -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(a.into()),
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text(b.into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]
+    }
+
+    /// Verbatim-concat regression: two text deltas with no inter-chunk
+    /// whitespace must aggregate to the literal concatenation.
+    #[tokio::test]
+    async fn result_field_verbatim_concats_adjacent_text_deltas() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(two_text_deltas_stream("...feel", "free to let me know!"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        assert_eq!(summary.final_text, "...feelfree to let me know!");
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["result"], "...feelfree to let me know!");
+    }
+
+    /// Verbatim-concat regression: whitespace at chunk boundaries must
+    /// pass through unmodified.
+    #[tokio::test]
+    async fn result_field_preserves_whitespace_at_chunk_boundary() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(two_text_deltas_stream("hello ", "world"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+        assert_eq!(summary.final_text, "hello world");
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 15 — `system/init` must surface the resolved
+    // `permission_mode` so operators can audit which gate ran in
+    // headless mode (where there's no TUI status chip).
+    // -------------------------------------------------------------------
+
+    /// Build a tool-using single-turn stream that opens a `tool_use`
+    /// block, streams its input JSON, closes it, and ends the turn.
+    fn tool_call_stream() -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::ToolUse {
+                    id: "toolu_001".into(),
+                    name: "Glob".into(),
+                },
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::ToolUseInputJson(r#"{"pattern":"**/*.toml"}"#.into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]
+    }
+
+    /// Default mode is surfaced verbatim in the `system/init` frame.
+    #[tokio::test]
+    async fn system_init_includes_permission_mode_default() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.permission_mode = "default".into();
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, config);
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+        let frames = parse_ndjson_lines(&driver.writer);
+        let init = frames
+            .iter()
+            .find(|v| v["type"] == "system" && v["subtype"] == "init")
+            .expect("system/init must be present");
+        assert_eq!(init["permission_mode"], "default");
+    }
+
+    /// `--no-permissions` surfaces the literal `"disabled"` string.
+    #[tokio::test]
+    async fn system_init_surfaces_disabled_when_no_permissions() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.permission_mode = "disabled".into();
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, config);
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+        let frames = parse_ndjson_lines(&driver.writer);
+        let init = frames
+            .iter()
+            .find(|v| v["type"] == "system" && v["subtype"] == "init")
+            .expect("system/init must be present");
+        assert_eq!(init["permission_mode"], "disabled");
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 8 — tool_use appears in two frames (short + inside
+    // `message`). ADR 0025 documents this as intentional; the test pins
+    // the contract so a future "dedupe" doesn't silently break operators.
+    // -------------------------------------------------------------------
+
+    /// Tool-using turn must emit BOTH the short `tool_use` frame AND a
+    /// `tool_use` block inside the subsequent `message` frame.
+    #[tokio::test]
+    async fn tool_use_appears_in_short_frame_and_message_frame() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(tool_call_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(buf, HeadlessRunConfig::minimal(OutputFormat::StreamJson));
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+
+        let short_tool_use: Vec<&serde_json::Value> =
+            frames.iter().filter(|v| v["type"] == "tool_use").collect();
+        assert_eq!(
+            short_tool_use.len(),
+            1,
+            "exactly one short tool_use frame per tool call (ADR 0025); got {short_tool_use:?}"
+        );
+        assert_eq!(short_tool_use[0]["id"], "toolu_001");
+        assert_eq!(short_tool_use[0]["name"], "Glob");
+        assert_eq!(short_tool_use[0]["input"]["pattern"], "**/*.toml");
+
+        let message_frames: Vec<&serde_json::Value> =
+            frames.iter().filter(|v| v["type"] == "message").collect();
+        assert_eq!(
+            message_frames.len(),
+            1,
+            "expected exactly one assistant message frame"
+        );
+        let blocks = message_frames[0]["content"]
+            .as_array()
+            .expect("message.content must be an array");
+        let nested: Vec<&serde_json::Value> =
+            blocks.iter().filter(|b| b["type"] == "tool_use").collect();
+        assert_eq!(
+            nested.len(),
+            1,
+            "message frame must carry the same tool_use block (ADR 0025: authoritative copy)"
+        );
+        assert_eq!(nested[0]["id"], short_tool_use[0]["id"]);
+        assert_eq!(nested[0]["name"], short_tool_use[0]["name"]);
+        assert_eq!(nested[0]["input"], short_tool_use[0]["input"]);
     }
 }

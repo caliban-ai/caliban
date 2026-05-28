@@ -107,7 +107,7 @@ mod tests {
         let f = parse_input_line(r#"{"type":"user","content":"hi"}"#)
             .unwrap()
             .unwrap();
-        assert!(matches!(f, InputFrame::User { .. }));
+        assert!(matches!(f, InputFrame::User(_)));
     }
 
     #[test]
@@ -124,8 +124,8 @@ mod tests {
 "#;
         let frames = parse_stream_json_payload(payload).unwrap();
         assert_eq!(frames.len(), 3);
-        assert!(matches!(frames[0], InputFrame::User { .. }));
-        assert!(matches!(frames[1], InputFrame::User { .. }));
-        assert!(matches!(frames[2], InputFrame::Control { .. }));
+        assert!(matches!(frames[0], InputFrame::User(_)));
+        assert!(matches!(frames[1], InputFrame::User(_)));
+        assert!(matches!(frames[2], InputFrame::Control(_)));
     }
 }

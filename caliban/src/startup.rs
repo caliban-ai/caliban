@@ -604,6 +604,7 @@ pub(crate) async fn run_headless(
     cancel: CancellationToken,
     hook_event_buffer: Option<headless::HookEventBuffer>,
     plugin_descriptors: Vec<serde_json::Value>,
+    permission_mode: caliban_agent_core::PermissionMode,
 ) -> i32 {
     let output_format = args.output_format.unwrap_or(headless::OutputFormat::Text);
 
@@ -640,22 +641,29 @@ pub(crate) async fn run_headless(
         }
     }
 
-    // Resolve the prompt source. Three shapes:
+    // Resolve the prompt source. Four shapes:
     // - An explicit CLI prompt (`--print "x"` / `--prompt` / positional) →
     //   single-frame path; `prompt_source` is `Single(text)`.
-    // - No explicit prompt, plain-text stdin → single-frame path with stdin
-    //   contents as the prompt.
-    // - No explicit prompt, `--input-format stream-json` → multi-frame path;
-    //   `prompt_source` is `StreamJson(stdin_input)` and is driven below by
-    //   `HeadlessDriver::run_frames` (Finding 10).
+    // - A prompt slot set to the `-` sentinel → read stdin. Routes to
+    //   `StreamJson` when `--input-format stream-json`, else `Single`.
+    //   This pairs with the clap-time validator that rejects any
+    //   non-`-` inline prompt in stream-json mode (lmstudio Finding 13).
+    // - No explicit prompt, plain-text stdin → single-frame path with
+    //   stdin contents as the prompt.
+    // - No explicit prompt, `--input-format stream-json` → multi-frame
+    //   path; `prompt_source` is `StreamJson(stdin_input)` and is
+    //   driven below by `HeadlessDriver::run_frames` (Finding 10).
     let print_value = args.print.as_deref().filter(|s| !s.is_empty());
-    let prompt_source = match (
-        print_value,
-        args.prompt_flag.as_deref(),
-        args.prompt.as_deref(),
-    ) {
-        (Some(p), _, _) | (_, Some(p), _) | (_, _, Some(p)) => PromptSource::Single(p.to_string()),
-        (None, None, None) => {
+    // First pick the first non-empty prompt slot. If it's `-`, treat as
+    // "delegate to stdin" — same semantics as omitting the flag.
+    let inline_prompt = print_value
+        .or(args.prompt_flag.as_deref())
+        .or(args.prompt.as_deref());
+    let prompt_source = match inline_prompt {
+        Some(p) if p != "-" => PromptSource::Single(p.to_string()),
+        // Either no inline prompt, or the `-` sentinel: pull stdin and
+        // route by --input-format.
+        _ => {
             let stdin_input = match headless::input::read_stdin_capped(&mut std::io::stdin()) {
                 Ok(s) => s,
                 Err(e) => {
@@ -763,6 +771,15 @@ pub(crate) async fn run_headless(
 
     let budget = headless::BudgetTracker::new(args.max_budget_usd);
 
+    // Resolved permission_mode string for the `system/init` frame. The
+    // literal `"disabled"` distinguishes `--no-permissions` (no hook at
+    // all) from the camelCase ADR 0029 mode names. lmstudio Finding 15.
+    let permission_mode_str = if args.no_permissions {
+        "disabled".to_string()
+    } else {
+        permission_mode.as_str().to_string()
+    };
+
     let config = headless::HeadlessRunConfig {
         output_format,
         input_format: args.input_format,
@@ -787,6 +804,7 @@ pub(crate) async fn run_headless(
         requested_model: model.clone(),
         cwd,
         hook_buffer: hook_event_buffer,
+        permission_mode: permission_mode_str,
     };
 
     let stdout = std::io::stdout().lock();

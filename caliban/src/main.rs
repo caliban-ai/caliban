@@ -40,6 +40,14 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Cross-flag validation that clap can't express natively. Fail loud
+    // with EX_USAGE (64) so operators don't debug silent prompt-bypass
+    // bugs (lmstudio Finding 13).
+    if let Err(e) = crate::args::validate_stream_json_input(&args) {
+        eprintln!("[caliban] {e}");
+        std::process::exit(64);
+    }
+
     // `caliban plugin <verb> ...` — plugin manager (ADR 0030). The clap
     // declaration uses `trailing_var_arg`, so the plugin CLI parses
     // its own verbs directly. Dispatched ahead of provider construction
@@ -353,6 +361,7 @@ async fn main() -> Result<()> {
                 std::process::exit(130);
             });
         }
+        let resolved_perm_mode = permission_mode.load();
         let exit = startup::run_headless(
             &args,
             agent,
@@ -366,6 +375,7 @@ async fn main() -> Result<()> {
             cancel,
             hook_event_buffer,
             plugin_descriptors,
+            resolved_perm_mode,
         )
         .await;
         std::process::exit(exit);

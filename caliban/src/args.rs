@@ -515,6 +515,44 @@ fn parse_temperature(s: &str) -> Result<f32, String> {
     Ok(n)
 }
 
+/// Post-parse validation for combinations clap can't express natively.
+///
+/// `--input-format stream-json` consumes stdin as a chat transcript;
+/// any inline prompt would silently bypass the NDJSON parser. Reject
+/// inline prompts at startup with `EX_USAGE`-style messaging so
+/// operators see the conflict immediately instead of debugging a
+/// blank-prompt agent run (lmstudio Finding 13).
+///
+/// The `-` sentinel is allowed in any prompt slot because it
+/// explicitly delegates to stdin — semantically identical to omitting
+/// the flag in stream-json mode.
+///
+/// # Errors
+/// Returns an `EX_USAGE`-style anyhow error when a non-`-` prompt is
+/// combined with `--input-format stream-json`.
+pub(crate) fn validate_stream_json_input(args: &Args) -> Result<()> {
+    if !matches!(args.input_format, headless::InputFormat::StreamJson) {
+        return Ok(());
+    }
+    let slots = [
+        ("--print / -p", args.print.as_deref()),
+        ("--prompt", args.prompt_flag.as_deref()),
+        ("PROMPT (positional)", args.prompt.as_deref()),
+    ];
+    for (slot, val) in slots {
+        if let Some(v) = val
+            && v != "-"
+            && !v.is_empty()
+        {
+            anyhow::bail!(
+                "`{slot}` is incompatible with `--input-format stream-json`: stdin is the NDJSON \
+                 frame stream. Pass `-` (or omit the prompt flag entirely) to read frames from stdin."
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn read_prompt(args: &Args) -> Result<String> {
     use std::io::Read as _;
     let raw = args
@@ -553,4 +591,64 @@ pub(crate) fn summarize_blocks(blocks: &[ContentBlock], max: usize) -> String {
         }
     }
     "(no text)".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an `Args` value with the listed extra CLI args appended.
+    /// Avoids stomping on test process state by always passing the
+    /// `caliban` binary name as `argv[0]`.
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv: Vec<&str> = vec!["caliban"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn validate_stream_json_input_allows_dash_print() {
+        // `-p -` explicitly delegates to stdin; valid under stream-json input.
+        let args = parse(&["--input-format", "stream-json", "-p", "-"]);
+        assert!(validate_stream_json_input(&args).is_ok());
+    }
+
+    #[test]
+    fn validate_stream_json_input_allows_no_prompt_at_all() {
+        // Omitting the prompt is the canonical stream-json invocation.
+        let args = parse(&["--input-format", "stream-json"]);
+        assert!(validate_stream_json_input(&args).is_ok());
+    }
+
+    #[test]
+    fn validate_stream_json_input_rejects_inline_print_prompt() {
+        // Inline `-p "hi"` would silently bypass the NDJSON parser
+        // (lmstudio Finding 13). Must fail loud.
+        let args = parse(&["--input-format", "stream-json", "-p", "hi"]);
+        let err = validate_stream_json_input(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stream-json"),
+            "error must name stream-json conflict; got {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_stream_json_input_rejects_inline_positional_prompt() {
+        let args = parse(&["--input-format", "stream-json", "hello"]);
+        assert!(validate_stream_json_input(&args).is_err());
+    }
+
+    #[test]
+    fn validate_stream_json_input_rejects_inline_prompt_flag() {
+        let args = parse(&["--input-format", "stream-json", "--prompt", "hello"]);
+        assert!(validate_stream_json_input(&args).is_err());
+    }
+
+    #[test]
+    fn validate_stream_json_input_noop_in_text_mode() {
+        // Inline prompts are obviously fine in the default text mode.
+        let args = parse(&["-p", "hello"]);
+        assert!(validate_stream_json_input(&args).is_ok());
+    }
 }
