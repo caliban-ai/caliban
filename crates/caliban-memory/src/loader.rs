@@ -42,18 +42,6 @@ const CONVENTIONS_BLOCK: &str = concat!(
     "facts already in the repo. Keep this file ≤ 200 lines.\n",
 );
 
-/// Environment kill-switch. When set to a truthy value, the auto tier is
-/// dropped from the prefix entirely (and the auto-memory skill is hidden by
-/// the binary, which checks the same flag).
-const DISABLE_ENV: &str = "CALIBAN_DISABLE_AUTO_MEMORY";
-
-fn auto_memory_disabled() -> bool {
-    matches!(
-        std::env::var(DISABLE_ENV).ok().as_deref(),
-        Some("1" | "true" | "TRUE" | "True" | "yes")
-    )
-}
-
 /// Load all three memory tiers from disk, enforce the token budget, and return
 /// the assembled [`MemoryPrefix`].
 ///
@@ -65,7 +53,7 @@ fn auto_memory_disabled() -> bool {
 /// (permissions, etc.), or [`MemoryError::AutoMemorySeed`] if the auto-memory
 /// directory exists check / seed write fails.
 pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
-    let auto_disabled = auto_memory_disabled();
+    let auto_disabled = config.disable_auto;
 
     // Seed the auto-memory dir if it doesn't exist yet (skip when disabled —
     // we don't want a CI run to create a project dir).
@@ -796,17 +784,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disable_env_skips_auto_tier() {
+    async fn disable_auto_config_skips_auto_tier() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("memory");
-        // Pre-populate so we *would* load if the env weren't set.
+        // Pre-populate so we *would* load if the flag weren't set.
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("MEMORY.md"), "# Memory index\n").unwrap();
 
-        let _guard = env_guard("CALIBAN_DISABLE_AUTO_MEMORY");
-        set_env("CALIBAN_DISABLE_AUTO_MEMORY", Some("1"));
-
-        let cfg = MemoryConfig::for_test(dir.clone());
+        // The disable flag lives on the config (resolved from
+        // `CALIBAN_DISABLE_AUTO_MEMORY` at `from_env` time), so this test sets
+        // it directly rather than mutating the process environment — which used
+        // to race with parallel tests that call `load()`.
+        let mut cfg = MemoryConfig::for_test(dir.clone());
+        cfg.disable_auto = true;
         let p = load(&cfg).await.unwrap();
         assert!(p.auto.is_none(), "auto tier should be dropped");
     }

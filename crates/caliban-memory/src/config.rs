@@ -61,6 +61,13 @@ pub struct MemoryConfig {
     /// project). When set, truncates project first, then global, to fit. `None`
     /// means "no per-scope cap".
     pub cap_tokens_claude_md: Option<usize>,
+    /// `CALIBAN_DISABLE_AUTO_MEMORY` — kill-switch: drop the auto-memory tier
+    /// from the prefix entirely. Resolved from the environment once in
+    /// [`MemoryConfig::from_env`] and defaulted to `false` in
+    /// [`MemoryConfig::for_test`], so [`crate::loader::load`] never reads the
+    /// process environment directly (which previously raced with env-mutating
+    /// tests under parallel execution).
+    pub disable_auto: bool,
 }
 
 impl MemoryConfig {
@@ -140,6 +147,7 @@ impl MemoryConfig {
             max_tokens,
             cap_tokens_auto,
             cap_tokens_claude_md,
+            disable_auto: env_truthy("CALIBAN_DISABLE_AUTO_MEMORY"),
         }
     }
 }
@@ -167,6 +175,7 @@ impl MemoryConfig {
             max_tokens: 100_000,
             cap_tokens_auto: None,
             cap_tokens_claude_md: None,
+            disable_auto: false,
         }
     }
 
