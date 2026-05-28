@@ -42,6 +42,15 @@ pub enum Error {
         body: String,
     },
 
+    /// The upstream model server reported an internal fault (process
+    /// crash, OOM kill, segfault, etc.) — distinct from `ServerError`
+    /// because the fault may arrive in-band (HTTP 200 + SSE error
+    /// payload, as LM Studio does when the model crashes mid-stream).
+    /// The fault is server-side, not request-side, so callers should
+    /// surface it as such rather than as `InvalidRequest`.
+    #[error("upstream server fault: {0}")]
+    UpstreamServerFault(String),
+
     /// The response was blocked by a content-safety filter.
     #[error("content filter triggered: {0}")]
     ContentFilter(String),

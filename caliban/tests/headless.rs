@@ -108,6 +108,58 @@ fn caliban_continue_with_empty_store_exits_66() {
     );
 }
 
+#[test]
+fn caliban_continue_with_empty_sessions_dir_no_session_arg_exits_66() {
+    // Finding 11 (2026-05-27 LM Studio probe): `--sessions-dir <empty>
+    // --continue` without `--session <NAME>` previously silently fell
+    // through to a fresh ephemeral run (exit 0). The fix honors the
+    // user-supplied sessions dir, scans it for prior sessions, and exits
+    // 66 when none are found.
+    //
+    // We use `--provider openai` with a fake `OPENAI_API_KEY` so provider
+    // initialization succeeds and the `--continue` resolution path actually
+    // runs — otherwise an unrelated "API key missing" error would mask the
+    // regression. The model name only matters for store-key bucketing; it
+    // is never dispatched (the agent loop exits at the session-resolution
+    // step with exit 66 before any HTTP request fires).
+    let exe = env!("CARGO_BIN_EXE_caliban");
+    let tmp = TempDir::new().unwrap();
+    let out = Command::new(exe)
+        .args([
+            "-p",
+            "hi",
+            "--continue",
+            "--sessions-dir",
+            tmp.path().to_str().unwrap(),
+            "--no-mcp",
+            "--bare",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-4o-mini",
+            // Crucially: no `--session <NAME>`. That's the regression path.
+        ])
+        .env("OPENAI_API_KEY", "sk-test-fake")
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("failed to invoke caliban");
+    let code = out.status.code().unwrap_or(0);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Must exit 66 (NoSessionsToContinue per ADR 0025); never 0.
+    assert_ne!(
+        code, 0,
+        "regression: --continue with empty --sessions-dir silently ran fresh ephemeral; stderr: {stderr}"
+    );
+    assert_eq!(
+        code, 66,
+        "expected 66 NoSessionsToContinue, got {code}; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("no sessions to continue"),
+        "stderr must explain why we refused; got: {stderr}"
+    );
+}
+
 // --- HeadlessDriver-level tests using MockProvider ----------------------
 
 fn one_turn_text_response(text: &str) -> Vec<Result<StreamEvent, caliban_provider::Error>> {

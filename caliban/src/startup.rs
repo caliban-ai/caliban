@@ -1345,10 +1345,20 @@ pub(crate) fn resolve_session(
     todos: &caliban_agent_core::SharedTodos,
     plan_mode: &caliban_agent_core::SharedPlanMode,
 ) -> Result<(Option<SessionStore>, Option<PersistedSession>)> {
-    let store = match (&args.sessions_dir, &args.session) {
-        (_, None) => None,
-        (Some(d), Some(_)) => Some(SessionStore::new(d.clone())),
-        (None, Some(_)) => Some(SessionStore::new(SessionStore::default_root()?)),
+    // Build the session store whenever any flag actually needs one:
+    // `--session <NAME>` (legacy), `--continue`, or `--resume <NAME>`.
+    // Without this, `--sessions-dir <X> --continue` (no `--session`) would
+    // silently fall back to scanning `~/.caliban/sessions` and find nothing,
+    // then no-op into a fresh ephemeral run — exactly Finding 11 of the
+    // 2026-05-27 LM Studio probe.
+    let needs_store = args.session.is_some() || args.continue_latest || args.resume.is_some();
+    let store = if needs_store {
+        Some(SessionStore::new(match &args.sessions_dir {
+            Some(d) => d.clone(),
+            None => SessionStore::default_root()?,
+        }))
+    } else {
+        None
     };
     let session = if let (Some(store), Some(name)) = (&store, &args.session) {
         Some(match store.load(name)? {

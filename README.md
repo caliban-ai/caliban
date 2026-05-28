@@ -278,51 +278,59 @@ shims; migrate them with `caliban config migrate`.
 
 ## Known model limitations
 
-### Qwen3 reasoning models on LM Studio — multi-turn tool use unsupported
+### Qwen3 reasoning models on LM Studio — long tool chains break (verified 2026-05-27)
 
 **Affected models.** Qwen3-family *reasoning* variants when served via
 LM Studio: e.g. `qwen3.5-9b-mlx`, `qwen3-72b-mlx`, and similar Qwen3
 reasoning-mode builds. Non-reasoning Qwen variants are not affected.
 
-**Symptom.** The first tool call in a conversation works. After the
-`tool_result` is sent back, the model's *follow-up* tool call is
-serialized as Qwen-native `<tool_call>` XML inside the OpenAI
-`content` field rather than populating the OpenAI `tool_calls` array:
+**What works.** Two-step tool chains (e.g. `Glob` → `Read` → final
+answer) run end-to-end. Reasoning content arrives in the OpenAI
+`reasoning_content` delta and is preserved as `thinking` blocks in
+the assistant message.
+
+**What breaks.** Once a chain reaches a third tool dispatch, the
+model serializes the next tool call as Qwen-native `<tool_call>` XML
+**inside its reasoning channel** (the OpenAI `reasoning_content`
+delta, surfaced as a `thinking` block in caliban) instead of populating
+the OpenAI `tool_calls` array:
 
 ```
 <tool_call>
-<function=Glob>
-<parameter=pattern>**/*.yaml</parameter>
+<function=Read>
+<parameter=path>
+Cargo.toml
+</parameter>
 </function>
 </tool_call>
 ```
 
-caliban's OpenAI-spec parser correctly treats this as text content,
-sees no `tool_calls` field, gets `finish_reason: "stop"`, and ends the
-turn without dispatching anything. The user sees a confusing
-empty-looking assistant turn (or the XML rendered as prose).
+caliban's OpenAI-spec parser sees a thinking block with no
+`tool_calls` field and a `finish_reason: "stop"`, so the turn ends
+without dispatching anything. The user sees a stalled run that
+exits cleanly with no apparent error.
 
-Text-only follow-ups after a `tool_result` work fine; only the
-second-or-later *tool dispatch* in a chain is broken.
-
-**Why caliban doesn't fix this.** LM Studio passes the model's output
-through verbatim and does not rewrite `<tool_call>` XML into the
-OpenAI `tool_calls` array. Building and maintaining a per-model-family
-content-side XML scanner inside caliban's OpenAI provider would add
-parsing complexity and ongoing maintenance for every Qwen template
-variation. We've elected to keep the bug visible and document the
-limitation instead.
+**Why caliban doesn't fix this.** LM Studio passes the model's
+reasoning output through verbatim and does not rewrite Qwen-native
+`<tool_call>` XML into the OpenAI `tool_calls` array. Building and
+maintaining a reasoning-channel XML scanner inside caliban's OpenAI
+provider would add parsing complexity and ongoing maintenance for
+every Qwen template variation. We've elected to keep the bug visible
+and document the limitation instead.
 
 **Workarounds (any one of):**
 
-1. **Configure LM Studio's per-model tool-call adapter** to emit
+1. **Keep tool chains short** (≤ 2 dispatches per turn). Restructure
+   prompts so each turn only requires a Glob+Read or Read+Edit pair,
+   not a three-step plan.
+2. **Configure LM Studio's per-model tool-call adapter** to emit
    OpenAI-style `tool_calls`. LM Studio exposes a per-model JSON
    config for tool-call normalization; if your build supports
    rewriting Qwen-native tool calls into the OpenAI shape, enable it
    for the affected model.
-2. **Use a non-reasoning Qwen variant** (e.g. a plain `qwen3-*`
+3. **Use a non-reasoning Qwen variant** (e.g. a plain `qwen3-*`
    instruct build without reasoning mode) served via LM Studio.
-3. **Use a hosted provider** — Anthropic, OpenAI, or Google — where
+4. **Use a hosted provider** — Anthropic, OpenAI, or Google — where
    tool-call schemas are normalized server-side.
 
 ## Repository layout
