@@ -21,7 +21,7 @@ they grow.
     - Add: ctx.app.context_window.record_history(&[]);
     - Placement: just before returning SlashOutcome::Continue.
 
-- Finding: when a turn ends with `stop_reason: MaxTokens` and no `ToolUse` block, the loop silently halts via the catch-all `EndOfTurn` branch. Reasoning-heavy models (e.g. gpt-5) can burn the entire `max_tokens` budget on internal/reasoning tokens, emit a single empty AssistantTextDelta, and exit the run with zero visible output and no next-turn signal. Reproduced 2026-05-26 with gpt-5-2025-08-07 at the default 1024-token cap: TurnEnd { stop_reason: MaxTokens, output_tokens: 2048, tool_results: [] } → agent went idle. Claude Code's leaked source handles this with a two-stage recovery (one-shot budget escalation, then meta-message continuation up to a cap); caliban currently has neither.
+- Finding [PARTIALLY RESOLVED — Stage A/B/C recovery shipped in #60; loop double-count fixed in #68]: when a turn ends with `stop_reason: MaxTokens` and no `ToolUse` block, the loop silently halts via the catch-all `EndOfTurn` branch. Reasoning-heavy models (e.g. gpt-5) can burn the entire `max_tokens` budget on internal/reasoning tokens, emit a single empty AssistantTextDelta, and exit the run with zero visible output and no next-turn signal. Reproduced 2026-05-26 with gpt-5-2025-08-07 at the default 1024-token cap: TurnEnd { stop_reason: MaxTokens, output_tokens: 2048, tool_results: [] } → agent went idle. Claude Code's leaked source handles this with a two-stage recovery (one-shot budget escalation, then meta-message continuation up to a cap). **Update 2026-05-27:** this two-stage recovery was already shipped in PR #60 (the "caliban currently has neither" claim was stale). PR #68 found it was over-firing — `max_tokens_recovery` defaulted to `true` and Stage A's re-issue re-emitted `TurnEnd`, inflating the turn count past the cap — so #68 disabled recovery by default and added an explicit `StopReason::MaxTokens` halt + `StopCondition::MaxTokensExhausted`. **Remaining work:** fix Stage A's `TurnEnd` double-count so recovery can be safely re-enabled (split attempt-end vs turn-end semantics), and add a CLI flag to opt back in.
   - Commit: ea8a56bd665a16d8a47ea5e858b6647187c7f3dc
   - File: crates/caliban-agent-core/src/stream/mod.rs
   - Lines: 903–908 (post-turn continue/halt decision); also 170–183 (StopCondition enum) and AgentConfig.max_tokens default (1024).
@@ -160,36 +160,35 @@ they grow.
 
 ---
 
-## Ollama probe follow-ups (2026-05-27, open)
+## Ollama probe follow-ups (2026-05-27)
 
 F1/F2/F3/F5 from the original probe were closed in PR #66 (`14afe66`).
-F4, F6, and F7 remain open and are tracked here.
-
-- Finding (F4): Headless `-p --session NAME` does not persist user/assistant messages. The session file ends up with only the system message; turn-1 user/assistant content never lands on disk, so turn 2 starts with a fresh context. Not Ollama-specific — affects every provider — but it does mean the headline `--session` flow in the README doesn't actually work today via `-p`.
-  - Commit: 43a288f (Ollama probe baseline)
-  - File: caliban/src/startup.rs
-  - Lines: 650–664
-  - Repro:
-    ```bash
-    caliban --session foo -p "Pick a number 1-10."         # → "7"
-    caliban --session foo -p "What number did you pick?"   # → "I haven't picked any number…"
-    cat ~/.local/share/caliban/sessions/foo.json | jq '.messages[].role'
-    # → "system"  (only)
-    ```
-  - Suggested fix: thread the agent's `final_messages` (or the driver's accumulated `messages`) back into the save path so user/assistant turns persist for `-p` runs the same way they do for TUI runs.
-
-- Finding (F6): Agent loop continues past `StopReason::MaxTokens` in some cases. With `--max-tokens 8` against qwen3.5 (a reasoning model that burns the entire budget on the `thinking` field), the headless driver reports `turns: 2` even though both turns hit the `length` stop reason and produced only Thinking content.
-  - Commit: 43a288f (Ollama probe baseline)
-  - File: crates/caliban-agent-core/src/turn.rs:39 (continue_loop check); crates/caliban-agent-core/src/stream/mod.rs (continue-loop branch)
-  - Repro:
-    ```bash
-    caliban --provider ollama --model qwen3.5:9b --max-tokens 8 \
-      -p --output-format stream-json "Count to twenty"
-    # → two assistant `message` frames, each Thinking-only, then result:""
-    ```
-  - Suggested fix: trace the continue-loop logic in `stream/mod.rs`; likely a missed condition where Thinking-only assistant turns fall through. `turn.rs:39` sets `continue_loop = stop_reason == StopReason::ToolUse`, so the second turn shouldn't fire. Worth a focused debugging pass — likely related to the MaxTokens recovery TODO above and may be folded into the same fix.
+**Update 2026-05-27:** F4 (session persistence) is fixed in **#70**;
+F6 (continue-past-MaxTokens) is fixed in **#68**. F7 (Ollama
+`tool_call_id` round-trip, future-proofing) remains open.
 
 - Finding (F7): Tool-result correlation has no `tool_call_id` round-trip for Ollama. The IR `ToolResult` block carries the `tool_use_id`, but the Ollama adapter drops it when serializing to the wire (Ollama's `role: "tool"` message format doesn't define a correlation field today). Correct for the current Ollama protocol, but future-proofing only: (1) if Ollama later adds a `tool_call_id` field, our adapter won't forward it without a code change; (2) parallel tool calls rely on positional order rather than ID.
   - Commit: 43a288f (Ollama probe baseline)
   - File: crates/caliban-provider-ollama/src/ir_convert.rs:111–131
   - Severity: none today (informational). Track here so we don't lose it when Ollama's tool-message schema evolves.
+
+---
+
+## LMStudio probe follow-ups (2026-05-27)
+
+Probe ran caliban's OpenAI provider against LMStudio
+(`http://localhost:1234/v1`) serving three loaded models
+(`qwen2.5-coder-7b-instruct-mlx`, `qwen3.5-9b-mlx`,
+`google/gemma-4-e4b`). Full writeup:
+[`docs/2026-05-27-lmstudio-probe-findings.md`](2026-05-27-lmstudio-probe-findings.md).
+
+**Resolution status (2026-05-28):** F2/F3/F4 landed in #71, F6 in #69,
+F7/F12 in #70, F11 in #69, F13/F14/F15 in #72 — all merged, so their
+entries were pruned. Only **F16** (below) remains open; it isn't
+addressed by any PR yet.
+
+- Finding (LMStudio F16 — NOT yet addressed by any PR): Headless `-p` running a `Write`/`Edit`/`Bash` prompt without `--auto-allow` fails on the first such tool call. Surfaced while documenting F15 in #72. Headless `-p` resolves to `PermissionMode::Default`, whose rule tail **Asks** for mutating tools; in a non-interactive context the `Ask` resolves to a hard deny, so a headless prompt that needs to write a file or run a command fails on the first mutating call. Read-only tools (Read/Glob/Grep) are Allowed by the default tail, which is why F15/E5 saw tools "just work" — they only exercised reads.
+  - Commit: 8b87b35 (LMStudio probe baseline)
+  - File: crates/caliban-agent-core/src/permissions.rs (default-rules tail); headless dispatch path in caliban/src/headless/mod.rs
+  - Severity: Medium — a whole tool class fails silently in the headline headless mode.
+  - Suggested fix: decide the intended headless default. Either (a) emit a clear error ("tool X requires --auto-allow or an --allow rule in headless mode") instead of an opaque deny, plus document the requirement loudly; or (b) make headless `-p` default to a more permissive mode for workspace-scoped mutating tools. Pairs with F15's `permission_mode` surfacing (now in `system/init` per #72) so the failure is at least diagnosable.
