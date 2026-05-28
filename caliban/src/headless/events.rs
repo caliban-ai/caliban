@@ -216,6 +216,29 @@ pub(crate) struct HookEvent {
     pub(crate) hook_specific_output: Value,
 }
 
+/// `warning` payload — informational, non-fatal divergences detected
+/// mid-stream that operators should see but that don't terminate the run.
+///
+/// The first subtype is `model_mismatch`: emitted by the run driver when
+/// the response's `model` field differs from the requested model (F4 from
+/// the 2026-05-27 lmstudio probe — local servers silently substitute a
+/// different model for unknown IDs). Future subtypes use the same shape;
+/// the `details` map is for subtype-specific payload (e.g. `requested` /
+/// `actual` for `model_mismatch`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WarningFrame {
+    /// Always `"warning"`.
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    /// Subtype tag (e.g. `"model_mismatch"`).
+    pub(crate) subtype: String,
+    /// Human-readable message (one line).
+    pub(crate) message: String,
+    /// Subtype-specific structured data.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub(crate) details: Value,
+}
+
 /// Final `result` frame. Also the single body of `--output-format json`.
 ///
 /// Field semantics by `subtype`:
@@ -384,6 +407,23 @@ pub(crate) fn user_echo(content: Value) -> UserEcho {
     UserEcho {
         kind: "user".into(),
         content,
+    }
+}
+
+/// Build a `warning/model_mismatch` frame (F4 — the OpenAI-compatible
+/// response's `model` field differs from the requested model).
+#[must_use]
+pub(crate) fn warning_model_mismatch(requested: &str, actual: &str) -> WarningFrame {
+    WarningFrame {
+        kind: "warning".into(),
+        subtype: "model_mismatch".into(),
+        message: format!(
+            "model mismatch: requested {requested:?} but provider responded with {actual:?}"
+        ),
+        details: serde_json::json!({
+            "requested": requested,
+            "actual": actual,
+        }),
     }
 }
 

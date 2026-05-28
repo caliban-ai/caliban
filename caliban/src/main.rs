@@ -60,7 +60,11 @@ async fn main() -> Result<()> {
     // status 1 if anything failed, else 0. Wired ahead of provider
     // construction so it runs even when auth/network is broken.
     if let Some(CalibanCommand::Doctor { deep }) = &args.command {
-        let diag = diagnostics::Diagnostics::run(diagnostics::DiagOpts { deep: *deep }).await;
+        let diag = diagnostics::Diagnostics::run(diagnostics::DiagOpts {
+            deep: *deep,
+            model: args.model.clone(),
+        })
+        .await;
         diagnostics::print_diagnostics_text(&diag);
         std::process::exit(diag.exit_code());
     }
@@ -211,6 +215,14 @@ async fn main() -> Result<()> {
         .model
         .clone()
         .unwrap_or_else(|| default_model_for(args.provider).to_string());
+
+    // F4 pre-flight: when targeting a non-canonical OpenAI endpoint
+    // (LM Studio etc.), confirm the model is loaded *before* the agent
+    // loop fires its first request. Local servers silently substitute
+    // the first loaded model for unknown IDs, so a typo runs the wrong
+    // model with no visible signal. The check is a no-op for canonical
+    // OpenAI / Anthropic / Google / Ollama.
+    startup::preflight_model_check(&args, &model).await?;
 
     // Wire AgentTool (sub-agent primitive) — closes over a snapshot of
     // the registry so sub-agents cannot recurse. Background-handoff

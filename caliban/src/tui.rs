@@ -839,9 +839,11 @@ mod tests {
         // The legacy slash::observe::doctor::run_checks helper was
         // replaced by the shared crate::diagnostics module (Plan C
         // Task 7). Exercise that instead so the test stays meaningful.
-        let diag =
-            crate::diagnostics::Diagnostics::run(crate::diagnostics::DiagOpts { deep: false })
-                .await;
+        let diag = crate::diagnostics::Diagnostics::run(crate::diagnostics::DiagOpts {
+            deep: false,
+            model: None,
+        })
+        .await;
         assert!(
             !diag.checks.is_empty(),
             "expected at least one health check to run"

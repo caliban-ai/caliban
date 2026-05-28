@@ -44,6 +44,19 @@ pub enum OpenAIError {
     #[error("transport error: {0}")]
     Transport(Box<dyn std::error::Error + Send + Sync>),
 
+    /// The configured base URL (typically from `OPENAI_BASE_URL`) is not
+    /// a parseable URL. Distinct from `Transport` so the binary's
+    /// startup dispatch can surface a config-shaped error message
+    /// instead of collapsing into "API key is missing" (lmstudio probe
+    /// 2026-05-27 Finding 2).
+    #[error("invalid base URL {value:?}: {source}")]
+    InvalidBaseUrl {
+        /// The unparseable value that the operator supplied.
+        value: String,
+        /// The underlying `url::ParseError`.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// An unsupported feature was requested.
     #[error("unsupported feature: {0}")]
     Unsupported(String),
@@ -75,6 +88,7 @@ impl From<OpenAIError> for ProviderError {
             | OpenAIError::StreamParse(_)
             | OpenAIError::MissingConfig(_)
             | OpenAIError::Transport(_)
+            | OpenAIError::InvalidBaseUrl { .. }
             | OpenAIError::Unsupported(_) => ProviderError::adapter(e),
             // Upstream-reported errors (in-band SSE error payload) are
             // request-shaped problems most of the time (oversized prompt,

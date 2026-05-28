@@ -50,17 +50,93 @@ impl DirectConfig {
     /// # Errors
     ///
     /// Returns `Err(OpenAIError::MissingConfig)` if `OPENAI_API_KEY` is not set,
-    /// or `Err(OpenAIError::Transport)` if `OPENAI_BASE_URL` is not a valid URL.
+    /// or `Err(OpenAIError::InvalidBaseUrl)` if `OPENAI_BASE_URL` is not a valid URL.
     pub fn from_env() -> Result<Self, OpenAIError> {
         let key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| OpenAIError::MissingConfig("OPENAI_API_KEY".into()))?;
-        let mut cfg = Self::new(SecretString::new(key.into()));
-        if let Ok(url) = std::env::var("OPENAI_BASE_URL") {
-            cfg.base_url = Url::parse(&url).map_err(|e| OpenAIError::Transport(Box::new(e)))?;
-        }
+        let url = std::env::var("OPENAI_BASE_URL").ok();
+        let mut cfg = Self::from_parts(
+            SecretString::new(key.into()),
+            url.as_deref(),
+            std::env::var("OPENAI_ORG_ID").ok(),
+            std::env::var("OPENAI_PROJECT").ok(),
+        )?;
         cfg.organization = std::env::var("OPENAI_ORG_ID").ok();
         cfg.project = std::env::var("OPENAI_PROJECT").ok();
         Ok(cfg)
+    }
+
+    /// Build a `DirectConfig` from explicit parts. Exposed so the env-
+    /// reading and URL-parsing branches can be exercised independently
+    /// in tests (mirrors `caliban_provider_ollama::config::from_env_value`).
+    ///
+    /// `base_url == None` selects the default; a `Some(value)` that does
+    /// not parse as a URL returns `Err(OpenAIError::InvalidBaseUrl { … })`
+    /// so the operator sees the env var name in the surface line instead
+    /// of the bare `url::ParseError` text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OpenAIError::InvalidBaseUrl)` when `base_url` is
+    /// `Some` but not a parseable URL.
+    pub fn from_parts(
+        api_key: SecretString,
+        base_url: Option<&str>,
+        organization: Option<String>,
+        project: Option<String>,
+    ) -> Result<Self, OpenAIError> {
+        let mut cfg = Self::new(api_key);
+        if let Some(url) = base_url {
+            cfg.base_url = Url::parse(url).map_err(|e| OpenAIError::InvalidBaseUrl {
+                value: url.to_string(),
+                source: Box::new(e),
+            })?;
+        }
+        cfg.organization = organization;
+        cfg.project = project;
+        Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_key() -> SecretString {
+        SecretString::new("sk-test".into())
+    }
+
+    #[test]
+    fn unset_base_url_falls_back_to_default() {
+        let cfg = DirectConfig::from_parts(dummy_key(), None, None, None)
+            .expect("unset OPENAI_BASE_URL must succeed");
+        assert_eq!(cfg.base_url.as_str(), "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn valid_base_url_is_used() {
+        let cfg =
+            DirectConfig::from_parts(dummy_key(), Some("http://localhost:1234/v1"), None, None)
+                .expect("valid URL should succeed");
+        assert_eq!(cfg.base_url.as_str(), "http://localhost:1234/v1");
+    }
+
+    #[test]
+    fn malformed_base_url_returns_invalid_base_url_error() {
+        // Regression: F2 from the 2026-05-27 lmstudio probe — a malformed
+        // OPENAI_BASE_URL was being wrapped as `OpenAIError::Transport`
+        // (an opaque, type-erased box) and the binary's startup dispatch
+        // collapsed it into "OPENAI_API_KEY is not set" even when the key
+        // was set. The error must be a distinct variant that carries the
+        // env-var name so the startup surface line can call it out.
+        let err = DirectConfig::from_parts(dummy_key(), Some("not://a:url:!@#"), None, None)
+            .expect_err("malformed URL must error");
+        match err {
+            OpenAIError::InvalidBaseUrl { value, .. } => {
+                assert_eq!(value, "not://a:url:!@#");
+            }
+            other => panic!("expected InvalidBaseUrl, got {other:?}"),
+        }
     }
 }
 

@@ -85,18 +85,32 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
     use ProviderKind::{Anthropic, Google, Ollama, Openai};
     Ok(match args.provider {
         Anthropic => {
+            use caliban_provider_anthropic::error::AnthropicError;
             use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
-            Arc::new(AnthropicProvider::direct(missing_key(
-                "ANTHROPIC_API_KEY",
-                DirectConfig::from_env(),
-            )?)?)
+            // `from_env` can fail two ways: API key missing OR
+            // `ANTHROPIC_BASE_URL` unparseable. Discriminate so the
+            // surface line names the right env var (F2 — was previously
+            // collapsing the URL-parse path into "API key is not set").
+            let cfg = DirectConfig::from_env().map_err(|e| match e {
+                AnthropicError::MissingConfig(name) => missing_key_err(name),
+                AnthropicError::Transport(inner) => anyhow::anyhow!(
+                    "invalid ANTHROPIC_BASE_URL: {inner} — unset it or supply a valid URL"
+                ),
+                other => anyhow::anyhow!(other),
+            })?;
+            Arc::new(AnthropicProvider::direct(cfg)?)
         }
         Openai => {
+            use caliban_provider_openai::error::OpenAIError;
             use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
-            Arc::new(OpenAIProvider::direct(missing_key(
-                "OPENAI_API_KEY",
-                DirectConfig::from_env(),
-            )?)?)
+            let cfg = DirectConfig::from_env().map_err(|e| match e {
+                OpenAIError::MissingConfig(name) => missing_key_err(name.as_str()),
+                OpenAIError::InvalidBaseUrl { value, source } => anyhow::anyhow!(
+                    "invalid OPENAI_BASE_URL {value:?}: {source} — unset it or supply a valid URL"
+                ),
+                other => anyhow::anyhow!(other),
+            })?;
+            Arc::new(OpenAIProvider::direct(cfg)?)
         }
         Ollama => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
@@ -109,25 +123,127 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
             )?)
         }
         Google => {
+            use caliban_provider_google::error::GoogleError;
             use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
-            Arc::new(GoogleProvider::ai_studio(missing_key(
-                "GEMINI_API_KEY",
-                AIStudioConfig::from_env(),
-            )?)?)
+            let cfg = AIStudioConfig::from_env().map_err(|e| match e {
+                GoogleError::MissingConfig(name) => missing_key_err(name),
+                GoogleError::Transport(inner) => anyhow::anyhow!(
+                    "invalid GEMINI_BASE_URL: {inner} — unset it or supply a valid URL"
+                ),
+                other => anyhow::anyhow!(other),
+            })?;
+            Arc::new(GoogleProvider::ai_studio(cfg)?)
         }
     })
 }
 
-/// Wrap a provider config-builder failure with a single actionable
-/// message instead of an anyhow chain that just re-states the env var
-/// name twice. Tells the operator the three ways to supply credentials.
-fn missing_key<T, E>(env_var: &'static str, res: std::result::Result<T, E>) -> Result<T> {
-    res.map_err(|_| {
-        anyhow::anyhow!(
-            "{env_var} is not set — export it, configure `apiKeyHelper` in \
-             settings.json (ADR 0026), or pick a different `--provider`"
-        )
-    })
+/// Format the canonical "API key is missing" surface line. Centralized so
+/// every provider arm of [`build_provider`] uses the same wording, and so
+/// the URL-parse error paths can clearly *not* trigger it (F2).
+fn missing_key_err(env_var: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{env_var} is not set — export it, configure `apiKeyHelper` in \
+         settings.json (ADR 0026), or pick a different `--provider`"
+    )
+}
+
+/// Pre-flight check: when targeting a non-canonical `OpenAI` endpoint
+/// (LM Studio, vLLM, `llama.cpp-server`, …), confirm the requested model
+/// is loaded before the agent loop fires its first request. Local servers
+/// like LM Studio silently substitute the first-loaded model for unknown
+/// model IDs and return a normal HTTP 200, so the typo never surfaces as
+/// an error and a wrong model runs the whole session (F4 from the 2026-
+/// 05-27 lmstudio probe).
+///
+/// Skipped for:
+/// - Non-`OpenAI` providers (Anthropic / Google / Ollama have their own
+///   handling; Anthropic + Google 404 unknown IDs cleanly).
+/// - Canonical `api.openai.com` (already 404s on unknown IDs).
+/// - When `OPENAI_BASE_URL` is unset (defaults to api.openai.com — same).
+/// - Network errors on the listing (treat as informational warning;
+///   the actual request will surface a more specific error).
+pub(crate) async fn preflight_model_check(args: &Args, model: &str) -> Result<()> {
+    if !matches!(args.provider, ProviderKind::Openai) {
+        return Ok(());
+    }
+    let Ok(base) = std::env::var("OPENAI_BASE_URL") else {
+        return Ok(());
+    };
+    let Ok(parsed) = url::Url::parse(&base) else {
+        // The unparseable-URL path is handled by build_provider; don't
+        // double-surface here.
+        return Ok(());
+    };
+    // Skip canonical OpenAI — public catalog is too dynamic to enumerate
+    // reliably, and the wire-level 404 already produces a clean error.
+    if matches!(parsed.host_str(), Some(h) if h.ends_with("openai.com")) {
+        return Ok(());
+    }
+
+    let mut models_url = parsed.clone();
+    {
+        let path = models_url.path().trim_end_matches('/').to_string();
+        models_url.set_path(&format!("{path}/models"));
+    }
+
+    // Don't escalate http-client construction failures here; the
+    // agent's own request will surface them.
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    else {
+        return Ok(());
+    };
+    let mut req = client.get(models_url);
+    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+        req = req.bearer_auth(k);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        // Reachability errors are not the operator's fault here — fall
+        // through and let the agent loop surface the real network error
+        // with its full context. Just print a hint on stderr so the
+        // pre-flight isn't completely invisible.
+        Err(e) => {
+            eprintln!(
+                "[caliban] note: model pre-flight could not reach {base} ({e}); proceeding with request"
+            );
+            return Ok(());
+        }
+    };
+    if !resp.status().is_success() {
+        // Non-2xx: same logic — the agent's request will explain it
+        // better (auth, 5xx, etc.).
+        return Ok(());
+    }
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
+    let models: Vec<String> = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        // Some local servers list nothing until a model is loaded; in
+        // that case we can't usefully compare. Let the request surface
+        // the real "no models loaded" error.
+        return Ok(());
+    }
+    if models.iter().any(|m| m == model) {
+        return Ok(());
+    }
+    let listed = models.join(", ");
+    Err(anyhow::anyhow!(
+        "model {model:?} is not loaded at OPENAI_BASE_URL={base}; loaded models: {listed} \
+         (pass --model with one of those names; LM Studio and similar servers silently \
+         substitute the first loaded model for unknown IDs, so this check fails fast)"
+    ))
 }
 
 pub(crate) fn build_registry(
@@ -234,6 +350,7 @@ pub(crate) fn web_fetch_client() -> reqwest::Client {
     caliban_common::http::no_redirect_client()
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_and_render(
     agent: Arc<Agent>,
     messages: Vec<Message>,
@@ -242,6 +359,8 @@ pub(crate) async fn run_and_render(
 ) -> Result<(Vec<Message>, Usage, caliban_agent_core::StopCondition)> {
     use caliban_agent_core::TurnEvent;
 
+    let requested_model = agent.active_model().as_str().to_string();
+    let mut seen_mismatches: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stream = agent.stream_until_done(messages, cancel);
     let mut tool_inputs: HashMap<String, String> = HashMap::new();
     let mut at_column_zero = true;
@@ -260,6 +379,22 @@ pub(crate) async fn run_and_render(
 
     while let Some(event) = stream.next().await {
         match event? {
+            TurnEvent::TurnStart { model: actual, .. }
+                if !actual.is_empty() && actual != requested_model =>
+            {
+                // F4: surface silent model substitution by LM Studio /
+                // similar OpenAI-compatible servers. The response's
+                // `model` field is the actually-served model ID; if it
+                // doesn't match the requested model, write one line to
+                // stderr the first time we see it (deduped per pair so
+                // a multi-turn run doesn't spam).
+                let key = format!("{requested_model}=>{actual}");
+                if seen_mismatches.insert(key) {
+                    eprintln!(
+                        "[caliban] warning: model mismatch — requested {requested_model:?} but provider responded with {actual:?}"
+                    );
+                }
+            }
             TurnEvent::AssistantTextDelta { text, .. } => {
                 print!("{text}");
                 std::io::stdout().flush().ok();
@@ -649,6 +784,7 @@ pub(crate) async fn run_headless(
         tools,
         plugins: plugin_descriptors,
         model_summary,
+        requested_model: model.clone(),
         cwd,
         hook_buffer: hook_event_buffer,
     };

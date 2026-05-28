@@ -159,6 +159,9 @@ pub(crate) struct HeadlessRunConfig {
     pub(crate) plugins: Vec<serde_json::Value>,
     /// "<provider>/<model>" summary.
     pub(crate) model_summary: String,
+    /// Raw model identifier as requested by the operator. Compared against
+    /// each `TurnStart.model` to detect silent model substitution (F4).
+    pub(crate) requested_model: String,
     /// Current working directory at run start.
     pub(crate) cwd: String,
     /// Optional buffer of hook events accumulated by an outer
@@ -186,6 +189,7 @@ impl HeadlessRunConfig {
             tools: Vec::new(),
             plugins: Vec::new(),
             model_summary: "mock/mock".into(),
+            requested_model: "mock".into(),
             cwd: ".".into(),
             hook_buffer: None,
         }
@@ -264,6 +268,10 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// session under `--session NAME` (F1 follow-up). Empty until the
     /// stream produces a `RunEnd` event.
     final_messages: Vec<Message>,
+    /// Model-mismatch warnings already emitted this run, keyed by the
+    /// `(requested, actual)` pair. Dedups so a multi-turn run against a
+    /// hot-swapped server doesn't spam the same warning every turn (F4).
+    seen_model_mismatches: std::collections::HashSet<(String, String)>,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -298,6 +306,7 @@ impl<W: Write> HeadlessDriver<W> {
             tool_calls_seen: 0,
             last_assistant_text: String::new(),
             final_messages: Vec::new(),
+            seen_model_mismatches: std::collections::HashSet::new(),
         }
     }
 
@@ -663,7 +672,35 @@ impl<W: Write> HeadlessDriver<W> {
                     }
                 }
             }
-            TurnEvent::TurnStart { .. } => {}
+            TurnEvent::TurnStart { model: actual, .. } => {
+                // F4: catch silent model substitution. Some OpenAI-compatible
+                // servers (LM Studio is the documented case) route requests
+                // for unknown model IDs to the first loaded model with a
+                // normal HTTP 200, so the typo never surfaces. The response's
+                // `model` field is the ground-truth ID the upstream actually
+                // ran. Compare against the requested model and emit a one-
+                // line warning the first time each (requested, actual) pair
+                // is seen this run.
+                let requested = self.config.requested_model.clone();
+                if !actual.is_empty()
+                    && actual != requested
+                    && self
+                        .seen_model_mismatches
+                        .insert((requested.clone(), actual.clone()))
+                {
+                    match self.config.output_format {
+                        OutputFormat::StreamJson => {
+                            let frame = events::warning_model_mismatch(&requested, &actual);
+                            self.write_ndjson(&frame)?;
+                        }
+                        OutputFormat::Text | OutputFormat::Json => {
+                            eprintln!(
+                                "[caliban] warning: model mismatch — requested {requested:?} but provider responded with {actual:?}"
+                            );
+                        }
+                    }
+                }
+            }
         }
         if matches!(self.config.output_format, OutputFormat::Text) && !*at_column_zero {
             // Ensure deltas are flushed; final newline is added at run end.
@@ -2075,6 +2112,119 @@ mod tests {
         assert!(
             frame.get("tool_calls_seen").is_none(),
             "success must not carry tool_calls_seen, got {frame}",
+        );
+    }
+
+    /// F4: when the upstream OpenAI-compatible server's response `model`
+    /// field differs from the requested model (LM Studio's silent-
+    /// substitution behavior), stream-json mode must emit a single
+    /// `warning/model_mismatch` frame the first time the pair is seen.
+    /// Subsequent turns with the same mismatch don't re-emit.
+    #[tokio::test]
+    async fn model_mismatch_emits_warning_frame_once() {
+        let mock = Arc::new(MockProvider::new());
+        // Two turns, both responding with `actual-served-model` even
+        // though we requested `requested-model`. The driver should warn
+        // exactly once (deduped).
+        let make_turn = || -> Vec<caliban_provider::error::Result<StreamEvent>> {
+            vec![
+                Ok(StreamEvent::MessageStart {
+                    id: "msg".into(),
+                    model: "actual-served-model".into(),
+                }),
+                Ok(StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_type: StreamingContentType::Text,
+                }),
+                Ok(StreamEvent::Delta {
+                    index: 0,
+                    delta: StreamingDelta::Text("hi".into()),
+                }),
+                Ok(StreamEvent::ContentBlockStop { index: 0 }),
+                Ok(StreamEvent::MessageDelta {
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage_delta: Some(Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    }),
+                }),
+                Ok(StreamEvent::MessageStop),
+            ]
+        };
+        mock.enqueue_stream(make_turn());
+        mock.enqueue_stream(make_turn());
+
+        let provider: Arc<dyn Provider + Send + Sync> = mock;
+        let agent = Arc::new(
+            Agent::builder()
+                .provider(provider)
+                .tools(ToolRegistry::new())
+                .model("requested-model")
+                .max_tokens(64)
+                .max_turns(10)
+                .build()
+                .expect("agent builder"),
+        );
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.requested_model = "requested-model".into();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(&mut buf, config);
+
+        let stdin = "{\"type\":\"user\",\"content\":\"first\"}\n\
+                     {\"type\":\"user\",\"content\":\"second\"}\n";
+        driver
+            .run_frames(agent, Vec::new(), stdin, CancellationToken::new())
+            .await
+            .expect("multi-frame run succeeded");
+
+        let frames = parse_ndjson_lines(&buf);
+        let mismatch_frames: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|v| v["type"] == "warning" && v["subtype"] == "model_mismatch")
+            .collect();
+        assert_eq!(
+            mismatch_frames.len(),
+            1,
+            "expected exactly one warning/model_mismatch frame, got {}: {frames:#?}",
+            mismatch_frames.len()
+        );
+        let frame = mismatch_frames[0];
+        assert_eq!(frame["details"]["requested"], "requested-model");
+        assert_eq!(frame["details"]["actual"], "actual-served-model");
+    }
+
+    /// Companion: when the response's `model` field matches the
+    /// requested model, no warning frame is emitted.
+    #[tokio::test]
+    async fn model_match_emits_no_warning_frame() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream()); // model: "mock"
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.requested_model = "mock".into();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(&mut buf, config);
+
+        driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("run succeeded");
+
+        let frames = parse_ndjson_lines(&buf);
+        let any_warning = frames
+            .iter()
+            .any(|v| v["type"] == "warning" && v["subtype"] == "model_mismatch");
+        assert!(
+            !any_warning,
+            "matching models should not produce a warning frame: {frames:#?}"
         );
     }
 }

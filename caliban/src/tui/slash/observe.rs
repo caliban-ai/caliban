@@ -216,8 +216,11 @@ impl SlashCommand for DoctorCommand {
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
         let deep = args.contains("--deep");
-        let diag =
-            crate::diagnostics::Diagnostics::run(crate::diagnostics::DiagOpts { deep }).await;
+        let diag = crate::diagnostics::Diagnostics::run(crate::diagnostics::DiagOpts {
+            deep,
+            model: None,
+        })
+        .await;
         ctx.app.transcript.push(TranscriptLine::Info(format!(
             "doctor \u{2014} {} check(s):",
             diag.checks.len()
