@@ -96,10 +96,16 @@ pub(crate) enum HeadlessError {
 }
 
 /// Map a [`HeadlessError`] to a process exit code per ADR 0025.
+///
+/// `MaxTurnsExceeded` uses `75` (`EX_TEMPFAIL` from `sysexits.h`) so it
+/// stays clear of the `128 + signal` UNIX convention. The prior value
+/// `130` collided with `SIGINT` (`128 + 2`), which made a CI script
+/// reading `$?` conclude the user had Ctrl-C'd even though `--max-turns`
+/// fired (F12 follow-up).
 #[must_use]
 pub(crate) fn exit_code_for(err: &HeadlessError) -> i32 {
     match err {
-        HeadlessError::MaxTurnsExceeded(_) => 130,
+        HeadlessError::MaxTurnsExceeded(_) => 75,
         HeadlessError::BudgetExceeded { .. } => 137,
         HeadlessError::StdinTooLarge { .. } | HeadlessError::Configuration(_) => 78,
         HeadlessError::ResumeNotFound(_)
@@ -209,6 +215,16 @@ pub(crate) struct HeadlessRunSummary {
     pub(crate) structured_output: Option<serde_json::Value>,
     /// Error message (when `subtype == Error`).
     pub(crate) error: Option<String>,
+    /// Number of tool calls observed across the run (counted at
+    /// `ToolCallEnd`). Surfaced in non-`success` `result` frames so
+    /// consumers can distinguish "agent looped through tools" from
+    /// "agent stalled with no observable activity" (F7 follow-up).
+    pub(crate) tool_calls_seen: u32,
+    /// Final state of the conversation: the user/assistant messages
+    /// the agent accumulated. Used by the binary to persist back into
+    /// the session store under `--session` (F1 follow-up). Empty for
+    /// runs that exit before any message lands.
+    pub(crate) final_messages: Vec<Message>,
 }
 
 /// Per-call buffer used to defer the stream-json `tool_use` frame until
@@ -233,6 +249,21 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// the start of each `run_single_pass`; entries are removed on
     /// `ToolCallEnd`.
     pending_tool_calls: HashMap<String, ToolCallBuf>,
+    /// Running tally of `ToolCallEnd` events seen across the entire run.
+    /// Surfaced in non-`success` `result` frames (F7 follow-up) so consumers
+    /// can distinguish an empty assistant reply from a genuine tool loop.
+    tool_calls_seen: u32,
+    /// Most recently observed non-empty assistant text body. Updated at
+    /// `TurnEnd` from the reconstructed assistant message. Used to populate
+    /// the `last_assistant_text` field of non-`success` `result` frames so
+    /// consumers can see what the agent last said before truncation, instead
+    /// of the across-turn concatenation that `final_text` carries.
+    last_assistant_text: String,
+    /// Full conversation history captured from `TurnEvent::RunEnd`. The
+    /// binary reads this after `run()` / `run_frames()` to persist the
+    /// session under `--session NAME` (F1 follow-up). Empty until the
+    /// stream produces a `RunEnd` event.
+    final_messages: Vec<Message>,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -264,7 +295,21 @@ impl<W: Write> HeadlessDriver<W> {
             writer,
             config,
             pending_tool_calls: HashMap::new(),
+            tool_calls_seen: 0,
+            last_assistant_text: String::new(),
+            final_messages: Vec::new(),
         }
+    }
+
+    /// Take ownership of the conversation history captured from the
+    /// `TurnEvent::RunEnd` event. The binary calls this after `run()` /
+    /// `run_frames()` to persist user/assistant messages back into the
+    /// session store under `--session NAME` (F1 follow-up).
+    ///
+    /// Returns an empty vec if the run terminated before producing any
+    /// `RunEnd` event (e.g. an early I/O error from the driver itself).
+    pub(crate) fn take_final_messages(&mut self) -> Vec<Message> {
+        std::mem::take(&mut self.final_messages)
     }
 
     /// Emit the `system/init` frame (stream-json mode only). No-op for
@@ -367,6 +412,9 @@ impl<W: Write> HeadlessDriver<W> {
         let max_turns_was_zero = self.config.max_turns == Some(0);
         if max_turns_was_zero {
             // Short-circuit: a 0 turn limit is a deterministic max-turns event.
+            // Preserve the input messages as final_messages so the binary can
+            // still persist them under `--session` (F1 follow-up).
+            self.final_messages.clone_from(&messages);
             let summary = HeadlessRunSummary {
                 subtype: ResultSubtype::MaxTurns,
                 final_text: String::new(),
@@ -376,6 +424,8 @@ impl<W: Write> HeadlessDriver<W> {
                 total_cost_usd: 0.0,
                 structured_output: None,
                 error: None,
+                tool_calls_seen: 0,
+                final_messages: messages,
             };
             self.emit_result(&summary)?;
             return Err(HeadlessError::MaxTurnsExceeded(0));
@@ -431,6 +481,8 @@ impl<W: Write> HeadlessDriver<W> {
             total_cost_usd: self.config.budget.total_cost_usd(),
             structured_output,
             error: schema_error.clone(),
+            tool_calls_seen: self.tool_calls_seen,
+            final_messages: self.final_messages.clone(),
         };
         self.emit_result(&summary)?;
         if let Some(e) = schema_error {
@@ -522,6 +574,10 @@ impl<W: Write> HeadlessDriver<W> {
                 content,
                 ..
             } => {
+                // Count every tool call regardless of output format — the
+                // counter feeds the non-`success` result frame (F7 follow-up),
+                // not just the stream-json `tool_result` frame.
+                self.tool_calls_seen = self.tool_calls_seen.saturating_add(1);
                 if matches!(self.config.output_format, OutputFormat::StreamJson) {
                     // Pair the `tool_use` frame with the matching
                     // `tool_result`: emit the deferred tool_use now that
@@ -546,6 +602,16 @@ impl<W: Write> HeadlessDriver<W> {
                 self.config
                     .budget
                     .record_with_model(&usage, 0.0, provider, model);
+                // Capture the per-turn assistant text body so non-`success`
+                // result frames can report the LAST thing the model said
+                // instead of the across-turn concatenation that `final_text`
+                // carries (F7 follow-up). Update only when the turn produced
+                // non-empty text so a Thinking-only turn doesn't blow away
+                // the prior turn's useful reply.
+                let turn_text = assistant_text(&assistant_message);
+                if !turn_text.is_empty() {
+                    self.last_assistant_text = turn_text;
+                }
                 if matches!(self.config.output_format, OutputFormat::StreamJson)
                     && !self.config.include_partial_messages
                 {
@@ -553,7 +619,17 @@ impl<W: Write> HeadlessDriver<W> {
                     self.write_ndjson(&events::assistant_message(content_value))?;
                 }
             }
-            TurnEvent::RunEnd { stopped_for, .. } => {
+            TurnEvent::RunEnd {
+                final_messages,
+                stopped_for,
+                ..
+            } => {
+                // Capture the full conversation history so the binary can
+                // persist user/assistant messages back into the session
+                // store under `--session NAME` (F1 follow-up). Mirrors
+                // `RunOutcome.final_messages` consumed by the TUI/single-prompt
+                // path; the driver had been silently dropping it.
+                self.final_messages = final_messages;
                 // Each non-EndOfTurn variant terminates the run. We hand the
                 // matching `TerminalStop` up to the caller so a single final
                 // `result` frame can be emitted (correct for both single-frame
@@ -665,6 +741,8 @@ impl<W: Write> HeadlessDriver<W> {
             total_cost_usd,
             structured_output: None,
             error,
+            tool_calls_seen: self.tool_calls_seen,
+            final_messages: self.final_messages.clone(),
         };
         self.emit_result(&summary)?;
         match stop {
@@ -738,6 +816,8 @@ impl<W: Write> HeadlessDriver<W> {
                         total_cost_usd: self.config.budget.total_cost_usd(),
                         structured_output: None,
                         error: Some(msg.clone()),
+                        tool_calls_seen: self.tool_calls_seen,
+                        final_messages: self.final_messages.clone(),
                     };
                     self.emit_result(&summary)?;
                     return Err(HeadlessError::InputParse(msg));
@@ -792,6 +872,8 @@ impl<W: Write> HeadlessDriver<W> {
                 total_cost_usd: self.config.budget.total_cost_usd(),
                 structured_output: None,
                 error: Some("no user frame found in stream-json stdin input".to_string()),
+                tool_calls_seen: self.tool_calls_seen,
+                final_messages: self.final_messages.clone(),
             };
             self.emit_result(&summary)?;
             return Err(HeadlessError::NoUserInput);
@@ -827,6 +909,8 @@ impl<W: Write> HeadlessDriver<W> {
             total_cost_usd: self.config.budget.total_cost_usd(),
             structured_output,
             error: schema_error.clone(),
+            tool_calls_seen: self.tool_calls_seen,
+            final_messages: self.final_messages.clone(),
         };
         self.emit_result(&summary)?;
         if let Some(e) = schema_error {
@@ -836,6 +920,12 @@ impl<W: Write> HeadlessDriver<W> {
     }
 
     fn emit_result(&mut self, s: &HeadlessRunSummary) -> Result<(), HeadlessError> {
+        let last_assistant_text_override =
+            if matches!(s.subtype, ResultSubtype::Success) || self.last_assistant_text.is_empty() {
+                None
+            } else {
+                Some(self.last_assistant_text.clone())
+            };
         let frame = events::result_frame(
             s.subtype,
             &s.final_text,
@@ -846,6 +936,8 @@ impl<W: Write> HeadlessDriver<W> {
             s.total_output_tokens,
             s.structured_output.clone(),
             s.error.clone(),
+            last_assistant_text_override,
+            s.tool_calls_seen,
         );
         match self.config.output_format {
             OutputFormat::Text => {
@@ -947,13 +1039,30 @@ fn extract_user_text(msg: &Message) -> String {
     out
 }
 
+/// Concatenate the `Text` blocks of an assistant message. Used to extract
+/// the per-turn assistant reply body (excluding `Thinking` / `ToolUse`)
+/// for the `last_assistant_text` field of non-`success` result frames.
+fn assistant_text(msg: &Message) -> String {
+    let mut out = String::new();
+    for b in &msg.content {
+        if let ContentBlock::Text(t) = b {
+            out.push_str(&t.text);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn exit_codes_match_adr_table() {
-        assert_eq!(exit_code_for(&HeadlessError::MaxTurnsExceeded(0)), 130);
+        // F12: max_turns maps to 75 (`EX_TEMPFAIL`) — distinct from the
+        // `128 + signal` UNIX convention so CI scripts can tell it from
+        // a real SIGINT (which still surfaces as 130 from the main signal
+        // handler in caliban/src/main.rs).
+        assert_eq!(exit_code_for(&HeadlessError::MaxTurnsExceeded(0)), 75);
         assert_eq!(
             exit_code_for(&HeadlessError::BudgetExceeded { limit: Some(0.01) }),
             137,
@@ -1266,7 +1375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_end_max_turns_emits_max_turns_subtype_and_exits_130() {
+    async fn run_end_max_turns_emits_max_turns_subtype_and_exits_75() {
         // Drive max_turns=1 with a tool-using response so the loop wants
         // to continue but hits the cap. The driver short-circuits when
         // max_turns is configured to 0; max_turns=1 reaches the model
@@ -1317,13 +1426,28 @@ mod tests {
             matches!(&err, HeadlessError::MaxTurnsExceeded(1)),
             "expected MaxTurnsExceeded(1), got {err:?}",
         );
-        assert_eq!(exit_code_for(&err), 130);
+        assert_eq!(exit_code_for(&err), 75);
 
         let frame = parse_json_frame(&buf);
         assert_eq!(frame["subtype"], "max_turns");
         assert!(
             frame["error"].is_null(),
             "max_turns frame should not carry error, got {frame}",
+        );
+        // F7: non-success result frames drop the `result` field and
+        // surface structured fields instead. The raw text fragment ("loop")
+        // moves to `last_assistant_text`.
+        assert!(
+            frame.get("result").is_none() || frame["result"].is_null(),
+            "max_turns must not carry top-level `result`, got {frame}",
+        );
+        assert_eq!(
+            frame["last_assistant_text"], "loop",
+            "max_turns must surface the last assistant text fragment, got {frame}",
+        );
+        assert_eq!(
+            frame["tool_calls_seen"], 0,
+            "tool_calls_seen should be present (zero here — no tool registered), got {frame}",
         );
     }
 
@@ -1741,6 +1865,216 @@ mod tests {
         assert!(
             has_thinking_block,
             "final message frame must still carry the Thinking content block"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // F1 follow-up — driver exposes `final_messages` to the binary so
+    // `-p --session NAME` actually persists user/assistant turns. The
+    // binary's session save path lives in `startup.rs::run_headless`;
+    // here we assert the driver-level contract: after `run()`, the
+    // accumulated history is non-empty and includes the user message we
+    // passed in plus the assistant's reply.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn driver_captures_final_messages_for_session_persistence() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(text_turn_stream("hi back"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let _summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hello driver")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let captured = driver.take_final_messages();
+        let roles: Vec<&str> = captured
+            .iter()
+            .map(|m| match m.role {
+                caliban_provider::Role::System => "system",
+                caliban_provider::Role::User => "user",
+                caliban_provider::Role::Assistant => "assistant",
+            })
+            .collect();
+        // The agent loop's `final_messages` includes the input user
+        // message plus the reconstructed assistant message; system
+        // prompts (when present) come from the caller, but the minimal
+        // config doesn't inject one. We assert at minimum a user + an
+        // assistant message round-tripped through the driver.
+        assert!(
+            roles.contains(&"user") && roles.contains(&"assistant"),
+            "expected final_messages to include user + assistant; got roles {roles:?}",
+        );
+
+        // A second `take_final_messages` returns empty — the value moves.
+        let again = driver.take_final_messages();
+        assert!(
+            again.is_empty(),
+            "take should drain the buffer, second call got {again:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_captures_final_messages_even_on_max_turns() {
+        // Even when the run terminates with MaxTurns, the driver should
+        // still expose `final_messages` so the binary can persist a
+        // partial transcript (F1 — resume should pick up where the cap
+        // landed, not lose the turn outright).
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg_1".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text("partial".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]);
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 1);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let err = driver
+            .run(
+                agent,
+                vec![Message::user_text("loop please")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("max_turns should surface as MaxTurnsExceeded");
+        assert!(matches!(err, HeadlessError::MaxTurnsExceeded(_)));
+
+        let captured = driver.take_final_messages();
+        assert!(
+            !captured.is_empty(),
+            "max_turns must still preserve accumulated messages for resume"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // F7 follow-up — non-`success` result frames carry structured fields
+    // (`last_assistant_text`, `tool_calls_seen`) instead of the raw
+    // concatenated `result` string. Asserted against an actual driver
+    // run, not just a unit-level `result_frame()` call.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn max_turns_result_frame_uses_structured_fields() {
+        let mock = Arc::new(MockProvider::new());
+        // Two text fragments across a turn; max_turns=1 truncates after.
+        mock.enqueue_stream(vec![
+            Ok(StreamEvent::MessageStart {
+                id: "msg_1".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Text,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text("first ".into()),
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Text("fragment".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage_delta: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]);
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 1);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await;
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "max_turns");
+        // F7: the concatenated `result` field is gone on non-success runs.
+        assert!(
+            frame.get("result").is_none() || frame["result"].is_null(),
+            "max_turns must not carry top-level `result`, got {frame}",
+        );
+        // The last assistant text body is preserved verbatim instead.
+        assert_eq!(frame["last_assistant_text"], "first fragment");
+        // tool_calls_seen is 0 here (no tool actually registered to fire).
+        assert_eq!(frame["tool_calls_seen"], 0);
+    }
+
+    #[tokio::test]
+    async fn success_result_frame_keeps_legacy_result_field() {
+        // Regression: the F7 fix MUST NOT touch the success shape.
+        // Downstream `jq` consumers depend on `result` being present.
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("benign run succeeds");
+        assert_eq!(summary.subtype, ResultSubtype::Success);
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "success");
+        assert_eq!(frame["result"], "ok");
+        // The structured fields are suppressed for success so the shape
+        // exactly matches the prior protocol.
+        assert!(
+            frame.get("last_assistant_text").is_none(),
+            "success must not carry last_assistant_text, got {frame}",
+        );
+        assert!(
+            frame.get("tool_calls_seen").is_none(),
+            "success must not carry tool_calls_seen, got {frame}",
         );
     }
 }

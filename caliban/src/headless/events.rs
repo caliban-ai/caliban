@@ -217,6 +217,17 @@ pub(crate) struct HookEvent {
 }
 
 /// Final `result` frame. Also the single body of `--output-format json`.
+///
+/// Field semantics by `subtype`:
+/// - `success` → `result` carries the assistant's final reply (load-bearing
+///   contract; downstream `jq` consumers depend on it). `last_assistant_text`
+///   and `tool_calls_seen` are omitted.
+/// - All non-`success` subtypes (`error`, `max_turns`, `budget_exceeded`,
+///   `cancelled`) → `result` is omitted; consumers should read the
+///   structured fields (`last_assistant_text`, `tool_calls_seen`,
+///   `error`) instead. This avoids the old behavior where `result` was the
+///   raw concatenation of every assistant-text fragment across a truncated
+///   run, which couldn't be distinguished from a clean answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ResultFrame {
     /// Always `"result"`.
@@ -225,8 +236,11 @@ pub(crate) struct ResultFrame {
     /// Outcome category (`success`, `error`, `max_turns`, `budget_exceeded`,
     /// `cancelled`).
     pub(crate) subtype: String,
-    /// Final assistant text (best-effort summary).
-    pub(crate) result: String,
+    /// Final assistant text (best-effort summary). Present only when
+    /// `subtype == "success"`; for non-`success` subtypes see
+    /// `last_assistant_text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<String>,
     /// Session identifier.
     pub(crate) session_id: String,
     /// Cumulative cost in USD computed by `caliban-telemetry::pricing`
@@ -246,6 +260,18 @@ pub(crate) struct ResultFrame {
     /// Error message, when `subtype == "error"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// Most recent non-empty assistant text body the agent produced.
+    /// Emitted for non-`success` subtypes (F7 follow-up); `null` when the
+    /// run produced no assistant text. Consumers parsing partial runs read
+    /// this instead of `result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_assistant_text: Option<String>,
+    /// Number of `ToolCallEnd` events observed across the entire run.
+    /// Emitted for non-`success` subtypes (F7 follow-up); lets consumers
+    /// distinguish an empty-but-active run (tool loop) from an empty-and-
+    /// idle one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_calls_seen: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +398,13 @@ pub(crate) fn hook_event(event_name: impl Into<String>, payload: Value) -> HookE
 }
 
 /// Build a final `result` frame.
+///
+/// Successful runs carry the assistant's reply in `result`; non-`success`
+/// runs carry it (best-effort) in `last_assistant_text` along with
+/// `tool_calls_seen`, and `result` is omitted from the serialized JSON.
+/// This is the F7 follow-up shape — the prior protocol concatenated every
+/// assistant fragment into `result` for max-turns runs, which couldn't be
+/// distinguished from a clean answer downstream.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn result_frame(
@@ -384,11 +417,32 @@ pub(crate) fn result_frame(
     total_output_tokens: u32,
     structured_output: Option<Value>,
     error: Option<String>,
+    last_assistant_text: Option<String>,
+    tool_calls_seen: u32,
 ) -> ResultFrame {
+    let is_success = matches!(subtype, ResultSubtype::Success);
+    let result_text: String = result_text.into();
+    let (result, last_assistant_text, tool_calls_seen) = if is_success {
+        // Success keeps the documented `result` field; structured fields
+        // are omitted so the success shape stays unchanged.
+        (Some(result_text), None, None)
+    } else {
+        // Non-success: surface structured fields instead of the raw
+        // concatenated `result`. `last_assistant_text` falls back to the
+        // existing `result_text` accumulator when the per-turn tracker is
+        // empty (e.g. a budget cutoff fires before the first TurnEnd).
+        let fallback = if result_text.is_empty() {
+            None
+        } else {
+            Some(result_text)
+        };
+        let lat = last_assistant_text.or(fallback);
+        (None, lat, Some(tool_calls_seen))
+    };
     ResultFrame {
         kind: "result".into(),
         subtype: subtype.as_str().into(),
-        result: result_text.into(),
+        result,
         session_id: session_id.into(),
         total_cost_usd,
         turns,
@@ -396,6 +450,8 @@ pub(crate) fn result_frame(
         total_output_tokens,
         structured_output,
         error,
+        last_assistant_text,
+        tool_calls_seen,
     }
 }
 
@@ -572,22 +628,119 @@ mod tests {
     }
 
     #[test]
-    fn result_frame_serializes_all_subtypes() {
+    fn result_frame_success_carries_result_field() {
+        let frame = result_frame(
+            ResultSubtype::Success,
+            "answer",
+            "s1",
+            0.0,
+            1,
+            10,
+            20,
+            None,
+            None,
+            None,
+            0,
+        );
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["type"], "result");
+        assert_eq!(json["subtype"], "success");
+        assert_eq!(json["result"], "answer");
+        // Structured fields are suppressed for success — the legacy contract.
+        assert!(
+            json.get("last_assistant_text").is_none(),
+            "success must not carry last_assistant_text, got {json}",
+        );
+        assert!(
+            json.get("tool_calls_seen").is_none(),
+            "success must not carry tool_calls_seen, got {json}",
+        );
+        assert_eq!(json["total_cost_usd"], 0.0);
+    }
+
+    #[test]
+    fn result_frame_non_success_uses_structured_fields() {
         for (subtype, expected) in [
-            (ResultSubtype::Success, "success"),
             (ResultSubtype::Error, "error"),
             (ResultSubtype::MaxTurns, "max_turns"),
             (ResultSubtype::BudgetExceeded, "budget_exceeded"),
             (ResultSubtype::Cancelled, "cancelled"),
             (ResultSubtype::MaxTokens, "max_tokens"),
         ] {
-            let frame = result_frame(subtype, "answer", "s1", 0.0, 1, 10, 20, None, None);
+            let frame = result_frame(
+                subtype,
+                "fragments fragments fragments",
+                "s1",
+                0.0,
+                3,
+                10,
+                20,
+                None,
+                None,
+                Some("last clean reply".into()),
+                7,
+            );
             let json = serde_json::to_value(&frame).unwrap();
             assert_eq!(json["type"], "result");
             assert_eq!(json["subtype"], expected);
-            assert_eq!(json["result"], "answer");
-            assert_eq!(json["total_cost_usd"], 0.0);
+            // F7 follow-up: non-success drops the concatenated `result`
+            // field and exposes structured fields instead.
+            assert!(
+                json.get("result").is_none(),
+                "non-success ({expected}) must not carry `result`, got {json}",
+            );
+            assert_eq!(json["last_assistant_text"], "last clean reply");
+            assert_eq!(json["tool_calls_seen"], 7);
         }
+    }
+
+    #[test]
+    fn result_frame_non_success_falls_back_to_result_text_when_no_explicit_last() {
+        // Caller didn't supply `last_assistant_text`; the builder falls
+        // back to the accumulator text so we don't emit `null` when there
+        // IS some assistant content the consumer can show.
+        let frame = result_frame(
+            ResultSubtype::MaxTurns,
+            "partial assistant text",
+            "s1",
+            0.0,
+            1,
+            10,
+            20,
+            None,
+            None,
+            None,
+            0,
+        );
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["last_assistant_text"], "partial assistant text");
+        assert_eq!(json["tool_calls_seen"], 0);
+    }
+
+    #[test]
+    fn result_frame_non_success_omits_last_assistant_text_when_empty() {
+        // No accumulator text and no explicit override → field is absent
+        // (rather than `""`) so consumers can distinguish "no observable
+        // output" from "empty assistant reply".
+        let frame = result_frame(
+            ResultSubtype::MaxTurns,
+            "",
+            "s1",
+            0.0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        );
+        let json = serde_json::to_value(&frame).unwrap();
+        assert!(
+            json.get("last_assistant_text").is_none(),
+            "absent text should drop the field, got {json}",
+        );
+        assert_eq!(json["tool_calls_seen"], 0);
     }
 
     #[test]

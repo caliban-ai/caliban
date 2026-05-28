@@ -362,11 +362,16 @@ pub(crate) async fn run_and_render(
 /// process exit code per ADR 0025's table. `EndOfTurn` returns `0`;
 /// every other variant returns the matching code from the headless
 /// driver, so single-prompt mode and `-p` mode exit identically.
+///
+/// `MaxTurnsReached` returns `75` (`EX_TEMPFAIL`) — distinct from the
+/// `128 + signal` UNIX convention so CI scripts can tell a max-turns
+/// stop from a real `SIGINT` (F12 follow-up). Stays in sync with
+/// `headless::exit_code_for`.
 pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition) -> i32 {
     use caliban_agent_core::StopCondition;
     match stop {
         StopCondition::EndOfTurn => 0,
-        StopCondition::MaxTurnsReached(_) => 130,
+        StopCondition::MaxTurnsReached(_) => 75,
         StopCondition::Cancelled => 124,
         StopCondition::ProviderError(_)
         | StopCondition::HookDenied(_)
@@ -683,6 +688,12 @@ pub(crate) async fn run_headless(
         }
     };
 
+    // F1: pull the agent's `final_messages` out of the driver before the
+    // borrow ends. The driver captures them from `TurnEvent::RunEnd`
+    // regardless of `stopped_for`, so even a max-turns / cancelled run
+    // still persists the user + partial-assistant turns it accumulated.
+    let driver_final_messages = driver.take_final_messages();
+
     // Fire SessionEnd hook (best-effort).
     {
         let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -712,10 +723,30 @@ pub(crate) async fn run_headless(
     if let (Some(store), Some(mut s)) = (store.as_ref(), session)
         && !args.no_save
     {
-        // For headless mode we don't have the agent's `final_messages`
-        // (the driver consumed them). Approximate by snapshotting todos
-        // and bumping updated_at.
-        s.touch();
+        // F1: thread the driver's accumulated `final_messages` back into
+        // the session so user/assistant turns from `-p --session NAME`
+        // runs actually persist. Without this, the second `-p` against the
+        // same session starts from a fresh transcript and the headline
+        // `--session` flow in the README doesn't work via headless.
+        //
+        // Mirrors the single-prompt path's `s.merge_run(...)` (startup.rs
+        // ~1202), but headless tracks token usage via `BudgetTracker`
+        // rather than the agent-core `Usage` accumulator — we merge the
+        // budget-tracked totals instead.
+        if driver_final_messages.is_empty() {
+            // No messages captured (e.g. run failed before the first
+            // `RunEnd`). Still bump `updated_at` so the touch is observable.
+            s.touch();
+        } else {
+            let (i_tok, o_tok) = budget.total_tokens();
+            let run_usage = caliban_provider::Usage {
+                input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
+                output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            };
+            s.merge_run(driver_final_messages, run_usage);
+        }
         s.todos
             .clone_from(&*todos.lock().expect("todos lock poisoned"));
         s.plan_mode = plan_mode.load(std::sync::atomic::Ordering::Relaxed);

@@ -73,15 +73,52 @@ are useful; CI runners are well-trained to add flags.
 | 0    | success |
 | 1    | generic runtime error |
 | 2    | tool/assistant error |
-| 64   | `EX_USAGE` (bad flags) |
-| 66   | `EX_NOINPUT` |
+| 64   | `EX_USAGE` (bad flags) / malformed stream-json input |
+| 66   | `EX_NOINPUT` (`--resume <missing>`, empty stream-json stdin) |
+| 75   | `EX_TEMPFAIL` — `--max-turns` exceeded (F12 follow-up: was `130`, which collided with `128 + SIGINT`) |
 | 78   | `EX_CONFIGURATION_ERROR` (stdin > 10 MB; settings parse failure) |
-| 124  | cancelled (SIGTERM / Ctrl-C) |
-| 130  | `--max-turns` exceeded |
+| 124  | cancelled (SIGTERM / Ctrl-C from the agent loop) |
+| 130  | reserved for real `SIGINT` reaching the harness (`128 + 2`); the signal handler in `caliban/src/main.rs` exits with this on a second Ctrl-C |
 | 137  | `--max-budget-usd` exceeded |
 
 CI tooling can distinguish "budget exhausted" from "real failure"
-without parsing stdout.
+without parsing stdout. **Update 2026-05-27 (F12):** `--max-turns`
+exhaustion previously exited `130`, which is `128 + SIGINT` in the
+UNIX convention — CI scripts reading `$?` reasonably concluded the
+operator had Ctrl-C'd. It now exits `75` (`EX_TEMPFAIL`), distinct
+from any signal-derived code. Consumers wanting the structured signal
+should read the matching `result` frame's `subtype: "max_turns"`.
+
+### Result-frame shape — structured fields for non-success runs
+
+The final `result` frame's body depends on `subtype`:
+
+- **`subtype: "success"`** — the assistant's reply lives in the
+  `result` string field. Token/cost/turn totals are always present.
+  Structured-output payloads are surfaced under `structured_output`
+  when `--json-schema` succeeded. This is the load-bearing contract
+  for downstream `jq` scripts and is **not** changed by the F7
+  follow-up below.
+- **All non-`success` subtypes** (`error`, `max_turns`,
+  `budget_exceeded`, `cancelled`) — the `result` field is **omitted**;
+  consumers must read the structured fields instead:
+  - `last_assistant_text` — the most recent non-empty assistant text
+    body the agent produced. `null` (field absent) when the run
+    terminated before any assistant text landed. Distinct from the
+    prior protocol, which set `result` to the concatenation of every
+    streamed assistant fragment across the truncated run — a value
+    that ranged from a stale plan preamble to literally `""` and
+    couldn't be distinguished from a clean answer.
+  - `tool_calls_seen` — running count of `ToolCallEnd` events
+    observed across the entire run. Lets consumers tell an
+    empty-but-active run (tool loop) from an empty-and-idle one.
+  - `error` — populated for `subtype: "error"` only; carries the
+    `StopCondition::ProviderError` / `HookDenied` / `CompactionFailed`
+    / `Refusal` / `ContentFilter` / schema-validation message verbatim.
+
+Pairs with the exit-code table above: the `result` frame's `subtype`
+and the process exit code agree on what the terminal condition was,
+so consumers can pick either signal.
 
 ### Cost accumulator lives in `caliban-agent-core::headless`
 
