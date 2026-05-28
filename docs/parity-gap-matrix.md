@@ -18,7 +18,10 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-05-26 (after Plan C "TUI slash & UX polish" landed:
+**Last refreshed:** 2026-05-28 (TODO/parity cleanup: validated the Plan
+A/B/C parity-sweep items against `main` and pruned the stale backlog;
+corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button
+modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish":
 `/clear` resets context_window, `/effort` runtime, `/model` runtime swap,
 `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless,
 `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button
@@ -63,7 +66,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020 |
 | Permission modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | ✅ | ADR-0029; Shift+Tab cycles + status-bar chip; `--permission-mode` flag; `CALIBAN_DEFAULT_PERMISSION_MODE` env; `--allow-dangerously-skip-permissions` gate for bypass |
 | Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | ✅ | ADR-0029; `AutoModeClassifier` via router `RequestPurpose::FastClassifier` with `$defaults` curated rule lists, sha256-keyed cache, 4 KiB input truncation |
-| TUI Ask modal | 🔴 | *(deferred PR #8)* |
+| TUI Ask modal | ✅ | ADR-0027 + Plan C; 4-button modal (Allow once / Always allow / Reject once / Always reject) — see row E "Permission Ask modal" |
 | OS-level sandbox (Seatbelt / bubblewrap) | ✅ | ADR-0032; v1 ships macOS + Linux/WSL; Windows native deferred |
 
 ## B. Hooks & extensibility
