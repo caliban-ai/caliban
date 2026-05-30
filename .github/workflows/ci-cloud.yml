@@ -3,7 +3,12 @@ name: ci-cloud
 on:
   push:
     branches: ["**"]
+    # NOTE: the `paths:` list is intentionally duplicated under `push`
+    # and `pull_request` below. GitHub Actions' historical YAML-anchor
+    # support has been spotty enough that duplication is safer than
+    # the DRY win. Keep the two lists in sync.
     paths:
+      # Provider internals that directly compile under cloud features.
       - 'crates/caliban-provider-anthropic/src/transport/bedrock.rs'
       - 'crates/caliban-provider-anthropic/src/transport/vertex.rs'
       - 'crates/caliban-provider-google/src/transport/vertex.rs'
@@ -11,6 +16,16 @@ on:
       - 'crates/caliban-provider-anthropic/src/config.rs'
       - 'crates/caliban-provider-google/src/config.rs'
       - 'crates/caliban-provider-openai/src/config.rs'
+      # Binary crate — provider construction wiring + anything in the
+      # caliban binary's source can affect what the cloud-features
+      # build sees. Branch protection requires this check, so PRs
+      # that touched the binary but none of the provider-internals
+      # above used to BLOCK forever (the workflow never triggered).
+      # Covering `caliban/src/**` + `caliban/Cargo.toml` (+ workspace
+      # `Cargo.toml`) unblocks them.
+      - 'caliban/src/**'
+      - 'caliban/Cargo.toml'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci-cloud.yml'
   pull_request:
@@ -23,12 +38,16 @@ on:
       - 'crates/caliban-provider-anthropic/src/config.rs'
       - 'crates/caliban-provider-google/src/config.rs'
       - 'crates/caliban-provider-openai/src/config.rs'
+      - 'caliban/src/**'
+      - 'caliban/Cargo.toml'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci-cloud.yml'
-  # Manual re-trigger — useful when a PR touched the `caliban` binary's
-  # provider-construction wiring (which the path filter above doesn't
-  # match) and the cloud-features build needs a fresh run against the
-  # current branch tip.
+  # Manual re-trigger — useful for ad-hoc reruns against the current
+  # branch tip even when the path filter didn't match. Note:
+  # workflow_dispatch runs satisfy the *workflow name* but NOT a
+  # required-status check on a PR (which binds to pull_request event
+  # type); use a path-filter touch to retrigger the required check.
   workflow_dispatch:
 
 concurrency:
@@ -65,6 +84,3 @@ jobs:
           cargo clippy --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex --all-targets -- -D warnings
           cargo test   --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
 
-# Trigger note: workflow_dispatch runs don't satisfy required pull_request
-# checks. Touching this file is in the path filter, so editing it forces
-# ci-cloud to evaluate the PR's HEAD commit.

@@ -113,3 +113,17 @@ to be picked up in follow-up work.
   - File: no code change; document on the next probe doc + matrix update.
   - Severity: informational — pure model-quality observation against the caliban driver path; caliban handled the halt cleanly (distinct exit 75 per `#70`'s structured result).
 
+---
+
+## CI / developer experience (2026-05-30)
+
+PRs #78 and #79 surfaced two CI/DX gaps that landed fixes here (this PR), plus one residual flaky test that needs deeper investigation. The two closed gaps are noted in the commit history; only the open flake is tracked below.
+
+- Finding (CI/DX-1 — Low, flaky): `crates/caliban-agent-core/tests/hooks_shell.rs::stdout_json_updated_input_parses` fails intermittently on CI (Linux runner) with `unexpected: Allow`. The test spawns a shell script that emits a `hookSpecificOutput { updatedInput }` JSON envelope via heredoc; the assertion expects `HookDecision::UpdatedInput("echo safe")` and got `HookDecision::Allow` once on PR #79's first run, then passed cleanly on `gh run rerun --failed`.
+  - File: `crates/caliban-agent-core/tests/hooks_shell.rs:99–118` (the test); `crates/caliban-agent-core/src/hooks_router.rs:100–186` (`ShellCommandHook::dispatch`).
+  - Severity: Low — only seen once across the IE1/IE2/IE3 + follow-up wave; re-run cleared it without any code change. But it IS real and will keep wasting CI minutes + producing red-then-green noise on PRs unless rooted.
+  - Hypothesis: `tokio::process::Command::wait_with_output()` either races the pipe drain or returns before the child's heredoc cat output is fully captured under runner load. The fallthrough `HookDecision::Allow` is reached at `hooks_router.rs:163–171` when `parse_decision_blob(&stdout_text)` returns `Allow` (empty / unparseable / no `hookSpecificOutput`) AND the trimmed stdout doesn't start with `{`. Empty stdout matches both — strong evidence the pipe wasn't drained.
+  - Investigation hints: (a) instrument `dispatch` to log `output.stdout.len()` and `output.status` when the JSON parse fails — confirm whether stdout is empty in the failing case. (b) try replacing `wait_with_output()` with explicit `child.stdout.take()` + `read_to_end` after `wait()` to control the drain ordering. (c) repro under `stress-ng --cpu 4` locally to mimic runner load.
+  - Fix candidates: (1) drop the test's `heredoc` for a single-line `echo` (smaller pipe-write window); (2) loop the test under a retry decorator (Rust doesn't have built-in; add a per-test helper that re-runs once on `unexpected: Allow`); (3) read stdout explicitly post-wait.
+  - Not done here because: deeper investigation belongs in its own focused PR — guessing at the fix would risk masking the root cause.
+

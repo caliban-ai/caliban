@@ -93,6 +93,14 @@ EOF
     }
 }
 
+// FLAKY: observed to fail intermittently on CI (Linux runner) with
+// `unexpected: Allow`, where the assertion expected
+// `HookDecision::UpdatedInput`. Hypothesis: the child's stdout pipe
+// isn't fully drained by `wait_with_output()` under runner load, so
+// `parse_decision_blob` sees empty stdout and falls back to `Allow`.
+// `gh run rerun --failed <run-id>` is the short-term unblock. Root
+// cause investigation tracked under `docs/TODO.md`
+// § CI / developer experience § CI/DX-1.
 #[tokio::test]
 async fn stdout_json_updated_input_parses() {
     let dir = TempDir::new().unwrap();
