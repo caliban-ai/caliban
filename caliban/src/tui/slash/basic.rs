@@ -20,6 +20,7 @@ impl SlashCommand for ClearCommand {
             description: "clear the transcript and conversation history",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -49,6 +50,7 @@ impl SlashCommand for HelpCommand {
             description: "list available slash commands",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -72,12 +74,14 @@ impl SlashCommand for QuitCommand {
                 description: "exit caliban",
                 args_hint: "",
                 hidden: true, // hide the alias from /help; /quit is canonical.
+                immediate: true,
             },
             _ => &SlashCommandMeta {
                 name: "/quit",
                 description: "exit caliban",
                 args_hint: "",
                 hidden: false,
+                immediate: true,
             },
         }
     }

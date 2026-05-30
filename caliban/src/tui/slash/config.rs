@@ -20,6 +20,7 @@ impl SlashCommand for ConfigCommand {
             description: "open the configuration overlay",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -38,6 +39,7 @@ impl SlashCommand for HooksCommand {
             description: "list configured hooks per event",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -90,6 +92,7 @@ impl SlashCommand for McpCommand {
             description: "show MCP server status",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -111,12 +114,14 @@ impl SlashCommand for PluginsCommand {
                 description: "alias for /plugins",
                 args_hint: "",
                 hidden: true,
+                immediate: false,
             },
             _ => &SlashCommandMeta {
                 name: "/plugins",
                 description: "list installed plugins",
                 args_hint: "",
                 hidden: false,
+                immediate: false,
             },
         }
     }
@@ -171,6 +176,7 @@ impl SlashCommand for AgentsCommand {
             description: "list sub-agents (full fleet overlay arrives with sub-agent isolation spec)",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {

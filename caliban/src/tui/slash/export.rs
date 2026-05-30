@@ -31,6 +31,7 @@ impl SlashCommand for ExportCommand {
             description: "export the session transcript to markdown (or json)",
             args_hint: "[path] [--format json]",
             hidden: false,
+            immediate: true,
         }
     }
 

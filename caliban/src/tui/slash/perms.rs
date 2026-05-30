@@ -18,6 +18,7 @@ impl SlashCommand for PermissionsCommand {
             description: "edit permission rules; see the effective rule for a focused tool",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {

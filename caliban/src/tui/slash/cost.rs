@@ -25,6 +25,7 @@ impl SlashCommand for CostCommand {
             description: "show cumulative cost and per-model breakdown",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
 

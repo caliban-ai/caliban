@@ -20,6 +20,7 @@ impl SlashCommand for UsageCommand {
             description: "show token + cost usage for this session",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -42,6 +43,7 @@ impl SlashCommand for ContextCommand {
             description: "show context window utilization + top-N largest blocks",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -191,6 +193,7 @@ impl SlashCommand for CompactCommand {
             description: "trigger the configured compactor; reports dropped/summarized count",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -212,6 +215,7 @@ impl SlashCommand for DoctorCommand {
             description: "run startup-time health checks (skills, hooks, MCP, auth)",
             args_hint: "",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -253,6 +257,7 @@ impl SlashCommand for SystemCommand {
             description: "view the active system prompt",
             args_hint: "",
             hidden: true, // present for backwards compat; not in spec.
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {

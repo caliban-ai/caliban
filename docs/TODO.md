@@ -86,80 +86,30 @@ documentation/guidance, not code.
   - Suggested placement: extend the existing Ollama probe section so the row reads e.g. `✓ ollama — http://… (4 models, NUM_PARALLEL=1 detected: parallel sub-agents will serialise)`. Skip when the configured provider is a hosted API where the answer is uninteresting.
   - Optional follow-up: if F1's stream-json deferred-`tool_use` semantic is also addressed, an opt-in `--include-tool-dispatch-events` (or millisecond `t_ms` field on `tool_use`/`tool_result` frames) would let consumers correlate dispatch timing with this `NUM_PARALLEL` characterisation.
 
+
 ---
 
-## TUI ergonomics (2026-05-30)
+## TUI ergonomics follow-ups (post-IE1/IE2/IE3 PR)
 
-caliban's TUI input handler refuses Enter when a turn is in flight
-(`caliban/src/tui/events.rs:869–870`, comment: *"Ignore submit if a
-turn is already running"*). Both plain user messages and slash-command
-invocations hit the same gate, so `/context`, `/cost`, `/usage`, theme/
-model switches, transcript overlays — none of which need the model — go
-nowhere while the model is streaming. Separately, a user message typed
-during a running turn is silently dropped instead of being queued for
-the next turn. IE1 and IE2 below stem from that gate; IE3 is a separate
-selection/copy issue rooted in TUI mouse capture.
+The original IE1 / IE2 / IE3 findings shipped (immediate slash
+commands during inference; queued user messages with two-stage Esc;
+mouse drag-select inside alt-screen with OSC-52 clipboard write). The
+items below are intentional v1 scope cuts noted during implementation,
+to be picked up in follow-up work.
 
-Surveyed: Claude Code, OpenCode (sst/opencode), Crush
-(charmbracelet/crush), Cline, and Aider. The three live patterns:
-**(A) server-side / state-side queue + dumb input** (Crush, OpenCode);
-**(B) module-level command queue + per-command `immediate: bool`**
-(Claude Code); **(C) fully blocking REPL** (Aider). For caliban's
-ratatui + crossterm shape, **(A)** is the smallest-diff option for IE2
-and a narrow slice of **(B)** (just an `immediate` flag on the slash
-registry, no full queue) is the right fit for IE1.
+- Finding (IE1-followup — Low): only 13 of 37 registered slash commands are tagged `immediate: true` in v1. Many of the remaining 24 (e.g. `/skills`, `/memory`, `/plugin`, `/plugins`, `/hooks`, `/agents`, `/mcp`, `/statusline`, `/tui`, `/login`, `/logout`, `/status`, `/feedback`, `/heapdump`, `/voice`) likely qualify but were left default-false for conservatism. Audit each `execute()` body — if the only `SlashOutcome` variants returned are `Continue` / `Overlay` / `StatusMessage`, flip to `immediate: true`. The regression test in `caliban/src/tui/slash.rs::known_immediate_commands_are_tagged_in_builtin_registry` is the place to extend.
+  - File: `caliban/src/tui/slash/*.rs` (per-command meta blocks)
+  - Severity: Low — UX nicety; users can already opt these in by waiting for the turn to settle.
 
-### IE1 — Non-model slash commands should execute during inference
+- Finding (IE2-followup — Low): drain pops ONE queued message per `RunEnd`. The original TODO suggested batching consecutive non-slash queued messages into a single user turn at drain time (Claude Code's `dequeueAllMatching` pattern), so a user who hammers Enter doesn't get N back-to-back agent runs. Not implemented for v1.
+  - File: `caliban/src/tui/events.rs::drain_one_queued`; `caliban/src/tui.rs` (main loop drain check).
+  - Severity: Low — multi-queued use case is uncommon; if needed, change `drain_one_queued` to `drain_consecutive_non_slash` returning a joined string.
 
-- Finding: `SlashCommandMeta` (`caliban/src/tui/slash.rs:33–44`) has no
-  way to declare a command as "doesn't need the model." All slash
-  commands fall through the same Enter-gated submit path
-  (`events.rs:869–870`), so even `/context`, `/cost`, `/usage`, `/help`,
-  `/perms`, `/config`, `/model`, `/effort`, `/export`, `/doctor`, and
-  overlay-opening commands refuse to fire while `app.running.is_some()`.
-  Proof that the gate is per-handler and not architectural: Ctrl+B
-  (background bash) already works mid-turn at `events.rs:799–805`, so
-  the event loop *can* dispatch immediate actions during a running
-  turn — slash commands just don't classify themselves as such.
-- File: `caliban/src/tui/slash.rs:33` (struct); `caliban/src/tui/events.rs:869–870` (the submit gate); per-command meta blocks in `caliban/src/tui/slash/*.rs`.
-- Severity: Medium UX — a whole class of commands silently no-ops mid-stream, including the diagnostics users most want while waiting (`/context`, `/cost`, `/usage`).
-- Suggested fix: add `pub(crate) immediate: bool` to `SlashCommandMeta`. In the submit handler at `events.rs:869`, *before* the running-turn bail, intercept slash-prefixed input through the registry; if `meta.immediate` is true, execute it directly — overlays open, ephemeral status emits, `Continue`/`Overlay`/`Status` outcomes apply — without touching the agent loop. The classifier is mechanical: if a command's `execute()` returns only `Continue` / `Overlay` / `Status` (no turn-spawning outcome), it's `immediate`. Audit and tag at least: `/context`, `/cost`, `/usage`, `/help`, `/perms`, `/config`, `/model`, `/effort`, `/theme`, `/export`, `/doctor`, transcript-overlay commands.
-- Caveat: commands that look immediate but mutate session-level state racing the turn (`/compact`, `/rewind`, `/clear`) should stay `immediate: false` and wait for the turn to settle, so they don't fight `RunEnd` semantics.
-- References: Claude Code uses an explicit `immediate?: boolean` on the command type (its `src/types/command.ts` line 199), branched in `handlePromptSubmit.ts` (~lines 239–310) so immediate commands fire even when `queryGuard.isActive`. Crush makes the same split implicit: agent-bound UI actions check `isAgentBusy()` and warn (`crush/internal/ui/model/ui.go` lines 1432, 2008), UI-only actions (theme, help, sidebar) just run.
+- Finding (IE3-followup — Medium for Terminal.app users): clipboard write is OSC-52 only. Some macOS Terminal.app configurations don't honour OSC-52, so drag-select still highlights and extracts but the clipboard write is silent. Plan adds an `arboard` fallback when OSC-52 fails or env detection says no; v1 stays OSC-52-only because adding `arboard` as a direct dep on the binary pulls in X11/Wayland clipboard libs that break headless builds.
+  - File: `caliban/src/tui/clipboard.rs` (add fallback path); `caliban/Cargo.toml` (optional `arboard` feature, default-on, that headless / CI can disable with `--no-default-features`).
+  - Severity: Medium for Terminal.app users (the OSC-52 emit returns Ok but the terminal silently drops the sequence); Low otherwise.
 
-### IE2 — Queue user-typed messages during inference, auto-send on turn end
+- Finding (caliban sub-agent driver — informational, F2-family confirmation): driving sub-agents through caliban + Ollama (`qwen3.5:9b-mlx` on the remote box) at `--max-turns 5` hit `result: max_turns` (exit 75) on a single-task Grep-and-list prompt — the model kept re-issuing Grep instead of summarising. Confirms F2/F5 (Qwen enumerated-plan under-execution and 9B coherence ceiling) extends to the MLX-quantised variant; `--max-turns 5` is too tight for any agentic delegation against 9B Qwen. Practical floor for delegation is `--max-turns 10–12` and the model is only reliable for 1–2 step lookups.
+  - File: no code change; document on the next probe doc + matrix update.
+  - Severity: informational — pure model-quality observation against the caliban driver path; caliban handled the halt cleanly (distinct exit 75 per `#70`'s structured result).
 
-- Finding: a plain user message typed during a running turn hits the same `events.rs:869` gate and is silently ignored. There is no "queued for next turn" state, no UI indicator, and no auto-send on `RunEnd`. Practical effect: a user who types a follow-up while the model is mid-stream loses the message and has to retype after the assistant returns.
-- File: `caliban/src/tui/events.rs:869–870` (the bail); `caliban/src/tui/app.rs:159` (`running: Option<RunningTurn>` — the natural place to colocate a queue); the `RunEnd`-time `app.running = None;` paths in `events.rs:314` and `:328` (the drain points).
-- Severity: Medium UX — silent input loss across a common interaction pattern.
-- Suggested fix (Crush-style, smallest diff for ratatui + crossterm):
-  1. Add `pub(crate) queued: VecDeque<String>` to `App` (or `RunningTurn`).
-  2. At `events.rs:869`, instead of returning, push the buffered input into `app.queued`, clear the input bar, and render a `QUEUED: <preview>` indicator (similar shape to the existing pending-Ask hint at `app.rs:202`) so the user sees it was captured.
-  3. On `RunEnd` (the `app.running = None;` sites at `events.rs:314,328`), if `app.queued.front().is_some()`, pop and dispatch the queued message as the next user turn via the same code path the input-bar Enter uses.
-  4. Esc semantics (two-stage, mirroring Crush): if the queue is non-empty, the first Esc clears the queue (not the in-flight turn); the second Esc within ~2 s cancels the running turn (the existing `events.rs:813` Esc-cancel path becomes the second-stage behavior).
-- Multi-message handling for v1: keep it FIFO. Batch consecutive non-slash queued messages into a single user turn at drain time (Claude Code's `dequeueAllMatching` pattern) so a user who hammers Enter doesn't trigger N back-to-back agent runs.
-- Caveats: respect `app.pending_ask` (`app.rs:202`) — don't drain into a turn while an Ask modal is open; don't drain across model swaps mid-session without prompting.
-- References: Crush stores per-session FIFO in `internal/agent/agent.go:146` (`messageQueue *csync.Map[string, []SessionAgentCall]`), enqueues on busy at :194–211, drains tail-recursively at :716–728 inside `Run()`. OpenCode keeps no client-side queue at all — the TUI fires `session.prompt()` unconditionally and the server's `runLoop` (`session/prompt.ts:1244`) re-iterates while `lastUser.id > lastAssistant.id`; the "QUEUED" badge is purely derived from message IDs (`routes/session/index.tsx:212,1347`). Claude Code's combined queue + priorities (`src/utils/messageQueueManager.ts`, `queueProcessor.ts`) is the heaviest version — overkill for v1.
-- Optional v2 (depends on IE1): a `/queue` immediate command that opens a small overlay listing pending items with peek/edit/cancel; the queue snapshot is derived from `app.queued`.
-
-### IE3 — Mouse drag-select doesn't work for copy/paste from caliban's output
-
-- Finding: dragging the mouse across caliban's transcript to select assistant output for copy/paste does not work. caliban calls `crossterm::EnableMouseCapture` at TUI startup (the canonical `EnterAlternateScreen, EnableMouseCapture` pair in `caliban/src/tui.rs` and restored after the external-editor suspend at `caliban/src/tui/external_editor.rs:130,143`). With mouse capture on, all mouse events (button, motion, drag, release) route to the app and the terminal emulator cannot perform its native drag-to-select. caliban currently *uses* mouse events only for scroll wheel (`MouseEventKind::ScrollUp/ScrollDown` in `handle_mouse` at `caliban/src/tui/events.rs:630–660`); everything else it captures is captured incidentally just to keep scroll working.
-- File: `caliban/src/tui.rs` (the startup `EnableMouseCapture`); `caliban/src/tui/external_editor.rs:130,143` (the existing toggle pattern — `Disable` before the external editor, `Enable` after); `caliban/src/tui/events.rs:630–660` (handler).
-- Severity: Medium UX — copy/paste from output is a baseline expectation. Today users either know the bypass-modifier or fall back to `/export`, and `/export` itself flags "clipboard support not wired in this build — pass a path" (`caliban/src/tui/slash/export.rs`).
-- **Empirical Terminal.app results (2026-05-30):**
-  - Neither **Option+drag** nor **Shift+drag** bypasses caliban's mouse capture in macOS Terminal.app. Modifier-bypass docs (interim mitigation #1) do not help Terminal.app users.
-  - Unchecking `View → Allow Mouse Reporting` (or `Terminal → Preferences → Profiles → <profile> → Window → "Allow Mouse Reporting"`) **does** restore drag-select. But the setting is per-window and **defaults to ON for every new Terminal.app window**, so interim mitigation #2 works but is friction-heavy for daily use.
-  - **For reference, Claude Code in the same Terminal.app has neither issue.** Its Ink-based TUI renders to the normal terminal stream rather than entering alternate-screen mode, so it never calls `EnableMouseCapture`. The terminal's native scrollback and native drag-select both work out of the box. caliban uses ratatui in alternate-screen mode, where in-app scroll-wheel requires explicit mouse capture — and that capture is what breaks selection. The two designs make different trade-offs; caliban's only way to recover Claude-Code-style "select works out of the box" *without giving up alt-screen polish* is the **Recommended fix** below: implement mouse-drag-select inside alt-screen, so capture stays on without breaking selection.
-- **Recommended fix (default implementation path): mouse-drag-select-to-clipboard inside alt-screen mode.** No feature trade-off, no default flip, no user toggle — keep `EnableMouseCapture` and all the alt-screen polish (persistent statusline / input bar, real overlays, in-app scroll-wheel, clean exit), and add mouse-driven selection on top. caliban already receives every mouse event when capture is on (`events.rs:630–660` currently consumes only `ScrollUp/ScrollDown`); the other variants are unused. Four components:
-  1. **Render-time text-position map.** As the transcript renderer draws each styled span, record a `(row, col) → (message_id, char_offset)` lookup. The structurally invasive piece — wraps caliban's existing draw passes in `caliban/src/tui/render.rs` so each laid-out span carries its origin range; reset the map at the start of each frame.
-  2. **Mouse-event state machine** in `events.rs::handle_mouse` (`events.rs:630`). `Down(Left)` at (r,c) → set selection start; `Drag(Left)` → update end + trigger redraw; `Up(Left)` → resolve the range via the position map and emit the extracted text. Double-click selects a word, triple-click a line — layered on the same machine. Scroll events stay independent (`ScrollUp`/`ScrollDown` are separate variants).
-  3. **Visual feedback.** Each frame, walk the active selection range and overlay `Style::default().bg(highlight)` on cells in the range. Stock ratatui — no special framework support needed.
-  4. **Clipboard write.** Emit OSC-52 (`ESC ] 52 ; c ; <base64> BEL`) on selection-end. Honored by kitty / iTerm2 / WezTerm / Ghostty / modern Konsole / Alacritty / foot. For terminals whose OSC-52 support is uncertain (notably macOS Terminal.app — recent and patchy support), fall back to `arboard` (already a transitive dep via `caliban-images`). Also closes the existing `/export` clipboard-support gap (`caliban/src/tui/slash/export.rs` currently flags "clipboard support not wired in this build").
-- Honest sizing: ~100–300 LoC plus the renderer wrap for the position map; **medium effort, not "tiny."** In exchange, every terminal — including Terminal.app — gets native-feeling drag-to-copy *with* in-app scroll-wheel preserved, no user toggles, no parity-matrix regression. Prior art in the Rust TUI ecosystem (verify before relying on): **Helix** (ratatui-adjacent editor) implements mouse text selection in alt-screen mode; **Zellij** (alt-screen TUI multiplexer) does selection across panes; **gitui** (ratatui) implements mouse selection. None of them abandoned alt-screen to do it.
-- **Interim mitigations** while the recommended fix is being built (or for users who want immediate relief):
-  1. **Modifier-key bypass docs** for terminals that honor it: **Shift+drag** on kitty, Ghostty, WezTerm, foot, Alacritty; iTerm2 additionally accepts Option+drag and ⌘+drag. macOS Terminal.app does NOT honor any bypass (verified above); this mitigation does not apply there.
-  2. **Terminal.app preference workaround** — uncheck `View → Allow Mouse Reporting` (or the per-profile equivalent at `Terminal → Preferences → Profiles → <profile> → Window`, [Apple support](https://support.apple.com/guide/terminal/turn-on-mouse-reporting-trmlc69728a5/mac)). Restores native drag-select; cost is losing caliban's in-app scroll-wheel for that window; the setting **resets to ON for every new Terminal.app window** so it's friction-heavy for daily use.
-  3. **In-app `/mouse` runtime toggle** (~20 LoC). `/mouse on`/`/mouse off` flips `crossterm::EnableMouseCapture` / `DisableMouseCapture` on demand — the same Disable/Enable pattern already at `external_editor.rs:130,143`. Useful as an escape hatch even after the recommended fix lands; under the recommended approach there's no need to flip the default and no parity-matrix regression.
-- References: the modifier-key bypass is documented by the terminal emulators themselves (iTerm2 Selection docs, kitty `terminal-select` docs, Ghostty docs); it's also what Helix and many Bubbletea-based TUIs tell their users to do. The runtime `/mouse` toggle pattern ships in lazygit and a few Bubbletea apps. OSC-52 reference: VT100.net / xterm docs; widely supported.
-- Caveat: don't surprise the user by toggling capture under their feet. If `/mouse off` is supplied, persist for the session and surface a status line ("mouse capture off; scroll uses terminal-native"); re-enabling on focus-loss or modal-open would be confusing.

@@ -41,6 +41,11 @@ pub(crate) struct SlashCommandMeta {
     /// When `true`, the command is hidden from the typeahead suggester and
     /// from `/help`. Still dispatchable by name.
     pub(crate) hidden: bool,
+    /// When `true`, the command can fire while a turn is in flight
+    /// (IE1: it doesn't need the model). The submit handler intercepts
+    /// immediate commands before the running-turn bail.
+    /// Default `false`. See `docs/TODO.md` § TUI ergonomics § IE1.
+    pub(crate) immediate: bool,
 }
 
 /// Outcome returned from `SlashCommand::execute`. The caller (`Tui`) acts
@@ -183,6 +188,16 @@ impl SlashCommandRegistry {
         self.by_name.contains_key(name)
     }
 
+    /// Look up a command's static [`SlashCommandMeta`] by exact name
+    /// (e.g. `"/context"`). Returns `None` if no command is registered
+    /// under that name. Used by the [`is_immediate_slash`] classifier
+    /// so the submit handler can read the `immediate` flag without
+    /// going through the full async dispatch path. See `docs/TODO.md`
+    /// § TUI ergonomics § IE1.
+    pub(crate) fn lookup_meta(&self, name: &str) -> Option<&SlashCommandMeta> {
+        self.by_name.get(name).map(|c| c.meta())
+    }
+
     /// Dispatch the command. Returns `StatusMessage` for an unknown name
     /// so the caller can surface it via the transcript without
     /// special-casing.
@@ -199,6 +214,23 @@ impl SlashCommandRegistry {
         };
         cmd.execute(args, ctx).await
     }
+}
+
+/// IE1 classifier: returns `true` iff `prompt` is a slash invocation
+/// whose command is registered with `immediate: true`. Pure function
+/// so the event-handler intercept stays unit-testable. Splits on
+/// whitespace to extract the leading slash token (so `/context` and
+/// `/context --foo` both classify the same way). Returns `false` for
+/// empty prompts, non-slash prompts, unknown commands, or commands
+/// whose `immediate` flag is `false`. See `docs/TODO.md`
+/// § TUI ergonomics § IE1.
+#[must_use]
+pub(crate) fn is_immediate_slash(prompt: &str, registry: &SlashCommandRegistry) -> bool {
+    let name = prompt.split_whitespace().next().unwrap_or("");
+    if !name.starts_with('/') {
+        return false;
+    }
+    registry.lookup_meta(name).is_some_and(|m| m.immediate)
 }
 
 /// Construct the built-in registry — every command shipped with the
@@ -265,6 +297,19 @@ mod tests {
                 description: "echo for tests",
                 args_hint: "",
                 hidden,
+                immediate: false,
+            },
+        })
+    }
+
+    fn echo_immediate(name: &'static str, immediate: bool) -> Arc<dyn SlashCommand> {
+        Arc::new(Echo {
+            meta: SlashCommandMeta {
+                name,
+                description: "echo for tests",
+                args_hint: "",
+                hidden: false,
+                immediate,
             },
         })
     }
@@ -339,5 +384,93 @@ mod tests {
         r.register(echo("/bbb", true));
         let names: Vec<&str> = r.visible_metas().iter().map(|m| m.name).collect();
         assert_eq!(names, vec!["/aaa"]);
+    }
+
+    /// IE1 Task 3 (RED): builtin registry tags non-model-touching
+    /// commands as `immediate: true` so the submit handler dispatches
+    /// them during inference; agent-loop-touching commands stay
+    /// `immediate: false`. See `docs/TODO.md` § TUI ergonomics § IE1.
+    #[test]
+    fn known_immediate_commands_are_tagged_in_builtin_registry() {
+        let r = register_builtin();
+        let immediate = [
+            "/usage",
+            "/context",
+            "/cost",
+            "/help",
+            "/permissions",
+            "/config",
+            "/model",
+            "/effort",
+            "/export",
+            "/doctor",
+            "/quit",
+            "/exit",
+            "/system",
+        ];
+        for cmd in &immediate {
+            let m = r
+                .lookup_meta(cmd)
+                .unwrap_or_else(|| panic!("missing {cmd} from registry"));
+            assert!(m.immediate, "expected {cmd} to be immediate");
+        }
+        // Sanity: ones that touch session state or model stay non-immediate.
+        let not_immediate = ["/clear", "/compact", "/rewind"];
+        for cmd in &not_immediate {
+            let m = r
+                .lookup_meta(cmd)
+                .unwrap_or_else(|| panic!("missing {cmd} from registry"));
+            assert!(!m.immediate, "{cmd} should NOT be immediate");
+        }
+    }
+
+    /// IE1 Task 2 (RED): registry exposes `lookup_meta(name)` so the
+    /// classifier can read the `immediate` flag without going through
+    /// the full dispatch path.
+    #[test]
+    fn lookup_meta_returns_some_for_known_command() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo("/foo", false));
+        assert!(r.lookup_meta("/foo").is_some());
+        assert!(r.lookup_meta("/bar").is_none());
+    }
+
+    /// IE1 Task 2 (RED): `is_immediate_slash` classifier — pure helper
+    /// the submit handler uses to decide whether to bypass the
+    /// running-turn bail.
+    #[test]
+    fn is_immediate_slash_recognizes_tagged_command() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo_immediate("/inst", true));
+        r.register(echo_immediate("/slow", false));
+        assert!(is_immediate_slash("/inst", &r));
+        assert!(is_immediate_slash("/inst with args", &r));
+        assert!(!is_immediate_slash("/slow", &r));
+        assert!(!is_immediate_slash("/unknown", &r));
+        assert!(!is_immediate_slash("hello world", &r));
+        assert!(!is_immediate_slash("", &r));
+    }
+
+    /// IE1 Task 1 (RED): `SlashCommandMeta` carries an `immediate` flag so
+    /// the submit handler can distinguish commands that need the model
+    /// from those that don't, and fire the latter during inference.
+    #[test]
+    fn meta_carries_immediate_flag() {
+        let m = SlashCommandMeta {
+            name: "/x",
+            description: "",
+            args_hint: "",
+            hidden: false,
+            immediate: true,
+        };
+        assert!(m.immediate);
+        let m2 = SlashCommandMeta {
+            name: "/y",
+            description: "",
+            args_hint: "",
+            hidden: false,
+            immediate: false,
+        };
+        assert!(!m2.immediate);
     }
 }

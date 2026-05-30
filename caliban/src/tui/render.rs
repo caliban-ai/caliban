@@ -39,7 +39,11 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         u16::try_from(total.clamp(1, INPUT_MAX_ROWS as usize)).unwrap_or(INPUT_MAX_ROWS)
     };
 
-    let toast_rows: u16 = u16::from(app.toast.as_ref().is_some_and(|t| !t.is_expired()));
+    // IE2: the toast strip is also borrowed for the QUEUED indicator
+    // when no toast is active and `app.queued` is non-empty. Toast
+    // wins when both are present (errors > queue hint).
+    let toast_rows: u16 =
+        u16::from(app.toast.as_ref().is_some_and(|t| !t.is_expired()) || !app.queued.is_empty());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -78,26 +82,53 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     app.last_max_scroll = max_scroll;
     app.scroll = scroll;
 
+    // IE3: build the per-frame position map from the rendered transcript
+    // cells, then overlay the mouse-selection highlight (if any) on top
+    // of the same area. Done in this order so the position map reflects
+    // the *original* glyphs (used for clipboard extract), and the user
+    // sees the highlight over the chars they're about to copy. See
+    // `docs/TODO.md` § TUI ergonomics § IE3.
+    let transcript_area = chunks[0];
+    {
+        let buf = frame.buffer_mut();
+        record_transcript_cells_into_position_map(buf, transcript_area, &mut app.position_map);
+        if let Some(range) = app.mouse_selection.range() {
+            let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
+            apply_selection_highlight(buf, transcript_area, range, highlight);
+        }
+    }
+
     // chunks[1] = top horizontal rule
     let hrule_top = Block::default()
         .borders(Borders::TOP)
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hrule_top, chunks[1]);
 
-    // chunks[2] = ephemeral toast (zero rows when no toast is active).
-    if toast_rows == 1
-        && let Some(t) = &app.toast
-    {
-        let (fg, bg) = match t.level {
-            toast::ToastLevel::Error => (Color::White, Color::Red),
-            toast::ToastLevel::Warn => (Color::Black, Color::Yellow),
-            toast::ToastLevel::Info => (Color::Gray, Color::Reset),
-        };
-        let line = Paragraph::new(Line::from(Span::styled(
-            t.text.clone(),
-            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-        )));
-        frame.render_widget(line, chunks[2]);
+    // chunks[2] = ephemeral toast or QUEUED indicator (zero rows when
+    // neither is active). Toast wins when both are present.
+    if toast_rows == 1 {
+        if let Some(t) = &app.toast {
+            let (fg, bg) = match t.level {
+                toast::ToastLevel::Error => (Color::White, Color::Red),
+                toast::ToastLevel::Warn => (Color::Black, Color::Yellow),
+                toast::ToastLevel::Info => (Color::Gray, Color::Reset),
+            };
+            let line = Paragraph::new(Line::from(Span::styled(
+                t.text.clone(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )));
+            frame.render_widget(line, chunks[2]);
+        } else if let Some(text) = format_queued_indicator(&app.queued) {
+            // IE2: QUEUED hint. Dim italic so it doesn't compete visually
+            // with the input bar. See `docs/TODO.md` § TUI ergonomics § IE2.
+            let line = Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+            frame.render_widget(line, chunks[2]);
+        }
     }
 
     // chunks[3] = input — character-wrapped manually so cursor math stays aligned.
@@ -569,6 +600,266 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
     ))
+}
+
+/// IE3: walk every cell in `area` of `buf` and record `(y, x) → first
+/// char of cell.symbol()` into `map`. Called by the renderer after
+/// the transcript is drawn, before any highlight overlay is applied,
+/// so subsequent mouse-up selection extracts the user-visible text.
+/// `map` is cleared first so each frame starts fresh. Cells whose
+/// symbol is empty or pure whitespace at the start of a run are still
+/// recorded (so selection across padding produces coherent output).
+/// See `docs/TODO.md` § TUI ergonomics § IE3.
+pub(crate) fn record_transcript_cells_into_position_map(
+    buf: &ratatui::buffer::Buffer,
+    area: Rect,
+    map: &mut super::mouse_select::PositionMap,
+) {
+    map.clear();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            if let Some(cell) = buf.cell((x, y))
+                && let Some(ch) = cell.symbol().chars().next()
+            {
+                map.record(y, x, ch);
+            }
+        }
+    }
+}
+
+/// IE3: overlay a background-colour highlight on the cells in
+/// `selection` (clipped to `area`). Called by the renderer after the
+/// transcript draw + position-map population so the highlight composites
+/// over the original glyph styles. Multi-row selections highlight
+/// from `start.col` to end-of-area on the first row, full row width
+/// on intermediate rows, and from area start to `end.col` on the
+/// last row. Order of endpoints is normalised. No-op for selections
+/// fully outside `area`. See `docs/TODO.md` § TUI ergonomics § IE3.
+pub(crate) fn apply_selection_highlight(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    selection: (super::mouse_select::Cell, super::mouse_select::Cell),
+    style: Style,
+) {
+    let (a, b) = if (selection.0.row, selection.0.col) <= (selection.1.row, selection.1.col) {
+        (selection.0, selection.1)
+    } else {
+        (selection.1, selection.0)
+    };
+    let area_end_x = area.x.saturating_add(area.width);
+    let area_end_y = area.y.saturating_add(area.height);
+    for y in a.row..=b.row {
+        if y < area.y || y >= area_end_y {
+            continue;
+        }
+        let lo = if y == a.row { a.col } else { area.x };
+        let hi = if y == b.row {
+            b.col
+        } else {
+            area_end_x.saturating_sub(1)
+        };
+        let lo = lo.max(area.x);
+        let hi = hi.min(area_end_x.saturating_sub(1));
+        for x in lo..=hi {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
+/// IE2: format the QUEUED indicator shown in the toast strip when
+/// `app.queued` is non-empty and no toast is currently active. Returns
+/// `None` for an empty queue, otherwise a single-line preview capped
+/// at `QUEUED_PREVIEW_CHARS` characters, with a `(+N more)` suffix
+/// when more than one message is queued. Caller wraps the result in
+/// a styled `Paragraph`. See `docs/TODO.md` § TUI ergonomics § IE2.
+const QUEUED_PREVIEW_CHARS: usize = 48;
+pub(crate) fn format_queued_indicator(
+    queue: &std::collections::VecDeque<String>,
+) -> Option<String> {
+    let front = queue.front()?;
+    let preview: String = front.chars().take(QUEUED_PREVIEW_CHARS).collect();
+    let suffix = if queue.len() > 1 {
+        format!(" (+{} more)", queue.len() - 1)
+    } else {
+        String::new()
+    };
+    Some(format!("QUEUED: {preview}{suffix}"))
+}
+
+#[cfg(test)]
+mod mouse_select_render_tests {
+    use super::*;
+    use crate::tui::mouse_select::{Cell as SelCell, PositionMap};
+    use ratatui::buffer::Buffer;
+
+    fn buf_from_lines(lines: &[&str]) -> Buffer {
+        let width = u16::try_from(lines.iter().map(|l| l.chars().count()).max().unwrap_or(0))
+            .expect("width fits u16");
+        let height = u16::try_from(lines.len()).expect("height fits u16");
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        for (y, line) in lines.iter().enumerate() {
+            for (x, ch) in line.chars().enumerate() {
+                let mut s = [0u8; 4];
+                let s = ch.encode_utf8(&mut s).to_string();
+                if let Some(cell) =
+                    buf.cell_mut((u16::try_from(x).unwrap(), u16::try_from(y).unwrap()))
+                {
+                    cell.set_symbol(&s);
+                }
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn record_transcript_cells_round_trips_single_line() {
+        let buf = buf_from_lines(&["hello"]);
+        let area = Rect::new(0, 0, 5, 1);
+        let mut map = PositionMap::new();
+        record_transcript_cells_into_position_map(&buf, area, &mut map);
+        // Buffer is at (0, 0) so map records (row=0, col=0..4).
+        let extracted = map.extract_range(SelCell::new(0, 0), SelCell::new(0, 4));
+        assert_eq!(extracted, "hello");
+    }
+
+    #[test]
+    fn record_transcript_cells_only_within_area() {
+        let buf = buf_from_lines(&["abcde", "fghij", "klmno"]);
+        // Only the middle row should be recorded.
+        let area = Rect::new(0, 1, 5, 1);
+        let mut map = PositionMap::new();
+        record_transcript_cells_into_position_map(&buf, area, &mut map);
+        // Cells outside area not recorded.
+        assert!(map.get(0, 0).is_none());
+        assert!(map.get(2, 0).is_none());
+        // Cells inside area recorded.
+        assert_eq!(map.get(1, 0), Some('f'));
+        assert_eq!(map.get(1, 4), Some('j'));
+    }
+
+    #[test]
+    fn record_clears_map_each_call() {
+        let buf1 = buf_from_lines(&["aaa"]);
+        let buf2 = buf_from_lines(&["bbb"]);
+        let area = Rect::new(0, 0, 3, 1);
+        let mut map = PositionMap::new();
+        record_transcript_cells_into_position_map(&buf1, area, &mut map);
+        assert_eq!(map.get(0, 0), Some('a'));
+        record_transcript_cells_into_position_map(&buf2, area, &mut map);
+        assert_eq!(map.get(0, 0), Some('b'));
+    }
+
+    #[test]
+    fn apply_selection_highlight_styles_cells_in_single_row() {
+        let mut buf = buf_from_lines(&["hello world"]);
+        let area = Rect::new(0, 0, 11, 1);
+        let style = Style::default().bg(Color::DarkGray);
+        apply_selection_highlight(
+            &mut buf,
+            area,
+            (SelCell::new(0, 0), SelCell::new(0, 4)),
+            style,
+        );
+        for x in 0..=4 {
+            assert_eq!(buf.cell((x, 0)).unwrap().style().bg, Some(Color::DarkGray));
+        }
+        // Outside the range — no highlight.
+        assert!(
+            buf.cell((5, 0)).unwrap().style().bg.is_none()
+                || buf.cell((5, 0)).unwrap().style().bg != Some(Color::DarkGray)
+        );
+    }
+
+    #[test]
+    fn apply_selection_highlight_normalises_reversed_endpoints() {
+        let mut buf = buf_from_lines(&["abcde"]);
+        let area = Rect::new(0, 0, 5, 1);
+        let style = Style::default().bg(Color::Red);
+        // Reversed: (0,3) -> (0,1) should highlight cols 1..=3.
+        apply_selection_highlight(
+            &mut buf,
+            area,
+            (SelCell::new(0, 3), SelCell::new(0, 1)),
+            style,
+        );
+        for x in 1..=3 {
+            assert_eq!(buf.cell((x, 0)).unwrap().style().bg, Some(Color::Red));
+        }
+    }
+
+    #[test]
+    fn apply_selection_highlight_clips_to_area() {
+        let mut buf = buf_from_lines(&["abcde", "fghij"]);
+        // Area is only the second row.
+        let area = Rect::new(0, 1, 5, 1);
+        let style = Style::default().bg(Color::Green);
+        // Selection spans both rows; only the in-area cells get styled.
+        apply_selection_highlight(
+            &mut buf,
+            area,
+            (SelCell::new(0, 0), SelCell::new(1, 4)),
+            style,
+        );
+        // Row 0 untouched.
+        for x in 0..5 {
+            assert_ne!(buf.cell((x, 0)).unwrap().style().bg, Some(Color::Green));
+        }
+        // Row 1 fully highlighted.
+        for x in 0..5 {
+            assert_eq!(buf.cell((x, 1)).unwrap().style().bg, Some(Color::Green));
+        }
+    }
+}
+
+#[cfg(test)]
+mod queued_indicator_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// IE2 render (RED): the QUEUED indicator string is None for an
+    /// empty queue and a `QUEUED: <preview>` for a non-empty one.
+    /// Long previews truncate to a fixed char cap; multi-item queues
+    /// append ` (+N more)`.
+    #[test]
+    fn format_queued_indicator_none_when_empty() {
+        let q: VecDeque<String> = VecDeque::new();
+        assert!(format_queued_indicator(&q).is_none());
+    }
+
+    #[test]
+    fn format_queued_indicator_single_item() {
+        let mut q: VecDeque<String> = VecDeque::new();
+        q.push_back("hello world".into());
+        assert_eq!(
+            format_queued_indicator(&q).as_deref(),
+            Some("QUEUED: hello world"),
+        );
+    }
+
+    #[test]
+    fn format_queued_indicator_appends_count_suffix_when_many() {
+        let mut q: VecDeque<String> = VecDeque::new();
+        q.push_back("first".into());
+        q.push_back("second".into());
+        q.push_back("third".into());
+        assert_eq!(
+            format_queued_indicator(&q).as_deref(),
+            Some("QUEUED: first (+2 more)"),
+        );
+    }
+
+    #[test]
+    fn format_queued_indicator_truncates_long_preview() {
+        let mut q: VecDeque<String> = VecDeque::new();
+        q.push_back("x".repeat(120));
+        let out = format_queued_indicator(&q).expect("non-empty");
+        // "QUEUED: " (8) + 48 x's = 56 chars
+        assert_eq!(out.chars().count(), 8 + 48);
+        assert!(out.starts_with("QUEUED: xxxxx"));
+    }
 }
 
 #[cfg(test)]

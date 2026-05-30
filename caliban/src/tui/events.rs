@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use caliban_agent_core::TurnEventStream;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use super::ViewState;
 use super::app::{Activity, App, RunningTurn, TranscriptLine};
@@ -339,6 +341,47 @@ pub(crate) fn handle_agent_error(e: &caliban_agent_core::Error, app: &mut App) {
 /// status messages, `Reload` semantics — are wired in this PR; commands
 /// that return `Continue` get no extra behavior, and `Quit`/`Overlay`/
 /// `StatusMessage` are honored directly.
+/// IE2: pop the next queued user message. Caller is responsible for
+/// loading the text into `app.input.buffer` and re-entering the submit
+/// path (the main TUI loop does this between turns via a synthetic
+/// Enter event). Returns `None` if the queue is empty.
+/// See `docs/TODO.md` § TUI ergonomics § IE2.
+pub(crate) fn drain_one_queued(app: &mut App) -> Option<String> {
+    app.queued.pop_front()
+}
+
+/// IE2: two-stage Esc — if the queue is non-empty, the first Esc
+/// clears it and arms `esc_armed_at`, returning `true` so the caller
+/// short-circuits the existing Esc handler. With an empty queue
+/// returns `false` and the existing logic (cancel running / clear
+/// input / Esc-Esc chord for `/rewind`) runs as before, so a second
+/// Esc with `running.is_some()` falls through to the cancel branch.
+/// See `docs/TODO.md` § TUI ergonomics § IE2.
+pub(crate) fn handle_esc_queue_clear(app: &mut App, now: std::time::Instant) -> bool {
+    if app.queued.is_empty() {
+        return false;
+    }
+    app.queued.clear();
+    app.esc_armed_at = Some(now);
+    true
+}
+
+/// IE2: append the trimmed input buffer onto `app.queued` and clear
+/// the buffer + cursor. Called by the submit handler when a turn is
+/// already running (and the prompt isn't an immediate slash command,
+/// which would be handled by IE1's intercept). No-op on whitespace-only
+/// input so accidental Enters during inference don't enqueue blanks.
+/// See `docs/TODO.md` § TUI ergonomics § IE2.
+pub(crate) fn push_user_input_to_queue(app: &mut App) {
+    let line = app.input.buffer.trim().to_string();
+    if line.is_empty() {
+        return;
+    }
+    app.queued.push_back(line);
+    app.input.buffer.clear();
+    app.input.cursor = 0;
+}
+
 pub(crate) fn handle_slash_command(line: &str, app: &mut App) {
     let mut parts = line.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("").to_string();
@@ -654,8 +697,38 @@ pub(crate) fn handle_mouse(event: MouseEvent, app: &mut App) {
                 app.scroll = next;
             }
         }
-        // Clicks, drags, motion — intentionally ignored. We capture the
-        // mouse only so the wheel reaches us.
+        // IE3: left-button drag → in-app text selection. Down anchors
+        // the selection at (row, col); Drag extends; Up finalises and
+        // emits an OSC-52 clipboard write of the selected text resolved
+        // through `app.position_map`. The render layer overlays the
+        // highlight from `app.mouse_selection.range()` each frame.
+        // See `docs/TODO.md` § TUI ergonomics § IE3.
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.mouse_selection
+                .on_down(super::mouse_select::Cell::new(event.row, event.column));
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            app.mouse_selection
+                .on_drag(super::mouse_select::Cell::new(event.row, event.column));
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.mouse_selection
+                .on_up(super::mouse_select::Cell::new(event.row, event.column));
+            // Extract + copy on completion. Empty selections (a click
+            // without drag) produce empty text — copy_to_clipboard
+            // short-circuits in that case.
+            if let Some((start, end)) = app.mouse_selection.range() {
+                let text = app.position_map.extract_range(start, end);
+                if let Err(e) = super::clipboard::copy_to_clipboard(&text) {
+                    tracing::warn!(error = %e, "OSC-52 clipboard write failed");
+                }
+            }
+        }
+        // Non-left button presses cancel any in-progress selection;
+        // other events (motion without drag, scroll left/right) ignored.
+        MouseEventKind::Down(_) => {
+            app.mouse_selection.cancel();
+        }
         _ => {}
     }
 }
@@ -806,6 +879,15 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             }
         }
         (KeyCode::Esc, _) => {
+            // IE2: two-stage Esc — if there are queued user messages,
+            // the first Esc clears the queue (not the in-flight turn).
+            // A subsequent Esc with the queue empty falls through to
+            // the existing logic below (cancel running / clear input /
+            // Esc-Esc chord for `/rewind`).
+            // See `docs/TODO.md` § TUI ergonomics § IE2.
+            if handle_esc_queue_clear(app, std::time::Instant::now()) {
+                return;
+            }
             // Esc handling (ADR 0028): if a turn is running, cancel it;
             // if input is non-empty, clear it; otherwise treat the press
             // as half of an Esc-Esc chord. Two Esc within
@@ -866,8 +948,21 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             if prompt.is_empty() {
                 return;
             }
-            // Ignore submit if a turn is already running.
+            // IE1: immediate slash commands (e.g. `/context`, `/cost`,
+            // `/help`) dispatch even while a turn is in flight. The
+            // classifier reads `SlashCommandMeta.immediate` set per
+            // command; see `docs/TODO.md` § TUI ergonomics § IE1.
+            if slash::is_immediate_slash(&prompt, &app.slash_registry) {
+                let _line = app.input.submit();
+                app.auto_scroll = true;
+                handle_slash_command(&prompt, app);
+                return;
+            }
+            // IE2: if a turn is already running, queue this prompt for
+            // the next turn instead of dropping it. Drained on `RunEnd`.
+            // See `docs/TODO.md` § TUI ergonomics § IE2.
             if app.running.is_some() {
+                push_user_input_to_queue(app);
                 return;
             }
 
@@ -1502,6 +1597,88 @@ mod tests {
         .expect("compaction failure must surface");
         assert_eq!(cf.level, StoppedForLevel::Error);
         assert_eq!(cf.line, "[caliban: compaction failed: out of budget]");
+    }
+
+    /// IE2 Task 8 (RED): `handle_esc_queue_clear` clears a non-empty
+    /// queue and arms `esc_armed_at`, returning `true` so the caller
+    /// can short-circuit the existing Esc behaviour. With an empty
+    /// queue it returns `false` and does nothing — existing logic
+    /// (cancel running / clear input / Esc-Esc chord) runs as before.
+    #[test]
+    fn handle_esc_queue_clear_clears_and_arms_when_queue_non_empty() {
+        let mut app = crate::tui::App::for_tests();
+        app.queued.push_back("a".into());
+        app.queued.push_back("b".into());
+        assert!(app.esc_armed_at.is_none());
+        let now = std::time::Instant::now();
+        let consumed = handle_esc_queue_clear(&mut app, now);
+        assert!(consumed);
+        assert!(app.queued.is_empty());
+        assert_eq!(app.esc_armed_at, Some(now));
+    }
+
+    #[test]
+    fn handle_esc_queue_clear_noop_when_queue_empty() {
+        let mut app = crate::tui::App::for_tests();
+        let now = std::time::Instant::now();
+        let consumed = handle_esc_queue_clear(&mut app, now);
+        assert!(!consumed);
+        assert!(app.esc_armed_at.is_none());
+    }
+
+    /// IE2 Task 7 (RED): `drain_one_queued` pops the front of `app.queued`
+    /// and returns it; returns `None` when the queue is empty. The main
+    /// loop calls this between turns to auto-dispatch queued user input.
+    #[test]
+    fn drain_one_queued_returns_front_and_pops() {
+        let mut app = crate::tui::App::for_tests();
+        app.queued.push_back("first".into());
+        app.queued.push_back("second".into());
+        assert_eq!(drain_one_queued(&mut app).as_deref(), Some("first"));
+        assert_eq!(app.queued.len(), 1);
+        assert_eq!(drain_one_queued(&mut app).as_deref(), Some("second"));
+        assert!(app.queued.is_empty());
+    }
+
+    #[test]
+    fn drain_one_queued_returns_none_when_empty() {
+        let mut app = crate::tui::App::for_tests();
+        assert!(drain_one_queued(&mut app).is_none());
+    }
+
+    /// IE2 Task 6 (RED): `push_user_input_to_queue` pushes the trimmed
+    /// input buffer onto `app.queued` and clears the buffer + cursor.
+    /// Empty input is a no-op so accidental Enters during inference
+    /// don't enqueue blank messages.
+    #[test]
+    fn push_user_input_to_queue_appends_and_clears_buffer() {
+        let mut app = crate::tui::App::for_tests();
+        app.input.buffer = "hello world".into();
+        app.input.cursor = app.input.buffer.len();
+        push_user_input_to_queue(&mut app);
+        assert_eq!(app.queued.front().map(String::as_str), Some("hello world"));
+        assert!(app.input.buffer.is_empty());
+        assert_eq!(app.input.cursor, 0);
+    }
+
+    #[test]
+    fn push_user_input_to_queue_noop_on_empty() {
+        let mut app = crate::tui::App::for_tests();
+        app.input.buffer = "   ".into(); // whitespace-only counts as empty
+        push_user_input_to_queue(&mut app);
+        assert!(app.queued.is_empty());
+    }
+
+    #[test]
+    fn push_user_input_to_queue_appends_fifo() {
+        let mut app = crate::tui::App::for_tests();
+        app.input.buffer = "first".into();
+        push_user_input_to_queue(&mut app);
+        app.input.buffer = "second".into();
+        push_user_input_to_queue(&mut app);
+        assert_eq!(app.queued.len(), 2);
+        assert_eq!(app.queued[0], "first");
+        assert_eq!(app.queued[1], "second");
     }
 
     #[test]

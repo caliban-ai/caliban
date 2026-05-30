@@ -26,6 +26,7 @@ impl SlashCommand for ModelCommand {
             description: "show or switch the active model (same-provider in v1)",
             args_hint: "[id]",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -97,6 +98,7 @@ impl SlashCommand for EffortCommand {
             description: "set reasoning effort (low|medium|high|max|auto)",
             args_hint: "<level>",
             hidden: false,
+            immediate: true,
         }
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -131,6 +133,7 @@ impl SlashCommand for StatusCommand {
             description: "show provider/auth/subscription status",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -154,6 +157,7 @@ impl SlashCommand for LoginCommand {
             description: "run the active provider's auth flow",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -174,6 +178,7 @@ impl SlashCommand for LogoutCommand {
             description: "clear cached credentials for the active provider",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -194,6 +199,7 @@ impl SlashCommand for SetupTokenCommand {
             description: "generate a long-lived Anthropic OAuth token for CI",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {

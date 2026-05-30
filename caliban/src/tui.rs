@@ -18,10 +18,12 @@
 mod app;
 pub(crate) mod ask;
 mod attach;
+mod clipboard;
 mod completer;
 mod events;
 mod external_editor;
 mod input;
+mod mouse_select;
 mod overlay;
 mod render;
 mod reverse_history;
@@ -192,6 +194,27 @@ pub(crate) async fn run(
         stdout().flush().ok();
         if app.should_exit {
             break;
+        }
+
+        // IE2: if a turn just ended and the user queued messages during
+        // it, pop the front and dispatch it as the next user turn by
+        // synthesizing an Enter key event into the existing submit path.
+        // The submit handler re-applies IE1 / running-check / shell /
+        // hooks / slash / message-build / stream-start identically to
+        // what happens on a real Enter, so all invariants are preserved.
+        // See `docs/TODO.md` § TUI ergonomics § IE2.
+        if app.running.is_none()
+            && !app.queued.is_empty()
+            && let Some(text) = events::drain_one_queued(&mut app)
+        {
+            app.input.buffer = text;
+            app.input.cursor = app.input.buffer.len();
+            let synth = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            events::handle_event(&synth, &mut app, &mut agent_stream);
+            continue; // redraw before polling so the new running state shows
         }
 
         tokio::select! {

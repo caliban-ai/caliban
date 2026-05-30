@@ -21,6 +21,7 @@ impl SlashCommand for PlanCommand {
             description: "toggle plan mode (mutating tools blocked when on)",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -51,6 +52,7 @@ impl SlashCommand for SkillsCommand {
             description: "list skills loaded from .caliban/skills/",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -94,6 +96,7 @@ impl SlashCommand for MemoryCommand {
             description: "view or edit memory tiers and topic files",
             args_hint: "[list|show <slug>|edit <slug>|delete <slug>]",
             hidden: false,
+            immediate: false,
         }
     }
     #[allow(clippy::too_many_lines)]
@@ -272,6 +275,7 @@ impl SlashCommand for OutputStyleCommand {
             description: "show the active output style and the available list",
             args_hint: "",
             hidden: false,
+            immediate: false,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
