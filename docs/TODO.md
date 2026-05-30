@@ -65,3 +65,23 @@ addressed by any PR yet.
   - File: crates/caliban-agent-core/src/permissions.rs (default-rules tail + `NonInteractiveAskHandler { auto_allow: false }` at :576); headless dispatch path in caliban/src/headless/mod.rs
   - Severity: Medium — a whole tool class fails silently in the headline headless mode.
   - Suggested fix: decide the intended headless default. Either (a) emit a clear error ("tool X requires --auto-allow or an --allow rule in headless mode") instead of an opaque deny, plus document the requirement loudly; or (b) make headless `-p` default to a more permissive mode for workspace-scoped mutating tools. Pairs with F15's `permission_mode` surfacing (now in `system/init` per #72) so the failure is at least diagnosable.
+
+---
+
+## Parallel sub-agent probe follow-ups (2026-05-30)
+
+Probe drove caliban to spawn three parallel `AgentTool` sub-agents
+against a self-hosted Ollama backend whose `NUM_PARALLEL=1` was
+characterised empirically the previous day. Full writeup:
+[`docs/2026-05-30-parallel-subagent-probe-findings.md`](2026-05-30-parallel-subagent-probe-findings.md).
+caliban's dispatch machinery handled the load cleanly (all sub-agents
+returned correct results, no client-side anomalies, 0 leaks). One
+small caliban-side action item surfaced; F1/F2/F4 from the probe are
+documentation/guidance, not code.
+
+- Finding (F3 — Low): `caliban doctor --deep` should detect single-NUM_PARALLEL backend serialisation and warn. Today the doctor probe confirms an Ollama endpoint is reachable and lists loaded models, but it does not characterise concurrency. Fire two `/api/generate` calls with `temperature: 0` and `num_predict: 16`; if the wall time is ≈ 2× single, the backend serialises (`NUM_PARALLEL=1`) and parallel sub-agents will not speed up — surface that as a warning so users see it before being surprised by it.
+  - Commit: (probe baseline; new probe, no prior PR)
+  - File: `caliban/src/diagnostics.rs` — new probe alongside the existing Ollama row; gated behind `--deep` (it issues two real inference calls).
+  - Severity: Low — diagnostic-only; no behavioural defect.
+  - Suggested placement: extend the existing Ollama probe section so the row reads e.g. `✓ ollama — http://… (4 models, NUM_PARALLEL=1 detected: parallel sub-agents will serialise)`. Skip when the configured provider is a hosted API where the answer is uninteresting.
+  - Optional follow-up: if F1's stream-json deferred-`tool_use` semantic is also addressed, an opt-in `--include-tool-dispatch-events` (or millisecond `t_ms` field on `tool_use`/`tool_result` frames) would let consumers correlate dispatch timing with this `NUM_PARALLEL` characterisation.

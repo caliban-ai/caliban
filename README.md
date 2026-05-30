@@ -278,22 +278,36 @@ shims; migrate them with `caliban config migrate`.
 
 ## Known model limitations
 
-### Qwen3 reasoning models on LM Studio — long tool chains break (verified 2026-05-27)
+### Qwen tool calls leak into reasoning on LM Studio's MLX engine (verified 2026-05-27)
 
-**Affected models.** Qwen3-family *reasoning* variants when served via
-LM Studio: e.g. `qwen3.5-9b-mlx`, `qwen3-72b-mlx`, and similar Qwen3
-reasoning-mode builds. Non-reasoning Qwen variants are not affected.
+**Affected setup.** This is **LM Studio's MLX engine specifically**, not
+a general Qwen3 limitation. Reproduced with `qwen3.5-9b-mlx` /
+`qwen3-72b-mlx` and similar Qwen3 reasoning-mode MLX builds served via
+LM Studio. The model itself is fine; LM Studio's MLX-engine output
+parser does not rewrite Qwen-native `<tool_call>` XML into the OpenAI
+`tool_calls` array (see [LM Studio issue #1592](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1592)
+for the upstream report).
 
-**What works.** Two-step tool chains (e.g. `Glob` → `Read` → final
-answer) run end-to-end. Reasoning content arrives in the OpenAI
-`reasoning_content` delta and is preserved as `thinking` blocks in
-the assistant message.
+**Where this does NOT reproduce (verified 2026-05-28).** The same
+`qwen35`-family model served by **Ollama (GGUF)** parses tool calls
+correctly — Ollama's `model/parsers/qwen35.go` extracts `<tool_call>`
+blocks into the structured `tool_calls` field server-side. See
+[`docs/2026-05-28-ollama-probe-findings.md`](docs/2026-05-28-ollama-probe-findings.md).
+Apple's reference `mlx_lm.server` also handles it when run with explicit
+parser flags (e.g. `--reasoning-parser qwen3_moe --tool-call-parser
+qwen3_coder`); auto-detection currently fails for non-Coder
+Qwen3.5/3.6 (mlx-lm issue #1293).
 
-**What breaks.** Once a chain reaches a third tool dispatch, the
-model serializes the next tool call as Qwen-native `<tool_call>` XML
-**inside its reasoning channel** (the OpenAI `reasoning_content`
-delta, surfaced as a `thinking` block in caliban) instead of populating
-the OpenAI `tool_calls` array:
+**What works on the affected setup.** Two-step tool chains (e.g. `Glob`
+→ `Read` → final answer) run end-to-end. Reasoning content arrives in
+the OpenAI `reasoning_content` delta and is preserved as `thinking`
+blocks in the assistant message.
+
+**What breaks.** Once a chain reaches a third tool dispatch, the model
+serializes the next tool call as Qwen-native `<tool_call>` XML *inside
+its reasoning channel* (the OpenAI `reasoning_content` delta, surfaced
+as a `thinking` block in caliban) instead of populating the OpenAI
+`tool_calls` array:
 
 ```
 <tool_call>
@@ -305,33 +319,42 @@ Cargo.toml
 </tool_call>
 ```
 
-caliban's OpenAI-spec parser sees a thinking block with no
-`tool_calls` field and a `finish_reason: "stop"`, so the turn ends
-without dispatching anything. The user sees a stalled run that
-exits cleanly with no apparent error.
+caliban's OpenAI-spec parser sees a thinking block with no `tool_calls`
+field and a `finish_reason: "stop"`, so the turn ends without
+dispatching anything. The user sees a stalled run that exits cleanly
+with no apparent error.
 
-**Why caliban doesn't fix this.** LM Studio passes the model's
-reasoning output through verbatim and does not rewrite Qwen-native
-`<tool_call>` XML into the OpenAI `tool_calls` array. Building and
-maintaining a reasoning-channel XML scanner inside caliban's OpenAI
-provider would add parsing complexity and ongoing maintenance for
-every Qwen template variation. We've elected to keep the bug visible
-and document the limitation instead.
+**Why caliban doesn't fix this in the OpenAI provider.** Because the gap
+is engine-specific (LM Studio's MLX path) and the broader ecosystem
+parses correctly server-side (Ollama, `mlx_lm.server`, vLLM,
+llama.cpp), building and maintaining a reasoning-channel XML scanner
+inside caliban's OpenAI provider for one engine's limitation would add
+parsing complexity and ongoing maintenance for every Qwen template
+variation without solving a generic problem. We document the
+limitation and recommend an engine switch instead.
 
 **Workarounds (any one of):**
 
-1. **Keep tool chains short** (≤ 2 dispatches per turn). Restructure
-   prompts so each turn only requires a Glob+Read or Read+Edit pair,
-   not a three-step plan.
-2. **Configure LM Studio's per-model tool-call adapter** to emit
-   OpenAI-style `tool_calls`. LM Studio exposes a per-model JSON
-   config for tool-call normalization; if your build supports
-   rewriting Qwen-native tool calls into the OpenAI shape, enable it
-   for the affected model.
-3. **Use a non-reasoning Qwen variant** (e.g. a plain `qwen3-*`
+1. **Switch to Ollama** (recommended on Apple Silicon and elsewhere)
+   — `--provider ollama --model qwen3.5:9b` etc.; set `OLLAMA_BASE_URL`
+   for a remote host. End-to-end validated in the 2026-05-28 probe.
+2. **Use Apple's `mlx_lm.server` with explicit parser flags** —
+   e.g. `mlx_lm.server --reasoning-parser qwen3_moe --tool-call-parser
+   qwen3_coder ...` — keeps the MLX speed edge while parsing the
+   reasoning-channel tool call.
+3. **Keep tool chains short on LM Studio MLX** (≤ 2 dispatches per
+   turn). Restructure prompts so each turn only requires a Glob+Read
+   or Read+Edit pair, not a three-step plan.
+4. **Use a non-reasoning Qwen variant** (e.g. a plain `qwen3-*`
    instruct build without reasoning mode) served via LM Studio.
-4. **Use a hosted provider** — Anthropic, OpenAI, or Google — where
+5. **Use a hosted provider** — Anthropic, OpenAI, or Google — where
    tool-call schemas are normalized server-side.
+
+> A residual Qwen-family "enumerated single-turn chain
+> under-execution" persists across engines and model sizes — that's
+> model quality, not engine. Documented as F2 in the
+> [2026-05-28 Ollama probe](docs/2026-05-28-ollama-probe-findings.md)
+> and confirmed on `qwen3.5:27b` on 2026-05-28.
 
 ## Repository layout
 
