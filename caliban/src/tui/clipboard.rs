@@ -2,7 +2,7 @@
 //!
 //! Emits the standard OSC-52 escape sequence so the host terminal
 //! writes `text` to the system clipboard. Supported by kitty, iTerm2,
-//! WezTerm, Ghostty, Alacritty, foot, modern Konsole, and (recent)
+//! `WezTerm`, Ghostty, Alacritty, foot, modern Konsole, and (recent)
 //! macOS Terminal.app. For terminals where OSC-52 is not honoured —
 //! historically including some macOS Terminal.app configurations — a
 //! follow-up TODO captures the `arboard` fallback path; v1 ships OSC-52
@@ -27,7 +27,7 @@ use base64::prelude::BASE64_STANDARD;
 
 /// Maximum payload length per OSC-52 sequence. Most terminals enforce a
 /// length limit on OSC strings; 8 KiB is a common documented cap (xterm
-/// is 100 KiB but kitty / WezTerm / Ghostty round closer to 8). Selections
+/// is 100 KiB but kitty / `WezTerm` / Ghostty round closer to 8). Selections
 /// longer than this are truncated rather than rejected — partial copy is
 /// strictly better than silent failure.
 const MAX_OSC52_BYTES: usize = 8 * 1024;

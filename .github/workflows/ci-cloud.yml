@@ -64,3 +64,7 @@ jobs:
           cargo build  --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
           cargo clippy --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex --all-targets -- -D warnings
           cargo test   --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
+
+# Trigger note: workflow_dispatch runs don't satisfy required pull_request
+# checks. Touching this file is in the path filter, so editing it forces
+# ci-cloud to evaluate the PR's HEAD commit.
