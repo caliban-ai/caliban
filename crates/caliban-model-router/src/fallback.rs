@@ -16,6 +16,7 @@ pub fn is_fatal_for_route(err: &ProviderError) -> bool {
         | ProviderError::ServerError { .. }
         | ProviderError::UpstreamServerFault(_)
         | ProviderError::Network(_)
+        | ProviderError::StreamInterrupted(_)
         | ProviderError::StreamIdle(_) => true,
         // Adapter errors are opaque — treat as non-fatal so we don't mask
         // configuration bugs by silently retrying.
@@ -84,6 +85,14 @@ mod tests {
     #[test]
     fn model_unavailable_is_fatal_for_route() {
         let e = ProviderError::ModelUnavailable("nope".into());
+        assert!(is_fatal_for_route(&e));
+    }
+
+    #[test]
+    fn stream_interrupted_is_fatal_for_route() {
+        // Mid-response interruption should advance to the next route, same
+        // as a connect-time network error.
+        let e = ProviderError::stream_interrupted("connection reset by peer");
         assert!(is_fatal_for_route(&e));
     }
 }

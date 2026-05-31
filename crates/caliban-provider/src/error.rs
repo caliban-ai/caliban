@@ -59,6 +59,17 @@ pub enum Error {
     #[error("network error: {0}")]
     Network(Box<dyn std::error::Error + Send + Sync>),
 
+    /// The HTTP response body was severed mid-stream. Distinct from
+    /// `Network` because the request itself succeeded (the upstream
+    /// accepted it and started replying) — what failed was reading the
+    /// streaming body to completion. Typical triggers: TCP RST or FIN
+    /// from upstream while the SSE stream was in flight, idle teardown
+    /// by NAT/proxy, or a transient connection reset. The wrapped
+    /// string is the underlying transport error chain, captured at the
+    /// point the chunk read failed.
+    #[error("stream interrupted mid-response: {0}")]
+    StreamInterrupted(String),
+
     /// The operation was cancelled before completion.
     #[error("operation cancelled")]
     Cancelled,
@@ -84,5 +95,39 @@ impl Error {
     /// Wrap an adapter-specific error.
     pub fn adapter(e: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Adapter(Box::new(e))
+    }
+
+    /// Wrap an upstream-severed-stream error. `inner` is rendered into
+    /// the message so the user-visible line reads "stream interrupted
+    /// mid-response: <source chain>".
+    pub fn stream_interrupted(inner: impl std::fmt::Display) -> Self {
+        Self::StreamInterrupted(inner.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_interrupted_display_uses_clear_prefix() {
+        // Operator-visible line. Must not say "decoding response body"
+        // (the prior misleading reqwest phrasing); must say something a
+        // user can recognize as a transport-level cutoff.
+        let e = Error::stream_interrupted("hyper: connection reset by peer");
+        assert_eq!(
+            e.to_string(),
+            "stream interrupted mid-response: hyper: connection reset by peer"
+        );
+    }
+
+    #[test]
+    fn stream_interrupted_constructor_accepts_display() {
+        // Helper should accept anything Display-able, mirroring how
+        // `network` / `adapter` accept anything Error-able.
+        let io = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+        let e = Error::stream_interrupted(io);
+        assert!(matches!(e, Error::StreamInterrupted(_)));
+        assert!(e.to_string().contains("eof"));
     }
 }

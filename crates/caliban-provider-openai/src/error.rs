@@ -66,7 +66,30 @@ impl From<OpenAIError> for ProviderError {
     fn from(e: OpenAIError) -> Self {
         match e {
             OpenAIError::Http(ref err) => {
-                if err.is_connect() || err.is_timeout() {
+                // Always log the reqwest error shape — operators have asked
+                // for visibility into which transport-failure flavor fired
+                // (timeout vs. connect vs. mid-body interruption) without
+                // needing to enable per-crate trace logs.
+                tracing::warn!(
+                    target: "caliban_provider_openai::transport",
+                    is_connect = err.is_connect(),
+                    is_timeout = err.is_timeout(),
+                    is_body = err.is_body(),
+                    is_decode = err.is_decode(),
+                    is_request = err.is_request(),
+                    url = err.url().map(reqwest::Url::as_str),
+                    source_chain = %render_source_chain(err),
+                    "openai transport error"
+                );
+                // Body/decode errors fire after the request was accepted and
+                // the response started streaming — surface them as a
+                // dedicated `StreamInterrupted` so the user sees "stream
+                // interrupted mid-response" rather than the misleading
+                // `network error: HTTP request failed: error decoding
+                // response body` chain.
+                if err.is_body() || err.is_decode() {
+                    ProviderError::stream_interrupted(render_source_chain(err))
+                } else if err.is_connect() || err.is_timeout() {
                     ProviderError::network(e)
                 } else {
                     ProviderError::adapter(e)
@@ -105,6 +128,27 @@ impl From<OpenAIError> for ProviderError {
                 .unwrap_or_else(|| ProviderError::InvalidRequest(msg.clone())),
         }
     }
+}
+
+/// Render an error and its source chain as `"top: child: grandchild"`.
+/// Used by the `OpenAIError::Http` log + the `StreamInterrupted` message
+/// to surface the underlying transport reason (e.g. the `hyper`/`io::Error`
+/// that severed the response body) instead of just the top-level
+/// `reqwest` Display.
+fn render_source_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut cursor: Option<&(dyn std::error::Error + 'static)> = err.source();
+    while let Some(next) = cursor {
+        let msg = next.to_string();
+        // reqwest's Display already includes the immediate source in some
+        // variants; skip duplicates that would otherwise read "X: X".
+        if !out.ends_with(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        cursor = next.source();
+    }
+    out
 }
 
 /// Inspect a 400/upstream error body for context-window-exceeded patterns.

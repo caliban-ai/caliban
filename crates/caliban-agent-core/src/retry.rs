@@ -50,6 +50,7 @@ pub fn is_retryable(e: &ProviderError) -> bool {
         e,
         ProviderError::RateLimit { .. }
             | ProviderError::Network(_)
+            | ProviderError::StreamInterrupted(_)
             | ProviderError::ServerError {
                 status: 502..=599,
                 ..

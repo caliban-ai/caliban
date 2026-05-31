@@ -32,6 +32,9 @@ fn retryable_classification() {
         status: 503,
         body: String::new()
     }));
+    assert!(is_retryable(&ProviderError::StreamInterrupted(
+        "connection reset by peer".into()
+    )));
     assert!(!is_retryable(&ProviderError::ServerError {
         status: 500,
         body: String::new()
