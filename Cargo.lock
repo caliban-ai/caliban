@@ -879,9 +879,12 @@ dependencies = [
  "async-trait",
  "caliban-common",
  "caliban-provider",
+ "chrono",
  "directories",
  "dirs",
+ "flate2",
  "futures",
+ "globset",
  "proptest",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -1236,7 +1239,9 @@ dependencies = [
  "caliban-agent-core",
  "caliban-common",
  "caliban-mcp-client",
+ "chrono",
  "dirs",
+ "fs2",
  "jsonschema",
  "notify",
  "serde",
@@ -2035,6 +2040,16 @@ checksum = "3027ae1df8d41b4bed2241c8fdad4acc1e7af60c8e17743534b545e77182d678"
 dependencies = [
  "lazy_static",
  "num",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -4513,7 +4528,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

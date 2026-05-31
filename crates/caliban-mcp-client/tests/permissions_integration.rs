@@ -121,6 +121,8 @@ async fn global_deny_overrides_server_allow() {
         tool: "mcp__*__delete_*".to_string(),
         action: Action::Deny,
         comment: Some("global deny".to_string()),
+        reason: None,
+        expires_at: None,
     }];
     global.extend(default_rules());
     let rules = merge_with_global(global, &servers);

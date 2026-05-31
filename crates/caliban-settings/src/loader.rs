@@ -3,10 +3,13 @@
 //! Drives the four canonical scopes + the CLI overlay, merges them per
 //! [`crate::merge::merge_values`], schema-validates the result, and
 //! deserializes into [`Settings`]. Also handles the
-//! `parent_settings_behavior: "block"` flip and the JSON/TOML coexistence
-//! rule.
+//! `parent_settings_behavior: "block"` flip and the TOML/JSON coexistence
+//! rule: `.toml` is the native format and wins when both files are present;
+//! `.json` is a legacy/import path that emits a one-time WARN.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -15,6 +18,28 @@ use crate::merge::merge_values;
 use crate::schema::validate_value;
 use crate::scope::{Scope, ScopePaths};
 use crate::settings::Settings;
+
+/// Emit a tracing WARN at most once per unique message for the lifetime of
+/// the process.  Prevents log spam when `load_settings` is called in a
+/// hot reload loop.
+///
+/// Dedup is process-lifetime only; cross-run nag is intentional during the
+/// migration window (e.g. the JSON-only WARN fires every run on purpose).
+fn warn_once(msg: String) {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // dedup is process-lifetime only; cross-run nag is intentional and tested manually
+    if !guard.contains(&msg) {
+        tracing::warn!(
+            target: caliban_common::tracing_targets::TARGET_SETTINGS,
+            "{msg}"
+        );
+        guard.insert(msg);
+    }
+}
 
 /// Where the loader found settings for one scope.
 #[derive(Debug, Clone)]
@@ -333,6 +358,10 @@ fn parse_cli_overlay(arg: &str) -> Result<Value, LoadError> {
 
 /// Read one scope: returns `Some(Value, Source)` if at least one file
 /// was found and parsed; `None` if neither JSON nor TOML existed.
+///
+/// Per-feature file precedence: if a `permissions.toml` exists alongside
+/// the primary settings file in the same scope directory, its `permissions`
+/// block overrides whatever the primary settings file declared for that key.
 fn read_scope(
     scope: Scope,
     workspace_root: &Path,
@@ -343,36 +372,79 @@ fn read_scope(
     };
     let json_exists = json_path.exists();
     let toml_exists = toml_path.exists();
-    if json_exists && toml_exists {
-        tracing::warn!(
-            target: caliban_common::tracing_targets::TARGET_SETTINGS,
-            scope = scope.label(),
-            json_path = %json_path.display(),
-            toml_path = %toml_path.display(),
-            "both .json and .toml present in scope; .json wins"
-        );
-    }
-    let chosen = if json_exists {
-        Some((json_path.clone(), "json"))
-    } else if toml_exists {
+    // TOML is the native/primary format.  JSON is the legacy/import path.
+    let chosen = if toml_exists {
+        if json_exists {
+            let jp = json_path.display();
+            let sl = scope.label();
+            warn_once(format!(
+                "settings [{sl}]: .json detected at {jp} but .toml takes \
+                 precedence; ignoring the .json (run `caliban settings import \
+                 --from {jp}` to migrate if you intended to use the .json)",
+            ));
+        }
         Some((toml_path.clone(), "toml"))
+    } else if json_exists {
+        let jp = json_path.display();
+        let sl = scope.label();
+        warn_once(format!(
+            "settings [{sl}]: {jp} is a legacy/import path; \
+             run `caliban settings import --from {jp}` to migrate to TOML",
+        ));
+        Some((json_path.clone(), "json"))
     } else {
         None
     };
-    let Some((path, format)) = chosen else {
+
+    // Compute the scope directory once — needed both for the per-feature
+    // file sibling lookup AND for the standalone-permissions.toml case.
+    let scope_dir = toml_path.parent().or_else(|| json_path.parent());
+
+    // If no primary settings file exists but a sibling `permissions.toml`
+    // does, bootstrap an empty value so the per-feature override below
+    // can populate it. This honors the v2 spec's split-file form
+    // (operators can use `permissions.toml` standalone, without ever
+    // creating a `settings.toml`).
+    let (mut value, source_path, source_format) = if let Some((path, format)) = chosen {
+        let body = std::fs::read_to_string(&path).map_err(|e| LoadError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let value = parse_body(&path, &body)?;
+        (value, Some(path), Some(format))
+    } else if scope_dir.is_some_and(|d| d.join("permissions.toml").exists()) {
+        (
+            serde_json::Value::Object(serde_json::Map::new()),
+            scope_dir.map(|d| d.join("permissions.toml")),
+            Some("toml"),
+        )
+    } else {
         return Ok(None);
     };
-    let body = std::fs::read_to_string(&path).map_err(|e| LoadError::Io {
-        path: path.clone(),
-        source: e,
-    })?;
-    let value = parse_body(&path, &body)?;
+
+    // Per-feature file precedence: `permissions.toml` in the same scope
+    // directory overrides the `permissions` slice from the primary settings
+    // file. This lets operators manage permissions independently of the
+    // main settings document.
+    if let Some(dir) = scope_dir {
+        let perm_path = dir.join("permissions.toml");
+        if perm_path.exists()
+            && let Ok(perm_body) = std::fs::read_to_string(&perm_path)
+            && let Ok(perm_val) = parse_body(&perm_path, &perm_body)
+            && let Some(perms) = perm_val.get("permissions").cloned()
+            && let Some(obj) = value.as_object_mut()
+        {
+            // Replace only the `permissions` key in the merged value.
+            obj.insert("permissions".to_string(), perms);
+        }
+    }
+
     Ok(Some((
         value,
         ScopeSource {
             scope,
-            path: Some(path),
-            format: Some(format),
+            path: source_path,
+            format: source_format,
         },
     )))
 }
@@ -435,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn json_wins_over_toml_in_same_scope() {
+    fn toml_wins_over_json_in_same_scope() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ws = tmp.path().to_path_buf();
         write(
@@ -453,13 +525,16 @@ mod tests {
         };
         let outcome = load_settings(&opts).unwrap();
         let m = outcome.settings.model.unwrap();
-        assert!(matches!(m, crate::ModelSelector::Name(n) if n == "json-model"));
+        assert!(
+            matches!(m, crate::ModelSelector::Name(ref n) if n == "toml-model"),
+            "TOML must beat JSON in the same scope"
+        );
         let proj = outcome
             .sources
             .iter()
             .find(|s| s.scope == Scope::Project)
             .unwrap();
-        assert_eq!(proj.format, Some("json"));
+        assert_eq!(proj.format, Some("toml"));
     }
 
     #[test]
@@ -654,6 +729,83 @@ mod tests {
         let outcome = load_settings(&opts).unwrap();
         assert!(outcome.settings.model.is_none());
         assert!(outcome.sources.is_empty());
+    }
+
+    #[test]
+    fn permissions_toml_overrides_settings_toml_permissions_in_same_scope() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        // settings.toml declares permissions.allow only
+        write(
+            &ws.join(".caliban/settings.toml"),
+            r#"
+[permissions]
+allow = ["from-settings"]
+"#,
+        );
+        // permissions.toml in the same scope directory overrides permissions
+        write(
+            &ws.join(".caliban/permissions.toml"),
+            r#"
+[permissions]
+deny = ["from-permissions-file"]
+"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let out = load_settings(&opts).unwrap();
+        // permissions.toml must win: deny contains the override entry
+        assert!(
+            out.settings
+                .permissions
+                .deny
+                .iter()
+                .any(|r| r == "from-permissions-file"),
+            "permissions.toml at the same scope must override"
+        );
+        // settings.toml.permissions must be shadowed: allow is empty
+        assert!(
+            !out.settings
+                .permissions
+                .allow
+                .iter()
+                .any(|r| r == "from-settings"),
+            "settings.toml.permissions must be shadowed"
+        );
+    }
+
+    #[test]
+    fn permissions_toml_loads_standalone_without_settings_toml() {
+        // Operators following the v2 spec's split-file form may use a
+        // standalone `permissions.toml` without ever creating a
+        // `settings.toml`. The loader must bootstrap an empty Settings
+        // value and merge the permissions slice in.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(
+            &ws.join(".caliban/permissions.toml"),
+            r#"
+[permissions]
+deny = ["from-permissions-file"]
+"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let out = load_settings(&opts).unwrap();
+        assert!(
+            out.settings
+                .permissions
+                .deny
+                .iter()
+                .any(|r| r == "from-permissions-file"),
+            "standalone permissions.toml must load even without a sibling settings.toml"
+        );
     }
 
     #[test]

@@ -20,6 +20,30 @@ use serde::{Deserialize, Serialize};
 // Permissions
 // ---------------------------------------------------------------------------
 
+/// A single permissions rule as carried in TOML/JSON. Mirrors the
+/// `caliban_agent_core::Rule` shape but lives here because Settings
+/// owns the wire serde shape (and to avoid a cyclic dep).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuleSpec {
+    /// Glob pattern matching tool names (e.g. `"Bash:cargo *"`).
+    pub pattern: String,
+    /// Decision string: `"allow"`, `"ask"`, or `"deny"`.
+    pub action: String,
+    /// Optional human-readable comment surfaced in `/permissions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Optional deny reason shown to the operator and logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Optional expiry timestamp after which the rule is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Deprecated `tool` alias accepted on input; hoisted into `pattern` on load.
+    #[serde(default, alias = "tool", skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+}
+
 /// Permission rule arrays. Mirrors the `permissions` block of a Claude-
 /// Code-compatible `settings.json`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,6 +55,14 @@ pub struct Permissions {
     pub ask: Vec<String>,
     /// Tools/patterns that hard-deny.
     pub deny: Vec<String>,
+    /// v2 ordered array. When non-empty, takes precedence over the buckets.
+    pub rules: Vec<RuleSpec>,
+    /// When true, refuse --no-permissions / bypass mode at startup.
+    pub enforce: Option<bool>,
+    /// Initial [`caliban_agent_core::PermissionMode`] at session start.
+    pub default_mode: Option<String>,
+    /// Append-only decision log toggle (default true).
+    pub audit_log: Option<bool>,
     /// Forward-compat container for unknown keys nested under `permissions`.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -298,32 +330,63 @@ impl Settings {
     }
 
     /// Convert the `permissions` arrays into a flat `Rule[]` suitable
-    /// for `PermissionsHook`. Order: `deny` > `ask` > `allow` (matches
-    /// the documented evaluation order in ADR 0020).
+    /// for `PermissionsHook`. When the v2 `rules` array is non-empty, it is
+    /// used verbatim (source order preserved). Otherwise falls back to the
+    /// legacy three-bucket form: `deny` > `ask` > `allow` (matches the
+    /// documented evaluation order in ADR 0020).
     #[must_use]
     pub fn permission_rules(&self) -> Vec<caliban_agent_core::Rule> {
         use caliban_agent_core::{Action, Rule};
+        let parse_action = |s: &str| match s.to_ascii_lowercase().as_str() {
+            "allow" => Action::Allow,
+            "ask" => Action::Ask,
+            "deny" => Action::Deny,
+            other => {
+                tracing::warn!("unknown permissions action {other:?}; falling back to ask");
+                Action::Ask
+            }
+        };
+
+        // v2 ordered form wins when non-empty.
+        if !self.permissions.rules.is_empty() {
+            return self
+                .permissions
+                .rules
+                .iter()
+                .map(|r| {
+                    let pat = if r.pattern.is_empty() {
+                        r.tool.clone().unwrap_or_default() // legacy `tool` alias
+                    } else {
+                        r.pattern.clone()
+                    };
+                    Rule {
+                        tool: pat,
+                        action: parse_action(&r.action),
+                        comment: r.comment.clone(),
+                        reason: r.reason.clone(),
+                        expires_at: r.expires_at,
+                    }
+                })
+                .collect();
+        }
+
+        // Legacy three-bucket fallback (deny > ask > allow).
+        let mk = |p: &str, a: Action| Rule {
+            tool: p.into(),
+            action: a,
+            comment: None,
+            reason: None,
+            expires_at: None,
+        };
         let mut out = Vec::new();
         for p in &self.permissions.deny {
-            out.push(Rule {
-                tool: p.clone(),
-                action: Action::Deny,
-                comment: None,
-            });
+            out.push(mk(p, Action::Deny));
         }
         for p in &self.permissions.ask {
-            out.push(Rule {
-                tool: p.clone(),
-                action: Action::Ask,
-                comment: None,
-            });
+            out.push(mk(p, Action::Ask));
         }
         for p in &self.permissions.allow {
-            out.push(Rule {
-                tool: p.clone(),
-                action: Action::Allow,
-                comment: None,
-            });
+            out.push(mk(p, Action::Allow));
         }
         out
     }
@@ -569,6 +632,53 @@ mod tests {
         // both Settings and legacy callers rely on).
         assert!(!legacy_tail.is_empty());
         assert_eq!(legacy_tail.last().unwrap().tool, "*");
+    }
+
+    #[test]
+    fn permissions_v2_ordered_rules_array_preserves_source_order() {
+        let toml_src = r#"
+[permissions]
+
+[[permissions.rules]]
+pattern = "Bash:git *"
+action = "allow"
+comment = "git ok"
+
+[[permissions.rules]]
+pattern = "Bash:rm *"
+action = "deny"
+reason  = "use git revert"
+
+[[permissions.rules]]
+pattern = "*"
+action = "ask"
+"#;
+        let s: Settings = toml::from_str(toml_src).unwrap();
+        let rules = s.permission_rules();
+        // Expect source order preserved — first rule is allow, NOT pushed behind deny.
+        assert_eq!(rules[0].tool, "Bash:git *");
+        assert_eq!(rules[0].action, caliban_agent_core::Action::Allow);
+        assert_eq!(rules[1].tool, "Bash:rm *");
+        assert_eq!(rules[1].action, caliban_agent_core::Action::Deny);
+        assert_eq!(rules[1].reason.as_deref(), Some("use git revert"));
+        assert_eq!(rules[2].tool, "*");
+        assert_eq!(rules[2].action, caliban_agent_core::Action::Ask);
+    }
+
+    #[test]
+    fn permissions_v2_falls_back_to_legacy_buckets_when_rules_unset() {
+        let toml_src = r#"
+[permissions]
+allow = ["Bash:git *"]
+deny  = ["Bash:rm *"]
+ask   = ["*"]
+"#;
+        let s: Settings = toml::from_str(toml_src).unwrap();
+        let rules = s.permission_rules();
+        // Legacy flatten order is deny → ask → allow (matches v1 behavior).
+        assert_eq!(rules[0].action, caliban_agent_core::Action::Deny);
+        assert_eq!(rules[1].action, caliban_agent_core::Action::Ask);
+        assert_eq!(rules[2].action, caliban_agent_core::Action::Allow);
     }
 
     #[test]

@@ -72,6 +72,95 @@ pub(crate) enum TranscriptLine {
     },
 }
 
+// ---------------------------------------------------------------------------
+// /permissions overlay state types (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Which tab is active in the `/permissions` overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PermissionsTab {
+    #[default]
+    View,
+    Edit,
+    Audit,
+}
+
+/// Origin of a rule as shown in the `/permissions` overlay.
+#[derive(Debug, Clone)]
+pub(crate) enum RuleOrigin {
+    /// Added via Ask modal "Always allow / always reject" — session-only.
+    Session,
+    /// Loaded from a config file at a particular scope.
+    File {
+        scope: caliban_settings::Scope,
+        path: std::path::PathBuf,
+        /// 0-based position within the scope's rules vec; reserved for
+        /// Phase 6 disambiguation when multiple rules share the same pattern.
+        #[allow(dead_code)]
+        index_in_scope: usize,
+    },
+    /// Built-in default (read-only; cannot be deleted).
+    Default,
+}
+
+/// One row to render in the `/permissions` list. Carries the rule itself
+/// plus its origin so the `[d]` key can dispatch deletion correctly.
+#[derive(Debug, Clone)]
+pub(crate) struct DisplayedRule {
+    /// Pattern string (e.g. `"Bash:cargo *"`).
+    pub(crate) pattern: String,
+    /// Effective action for this rule.
+    pub(crate) action: caliban_agent_core::Action,
+    /// Optional human-readable comment from the rule source. Displayed
+    /// in future Phase 6 inline detail view.
+    #[allow(dead_code)]
+    pub(crate) comment: Option<String>,
+    /// Where this rule came from.
+    pub(crate) origin: RuleOrigin,
+}
+
+/// Source filter chip — controls which rule sources are displayed in Edit tab.
+/// Variants beyond `All` are reserved for Phase 6 source-chip filtering.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SourceFilter {
+    #[default]
+    All,
+    Session,
+    Local,
+    Project,
+    User,
+    Managed,
+    BuiltIn,
+}
+
+/// Consolidated state for the `/permissions` overlay (replaces bare `permissions_cursor`).
+#[allow(dead_code)] // `filter` and `source_filter` reserved for Phase 6
+#[derive(Debug, Default)]
+pub(crate) struct PermissionsOverlayState {
+    /// Active tab.
+    pub(crate) tab: PermissionsTab,
+    /// Row cursor — index into the rule list visible on the current tab.
+    pub(crate) cursor: usize,
+    /// Free-text filter (unused in Phase 5; reserved for Phase 6).
+    pub(crate) filter: String,
+    /// Source filter chip (unused in Phase 5 UI; reserved for Phase 6).
+    pub(crate) source_filter: SourceFilter,
+}
+
+/// State for the `/permissions` test pane (opened with `t` in the Edit tab).
+#[derive(Debug, Default)]
+pub(crate) struct PermissionsTestPane {
+    /// Tool name the operator wants to test (e.g. `"Bash"`).
+    pub(crate) tool_name: String,
+    /// JSON input string (e.g. `{"command":"ls"}`).
+    pub(crate) input_json: String,
+    /// Outcome of the most recent Enter-to-run evaluation.
+    pub(crate) last_outcome: Option<String>,
+    /// Which field the cursor is on: 0 = `tool_name`, 1 = `input_json`.
+    pub(crate) focus: usize,
+}
+
 /// State for a currently-running agent turn.
 #[allow(dead_code)] // Used in T.2+ agent integration
 #[derive(Debug)]
@@ -178,12 +267,10 @@ pub(crate) struct App {
     /// `Up(Left)` to extract the dragged text. Reset to empty each
     /// frame. See `docs/TODO.md` § TUI ergonomics § IE3.
     pub(crate) position_map: super::mouse_select::PositionMap,
-    /// `/permissions` overlay cursor — index into the runtime-rule
-    /// list (in insertion order, per `RuntimeRuleStore::snapshot`).
-    /// `d` in the overlay removes the rule at this position; arrow
-    /// keys move it. Clamped to `[0, len)` on each render so removals
+    /// `/permissions` overlay state (tab, cursor, filters).
+    /// The cursor is clamped to `[0, len)` on each render so removals
     /// don't leave it dangling.
-    pub(crate) permissions_cursor: usize,
+    pub(crate) permissions: PermissionsOverlayState,
     /// Current view state: main view or an open overlay.
     pub(crate) view: ViewState,
     /// In-memory message history for the current invocation (ephemeral and session modes).
@@ -229,6 +316,12 @@ pub(crate) struct App {
     /// Currently-pending Ask request. While `Some(_)`, the input is locked
     /// and the modal is rendered.
     pub(crate) ask_modal: Option<ask::AskRequest>,
+    /// Concurrent Ask requests that arrived while another modal was already
+    /// open. Drained after each modal answer: each item is re-evaluated
+    /// against the (potentially updated) `runtime_rules` and either
+    /// auto-resolved (when a session rule the user just added matches) or
+    /// promoted to the next visible modal.
+    pub(crate) ask_queue: std::collections::VecDeque<ask::AskRequest>,
     /// State for the Ctrl+O transcript viewer overlay.
     pub(crate) transcript_viewer: transcript_viewer::TranscriptViewerState,
     /// State for the Ctrl+R reverse-history search overlay.
@@ -267,9 +360,19 @@ pub(crate) struct App {
     /// goes quiet for >3s without an active tool dispatch.
     pub(crate) last_delta_at: std::time::Instant,
     /// Session-scoped runtime rules added via the Ask modal's "Always
-    /// allow / Always reject" branches (Plan C T11). Consulted by the
-    /// modal flow before re-prompting; never persisted to disk in v1.
+    /// allow / Always deny" branches when the operator picks the
+    /// `session` scope in the sub-prompt (Phase 4). Consulted by the
+    /// modal flow before re-prompting; never persisted to disk —
+    /// other scopes route through `caliban-settings::writer` instead.
     pub(crate) runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
+    /// When non-None, the Ask modal is showing the always-allow/deny sub-prompt
+    /// (Phase 4). The operator opened it with `a` (always allow) or `d`
+    /// (always deny) inside the Ask modal.
+    pub(crate) always_subprompt: Option<crate::tui::ask::AlwaysSubprompt>,
+    /// When non-None, the `/permissions` test pane is open (opened with `t`
+    /// in the Edit tab). The operator types a tool name + JSON input; Enter
+    /// runs the matcher and populates `last_outcome`.
+    pub(crate) permissions_test: Option<PermissionsTestPane>,
 }
 
 impl App {
@@ -375,7 +478,8 @@ impl App {
             esc_armed_at: None,
             mouse_selection: super::mouse_select::MouseSelection::default(),
             position_map: super::mouse_select::PositionMap::new(),
-            permissions_cursor: 0,
+            permissions: PermissionsOverlayState::default(),
+            permissions_test: None,
             view: ViewState::Main,
             messages,
             toast: None,
@@ -390,6 +494,7 @@ impl App {
             cost_accumulator,
             ask_rx,
             ask_modal: None,
+            ask_queue: std::collections::VecDeque::new(),
             transcript_viewer: transcript_viewer::TranscriptViewerState::default(),
             reverse_history: None,
             input_history_path,
@@ -401,6 +506,7 @@ impl App {
             last_status_message: None,
             last_delta_at: std::time::Instant::now(),
             runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
+            always_subprompt: None,
         }
     }
 
@@ -416,6 +522,67 @@ impl App {
     ) -> Self {
         self.checkpoint_store = Some(store);
         self
+    }
+
+    /// Return the effective rule list as rendered in `/permissions`:
+    /// session rules first (top priority), then file-sourced rules in
+    /// scope-priority order (local → project → user → managed), then
+    /// built-in defaults last.
+    ///
+    /// Called on every render of the Edit/View tabs; also by the `[d]`
+    /// key dispatch so it can determine the origin of the selected row
+    /// and route the deletion correctly.
+    ///
+    /// File-IO (via `load_rules_with_provenance`) is acceptable here —
+    /// the overlay is not a hot render path.
+    pub(crate) fn displayed_rules(&self) -> Vec<DisplayedRule> {
+        let mut out: Vec<DisplayedRule> = Vec::new();
+
+        // 1. Session rules (highest priority).
+        for r in self.runtime_rules.snapshot() {
+            out.push(DisplayedRule {
+                pattern: r.pattern.clone(),
+                action: r.action,
+                comment: None,
+                origin: RuleOrigin::Session,
+            });
+        }
+
+        // 2. File-sourced rules (local → project → user → managed).
+        let cwd = self
+            .cwd
+            .to_str()
+            .map_or_else(|| ".".to_string(), ToOwned::to_owned);
+        let opts = caliban_settings::LoadOptions::new(cwd);
+        if let Ok(file_rules) = caliban_settings::load_rules_with_provenance(&opts) {
+            for (rule, prov) in file_rules {
+                // Only include rules that have an actual path — skip Cli scope.
+                if let Some(path) = prov.path {
+                    out.push(DisplayedRule {
+                        pattern: rule.tool.clone(),
+                        action: rule.action,
+                        comment: rule.comment.clone(),
+                        origin: RuleOrigin::File {
+                            scope: prov.scope,
+                            path,
+                            index_in_scope: prov.index_in_scope,
+                        },
+                    });
+                }
+            }
+        }
+
+        // 3. Built-in defaults (lowest priority; read-only).
+        for rule in caliban_agent_core::default_rules() {
+            out.push(DisplayedRule {
+                pattern: rule.tool.clone(),
+                action: rule.action,
+                comment: rule.comment.clone(),
+                origin: RuleOrigin::Default,
+            });
+        }
+
+        out
     }
 
     /// Test-only constructor — builds a minimal `App` backed by a

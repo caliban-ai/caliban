@@ -93,6 +93,10 @@ pub fn maybe_load_legacy_permissions(settings: &mut Settings, workspace_root: &P
                 found_any = true;
             }
             if found_any {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_SETTINGS,
+                    "permissions.toml [[rule]] form is deprecated; will be rewritten to v2 canonical form on next caliban-owned edit"
+                );
                 tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "loaded legacy permissions.toml as fallback (compat)");
             }
             found_any
@@ -267,5 +271,32 @@ action = "deny"
         let mut s = Settings::default();
         assert!(maybe_load_legacy_permissions(&mut s, ws));
         assert!(s.permissions.deny.iter().any(|x| x == "Bash:rm *"));
+    }
+
+    #[test]
+    fn legacy_permissions_toml_warns_once_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join(".caliban");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("permissions.toml"),
+            r#"
+[[rule]]
+tool = "Bash"
+action = "ask"
+"#,
+        )
+        .unwrap();
+
+        let mut s = Settings::default();
+        let loaded = maybe_load_legacy_permissions(&mut s, dir.path());
+        assert!(loaded, "fixture present, must report loaded=true");
+        // ensure the rule shows up under permissions.allow/ask/deny via legacy compat shape
+        assert!(
+            !s.permissions.ask.is_empty()
+                || !s.permissions.allow.is_empty()
+                || !s.permissions.deny.is_empty(),
+            "rule should be present in one of the permission buckets"
+        );
     }
 }

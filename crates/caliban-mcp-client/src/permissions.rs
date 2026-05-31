@@ -76,6 +76,8 @@ fn scoped_rule(server: &str, raw_pattern: &str, action: Action) -> Rule {
                 Action::Ask => "ask",
             },
         )),
+        reason: None,
+        expires_at: None,
     }
 }
 
@@ -163,11 +165,15 @@ mod tests {
                 tool: "mcp__*".to_string(),
                 action: Action::Deny,
                 comment: None,
+                reason: None,
+                expires_at: None,
             },
             Rule {
                 tool: "*".to_string(),
                 action: Action::Ask,
                 comment: None,
+                reason: None,
+                expires_at: None,
             },
         ];
         let mut servers = BTreeMap::new();

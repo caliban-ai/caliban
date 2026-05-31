@@ -212,6 +212,22 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if let ViewState::Overlay(o) = app.view {
         render_overlay(frame, app, o);
     }
+
+    // The "Always allow / Always deny" sub-prompt is a transient modal
+    // that floats above whichever overlay opened it (Ask modal or
+    // /permissions). When it's open, every key routes to its handler
+    // (see events::handle_key); rendering it last ensures it visibly
+    // covers the overlay underneath so the operator knows they're
+    // interacting with the sub-prompt, not the original modal.
+    if let Some(sp) = app.always_subprompt.as_ref() {
+        let area = super::overlay::centered_rect(70, 60, frame.area());
+        frame.render_widget(ratatui::widgets::Clear, area);
+        let (tool, input_excerpt) = match app.ask_modal.as_ref() {
+            Some(req) => (req.tool_name.as_str(), req.input_summary.as_str()),
+            None => ("(rule editor)", ""),
+        };
+        super::ask::render_always_subprompt(frame, area, sp, tool, input_excerpt);
+    }
 }
 
 /// Float a completion menu directly above the input area. Capped at 8 rows;
@@ -593,13 +609,24 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         .map(|seg| format!(" \u{00B7} {seg}"))
         .unwrap_or_default();
 
-    let text = format!(
+    let main_text = format!(
         " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{perm_mode_part}{overlay_part}{running_part}{context_part}"
     );
-    Line::from(Span::styled(
-        text,
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        main_text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
-    ))
+    )];
+    // Bypass-latch chip: visible whenever the latch is set, regardless of
+    // the current PermissionMode. Rendered in bold red so it is never missed.
+    if app.bypass_latch {
+        spans.push(Span::styled(
+            " \u{26A0} bypass latched (Ctrl+Shift+B to drop) ",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// IE3: walk every cell in `area` of `buf` and record `(y, x) → first

@@ -27,9 +27,10 @@
 //!
 //! ## Format
 //!
-//! JSON is the canonical format (`settings.json`); a `.toml` file at the
-//! same path is parsed identically. When both exist in the same scope,
-//! the JSON file wins and a `WARN` is logged.
+//! TOML is the canonical/native format (`settings.toml`); a `.json` file at
+//! the same path is a legacy/import path and is still parsed for backwards
+//! compatibility. When both exist in the same scope, the `.toml` file wins
+//! and a `WARN` is logged pointing to the migration command.
 //!
 //! ## Live reload
 //!
@@ -43,25 +44,32 @@
 
 mod api_key_helper;
 pub mod compat;
+pub mod import;
 mod loader;
 mod merge;
 mod overlay;
+pub mod provenance;
 mod schema;
 mod scope;
 mod settings;
 mod statusline;
 mod watcher;
+pub mod writer;
 
 pub use api_key_helper::{ApiKeyHelperPool, ApiKeyHelperSpec, AuthOutcome};
 pub use compat::{maybe_load_legacy_hooks, maybe_load_legacy_mcp, maybe_load_legacy_permissions};
 pub use loader::{LoadError, LoadOptions, LoadOutcome, ScopeSource, load_settings};
 pub use merge::{ChangedKey, RestartImpact, diff_settings, merge_values};
 pub use overlay::{ConfigRow, get, render_rows, render_text};
+pub use provenance::{RuleProvenance, load_rules_with_provenance};
 pub use schema::{SCHEMA_JSON, validate_value};
 pub use scope::{Scope, ScopePaths};
-pub use settings::{ApiKeyHelperRaw, McpServerSetting, ModelSelector, Permissions, Settings};
+pub use settings::{
+    ApiKeyHelperRaw, McpServerSetting, ModelSelector, Permissions, RuleSpec, Settings,
+};
 pub use statusline::{StatuslineConfig, StatuslineContext, StatuslineRunner};
 pub use watcher::{SettingsWatcher, WatcherEvent, is_settings_path, watch_paths_from_sources};
+pub use writer::{FileKind, append_rule_to_file, delete_rule_at, scope_path, write_toml_atomic};
 
 use std::sync::Arc;
 

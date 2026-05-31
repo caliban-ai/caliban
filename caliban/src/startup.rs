@@ -1182,6 +1182,8 @@ pub(crate) fn build_permissions(
             tool: p.clone(),
             action: Action::Allow,
             comment: None,
+            reason: None,
+            expires_at: None,
         });
     }
     for p in &args.deny {
@@ -1189,6 +1191,8 @@ pub(crate) fn build_permissions(
             tool: p.clone(),
             action: Action::Deny,
             comment: None,
+            reason: None,
+            expires_at: None,
         });
     }
     for p in &args.ask {
@@ -1196,6 +1200,8 @@ pub(crate) fn build_permissions(
             tool: p.clone(),
             action: Action::Ask,
             comment: None,
+            reason: None,
+            expires_at: None,
         });
     }
     // Layer Settings permission rules (which already incorporate the
@@ -1249,10 +1255,95 @@ pub(crate) fn build_permissions(
         Some(Arc::clone(&classifier)),
         args.allow_dangerously_skip_permissions,
     ));
+
+    let session_id = args
+        .session
+        .clone()
+        .or_else(|| args.resume.clone())
+        .unwrap_or_else(|| "ephemeral".into());
+    let audit_enabled = settings_snapshot.permissions.audit_log.unwrap_or(true);
+    let hooks_chain = wrap_with_audit(filter, audit_enabled, session_id);
+
     PermissionsSetup {
-        permissions_hook: Some(filter),
+        permissions_hook: Some(hooks_chain),
         tui_ask_rx: ask_rx,
         auto_mode_classifier: Some(classifier),
+    }
+}
+
+/// Optionally wrap `inner` with a [`caliban_agent_core::decision_log::DecisionRecorder`]
+/// when `audit_enabled` is true and the log path is resolvable.
+fn wrap_with_audit(
+    inner: Arc<dyn caliban_agent_core::Hooks + Send + Sync>,
+    audit_enabled: bool,
+    session_id: String,
+) -> Arc<dyn caliban_agent_core::Hooks + Send + Sync> {
+    if !audit_enabled {
+        return inner;
+    }
+    let Some(path) = caliban_agent_core::decision_log::decision_log_path() else {
+        return inner;
+    };
+    match caliban_agent_core::decision_log::DecisionLogWriter::open(path, session_id) {
+        Ok(w) => Arc::new(caliban_agent_core::decision_log::DecisionRecorder {
+            writer: Arc::new(w),
+            inner,
+            enabled: true,
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "audit log unavailable; proceeding without it");
+            inner
+        }
+    }
+}
+
+/// Returns `Err` with a human-readable explanation when `enforce = true` is
+/// set and the caller has flags that would weaken or skip permissions.
+pub(crate) fn check_enforce_gate(
+    args: &Args,
+    settings: &caliban_settings::Settings,
+) -> std::result::Result<(), String> {
+    if settings.permissions.enforce != Some(true) {
+        return Ok(());
+    }
+    if args.no_permissions {
+        return Err("permissions.enforce = true is set; --no-permissions is refused".into());
+    }
+    if args.auto_allow {
+        return Err("permissions.enforce = true is set; --auto-allow is refused".into());
+    }
+    // bypassPermissions startup mode requires the latch already, but the
+    // enforce flag overrides even the latch.
+    if args.permission_mode.as_deref() == Some("bypassPermissions") {
+        return Err("permissions.enforce = true is set; bypassPermissions mode is refused".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod enforce_tests {
+    use super::*;
+    use clap::Parser as _;
+
+    #[test]
+    fn enforce_true_blocks_no_permissions() {
+        let mut settings = caliban_settings::Settings::default();
+        settings.permissions.enforce = Some(true);
+        let args = Args::try_parse_from(["caliban", "--no-permissions"]).unwrap();
+        let result = check_enforce_gate(&args, &settings);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("enforce") && msg.contains("--no-permissions"),
+            "expected enforce-blocks message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn enforce_false_or_unset_allows_no_permissions() {
+        let settings = caliban_settings::Settings::default();
+        let args = Args::try_parse_from(["caliban", "--no-permissions"]).unwrap();
+        assert!(check_enforce_gate(&args, &settings).is_ok());
     }
 }
 

@@ -44,6 +44,9 @@ pub(crate) struct AskRequest {
     /// they're committing to. Computed via
     /// [`caliban_agent_core::derive_pattern`].
     pub(crate) always_pattern: String,
+    /// Raw tool input value — used by Phase 4 [`derive_suggestions`] to build
+    /// the broadest→narrowest suggestion list in the [`AlwaysSubprompt`].
+    pub(crate) tool_input: serde_json::Value,
     /// Oneshot to resolve when the user picks an answer.
     pub(crate) respond: oneshot::Sender<AskResponse>,
 }
@@ -124,6 +127,7 @@ impl AskHandler for TuiAskHandler {
             tool_name: ctx.tool_name.to_string(),
             input_summary: input_summary(ctx.input),
             always_pattern: caliban_agent_core::derive_pattern(ctx.tool_name, ctx.input),
+            tool_input: ctx.input.clone(),
             respond: respond_tx,
         };
         if self.tx.send(req).is_err() {
@@ -146,6 +150,226 @@ impl AskHandler for TuiAskHandler {
             )),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AlwaysSubprompt — state for the always-allow / always-deny sub-prompt
+// ---------------------------------------------------------------------------
+
+/// Sub-prompt opened when the operator hits `a` or `d` in the Ask modal.
+/// Picks one of the suggested patterns (or a custom one) and a write scope.
+///
+/// Navigation model: `selected` indexes `0..=suggestions.len()`. The last
+/// position (`selected == suggestions.len()`) is the `[custom]` row where
+/// the operator can type their own pattern (kept in `custom`). Any other
+/// position selects one of the pre-derived suggestions.
+#[derive(Debug, Clone)]
+pub(crate) struct AlwaysSubprompt {
+    /// Suggested patterns, broadest → narrowest. The last one is always
+    /// the literal exact-input pattern.
+    pub(crate) suggestions: Vec<String>,
+    /// Currently-selected row index. Range: `0..=suggestions.len()`.
+    /// Initialised to the narrowest real suggestion (last index of
+    /// `suggestions`); the `[custom]` row is one past that.
+    pub(crate) selected: usize,
+    /// When the operator navigated onto the `[custom]` row, the free-form
+    /// pattern they're typing accumulates here. `None` until they first
+    /// land on the custom row.
+    pub(crate) custom: Option<String>,
+    /// Live preview: does `selected_pattern()` match the pending input?
+    /// Set to `true` by default when exact match is selected; updated by the
+    /// render layer once pattern-matching is wired (Phase 5).
+    #[allow(dead_code)]
+    pub(crate) preview_matches: bool,
+    /// Scope picker.
+    pub(crate) scope: caliban_settings::Scope,
+    /// Optional operator comment.
+    pub(crate) comment: String,
+    /// Optional deny-only reason (only populated for the deny variant).
+    pub(crate) reason: String,
+    /// Allow or Deny — set when the sub-prompt was opened.
+    pub(crate) action: caliban_agent_core::Action,
+}
+
+impl AlwaysSubprompt {
+    /// True when the `[custom]` row is the current selection (one past
+    /// the end of `suggestions`).
+    pub(crate) fn is_custom_selected(&self) -> bool {
+        self.selected >= self.suggestions.len()
+    }
+
+    /// Selected pattern — either the indexed real suggestion or the
+    /// `custom` buffer.
+    pub(crate) fn selected_pattern(&self) -> &str {
+        if self.is_custom_selected() {
+            self.custom.as_deref().unwrap_or("")
+        } else {
+            &self.suggestions[self.selected]
+        }
+    }
+}
+
+/// Derived suggestions for the sub-prompt. Order: broadest → narrowest.
+/// The default selection is the LAST (narrowest) — see `AlwaysSubprompt::selected`.
+pub(crate) fn derive_suggestions(tool: &str, input: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match tool {
+        "Bash" => {
+            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let toks: Vec<&str> = cmd.split_whitespace().collect();
+            if let Some(first) = toks.first() {
+                out.push(format!("Bash:{first} *"));
+            }
+            if toks.len() >= 2 {
+                out.push(format!("Bash:{} {}*", toks[0], toks[1]));
+            }
+            out.push(format!("Bash:{cmd}")); // exact
+        }
+        "Edit" | "Read" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let p = std::path::Path::new(path);
+            if let Some(parent) = p.parent().and_then(|p| p.to_str()) {
+                out.push(format!("{tool}:{parent}/**"));
+                out.push(format!("{tool}:{parent}/*"));
+            }
+            out.push(format!("{tool}:{path}")); // exact
+        }
+        other if other.starts_with("mcp__") => {
+            out.push(other.to_string());
+            if let Some(obj) = input.as_object() {
+                for (k, v) in obj.iter().take(2) {
+                    if let Some(s) = v.as_str() {
+                        out.push(format!("{other}:{k}={s}"));
+                    }
+                }
+            }
+        }
+        _ => out.push(tool.to_string()),
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// render_always_subprompt — ratatui rendering for the sub-prompt modal
+// ---------------------------------------------------------------------------
+
+pub(crate) fn render_always_subprompt(
+    f: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
+    sp: &AlwaysSubprompt,
+    tool: &str,
+    input_excerpt: &str,
+) {
+    use caliban_settings::Scope;
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let title = match sp.action {
+        caliban_agent_core::Action::Allow => " Always allow ",
+        caliban_agent_core::Action::Deny => " Always deny ",
+        caliban_agent_core::Action::Ask => " Always ",
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line_count = u16::try_from(input_excerpt.lines().count()).unwrap_or(u16::MAX);
+    let suggestion_count = u16::try_from(sp.suggestions.len()).unwrap_or(u16::MAX);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2 + line_count),
+            Constraint::Length(1),
+            Constraint::Length(suggestion_count + 1),
+            Constraint::Length(1),
+            Constraint::Length(5), // scope picker (4 options + header)
+            Constraint::Length(1),
+            Constraint::Length(2), // comment + reason
+            Constraint::Min(1),
+            Constraint::Length(1), // footer
+        ])
+        .split(inner);
+
+    // Pending call summary
+    let mut summary = vec![Line::from(format!("Pending tool call: {tool}"))];
+    for l in input_excerpt.lines() {
+        summary.push(Line::from(format!("  {l}")));
+    }
+    f.render_widget(Paragraph::new(summary), chunks[0]);
+
+    // Suggestions — `selected` is the single source of truth for which row
+    // is highlighted. The custom row sits one index past `suggestions.len()`.
+    let mut suggestion_lines = vec![Line::from(
+        "Suggested patterns (↑/↓ to move, type to edit comment / custom pattern):",
+    )];
+    for (i, p) in sp.suggestions.iter().enumerate() {
+        let marker = if i == sp.selected { "(•)" } else { "( )" };
+        suggestion_lines.push(Line::from(format!("  {marker} {p}")));
+    }
+    let custom_marker = if sp.is_custom_selected() {
+        "(•)"
+    } else {
+        "( )"
+    };
+    suggestion_lines.push(Line::from(format!(
+        "  {custom_marker} [custom] {}",
+        sp.custom.as_deref().unwrap_or("(empty — type to fill)")
+    )));
+    let preview = if sp.preview_matches {
+        "✓ would match pending input"
+    } else {
+        "✗ would NOT match pending input"
+    };
+    suggestion_lines.push(Line::from(Span::styled(
+        preview,
+        Style::default().fg(if sp.preview_matches {
+            Color::Green
+        } else {
+            Color::Red
+        }),
+    )));
+    f.render_widget(Paragraph::new(suggestion_lines), chunks[2]);
+
+    // Scope picker
+    let scopes = [
+        (Scope::Cli, "session  (in-memory; gone on restart)"),
+        (
+            Scope::Project,
+            "project  (.caliban/permissions.toml; commit-friendly)",
+        ),
+        (Scope::User, "user     (~/.config/caliban/permissions.toml)"),
+        (
+            Scope::Local,
+            "local    (.caliban/permissions.local.toml; gitignored)",
+        ),
+    ];
+    let mut scope_lines = vec![Line::from("Save to:")];
+    for (scope, label) in scopes {
+        let marker = if sp.scope == scope { "(•)" } else { "( )" };
+        scope_lines.push(Line::from(format!("  {marker} {label}")));
+    }
+    f.render_widget(Paragraph::new(scope_lines), chunks[4]);
+
+    // Comment + reason
+    let mut cr_lines = vec![Line::from(format!("Comment: {}", sp.comment))];
+    if sp.action == caliban_agent_core::Action::Deny {
+        cr_lines.push(Line::from(format!("Reason : {}", sp.reason)));
+    }
+    f.render_widget(Paragraph::new(cr_lines), chunks[6]);
+
+    // Footer
+    f.render_widget(
+        Paragraph::new(
+            "↑/↓ move   [tab] cycle scope   [enter] save   [esc] cancel (allow once, no rule)",
+        )
+        .style(Style::default().add_modifier(Modifier::REVERSED)),
+        chunks[8],
+    );
 }
 
 #[cfg(test)]
@@ -214,5 +438,49 @@ mod tests {
         let long = "a".repeat(500);
         let v = serde_json::json!({"command": long});
         assert!(input_summary(&v).len() < 250);
+    }
+
+    #[test]
+    fn render_always_subprompt_does_not_panic() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let sp = AlwaysSubprompt {
+            suggestions: vec![
+                "Bash:cargo *".into(),
+                "Bash:cargo test*".into(),
+                "Bash:cargo test --all".into(),
+            ],
+            selected: 2,
+            custom: None,
+            preview_matches: true,
+            scope: caliban_settings::Scope::Project,
+            comment: String::new(),
+            reason: String::new(),
+            action: caliban_agent_core::Action::Allow,
+        };
+        term.draw(|f| {
+            let area = f.area();
+            render_always_subprompt(f, area, &sp, "Bash", "command: cargo test --all");
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn derive_suggestions_bash_orders_broadest_to_narrowest() {
+        let i = serde_json::json!({"command": "cargo test --all"});
+        let s = derive_suggestions("Bash", &i);
+        assert_eq!(s[0], "Bash:cargo *");
+        assert_eq!(s[1], "Bash:cargo test*");
+        assert_eq!(s.last().unwrap(), "Bash:cargo test --all");
+    }
+
+    #[test]
+    fn derive_suggestions_edit_emits_dir_globs_and_exact() {
+        let i = serde_json::json!({"file_path": "/repo/src/foo.rs"});
+        let s = derive_suggestions("Edit", &i);
+        assert!(s.iter().any(|x| x == "Edit:/repo/src/**"));
+        assert!(s.iter().any(|x| x == "Edit:/repo/src/*"));
+        assert!(s.last().unwrap().ends_with("foo.rs"));
     }
 }

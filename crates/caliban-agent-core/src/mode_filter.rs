@@ -337,6 +337,8 @@ mod tests {
             tool: tool.into(),
             action,
             comment: None,
+            reason: None,
+            expires_at: None,
         }
     }
 
@@ -572,30 +574,59 @@ mod tests {
 
     #[test]
     fn resolve_startup_mode_blocks_bypass_without_latch() {
-        let err =
-            crate::permission_mode::resolve_startup_mode(Some("bypassPermissions"), None, false)
-                .unwrap_err();
+        let err = crate::permission_mode::resolve_startup_mode(
+            Some("bypassPermissions"),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("--allow-dangerously-skip-permissions"));
     }
 
     #[test]
     fn resolve_startup_mode_cli_overrides_env() {
-        let m =
-            crate::permission_mode::resolve_startup_mode(Some("acceptEdits"), Some("plan"), false)
-                .unwrap();
+        let m = crate::permission_mode::resolve_startup_mode(
+            Some("acceptEdits"),
+            Some("plan"),
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(m, PermissionMode::AcceptEdits);
     }
 
     #[test]
     fn resolve_startup_mode_env_when_cli_absent() {
-        let m = crate::permission_mode::resolve_startup_mode(None, Some("plan"), false).unwrap();
+        let m =
+            crate::permission_mode::resolve_startup_mode(None, Some("plan"), None, false).unwrap();
         assert_eq!(m, PermissionMode::Plan);
     }
 
     #[test]
     fn resolve_startup_mode_default_when_neither() {
-        let m = crate::permission_mode::resolve_startup_mode(None, None, false).unwrap();
+        let m = crate::permission_mode::resolve_startup_mode(None, None, None, false).unwrap();
         assert_eq!(m, PermissionMode::Default);
+    }
+
+    #[test]
+    fn resolve_startup_mode_settings_default_when_cli_and_env_absent() {
+        let m =
+            crate::permission_mode::resolve_startup_mode(None, None, Some("acceptEdits"), false)
+                .unwrap();
+        assert_eq!(m, PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn resolve_startup_mode_cli_beats_settings_default() {
+        let m = crate::permission_mode::resolve_startup_mode(
+            Some("plan"),
+            None,
+            Some("acceptEdits"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(m, PermissionMode::Plan);
     }
 
     // --- auto mode with a fake classifier provider ---

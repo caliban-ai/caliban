@@ -6,6 +6,7 @@ pub mod agent;
 pub mod auto_mode;
 pub mod cache;
 pub mod compact;
+pub mod decision_log;
 pub mod error;
 pub mod hooks;
 pub mod hooks_config;
@@ -13,6 +14,7 @@ pub mod hooks_router;
 pub mod mode_filter;
 pub mod permission_mode;
 pub mod permissions;
+pub mod permissions_matcher;
 pub mod plan_mode;
 pub mod post_process;
 pub mod registry;
@@ -49,7 +51,7 @@ pub use permission_mode::{
 };
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
-    RuntimeRule, RuntimeRuleStore, default_rules, derive_pattern,
+    RuntimeRule, RuntimeRuleStore, default_rules, derive_pattern, evaluate_rules,
 };
 // `load_rules` / `load_rules_file` are `#[deprecated]` in favor of
 // `caliban-settings` (PR-T3-B). Re-exported with `#[allow(deprecated)]`

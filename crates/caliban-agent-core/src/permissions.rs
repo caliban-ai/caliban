@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::hooks::{HookDecision, Hooks, PermCtx, ToolCtx};
@@ -17,7 +17,7 @@ use crate::hooks::{HookDecision, Hooks, PermCtx, ToolCtx};
 // ---------------------------------------------------------------------------
 
 /// The outcome of matching a rule against a tool call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     /// Run the tool without prompting.
@@ -29,15 +29,22 @@ pub enum Action {
 }
 
 /// One rule from a TOML file or CLI flag.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Rule {
     /// Pattern of the form `Tool` or `Tool:first-arg-glob`.
     pub tool: String,
     /// Action to take when the pattern matches.
     pub action: Action,
-    /// Optional comment displayed in the Ask modal.
-    #[serde(default)]
+    /// Optional comment displayed in the Ask modal + audit log; never seen by the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Deny-only; surfaces to the model in place of the generic
+    /// "permission denied" message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Reserved for v3 time-bounded rules; v2 parses but ignores at evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Runtime-only rule added during a session via the "Always allow/reject"
@@ -132,6 +139,8 @@ impl RuntimeRuleStore {
                 tool: r.pattern.clone(),
                 action: r.action,
                 comment: None,
+                reason: None,
+                expires_at: None,
             };
             if rule_matches(&synth, ctx) {
                 return Some(r.action);
@@ -198,29 +207,19 @@ pub use caliban_common::glob_match::matches_glob;
 pub use caliban_common::glob_match::first_arg;
 
 // ---------------------------------------------------------------------------
-// Pattern parsing
+// Pattern matching — delegated to permissions_matcher
 // ---------------------------------------------------------------------------
 
-/// `(tool_pattern, first_arg_pattern)` — the second is `None` when the rule
-/// pattern has no `:`.
-fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
-    pattern
-        .split_once(':')
-        .map_or((pattern, None), |(name, glob)| (name, Some(glob)))
+fn rule_matches(rule: &Rule, ctx: &ToolCtx<'_>) -> bool {
+    crate::permissions_matcher::matches(&rule.tool, ctx)
 }
 
-fn rule_matches(rule: &Rule, ctx: &ToolCtx<'_>) -> bool {
-    use caliban_common::glob_match::{first_arg as common_first_arg, matches_glob as common_glob};
-    let (tool_pat, arg_pat) = split_pattern(&rule.tool);
-    if tool_pat != "*" && !common_glob(tool_pat, ctx.tool_name) {
-        return false;
-    }
-    match arg_pat {
-        None => true,
-        Some(glob) => common_first_arg(ctx.tool_name, ctx.input)
-            .as_deref()
-            .is_some_and(|arg| common_glob(glob, arg)),
-    }
+/// Free function used by the CLI (`caliban perms test/explain`) and the
+/// `/permissions` test pane — runs the matcher against a borrowed rule
+/// list and returns the first match.
+#[must_use]
+pub fn evaluate_rules<'a>(rules: &'a [Rule], ctx: &ToolCtx<'_>) -> Option<&'a Rule> {
+    rules.iter().find(|r| rule_matches(r, ctx))
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +248,8 @@ pub fn default_rules() -> Vec<Rule> {
         tool: t.into(),
         action: a,
         comment: None,
+        reason: None,
+        expires_at: None,
     })
     .collect()
 }
@@ -413,18 +414,21 @@ impl PermissionsHook {
     }
 
     /// Like [`Self::evaluate`] but also returns the matched rule's comment
-    /// (when any). Used to populate [`PermCtx::rule_comment`] for downstream
-    /// hooks.
+    /// and reason (when any). Used to populate [`PermCtx::rule_comment`] for
+    /// downstream hooks and to surface the deny reason to the model.
     #[must_use]
-    pub fn evaluate_with_rule(&self, ctx: &ToolCtx<'_>) -> (Action, Option<String>) {
+    pub fn evaluate_with_rule(
+        &self,
+        ctx: &ToolCtx<'_>,
+    ) -> (Action, Option<String>, Option<String>) {
         for r in &self.rules {
             if rule_matches(r, ctx) {
-                return (r.action, r.comment.clone());
+                return (r.action, r.comment.clone(), r.reason.clone());
             }
         }
         // Should be unreachable thanks to the `*` catch-all default; if it
         // somehow happens, deny rather than implicit allow.
-        (Action::Deny, None)
+        (Action::Deny, None, None)
     }
 }
 
@@ -439,7 +443,7 @@ fn action_str(a: Action) -> &'static str {
 #[async_trait]
 impl Hooks for PermissionsHook {
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        let (action, comment) = self.evaluate_with_rule(ctx);
+        let (action, comment, reason) = self.evaluate_with_rule(ctx);
         match action {
             Action::Allow => self.inner.before_tool(ctx).await,
             Action::Deny => {
@@ -455,10 +459,9 @@ impl Hooks for PermissionsHook {
                 if let Err(e) = self.inner.permission_denied(&perm_ctx).await {
                     tracing::warn!(error = %e, "permission_denied hook error (non-fatal)");
                 }
-                Ok(HookDecision::Deny(format!(
-                    "permission denied for tool '{}'",
-                    ctx.tool_name
-                )))
+                let deny_msg = reason
+                    .unwrap_or_else(|| format!("permission denied for tool '{}'", ctx.tool_name));
+                Ok(HookDecision::Deny(deny_msg))
             }
             Action::Ask => {
                 let perm_ctx = PermCtx {
@@ -599,6 +602,8 @@ mod tests {
             tool: tool.into(),
             action,
             comment: None,
+            reason: None,
+            expires_at: None,
         }
     }
 
@@ -670,6 +675,28 @@ mod tests {
     // --- async hook ---
 
     #[tokio::test]
+    async fn deny_action_surfaces_reason_to_model() {
+        let mut rules = vec![Rule {
+            tool: "Bash".into(),
+            action: Action::Deny,
+            comment: None,
+            reason: Some("no shell, use Edit".into()),
+            expires_at: None,
+        }];
+        rules.extend(default_rules());
+        let h = hook(rules);
+        let i = serde_json::json!({"command": "ls"});
+        let d = h.before_tool(&ctx("Bash", &i)).await.unwrap();
+        match d {
+            HookDecision::Deny(msg) => assert!(
+                msg.contains("no shell, use Edit"),
+                "deny message must surface rule.reason — got: {msg}"
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn deny_action_returns_deny_decision() {
         let mut rules = vec![rule("Bash", Action::Deny)];
         rules.extend(default_rules());
@@ -700,6 +727,23 @@ mod tests {
     }
 
     // --- TOML loader ---
+
+    #[test]
+    fn rule_deserializes_reason_and_expires_at() {
+        let src = r#"
+[[rule]]
+tool = "Bash"
+action = "deny"
+reason = "no shell access in CI"
+expires_at = "2026-12-31T00:00:00Z"
+"#;
+        let parsed: RulesFile = toml::from_str(src).unwrap();
+        assert_eq!(parsed.rules.len(), 1);
+        let r = &parsed.rules[0];
+        assert_eq!(r.action, Action::Deny);
+        assert_eq!(r.reason.as_deref(), Some("no shell access in CI"));
+        assert!(r.expires_at.is_some());
+    }
 
     #[test]
     #[allow(deprecated)]
@@ -894,5 +938,74 @@ mod runtime_rule_tests {
         let input = serde_json::json!({"command": "rm -rf /tmp"});
         let outcome = store.evaluate(&ctx("Bash", &input));
         assert_eq!(outcome, Some(Action::Deny));
+    }
+}
+
+#[cfg(test)]
+mod evaluate_rules_tests {
+    use super::*;
+
+    fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
+        ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t",
+            tool_name: name,
+            input,
+        }
+    }
+
+    /// Task 5.3: `evaluate_rules` returns the first matching rule.
+    #[test]
+    fn test_pane_outcome_reflects_matched_rule() {
+        let rules = vec![Rule {
+            tool: "Bash:rm *".into(),
+            action: Action::Deny,
+            comment: None,
+            reason: None,
+            expires_at: None,
+        }];
+        let input = serde_json::json!({"command": "rm -rf /"});
+        let ctx = ctx("Bash", &input);
+        let r = evaluate_rules(&rules, &ctx).unwrap();
+        assert_eq!(r.tool, "Bash:rm *");
+        assert_eq!(r.action, Action::Deny);
+    }
+
+    #[test]
+    fn evaluate_rules_returns_none_when_no_match() {
+        let rules = vec![Rule {
+            tool: "Read".into(),
+            action: Action::Allow,
+            comment: None,
+            reason: None,
+            expires_at: None,
+        }];
+        let input = serde_json::json!({"command": "ls"});
+        let ctx = ctx("Bash", &input);
+        assert!(evaluate_rules(&rules, &ctx).is_none());
+    }
+
+    #[test]
+    fn evaluate_rules_first_match_wins() {
+        let rules = vec![
+            Rule {
+                tool: "Bash".into(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            },
+            Rule {
+                tool: "Bash".into(),
+                action: Action::Deny,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            },
+        ];
+        let input = serde_json::json!({"command": "ls"});
+        let ctx = ctx("Bash", &input);
+        let r = evaluate_rules(&rules, &ctx).unwrap();
+        assert_eq!(r.action, Action::Allow, "first rule should win");
     }
 }

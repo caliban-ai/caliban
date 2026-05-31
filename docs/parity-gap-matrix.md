@@ -18,14 +18,7 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-05-28 (TODO/parity cleanup: validated the Plan
-A/B/C parity-sweep items against `main` and pruned the stale backlog;
-corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button
-modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish":
-`/clear` resets context_window, `/effort` runtime, `/model` runtime swap,
-`/cost` breakdown, `/doctor` real checks + `caliban doctor` headless,
-`/resume` filter, `/context` top-N, `/export`, permission-modal 4-button
-+ runtime rules, custom statusline runner).
+**Last refreshed:** 2026-05-31 (permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
 
 ## Design coverage
 
@@ -33,6 +26,7 @@ Every 🔴 row in this matrix has a proposed design doc as of 2026-05-24:
 
 | Theme | Spec | ADR |
 |---|---|---|
+| A. Permissions/safety (v2 schema + TOML polarity + active management) | [`permissions-v2-design`](superpowers/specs/2026-05-31-permissions-v2-design.md) | [0045](../adrs/0045-permissions-v2-and-toml-primary-config.md) |
 | A. Permissions/safety (modes + auto-mode) | [`permission-modes-design`](superpowers/specs/2026-05-24-permission-modes-design.md) | [0029](../adrs/0029-permission-modes-and-auto-mode.md) |
 | A. Permissions/safety (OS sandbox) | [`os-sandbox-design`](superpowers/specs/2026-05-24-os-sandbox-design.md) | [0032](../adrs/0032-os-sandbox.md) |
 | B. Hooks (event surface + handlers) | [`hooks-expansion-design`](superpowers/specs/2026-05-24-hooks-expansion-design.md) | [0024](../adrs/0024-hook-event-taxonomy.md) |
@@ -63,8 +57,9 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020 |
-| Permission modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | ✅ | ADR-0029; Shift+Tab cycles + status-bar chip; `--permission-mode` flag; `CALIBAN_DEFAULT_PERMISSION_MODE` env; `--allow-dangerously-skip-permissions` gate for bypass |
+| Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020; v2 schema: ordered `[[permissions.rules]]` array with `pattern`/`action`/`comment`/`reason`/`expires_at`, globstar `**`, `Bash:~glob` anywhere-match, dotted-key MCP arg accessors — ADR-0045 / [v2 spec](superpowers/specs/2026-05-31-permissions-v2-design.md) |
+| Permissions modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | ✅ | ADR-0029; Shift+Tab cycles + status-bar chip; `--permission-mode` flag; `CALIBAN_DEFAULT_PERMISSION_MODE` env; `--allow-dangerously-skip-permissions` gate for bypass; `permissions.enforce = true` refuses bypass at startup (ADR-0045) |
+| Permissions active management (CLI + TUI editor + modal writeback + audit log) | ✅ | ADR-0045 / [v2 spec](superpowers/specs/2026-05-31-permissions-v2-design.md); `caliban perms` CLI (list/test/explain/add/remove/import/export/audit/lint), `/permissions` overlay editor, modal scope picker with TOML writeback, JSONL decision log under `$XDG_STATE_HOME`, `permissions.enforce` lockdown, always-visible bypass-latch chip with `ctrl+shift+b` drop |
 | Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | ✅ | ADR-0029; `AutoModeClassifier` via router `RequestPurpose::FastClassifier` with `$defaults` curated rule lists, sha256-keyed cache, 4 KiB input truncation |
 | TUI Ask modal | ✅ | ADR-0027 + Plan C; 4-button modal (Allow once / Always allow / Reject once / Always reject) — see row E "Permission Ask modal" |
 | OS-level sandbox (Seatbelt / bubblewrap) | ✅ | ADR-0032; v1 ships macOS + Linux/WSL; Windows native deferred |
@@ -102,7 +97,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| Layered settings (managed / user / project / local) with merge semantics | ✅ | ADR-0026; new crate `caliban-settings` loads JSON/TOML at four canonical scopes with documented per-key merge rules + `--settings` / `--setting-sources` CLI flags + `parent_settings_behavior: "block"` lockdown. Legacy per-feature TOMLs (`permissions.toml`, `mcp.toml`, `hooks.toml`) still load when the unified file is absent. |
+| Layered settings (managed / user / project / local) with merge semantics | ✅ | ADR-0026; new crate `caliban-settings` loads JSON/TOML at four canonical scopes with documented per-key merge rules + `--settings` / `--setting-sources` CLI flags + `parent_settings_behavior: "block"` lockdown. Legacy per-feature TOMLs (`permissions.toml`, `mcp.toml`, `hooks.toml`) still load when the unified file is absent. TOML restored as primary write format per ADR-0045; JSON accepted on read with WARN. |
 | `/config` interactive editor | ✅ | ADR-0026 (Phase 1); existing `/config` overlay now surfaces the merged effective settings + scope chain (provenance per key). Tabbed write-back editor lands with ADR 0040 slash registry. |
 | Live reload (`ConfigChange` hook) | ✅ | ADR-0026; `SettingsWatcher` (notify, 250 ms debounce) fires on every scope file change; `ConfigChangeCtx` already exists in `caliban_agent_core::hooks`. `model` / `output_style` are flagged restart-required in the diff. |
 | `apiKeyHelper` (dynamic auth refresh) | ✅ | ADR-0026; `ApiKeyHelperPool` invokes the helper script without a shell, caches per `refreshIntervalMs` (default 5 min, configurable via `CALIBAN_API_KEY_HELPER_TTL_MS`), invalidates on 401, and logs slow-helper warnings at `slowHelperWarningMs` (default 10 s). |

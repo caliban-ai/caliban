@@ -312,6 +312,8 @@ mod tests {
                     tool: "Bash".into(),
                     action: Action::Allow,
                     comment: None,
+                    reason: None,
+                    expires_at: None,
                 }];
                 r.extend(default_rules());
                 r
@@ -336,6 +338,8 @@ mod tests {
                     tool: "Bash:rm *".into(),
                     action: Action::Deny,
                     comment: None,
+                    reason: None,
+                    expires_at: None,
                 }];
                 r.extend(default_rules());
                 r
@@ -376,6 +380,8 @@ mod tests {
                     tool: "Bash".into(),
                     action: Action::Allow,
                     comment: None,
+                    reason: None,
+                    expires_at: None,
                 }];
                 r.extend(default_rules());
                 r

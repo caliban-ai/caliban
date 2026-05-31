@@ -251,15 +251,15 @@ pub(crate) fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
     ]));
     out.push(Line::raw(""));
     out.push(Line::styled(
-        "   [y] Allow once       [A] Always allow this pattern",
+        "   [y] Allow once       [a] Always allow (opens scope picker)",
         Style::default().fg(Color::Cyan),
     ));
     out.push(Line::styled(
-        "   [n] Reject once      [R] Always reject this pattern",
+        "   [n] Deny once        [d] Always deny  (opens scope picker)",
         Style::default().fg(Color::Cyan),
     ));
     out.push(Line::styled(
-        "   [Esc] Deny",
+        "   [Esc] Deny once",
         Style::default().fg(Color::Cyan),
     ));
     out.push(Line::raw(""));
@@ -740,105 +740,229 @@ pub(crate) fn rewind_lines(app: &App) -> Vec<Line<'static>> {
 
 /// `/permissions` overlay body.
 ///
-/// Sections: current mode + bypass-latch status, then the runtime-rule
-/// list (added via Ask modal "Always allow/reject" branches), then key
-/// hints. The cursor (`app.permissions_cursor`) is rendered as `>` on
-/// the selected runtime rule.
+/// Sections: tab header, current mode + bypass-latch status, then the
+/// runtime-rule list (added via Ask modal "Always allow/reject" branches),
+/// then key hints. The cursor (`app.permissions.cursor`) is rendered as `>`
+/// on the selected runtime rule.
 ///
 /// Pure with respect to `App` — only reads. Mutations (mode cycle,
 /// rule remove, cursor move) happen in `events.rs::handle_key` under
 /// the `ViewState::Overlay(Overlay::Permissions)` branch.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn permissions_lines(app: &App) -> Vec<Line<'static>> {
+    use crate::tui::app::PermissionsTab;
     let dim = Style::default().add_modifier(Modifier::DIM);
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut out: Vec<Line<'static>> = Vec::new();
 
-    // Mode line.
-    let mode = app.permission_mode.load();
-    let chip = match mode {
-        caliban_agent_core::PermissionMode::Default => "default".to_string(),
-        other => other.chip().to_string(),
+    // Tab header — render before the body so it's always visible at top.
+    let tab_header = match app.permissions.tab {
+        PermissionsTab::View => " View(▶)  Edit  Audit ",
+        PermissionsTab::Edit => " View  Edit(▶)  Audit ",
+        PermissionsTab::Audit => " View  Edit  Audit(▶) ",
     };
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(tab_header.to_string(), bold),
+        Span::styled("  (Tab to switch tabs)", dim),
+    ]));
     out.push(Line::raw(""));
-    out.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Mode: ", bold),
-        Span::styled(chip, Style::default().fg(Color::Yellow)),
-        Span::raw("    "),
-        Span::styled("(Tab or Shift+Tab to cycle)", dim),
-    ]));
 
-    // Bypass-latch status.
-    let latch_text = if app.bypass_latch {
-        "armed (--allow-dangerously-skip-permissions)"
-    } else {
-        "not armed"
-    };
-    let latch_style = if app.bypass_latch {
-        Style::default().fg(Color::Red)
-    } else {
-        dim
-    };
-    out.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Bypass latch: ", bold),
-        Span::styled(latch_text.to_string(), latch_style),
-    ]));
-
-    out.push(Line::raw(""));
-    out.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            "Runtime rules (added via Ask modal \"Always\" branches):",
-            bold,
-        ),
-    ]));
-
-    // Runtime rules.
-    let rules = app.runtime_rules.snapshot();
-    if rules.is_empty() {
-        out.push(Line::styled("    (none)", dim));
-    } else {
-        let cursor = app.permissions_cursor.min(rules.len().saturating_sub(1));
-        for (i, r) in rules.iter().enumerate() {
-            let prefix = if i == cursor { "  >" } else { "   " };
-            let action_label = match r.action {
-                caliban_agent_core::permissions::Action::Allow => "Allow ",
-                caliban_agent_core::permissions::Action::Deny => "Deny  ",
-                caliban_agent_core::permissions::Action::Ask => "Ask   ",
+    match app.permissions.tab {
+        PermissionsTab::View | PermissionsTab::Edit => {
+            // Mode line (shown on both View and Edit tabs).
+            let mode = app.permission_mode.load();
+            let chip = match mode {
+                caliban_agent_core::PermissionMode::Default => "default".to_string(),
+                other => other.chip().to_string(),
             };
-            let action_style = match r.action {
-                caliban_agent_core::permissions::Action::Allow => Style::default().fg(Color::Green),
-                caliban_agent_core::permissions::Action::Deny => Style::default().fg(Color::Red),
-                caliban_agent_core::permissions::Action::Ask => Style::default().fg(Color::Yellow),
-            };
-            let line_style = if i == cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
+            out.push(Line::raw(""));
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Mode: ", bold),
+                Span::styled(chip, Style::default().fg(Color::Yellow)),
+                Span::raw("    "),
+                Span::styled("(Tab to switch tabs / Shift+Tab cycle mode)", dim),
+            ]));
+
+            // Bypass-latch status.
+            let latch_text = if app.bypass_latch {
+                "armed (--allow-dangerously-skip-permissions)"
             } else {
-                Style::default()
+                "not armed"
             };
-            out.push(
-                Line::from(vec![
-                    Span::raw(format!("{prefix} [{i}] ")),
-                    Span::styled(action_label.to_string(), action_style),
-                    Span::raw(r.pattern.clone()),
-                ])
-                .style(line_style),
-            );
+            let latch_style = if app.bypass_latch {
+                Style::default().fg(Color::Red)
+            } else {
+                dim
+            };
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Bypass latch: ", bold),
+                Span::styled(latch_text.to_string(), latch_style),
+            ]));
+
+            out.push(Line::raw(""));
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Effective rules (session > config files > built-in):", bold),
+            ]));
+
+            // Unified rule list: session + file-sourced + built-in defaults.
+            let displayed = app.displayed_rules();
+            if displayed.is_empty() {
+                out.push(Line::styled("    (none)", dim));
+            } else {
+                use crate::tui::app::RuleOrigin;
+                let cursor = app
+                    .permissions
+                    .cursor
+                    .min(displayed.len().saturating_sub(1));
+                for (i, r) in displayed.iter().enumerate() {
+                    let prefix = if i == cursor { "  >" } else { "   " };
+                    let action_label = match r.action {
+                        caliban_agent_core::permissions::Action::Allow => "Allow ",
+                        caliban_agent_core::permissions::Action::Deny => "Deny  ",
+                        caliban_agent_core::permissions::Action::Ask => "Ask   ",
+                    };
+                    let action_style = match r.action {
+                        caliban_agent_core::permissions::Action::Allow => {
+                            Style::default().fg(Color::Green)
+                        }
+                        caliban_agent_core::permissions::Action::Deny => {
+                            Style::default().fg(Color::Red)
+                        }
+                        caliban_agent_core::permissions::Action::Ask => {
+                            Style::default().fg(Color::Yellow)
+                        }
+                    };
+                    let scope_chip = match &r.origin {
+                        RuleOrigin::Session => "[session]".to_string(),
+                        RuleOrigin::File { scope, .. } => {
+                            format!("[{}]", scope.label())
+                        }
+                        RuleOrigin::Default => "[default]".to_string(),
+                    };
+                    let chip_style = match &r.origin {
+                        RuleOrigin::Session => Style::default().fg(Color::Cyan),
+                        RuleOrigin::File { .. } => Style::default().fg(Color::Blue),
+                        RuleOrigin::Default => dim,
+                    };
+                    let line_style = if i == cursor {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    out.push(
+                        Line::from(vec![
+                            Span::raw(format!("{prefix} [{i}] ")),
+                            Span::styled(action_label.to_string(), action_style),
+                            Span::raw(r.pattern.clone()),
+                            Span::raw("  "),
+                            Span::styled(scope_chip, chip_style),
+                        ])
+                        .style(line_style),
+                    );
+                }
+            }
+
+            out.push(Line::raw(""));
+            if app.permissions.tab == PermissionsTab::Edit {
+                // Edit-tab key hints.
+                out.push(Line::styled(
+                    "  Edit: [a] add rule  [d] delete rule  [p] promote to file  [t] test pane",
+                    dim,
+                ));
+                out.push(Line::styled(
+                    "  Nav:  \u{2191}\u{2193}/jk move  Esc/q close",
+                    dim,
+                ));
+                out.push(Line::styled(
+                    "  Tip: [d] deletes from the rule's source file; managed and defaults are read-only.",
+                    dim,
+                ));
+
+                // Test pane inline output (when open).
+                if let Some(tp) = app.permissions_test.as_ref() {
+                    out.push(Line::raw(""));
+                    out.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("Test pane:", bold),
+                        Span::styled("  Enter to run  Esc to close", dim),
+                    ]));
+                    out.push(Line::from(vec![
+                        Span::raw("  tool: "),
+                        Span::styled(
+                            tp.tool_name.clone(),
+                            if tp.focus == 0 {
+                                Style::default().add_modifier(Modifier::REVERSED)
+                            } else {
+                                Style::default().fg(Color::Cyan)
+                            },
+                        ),
+                    ]));
+                    out.push(Line::from(vec![
+                        Span::raw("  json: "),
+                        Span::styled(
+                            tp.input_json.clone(),
+                            if tp.focus == 1 {
+                                Style::default().add_modifier(Modifier::REVERSED)
+                            } else {
+                                Style::default().fg(Color::Cyan)
+                            },
+                        ),
+                    ]));
+                    if let Some(outcome) = tp.last_outcome.as_ref() {
+                        out.push(Line::from(vec![
+                            Span::raw("  result: "),
+                            Span::styled(outcome.clone(), Style::default().fg(Color::Yellow)),
+                        ]));
+                    }
+                }
+            } else {
+                // View-tab key hints.
+                out.push(Line::styled(
+                    "  Keys: Tab switch tab  Shift+Tab cycle mode  d delete rule  \u{2191}\u{2193}/jk move  Esc/q close",
+                    dim,
+                ));
+                out.push(Line::styled(
+                    "  Tip: [d] deletes from the rule's source file; managed and defaults are read-only.",
+                    dim,
+                ));
+            }
+        }
+        PermissionsTab::Audit => {
+            // Audit tab — the actual DecisionRecorder log lives at the path
+            // returned by `caliban_agent_core::decision_log::decision_log_path()`.
+            // For now, just point operators to `caliban perms audit` for the
+            // richer viewer; the TUI viewer can be expanded later.
+            out.push(Line::raw(""));
+            let msg = if audit_log_exists() {
+                "Audit log present. Run `caliban perms audit` for the full viewer."
+            } else {
+                "Audit log empty (enable with permissions.audit_log = true)."
+            };
+            out.push(Line::styled(msg.to_string(), dim));
+            out.push(Line::raw(""));
+            out.push(Line::styled("  Keys: Tab switch tab  Esc/q close", dim));
         }
     }
 
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "  Keys: Tab cycle mode  Shift+Tab reverse  d delete rule  \u{2191}\u{2193}/jk move  Esc/q close",
-        dim,
-    ));
-    out.push(Line::styled(
-        "  Tip: config-file rules are not shown here yet (live inside the PermissionsHook).",
-        dim,
-    ));
-
     out
+}
+
+/// Returns `true` if the canonical permissions decision log file exists.
+/// Mirrors `caliban_agent_core::decision_log::decision_log_path` (without
+/// importing it here to avoid a circular surface) and reads the same
+/// `permission-decisions.jsonl` filename under
+/// `$XDG_STATE_HOME/caliban/` (or the OS equivalent).
+fn audit_log_exists() -> bool {
+    let base = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("caliban")
+        .join("permission-decisions.jsonl")
+        .exists()
 }
 
 #[cfg(test)]
@@ -863,7 +987,8 @@ mod permissions_overlay_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("Mode: default"));
-        assert!(joined.contains("(none)"));
+        // Default rules (e.g. Read, Bash) are always shown even on a fresh app.
+        assert!(joined.contains("[default]"));
         assert!(joined.contains("Bypass latch: not armed"));
     }
 
@@ -897,7 +1022,7 @@ mod permissions_overlay_tests {
             pattern: "Edit(/tmp/*)".into(),
             action: Action::Deny,
         });
-        app.permissions_cursor = 1;
+        app.permissions.cursor = 1;
         let lines = permissions_lines(&app);
         let joined = lines
             .iter()
@@ -930,17 +1055,69 @@ mod permissions_overlay_tests {
             pattern: "a".into(),
             action: Action::Allow,
         });
-        app.permissions_cursor = 99; // intentionally out of bounds
-        // Should not panic; cursor renders as if on the last (and only) row.
+        app.permissions.cursor = 99; // intentionally out of bounds
+        // Should not panic; cursor clamps to the last row in the displayed
+        // list (session rule + built-in defaults).
         let lines = permissions_lines(&app);
         let lines_text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        let row0 = lines_text
+        // The session rule "a" appears at [0].
+        assert!(
+            lines_text.iter().any(|s| s.contains("[0]")),
+            "rule row 0 must be present"
+        );
+        // At least one row must have the cursor mark (the last row in the list).
+        assert!(
+            lines_text.iter().any(|s| s.starts_with("  >")),
+            "some row must have the cursor mark"
+        );
+    }
+
+    /// Task 5.1 smoke test: all three tabs render without panic.
+    #[test]
+    fn permissions_overlay_renders_all_three_tabs() {
+        use crate::tui::app::{PermissionsOverlayState, PermissionsTab};
+        let mut app = App::for_tests();
+        for tab in [
+            PermissionsTab::View,
+            PermissionsTab::Edit,
+            PermissionsTab::Audit,
+        ] {
+            app.permissions = PermissionsOverlayState {
+                tab,
+                ..Default::default()
+            };
+            let lines = permissions_lines(&app);
+            let joined: String = lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<String>();
+            // Each tab should show the tab header marker.
+            match tab {
+                PermissionsTab::View => assert!(joined.contains("View(▶)"), "View tab header"),
+                PermissionsTab::Edit => assert!(joined.contains("Edit(▶)"), "Edit tab header"),
+                PermissionsTab::Audit => assert!(joined.contains("Audit(▶)"), "Audit tab header"),
+            }
+        }
+    }
+
+    /// Tab header shows the correct active-tab indicator.
+    #[test]
+    fn permissions_tab_header_reflects_active_tab() {
+        use crate::tui::app::{PermissionsOverlayState, PermissionsTab};
+        let mut app = App::for_tests();
+        app.permissions = PermissionsOverlayState {
+            tab: PermissionsTab::Edit,
+            ..Default::default()
+        };
+        let lines = permissions_lines(&app);
+        let joined: String = lines
             .iter()
-            .find(|s| s.contains("[0]"))
-            .expect("rule row 0");
-        assert!(row0.starts_with("  >"));
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<String>();
+        assert!(joined.contains("Edit(▶)"), "Edit should be active");
+        assert!(!joined.contains("View(▶)"), "View should not be active");
     }
 }

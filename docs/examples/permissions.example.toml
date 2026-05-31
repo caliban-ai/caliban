@@ -1,41 +1,75 @@
-# Example permissions.toml for caliban.
+# permissions.example.toml — v2 schema
 #
 # Drop a copy at `<workspace>/.caliban/permissions.toml` (project-scoped) or
 # `$XDG_CONFIG_HOME/caliban/permissions.toml` (user-scoped, default
-# `~/.config/caliban/permissions.toml`). Project rules win over user rules.
-# CLI flags `--allow`, `--deny`, `--ask` are applied at the top with first-
-# match-wins. Built-in defaults sit at the bottom.
+# `~/.config/caliban/permissions.toml`). Managed > User > Project > Local —
+# earlier scopes shadow later ones, and the list within each scope is
+# evaluated top-to-bottom; first match wins.
+#
+# Caliban's native write format is TOML. JSON is accepted on read as a
+# legacy/import path (with a WARN). All caliban-owned writes — the Ask
+# modal, the /permissions editor, and the `caliban perms` CLI — emit TOML.
 
-# Allow common, safe git invocations without prompting.
-[[rule]]
-tool = "Bash:git status*"
-action = "allow"
+[permissions]
+enforce     = false           # set true to refuse --allow-dangerously-skip-permissions at startup
+default_mode = "default"      # default | acceptEdits | plan | auto | dontAsk | bypassPermissions
+audit_log   = true            # append JSONL decision log under $XDG_STATE_HOME/caliban/
 
-[[rule]]
-tool = "Bash:git diff*"
-action = "allow"
+# -------------------------------------------------------------------
+# Rules — ordered array, first match wins.
+# Fields:
+#   pattern  (required) — see grammar below
+#   action   (required) — "allow" | "deny" | "ask"
+#   comment  (optional) — human note; not shown to the model
+#   reason   (optional, deny-only) — shown to the model so it can retry differently
+#   expires_at (reserved) — ISO-8601 datetime; rule ignored after this instant
+# -------------------------------------------------------------------
 
-[[rule]]
-tool = "Bash:git log*"
-action = "allow"
+# git ops are typically safe; allow without prompting.
+[[permissions.rules]]
+pattern = "Bash:git *"
+action  = "allow"
+comment = "git ops are fine"
 
-# Refuse rm; the agent should use the Write tool or git revert.
-[[rule]]
-tool = "Bash:rm *"
-action = "deny"
-comment = "Use Write or git revert instead of rm"
+# Never rm from the shell — use git revert or the Write tool.
+[[permissions.rules]]
+pattern = "Bash:rm *"
+action  = "deny"
+reason  = "use git revert or the Write tool"
 
-# Anything else bash-related needs a human in the loop.
-[[rule]]
-tool = "Bash"
-action = "ask"
+# The ~-prefix anchors anywhere in the command line (catches `sudo rm`,
+# `bash -c "rm …"`, wrapper scripts, etc.).
+[[permissions.rules]]
+pattern = "Bash:~rm *"
+action  = "deny"
+reason  = "no rm even via wrappers"
 
-# Network egress: ask before fetching arbitrary URLs.
-[[rule]]
-tool = "WebFetch"
-action = "ask"
+# Markdown edits in any directory — fine.
+[[permissions.rules]]
+pattern = "Edit:**/*.md"
+action  = "allow"
 
-# Catch-all (this is also the built-in default).
-[[rule]]
-tool = "*"
-action = "ask"
+# MCP tool with dotted-key arg accessor: only allow creating issues
+# inside the anthropic org.
+[[permissions.rules]]
+pattern = "mcp__github__create_issue:repo=anthropic/*"
+action  = "allow"
+
+# Catch-all: anything not matched above goes to the Ask modal.
+[[permissions.rules]]
+pattern = "*"
+action  = "ask"
+
+# -------------------------------------------------------------------
+# Pattern grammar quick reference
+# -------------------------------------------------------------------
+# Tool                  — match any invocation of Tool
+# Tool:<glob>           — match the tool's first argument with */?>/** glob
+# Bash:~<glob>          — match anywhere in the bash command line
+# Tool:key=<glob>       — match a structured input field by dotted key;
+#                         multiple key=glob pairs comma-separated AND together
+# *                     — catch-all
+#
+# File-edit tools (Read, Write, Edit, MultiEdit, NotebookEdit):
+#   the file path is workspace-normalized before matching, so
+#   `Edit:src/**/*.rs` works from anywhere inside the repo.

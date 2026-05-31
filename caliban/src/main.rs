@@ -7,8 +7,10 @@ mod agents_cli;
 mod args;
 mod diagnostics;
 mod headless;
+mod perms_cli;
 mod plugin_cli;
 mod router;
+mod settings_cli;
 mod startup;
 mod subcommands;
 mod system_prompt;
@@ -29,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 // and the headless / system_prompt modules keep working after the split.
 #[allow(unused_imports)]
 pub(crate) use crate::args::{
-    AgentsCommand, Args, CalibanCommand, DaemonCommand, ProviderKind, RouterCommand,
-    default_model_for, provider_name,
+    AgentsCommand, Args, CalibanCommand, DaemonCommand, PermsCommand, ProviderKind, RouterCommand,
+    SettingsCommand, default_model_for, provider_name,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -81,6 +83,18 @@ async fn main() -> Result<()> {
     // provider or daemon needed (ADR 0026).
     if let Some(CalibanCommand::Config { inner }) = &args.command {
         let code = subcommands::run_config(inner)?;
+        std::process::exit(code);
+    }
+
+    // `caliban perms <verb>` — permission rule management (ADR 0029 / Phase 6).
+    if let Some(CalibanCommand::Perms { cmd }) = &args.command {
+        let code = perms_cli::run(cmd);
+        std::process::exit(code);
+    }
+
+    // `caliban settings <verb>` — settings import / print (Phase 6).
+    if let Some(CalibanCommand::Settings { cmd }) = &args.command {
+        let code = settings_cli::run(cmd);
         std::process::exit(code);
     }
 
@@ -168,12 +182,16 @@ async fn main() -> Result<()> {
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
 
+    // Enforce gate: when permissions.enforce = true, refuse bypass flags.
+    startup::check_enforce_gate(&args, &settings_snapshot).map_err(|e| anyhow::anyhow!(e))?;
+
     // Resolve the initial permission mode (ADR 0029). CLI flag wins over
     // env; bypass mode requires --allow-dangerously-skip-permissions.
     let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
     let initial_perm_mode = caliban_agent_core::resolve_startup_mode(
         args.permission_mode.as_deref(),
         env_perm.as_deref(),
+        settings_snapshot.permissions.default_mode.as_deref(),
         args.allow_dangerously_skip_permissions,
     )
     .map_err(|e| anyhow::anyhow!(e))?;

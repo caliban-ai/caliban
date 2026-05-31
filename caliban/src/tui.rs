@@ -249,11 +249,16 @@ pub(crate) async fn run(
                 }
             } => {
                 if let Some(req) = ask_event {
-                    // Only open the modal if none is currently active. If a
-                    // request races in mid-modal, deny it (the Bash tool will
-                    // surface the message).
+                    // Concurrent tool calls (a model batching N tool_use
+                    // blocks in one turn) produce N AskRequests. Queue the
+                    // ones that arrive while a modal is already open; they
+                    // get re-evaluated against the runtime store after each
+                    // modal answer (see events::drain_ask_queue). This was a
+                    // real bug — the 2nd…Nth concurrent calls used to be
+                    // auto-denied even when the user picked an "Always allow"
+                    // pattern that would have matched them.
                     if app.ask_modal.is_some() {
-                        let _ = req.respond.send(ask::AskResponse::Deny);
+                        app.ask_queue.push_back(req);
                     } else {
                         app.ask_modal = Some(req);
                         app.view = ViewState::Overlay(Overlay::AskModal);

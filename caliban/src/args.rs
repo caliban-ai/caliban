@@ -419,6 +419,147 @@ pub(crate) enum CalibanCommand {
         #[arg(value_name = "ARGS")]
         args: Vec<String>,
     },
+    /// Manage permission rules across all config scopes.
+    Perms {
+        #[command(subcommand)]
+        cmd: PermsCommand,
+    },
+    /// Manage caliban-wide settings (import, print).
+    Settings {
+        #[command(subcommand)]
+        cmd: SettingsCommand,
+    },
+}
+
+/// `caliban perms <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum PermsCommand {
+    /// List permission rules (all scopes merged, or a specific scope).
+    List {
+        /// Restrict output to a single scope (managed/user/project/local/cli).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Show the effective merged rule list across all scopes.
+        #[arg(long)]
+        effective: bool,
+        /// Emit JSON instead of the default human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Test whether a tool call would be allowed, denied, or asked.
+    Test {
+        /// Tool name (e.g. `Bash`).
+        tool: String,
+        /// Tool input as JSON (e.g. `'{"command":"git push"}'`).
+        #[arg(value_parser = parse_input_json)]
+        input: Option<serde_json::Value>,
+    },
+    /// Show which rule in the list first matches a tool call.
+    Explain {
+        /// Tool name (e.g. `Bash`).
+        tool: String,
+        /// Tool input as JSON (e.g. `'{"command":"git push"}'`).
+        #[arg(value_parser = parse_input_json)]
+        input: Option<serde_json::Value>,
+    },
+    /// Add a permission rule to a scope file.
+    Add {
+        /// Pattern of the form `Tool` or `Tool:first-arg-glob`.
+        pattern: String,
+        /// Action: `allow`, `ask`, or `deny`.
+        action: String,
+        /// Target scope (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional human-readable comment stored in the rule.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Optional deny reason shown to the operator.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Remove a permission rule from a scope file.
+    Remove {
+        /// Remove by ordinal position (1-based).
+        #[arg(long)]
+        index: Option<usize>,
+        /// Remove all rules whose pattern equals this value.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Target scope (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Import rules from a foreign config (Claude Code JSON, legacy caliban TOML).
+    Import {
+        /// Path to the source file.
+        #[arg(long, value_name = "PATH")]
+        from: std::path::PathBuf,
+        /// Destination scope (default: `user`).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Print what would be imported without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Export permission rules to stdout in TOML or JSON format.
+    Export {
+        /// Source scope (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Output format: `toml` (default) or `json`.
+        #[arg(long, default_value = "toml")]
+        format: String,
+    },
+    /// Show the permission-decision audit log (full impl in Phase 7).
+    Audit {
+        /// Show decisions since this ISO timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter by tool name.
+        #[arg(long)]
+        tool: Option<String>,
+        /// Filter by action (allow/ask/deny).
+        #[arg(long)]
+        action: Option<String>,
+        /// Limit output to the most-recent N entries.
+        #[arg(long)]
+        head: Option<usize>,
+    },
+    /// Check for duplicate or conflicting rules in a scope file.
+    Lint {
+        /// Scope to lint (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+}
+
+fn parse_input_json(s: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(s).map_err(|e| e.to_string())
+}
+
+/// `caliban settings <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum SettingsCommand {
+    /// Import a settings JSON (Claude Code / Codex / legacy caliban) into
+    /// canonical caliban TOML.
+    Import {
+        /// Path to the source file.
+        #[arg(long, value_name = "PATH")]
+        from: std::path::PathBuf,
+        /// Destination scope (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Print what would be imported without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the settings for a scope (or the merged effective settings).
+    Print {
+        /// Scope to print (default: `project`).
+        #[arg(long)]
+        scope: Option<String>,
+    },
 }
 
 /// `caliban config <verb>` verbs.

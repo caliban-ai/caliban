@@ -24,9 +24,11 @@ url              = { workspace = true }
 jsonschema       = { workspace = true }
 notify           = { workspace = true }
 tokio            = { workspace = true }
+fs2              = { workspace = true }
 caliban-common     = { path = "../caliban-common" }
 caliban-agent-core = { path = "../caliban-agent-core" }
 caliban-mcp-client = { path = "../caliban-mcp-client" }
+chrono             = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

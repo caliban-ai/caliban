@@ -263,6 +263,98 @@ caliban --bg "<task>"              # spawn a background agent and return immedia
 `--output-format`, `--input-format`, `--no-skills`, `--no-mcp`,
 `--no-plugins`, `--no-sub-agent`, `--no-hooks`, and more).
 
+## Permissions
+
+caliban gates every tool call through a rule list. Rules live in
+`permissions.toml` (preferred) or under the `[permissions]` table of
+`settings.toml`, at four scopes (managed / user / project / local).
+The list is evaluated top to bottom; first match wins. Built-in
+defaults backfill at the end.
+
+### A minimal `permissions.toml`
+
+```toml
+[permissions]
+enforce      = false          # set true to refuse --allow-dangerously-skip-permissions at startup
+default_mode = "default"      # default | acceptEdits | plan | auto | dontAsk | bypassPermissions
+audit_log    = true           # JSONL decision log under $XDG_STATE_HOME
+
+[[permissions.rules]]
+pattern = "Bash:git *"
+action  = "allow"
+
+[[permissions.rules]]
+pattern = "Bash:rm *"
+action  = "deny"
+reason  = "use git revert"
+
+[[permissions.rules]]
+pattern = "*"
+action  = "ask"
+```
+
+See [`docs/examples/permissions.example.toml`](docs/examples/permissions.example.toml)
+for a more complete example with comments and pattern notes.
+
+### Pattern grammar
+
+- `Tool` — match any invocation of `Tool`.
+- `Tool:<glob>` — match the tool's first arg with `*`/`?`/`**` glob.
+- `Bash:~<glob>` — match anywhere in the bash command line (catches
+  `sudo rm`, `bash -c "rm …"`, etc.).
+- `Tool:key=<glob>` / `Tool:k1.k2=<glob>` — match a structured input
+  field by dotted-key. Multiple `key=glob` comma-separated AND together.
+- `*` — catch-all.
+
+For file-edit tools (`Read`, `Write`, `Edit`, `MultiEdit`,
+`NotebookEdit`) the file path is workspace-normalized before
+matching, so `Edit:src/**/*.rs` works from anywhere in the repo.
+
+### Modal "always allow / always deny"
+
+Pressing **y** or **n** in the Ask modal opens a sub-prompt:
+
+- Pick a pattern (narrow default shown; broader options selectable).
+- Pick a scope (session / project / user / local).
+- Optionally add a comment, or a deny-only reason that surfaces to
+  the model.
+- Press Enter to commit; Esc to allow/deny just once with no rule.
+
+### `caliban perms` CLI
+
+| Subcommand | What it does |
+|------------|--------------|
+| `caliban perms list [--scope <s>] [--effective] [--json]` | Show one scope's rules, or the merged effective set. |
+| `caliban perms test <tool> [<json>]` | Run the matcher; exit `0` allow / `1` deny / `2` ask. |
+| `caliban perms explain <tool> [<json>]` | Show every rule with `MATCH` flagged. |
+| `caliban perms add <pattern> <action> [--scope <s>] [--comment <c>] [--reason <r>]` | Atomic append to a scope's TOML. |
+| `caliban perms remove --pattern <p> [--scope <s>]` | Atomic rewrite with the matching rule removed. |
+| `caliban perms import --from <path> [--scope <s>] [--dry-run]` | Detect JSON / legacy TOML; emit canonical TOML. |
+| `caliban perms export [--scope <s>] [--format toml\|json]` | Print rules in TOML or JSON shape. |
+| `caliban perms audit [--since <when>] [--tool <name>] [--action <a>] [--head <N>]` | Read the decision log. |
+
+### Configuration polarity
+
+caliban's native config format is TOML. JSON is accepted on read as
+a legacy/import path: when no `.toml` exists at a scope, the `.json`
+file is read and a WARN suggests `caliban settings import`. Writes
+from the modal, the `/permissions` editor, and the CLI always emit
+TOML.
+
+### Bypass mode (escape hatch)
+
+`--allow-dangerously-skip-permissions` arms a session-wide latch
+that allows cycling into `bypassPermissions` mode (rules ignored).
+A red **⚠ bypass latched** chip stays visible the entire session
+when the latch is on. Press **ctrl+shift+b** to drop the latch
+(restart required to re-arm). `permissions.enforce = true` in any
+scope refuses the flag at startup.
+
+See [ADR 0045](adrs/0045-permissions-v2-and-toml-primary-config.md)
+for the full design rationale and
+[`docs/superpowers/specs/2026-05-31-permissions-v2-design.md`](docs/superpowers/specs/2026-05-31-permissions-v2-design.md)
+for the detailed spec.
+
 ## Configuration
 
 caliban reads `settings.json` (or `.toml`) at four scopes — **Managed >
