@@ -12,6 +12,16 @@ publish     = false
 name = "caliban"
 path = "src/main.rs"
 
+[features]
+# IE3 follow-up: clipboard fallback via the `arboard` crate, used when
+# OSC-52 isn't honoured by the host terminal (notably some macOS
+# Terminal.app configurations). Default-on so most users get the
+# fallback for free. Disable with `--no-default-features` on headless
+# / CI hosts that lack the X11/Wayland clipboard libs arboard needs
+# at link time (libxcb on Linux). See `caliban/src/tui/clipboard.rs`.
+default   = ["clipboard"]
+clipboard = ["dep:arboard"]
+
 [dependencies]
 caliban-common             = { path = "../crates/caliban-common" }
 caliban-provider           = { path = "../crates/caliban-provider" }
@@ -47,6 +57,10 @@ async-trait                = { workspace = true }
 tracing                    = { workspace = true }
 tracing-subscriber         = { workspace = true }
 base64                     = { workspace = true }
+# IE3 follow-up: optional system-clipboard fallback. Gated behind the
+# `clipboard` feature (default-on) so headless builds can opt out via
+# `--no-default-features` to avoid the X11/Wayland link-time deps.
+arboard                    = { workspace = true, optional = true }
 ratatui = { version = "0.29.0", features = ["crossterm"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 nucleo-matcher           = { workspace = true }

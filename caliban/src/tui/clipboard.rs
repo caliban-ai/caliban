@@ -1,15 +1,23 @@
-//! Clipboard write via OSC-52 (IE3 Task 14).
+//! Clipboard write: `arboard` system-clipboard write first, OSC-52
+//! escape sequence as a fallback (IE3 Task 14 + IE3-followup).
 //!
-//! Emits the standard OSC-52 escape sequence so the host terminal
-//! writes `text` to the system clipboard. Supported by kitty, iTerm2,
-//! `WezTerm`, Ghostty, Alacritty, foot, modern Konsole, and (recent)
-//! macOS Terminal.app. For terminals where OSC-52 is not honoured —
-//! historically including some macOS Terminal.app configurations — a
-//! follow-up TODO captures the `arboard` fallback path; v1 ships OSC-52
-//! only so the binary stays linkable on headless hosts that lack the
-//! X11/Wayland clipboard libraries `arboard` needs.
+//! The `arboard` path writes directly to the host's system clipboard
+//! (`NSPasteboard` on macOS, the X11/Wayland selection on Linux, the
+//! Windows clipboard on Windows). When it succeeds, no terminal
+//! cooperation is required — drag-select-to-copy works even in
+//! terminals (notably some macOS Terminal.app configurations) that
+//! silently drop the OSC-52 escape sequence.
 //!
-//! Format (xterm `OSC 52 ; Pc ; Pd ST`):
+//! When `arboard` is not compiled in (the `clipboard` feature is off
+//! — typically on headless / CI hosts that lack the X11/Wayland
+//! clipboard libraries `arboard` needs at link time), or when its
+//! runtime call fails (no clipboard service running, locked
+//! pasteboard, etc.), we fall back to emitting the standard OSC-52
+//! escape sequence. Most modern terminals (kitty, iTerm2, `WezTerm`,
+//! Ghostty, Alacritty, foot, modern Konsole, recent Terminal.app)
+//! honour OSC-52 even when arboard isn't available.
+//!
+//! OSC-52 format (xterm `OSC 52 ; Pc ; Pd ST`):
 //!
 //! ```text
 //! ESC ] 5 2 ; c ; <base64-of-text> BEL
@@ -58,15 +66,46 @@ pub(crate) fn osc52_payload(text: &str) -> String {
     format!("\x1b]52;c;{b64}\x07")
 }
 
-/// Emit an OSC-52 clipboard-write sequence for `text` to stdout, then
-/// flush. Returns the IO error if write or flush fails. Best-effort:
-/// callers should not abort on failure (clipboard write is a UX nicety,
-/// not a correctness requirement).
+/// Try a direct system-clipboard write via `arboard`. Returns `Ok(())`
+/// on success; any error (clipboard service unavailable, locked, etc.)
+/// is returned to the caller so they can fall back to OSC-52.
 ///
-/// Empty input is a no-op (no escape sequence emitted).
+/// Only compiled when the `clipboard` feature is enabled (default-on).
+/// On headless hosts that lack X11/Wayland clipboard libs, build with
+/// `--no-default-features` to strip this path entirely.
+#[cfg(feature = "clipboard")]
+fn try_arboard(text: &str) -> Result<(), arboard::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text.to_owned())?;
+    Ok(())
+}
+
+/// Best-effort clipboard write of `text`. Strategy:
+///
+/// 1. If the `clipboard` feature is compiled in, try [`arboard`] first.
+///    On success, return — the terminal isn't involved and there's no
+///    risk of stray escape bytes leaking to the screen.
+/// 2. If arboard isn't compiled in OR fails at runtime (no clipboard
+///    service, locked pasteboard), emit an OSC-52 escape sequence to
+///    stdout and flush. Terminals that honour OSC-52 will catch it; on
+///    terminals that don't, the bytes may render as visible garbage —
+///    that's the unavoidable failure mode of the fallback.
+///
+/// Empty input is a no-op (no clipboard call, no escape emitted).
+/// Callers should treat any error as non-fatal: clipboard write is a
+/// UX nicety, not a correctness requirement.
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());
+    }
+    #[cfg(feature = "clipboard")]
+    {
+        match try_arboard(text) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::debug!(error = %e, "arboard clipboard write failed; falling back to OSC-52");
+            }
+        }
     }
     let payload = osc52_payload(text);
     let mut out = std::io::stdout().lock();
@@ -128,7 +167,8 @@ mod tests {
 
     #[test]
     fn copy_to_clipboard_is_noop_on_empty() {
-        // Doesn't actually touch stdout for empty input (returns Ok early).
+        // Doesn't touch stdout or the system clipboard for empty input
+        // (returns Ok early under either feature configuration).
         copy_to_clipboard("").expect("empty input is Ok");
     }
 }

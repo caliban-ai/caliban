@@ -105,10 +105,6 @@ to be picked up in follow-up work.
   - File: `caliban/src/tui/events.rs::drain_one_queued`; `caliban/src/tui.rs` (main loop drain check).
   - Severity: Low — multi-queued use case is uncommon; if needed, change `drain_one_queued` to `drain_consecutive_non_slash` returning a joined string.
 
-- Finding (IE3-followup — Medium for Terminal.app users): clipboard write is OSC-52 only. Some macOS Terminal.app configurations don't honour OSC-52, so drag-select still highlights and extracts but the clipboard write is silent. Plan adds an `arboard` fallback when OSC-52 fails or env detection says no; v1 stays OSC-52-only because adding `arboard` as a direct dep on the binary pulls in X11/Wayland clipboard libs that break headless builds.
-  - File: `caliban/src/tui/clipboard.rs` (add fallback path); `caliban/Cargo.toml` (optional `arboard` feature, default-on, that headless / CI can disable with `--no-default-features`).
-  - Severity: Medium for Terminal.app users (the OSC-52 emit returns Ok but the terminal silently drops the sequence); Low otherwise.
-
 - Finding (caliban sub-agent driver — informational, F2-family confirmation): driving sub-agents through caliban + Ollama (`qwen3.5:9b-mlx` on the remote box) at `--max-turns 5` hit `result: max_turns` (exit 75) on a single-task Grep-and-list prompt — the model kept re-issuing Grep instead of summarising. Confirms F2/F5 (Qwen enumerated-plan under-execution and 9B coherence ceiling) extends to the MLX-quantised variant; `--max-turns 5` is too tight for any agentic delegation against 9B Qwen. Practical floor for delegation is `--max-turns 10–12` and the model is only reliable for 1–2 step lookups.
   - File: no code change; document on the next probe doc + matrix update.
   - Severity: informational — pure model-quality observation against the caliban driver path; caliban handled the halt cleanly (distinct exit 75 per `#70`'s structured result).
