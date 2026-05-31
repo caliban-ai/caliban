@@ -1,54 +1,14 @@
 name: ci-cloud
 
+# Cloud features (bedrock / vertex / azure) are not built in PR CI.
+# Drift on `main` is caught by the weekly cron; explicit verification
+# before merging cloud-transport changes is via `workflow_dispatch`
+# from the Actions tab. Branch protection no longer requires this
+# check. Rationale: docs/superpowers/specs/2026-05-31-ci-cost-reduction-design.md
 on:
-  push:
-    branches: ["**"]
-    # NOTE: the `paths:` list is intentionally duplicated under `push`
-    # and `pull_request` below. GitHub Actions' historical YAML-anchor
-    # support has been spotty enough that duplication is safer than
-    # the DRY win. Keep the two lists in sync.
-    paths:
-      # Provider internals that directly compile under cloud features.
-      - 'crates/caliban-provider-anthropic/src/transport/bedrock.rs'
-      - 'crates/caliban-provider-anthropic/src/transport/vertex.rs'
-      - 'crates/caliban-provider-google/src/transport/vertex.rs'
-      - 'crates/caliban-provider-openai/src/transport/azure.rs'
-      - 'crates/caliban-provider-anthropic/src/config.rs'
-      - 'crates/caliban-provider-google/src/config.rs'
-      - 'crates/caliban-provider-openai/src/config.rs'
-      # Binary crate — provider construction wiring + anything in the
-      # caliban binary's source can affect what the cloud-features
-      # build sees. Branch protection requires this check, so PRs
-      # that touched the binary but none of the provider-internals
-      # above used to BLOCK forever (the workflow never triggered).
-      # Covering `caliban/src/**` + `caliban/Cargo.toml` (+ workspace
-      # `Cargo.toml`) unblocks them.
-      - 'caliban/src/**'
-      - 'caliban/Cargo.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/ci-cloud.yml'
-  pull_request:
-    branches: ["**"]
-    paths:
-      - 'crates/caliban-provider-anthropic/src/transport/bedrock.rs'
-      - 'crates/caliban-provider-anthropic/src/transport/vertex.rs'
-      - 'crates/caliban-provider-google/src/transport/vertex.rs'
-      - 'crates/caliban-provider-openai/src/transport/azure.rs'
-      - 'crates/caliban-provider-anthropic/src/config.rs'
-      - 'crates/caliban-provider-google/src/config.rs'
-      - 'crates/caliban-provider-openai/src/config.rs'
-      - 'caliban/src/**'
-      - 'caliban/Cargo.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/ci-cloud.yml'
-  # Manual re-trigger — useful for ad-hoc reruns against the current
-  # branch tip even when the path filter didn't match. Note:
-  # workflow_dispatch runs satisfy the *workflow name* but NOT a
-  # required-status check on a PR (which binds to pull_request event
-  # type); use a path-filter touch to retrigger the required check.
   workflow_dispatch:
+  schedule:
+    - cron: "0 13 * * 1"   # Mondays 13:00 UTC
 
 concurrency:
   group: ci-cloud-${{ github.ref }}

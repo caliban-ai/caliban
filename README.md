@@ -490,6 +490,30 @@ Both inherit the workspace's package metadata, dependencies, and lints
 via `*.workspace = true`. See an existing crate's `Cargo.toml` for the
 boilerplate.
 
+## CI
+
+Pull-request CI runs `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo build --workspace --all-targets`,
+and `cargo test --workspace` against the default feature set. Docs-only
+changes (`**.md`, `docs/**`, `LICENSE`, `.github/ISSUE_TEMPLATE/**`)
+skip CI entirely.
+
+Cloud transports (`caliban-provider-anthropic/{bedrock,vertex}`,
+`caliban-provider-openai/azure`, `caliban-provider-google/vertex`) are
+**not** built in PR CI. They are exercised by:
+
+- A weekly cron (Mondays 13:00 UTC) that runs the full cloud-features
+  build against `main`.
+- Manual dispatch of the `ci-cloud` workflow from the Actions tab when
+  a PR touches cloud transport code.
+
+To verify cloud changes locally:
+
+```bash
+cargo build --workspace \
+  --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex
+```
+
 ## Parity with Claude Code
 
 caliban tracks parity against Claude Code in two living documents:
