@@ -44,6 +44,13 @@ pub(crate) enum Overlay {
     /// restore conversation / restore both / summarize from here /
     /// summarize up to here.
     Rewind,
+    /// `/permissions` overlay. Shows the active permission mode +
+    /// bypass-latch status + runtime rules added via the Ask modal's
+    /// "Always allow/reject" branches. Interactive: `Tab` cycles mode
+    /// (parity with `Shift+Tab` but discoverable in-overlay), `d`
+    /// removes the selected runtime rule, arrows move the cursor.
+    /// See `docs/superpowers/specs/2026-05-24-settings-hierarchy-design.md`.
+    Permissions,
 }
 
 impl Overlay {
@@ -58,6 +65,7 @@ impl Overlay {
             Self::ReverseHistory => "Reverse History",
             Self::AskModal => "Permission Needed",
             Self::Rewind => "Rewind",
+            Self::Permissions => "Permissions",
         }
     }
 
@@ -72,6 +80,7 @@ impl Overlay {
             Self::ReverseHistory => "history",
             Self::AskModal => "ask",
             Self::Rewind => "rewind",
+            Self::Permissions => "permissions",
         }
     }
 }
@@ -146,6 +155,7 @@ pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay:
         Overlay::ReverseHistory => reverse_history_lines(app),
         Overlay::AskModal => ask_modal_lines(app),
         Overlay::Rewind => rewind_lines(app),
+        Overlay::Permissions => permissions_lines(app),
     };
 
     let body = Paragraph::new(content_lines)
@@ -726,4 +736,211 @@ pub(crate) fn rewind_lines(app: &App) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::DIM),
     ));
     out
+}
+
+/// `/permissions` overlay body.
+///
+/// Sections: current mode + bypass-latch status, then the runtime-rule
+/// list (added via Ask modal "Always allow/reject" branches), then key
+/// hints. The cursor (`app.permissions_cursor`) is rendered as `>` on
+/// the selected runtime rule.
+///
+/// Pure with respect to `App` — only reads. Mutations (mode cycle,
+/// rule remove, cursor move) happen in `events.rs::handle_key` under
+/// the `ViewState::Overlay(Overlay::Permissions)` branch.
+pub(crate) fn permissions_lines(app: &App) -> Vec<Line<'static>> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    // Mode line.
+    let mode = app.permission_mode.load();
+    let chip = match mode {
+        caliban_agent_core::PermissionMode::Default => "default".to_string(),
+        other => other.chip().to_string(),
+    };
+    out.push(Line::raw(""));
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Mode: ", bold),
+        Span::styled(chip, Style::default().fg(Color::Yellow)),
+        Span::raw("    "),
+        Span::styled("(Tab or Shift+Tab to cycle)", dim),
+    ]));
+
+    // Bypass-latch status.
+    let latch_text = if app.bypass_latch {
+        "armed (--allow-dangerously-skip-permissions)"
+    } else {
+        "not armed"
+    };
+    let latch_style = if app.bypass_latch {
+        Style::default().fg(Color::Red)
+    } else {
+        dim
+    };
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Bypass latch: ", bold),
+        Span::styled(latch_text.to_string(), latch_style),
+    ]));
+
+    out.push(Line::raw(""));
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "Runtime rules (added via Ask modal \"Always\" branches):",
+            bold,
+        ),
+    ]));
+
+    // Runtime rules.
+    let rules = app.runtime_rules.snapshot();
+    if rules.is_empty() {
+        out.push(Line::styled("    (none)", dim));
+    } else {
+        let cursor = app.permissions_cursor.min(rules.len().saturating_sub(1));
+        for (i, r) in rules.iter().enumerate() {
+            let prefix = if i == cursor { "  >" } else { "   " };
+            let action_label = match r.action {
+                caliban_agent_core::permissions::Action::Allow => "Allow ",
+                caliban_agent_core::permissions::Action::Deny => "Deny  ",
+                caliban_agent_core::permissions::Action::Ask => "Ask   ",
+            };
+            let action_style = match r.action {
+                caliban_agent_core::permissions::Action::Allow => Style::default().fg(Color::Green),
+                caliban_agent_core::permissions::Action::Deny => Style::default().fg(Color::Red),
+                caliban_agent_core::permissions::Action::Ask => Style::default().fg(Color::Yellow),
+            };
+            let line_style = if i == cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            out.push(
+                Line::from(vec![
+                    Span::raw(format!("{prefix} [{i}] ")),
+                    Span::styled(action_label.to_string(), action_style),
+                    Span::raw(r.pattern.clone()),
+                ])
+                .style(line_style),
+            );
+        }
+    }
+
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "  Keys: Tab cycle mode  Shift+Tab reverse  d delete rule  \u{2191}\u{2193}/jk move  Esc/q close",
+        dim,
+    ));
+    out.push(Line::styled(
+        "  Tip: config-file rules are not shown here yet (live inside the PermissionsHook).",
+        dim,
+    ));
+
+    out
+}
+
+#[cfg(test)]
+mod permissions_overlay_tests {
+    use super::*;
+    use crate::tui::App;
+    use caliban_agent_core::PermissionMode;
+    use caliban_agent_core::permissions::{Action, RuntimeRule};
+
+    #[test]
+    fn permissions_lines_shows_default_mode_and_no_rules_on_fresh_app() {
+        let app = App::for_tests();
+        let lines = permissions_lines(&app);
+        let joined = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Mode: default"));
+        assert!(joined.contains("(none)"));
+        assert!(joined.contains("Bypass latch: not armed"));
+    }
+
+    #[test]
+    fn permissions_lines_renders_mode_chip_when_not_default() {
+        let app = App::for_tests();
+        app.permission_mode.store(PermissionMode::Plan);
+        let lines = permissions_lines(&app);
+        let joined = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("plan"));
+        assert!(!joined.contains("Mode: default"));
+    }
+
+    #[test]
+    fn permissions_lines_lists_runtime_rules_with_cursor() {
+        let mut app = App::for_tests();
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "Bash:ls *".into(),
+            action: Action::Allow,
+        });
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "Edit(/tmp/*)".into(),
+            action: Action::Deny,
+        });
+        app.permissions_cursor = 1;
+        let lines = permissions_lines(&app);
+        let joined = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("[0] Allow Bash:ls *"));
+        assert!(joined.contains("[1] Deny  Edit(/tmp/*)"));
+        // Cursor mark on row 1 (the selected one).
+        let lines_text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let row1 = lines_text
+            .iter()
+            .find(|s| s.contains("[1]"))
+            .expect("rule row 1");
+        assert!(row1.starts_with("  >"));
+    }
+
+    #[test]
+    fn permissions_lines_clamps_cursor_when_past_end() {
+        let mut app = App::for_tests();
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "a".into(),
+            action: Action::Allow,
+        });
+        app.permissions_cursor = 99; // intentionally out of bounds
+        // Should not panic; cursor renders as if on the last (and only) row.
+        let lines = permissions_lines(&app);
+        let lines_text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let row0 = lines_text
+            .iter()
+            .find(|s| s.contains("[0]"))
+            .expect("rule row 0");
+        assert!(row0.starts_with("  >"));
+    }
 }

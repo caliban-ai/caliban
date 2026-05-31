@@ -85,6 +85,38 @@ impl RuntimeRuleStore {
             .push(rule);
     }
 
+    /// Snapshot the current rules in insertion order. Used by the
+    /// `/permissions` overlay to render the live runtime-rule list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<RuntimeRule> {
+        self.rules
+            .lock()
+            .expect("RuntimeRuleStore mutex poisoned")
+            .clone()
+    }
+
+    /// Remove and return the rule at `index` (in insertion order, the
+    /// same order [`Self::snapshot`] returns). Returns `None` for an
+    /// out-of-bounds index; the store is left unchanged in that case.
+    /// Used by the `/permissions` overlay's `d` keybind to delete a
+    /// selected runtime rule.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn remove(&self, index: usize) -> Option<RuntimeRule> {
+        let mut rules = self.rules.lock().expect("RuntimeRuleStore mutex poisoned");
+        if index < rules.len() {
+            Some(rules.remove(index))
+        } else {
+            None
+        }
+    }
+
     /// Evaluate against a `ToolCtx`. Returns `Some(Action::Allow|Deny)`
     /// if a runtime rule matches; `None` otherwise. The caller falls
     /// back to the config rule set when this returns `None`.
@@ -785,6 +817,66 @@ mod runtime_rule_tests {
         let input = serde_json::json!({"command": "ls -al"});
         let outcome = store.evaluate(&ctx("Bash", &input));
         assert_eq!(outcome, Some(Action::Allow));
+    }
+
+    #[test]
+    fn snapshot_returns_rules_in_insertion_order() {
+        let store = RuntimeRuleStore::new();
+        store.add(RuntimeRule {
+            pattern: "Bash:ls *".into(),
+            action: Action::Allow,
+        });
+        store.add(RuntimeRule {
+            pattern: "Edit(/tmp/*)".into(),
+            action: Action::Deny,
+        });
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].pattern, "Bash:ls *");
+        assert_eq!(snap[0].action, Action::Allow);
+        assert_eq!(snap[1].pattern, "Edit(/tmp/*)");
+        assert_eq!(snap[1].action, Action::Deny);
+    }
+
+    #[test]
+    fn snapshot_on_empty_store_returns_empty() {
+        let store = RuntimeRuleStore::new();
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn remove_drops_rule_at_index_and_shifts_remainder() {
+        let store = RuntimeRuleStore::new();
+        store.add(RuntimeRule {
+            pattern: "a".into(),
+            action: Action::Allow,
+        });
+        store.add(RuntimeRule {
+            pattern: "b".into(),
+            action: Action::Allow,
+        });
+        store.add(RuntimeRule {
+            pattern: "c".into(),
+            action: Action::Allow,
+        });
+        let removed = store.remove(1);
+        assert_eq!(removed.as_ref().map(|r| r.pattern.as_str()), Some("b"));
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].pattern, "a");
+        assert_eq!(snap[1].pattern, "c");
+    }
+
+    #[test]
+    fn remove_out_of_bounds_returns_none_and_leaves_store_intact() {
+        let store = RuntimeRuleStore::new();
+        store.add(RuntimeRule {
+            pattern: "x".into(),
+            action: Action::Allow,
+        });
+        assert!(store.remove(5).is_none());
+        assert!(store.remove(usize::MAX).is_none());
+        assert_eq!(store.snapshot().len(), 1);
     }
 
     #[test]

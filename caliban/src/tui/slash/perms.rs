@@ -15,19 +15,20 @@ impl SlashCommand for PermissionsCommand {
     fn meta(&self) -> &SlashCommandMeta {
         &SlashCommandMeta {
             name: "/permissions",
-            description: "edit permission rules; see the effective rule for a focused tool",
+            description: "view current mode + runtime rules; Tab cycles mode, d deletes rule",
             args_hint: "",
             hidden: false,
             immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
-        // No dedicated overlay variant yet — surface a status message that
-        // points the operator at the Settings hierarchy spec which adds
-        // the proper Permissions tab.
-        Ok(SlashOutcome::StatusMessage(
-            "/permissions \u{2014} full overlay lands with the Settings hierarchy spec; use Shift+Tab to cycle permission modes for now".into(),
-        ))
+        // Opens the Permissions overlay — shows current mode +
+        // bypass-latch + runtime rules added via the Ask modal's
+        // "Always allow/reject" branches. Tab cycles mode; `d`
+        // removes the selected rule. See
+        // `caliban/src/tui/overlay.rs::permissions_lines` and
+        // `caliban/src/tui/events.rs::handle_permissions_overlay_key`.
+        Ok(SlashOutcome::Overlay(crate::tui::Overlay::Permissions))
     }
 }
 

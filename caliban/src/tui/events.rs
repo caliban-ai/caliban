@@ -766,6 +766,9 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             Overlay::Mcp if handle_mcp_overlay_key(key, app) => {
                 return;
             }
+            Overlay::Permissions if handle_permissions_overlay_key(key, app) => {
+                return;
+            }
             _ => {}
         }
         match (key.code, key.modifiers) {
@@ -1377,6 +1380,78 @@ pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
         }
         let _ = req.respond.send(r);
         app.view = ViewState::Main;
+    }
+}
+
+/// Key dispatch for the `/permissions` overlay. Returns `true` if the
+/// key was consumed (caller skips the generic close-overlay handling);
+/// `false` to let the generic Esc/q close path run.
+///
+/// Keys:
+/// - `Tab`           → cycle permission mode forward (parity with Shift+Tab)
+/// - `BackTab`       → cycle permission mode backward
+/// - `↑` / `k`       → move cursor up in the runtime-rule list
+/// - `↓` / `j`       → move cursor down in the runtime-rule list
+/// - `d`             → remove the rule at the cursor (clamps cursor on remove)
+///
+/// All other keys (including `Esc` / `q` / `Ctrl+C`) return `false` so
+/// the generic overlay-close path handles them.
+pub(crate) fn handle_permissions_overlay_key(key: KeyEvent, app: &mut App) -> bool {
+    match (key.code, key.modifiers) {
+        (KeyCode::Tab, _) => {
+            cycle_permission_mode(app);
+            true
+        }
+        (KeyCode::BackTab, _) => {
+            // BackTab = Shift+Tab; cycle in the reverse direction. The
+            // existing `cycle_permission_mode` only goes forward, so we
+            // approximate "reverse" by cycling forward N-1 times where N
+            // is the mode count (6). Cheap and avoids duplicating the
+            // mode-ordering policy here.
+            for _ in 0..5 {
+                cycle_permission_mode(app);
+            }
+            true
+        }
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+            app.permissions_cursor = app.permissions_cursor.saturating_sub(1);
+            true
+        }
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+            let len = app.runtime_rules.snapshot().len();
+            if len > 0 {
+                app.permissions_cursor = (app.permissions_cursor + 1).min(len - 1);
+            }
+            true
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) => {
+            let len = app.runtime_rules.snapshot().len();
+            if len == 0 {
+                return true; // consumed but no-op
+            }
+            let idx = app.permissions_cursor.min(len - 1);
+            if let Some(removed) = app.runtime_rules.remove(idx) {
+                app.toast = Some(toast::Toast::info(format!(
+                    "removed rule: {} {}",
+                    match removed.action {
+                        caliban_agent_core::permissions::Action::Allow => "Allow",
+                        caliban_agent_core::permissions::Action::Deny => "Deny",
+                        caliban_agent_core::permissions::Action::Ask => "Ask",
+                    },
+                    removed.pattern,
+                )));
+            }
+            // Clamp cursor to new length (so deleting the last row moves
+            // selection to the new last row).
+            let new_len = app.runtime_rules.snapshot().len();
+            if new_len == 0 {
+                app.permissions_cursor = 0;
+            } else if app.permissions_cursor >= new_len {
+                app.permissions_cursor = new_len - 1;
+            }
+            true
+        }
+        _ => false,
     }
 }
 

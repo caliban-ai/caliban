@@ -178,6 +178,12 @@ pub(crate) struct App {
     /// `Up(Left)` to extract the dragged text. Reset to empty each
     /// frame. See `docs/TODO.md` § TUI ergonomics § IE3.
     pub(crate) position_map: super::mouse_select::PositionMap,
+    /// `/permissions` overlay cursor — index into the runtime-rule
+    /// list (in insertion order, per `RuntimeRuleStore::snapshot`).
+    /// `d` in the overlay removes the rule at this position; arrow
+    /// keys move it. Clamped to `[0, len)` on each render so removals
+    /// don't leave it dangling.
+    pub(crate) permissions_cursor: usize,
     /// Current view state: main view or an open overlay.
     pub(crate) view: ViewState,
     /// In-memory message history for the current invocation (ephemeral and session modes).
@@ -369,6 +375,7 @@ impl App {
             esc_armed_at: None,
             mouse_selection: super::mouse_select::MouseSelection::default(),
             position_map: super::mouse_select::PositionMap::new(),
+            permissions_cursor: 0,
             view: ViewState::Main,
             messages,
             toast: None,

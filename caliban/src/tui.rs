@@ -1136,7 +1136,10 @@ mod tests {
             // /effort is no longer a stub — it sets reasoning effort via
             // AgentConfig.effort (Plan C, Task 3). Removed from this list.
             ("/statusline", "Settings hierarchy"),
-            ("/permissions", "Settings hierarchy"),
+            // /permissions is no longer a stub — it opens the
+            // Permissions overlay (see `tui/overlay.rs::permissions_lines`
+            // and `tui/events.rs::handle_permissions_overlay_key`).
+            // Removed from this list.
             ("/tui", "TUI ergonomics"),
         ] {
             app.transcript.clear();
