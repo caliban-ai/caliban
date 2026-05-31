@@ -2683,7 +2683,7 @@ mod tests {
             tool_name: "Edit".into(),
             input_summary: "path=foo.rs".into(),
             always_pattern: "Edit:foo.rs".into(),
-            tool_input: serde_json::json!({"file_path": "foo.rs"}),
+            tool_input: serde_json::json!({"path": "foo.rs"}),
             respond: tx_b,
         });
 

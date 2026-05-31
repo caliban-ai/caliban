@@ -150,33 +150,6 @@ impl RuntimeRuleStore {
     }
 }
 
-/// Derive an "Always-allow / Always-reject" rule pattern from one
-/// invocation. The plan calls for one canonical shape per tool kind so
-/// the modal can show what the user is committing to before they
-/// confirm. Pure function; unit-tested.
-#[must_use]
-pub fn derive_pattern(tool: &str, input: &serde_json::Value) -> String {
-    if tool == "Bash" {
-        let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-        let first = cmd.split_whitespace().next().unwrap_or("*");
-        return format!("Bash({first} *)");
-    }
-    if matches!(tool, "Edit" | "Read" | "Write") {
-        let path = input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("/*");
-        let dir = std::path::Path::new(path)
-            .parent()
-            .map_or_else(|| "/".into(), |p| p.display().to_string());
-        return format!("{tool}({dir}/*)");
-    }
-    if tool.starts_with("mcp__") {
-        return format!("{tool}(*)");
-    }
-    format!("{tool}(*)")
-}
-
 #[derive(Debug, Deserialize)]
 struct RulesFile {
     #[serde(default, rename = "rule")]
@@ -795,39 +768,6 @@ action = "bogus"
         .unwrap();
         let err = load_rules_file(&f).unwrap_err();
         assert!(matches!(err, PermissionsLoadError::Parse { .. }));
-    }
-}
-
-#[cfg(test)]
-mod derive_pattern_tests {
-    use super::*;
-
-    #[test]
-    fn bash_pattern_derives_first_token() {
-        let p = derive_pattern("Bash", &serde_json::json!({"command": "gh pr view 42"}));
-        assert_eq!(p, "Bash(gh *)");
-    }
-
-    #[test]
-    fn read_pattern_uses_parent_dir() {
-        let p = derive_pattern(
-            "Read",
-            &serde_json::json!({"file_path": "/home/me/proj/src/foo.rs"}),
-        );
-        assert!(p.starts_with("Read(/home/me/proj/src/"));
-        assert!(p.ends_with("/*)"));
-    }
-
-    #[test]
-    fn mcp_pattern_glob_all_args() {
-        let p = derive_pattern("mcp__server__tool", &serde_json::json!({}));
-        assert_eq!(p, "mcp__server__tool(*)");
-    }
-
-    #[test]
-    fn other_pattern_glob_all_args() {
-        let p = derive_pattern("WebFetch", &serde_json::json!({"url": "https://x"}));
-        assert_eq!(p, "WebFetch(*)");
     }
 }
 

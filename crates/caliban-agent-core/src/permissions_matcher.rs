@@ -108,12 +108,13 @@ pub fn matches_with_workspace(
 
     // Path globs for file-edit tools — workspace-normalize both sides.
     if is_file_edit_tool(ctx.tool_name) {
-        let raw = ctx
-            .input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let target = workspace_normalize(raw, workspace);
+        // File-edit tools deserialize as `{"path": "..."}`; the canonical
+        // accessor lives in `caliban_common` so all permission codepaths
+        // agree on the key (previously this site looked up "file_path",
+        // which silently produced an empty target and made every
+        // `Tool:<glob>` rule a no-op for MultiEdit/NotebookEdit).
+        let raw = first_arg(ctx).unwrap_or_default();
+        let target = workspace_normalize(&raw, workspace);
         let spec_path = std::path::Path::new(spec);
         // If the pattern is absolute, match directly.
         // If relative, prepend `**/` so `src/**/*.rs` matches at any depth
@@ -133,14 +134,11 @@ pub fn matches_with_workspace(
     glob_match(spec, &first)
 }
 
+/// Thin wrapper around the canonical [`caliban_common::glob_match::first_arg`]
+/// so the matcher and the rest of caliban agree on the JSON key used to
+/// extract a tool's first arg (e.g. `path` for file-edit tools).
 fn first_arg(ctx: &ToolCtx<'_>) -> Option<String> {
-    let key = match ctx.tool_name {
-        "Bash" => "command",
-        "WebFetch" => "url",
-        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_path",
-        _ => return None,
-    };
-    ctx.input.get(key)?.as_str().map(str::to_owned)
+    caliban_common::glob_match::first_arg(ctx.tool_name, ctx.input)
 }
 
 fn contains_glob(pat: &str, hay: &str) -> bool {
@@ -198,8 +196,11 @@ mod tests {
 
     #[test]
     fn globstar_path_matches_nested_rs_file() {
+        // File-edit tools deserialize their JSON input as `{"path": "..."}`
+        // — see caliban-tools-builtin/src/fs/{edit,multi_edit,...}.rs. The
+        // matcher must look up the same key.
         let ws = std::path::Path::new("/repo");
-        let i = json!({"file_path": "/repo/crates/x/src/y.rs"});
+        let i = json!({"path": "/repo/crates/x/src/y.rs"});
         assert!(
             matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &i), ws),
             "globstar should match nested .rs under the workspace src tree"
@@ -209,13 +210,38 @@ mod tests {
     #[test]
     fn path_normalization_handles_relative_pattern() {
         let ws = std::path::Path::new("/repo");
-        let i = json!({"file_path": "/repo/foo.rs"});
+        let i = json!({"path": "/repo/foo.rs"});
         assert!(matches_with_workspace(
             "Edit:./foo.rs",
             &ctx("Edit", &i),
             ws
         ));
         assert!(matches_with_workspace("Edit:foo.rs", &ctx("Edit", &i), ws));
+    }
+
+    #[test]
+    fn multi_edit_path_matches_workspace_glob() {
+        // Regression: prior to the path-key fix, MultiEdit rules never
+        // matched any input because the matcher looked up "file_path"
+        // while the tool's input shape is `{"path": "...", "edits": [...]}`.
+        let ws = std::path::Path::new("/repo");
+        let i = json!({"path": "/repo/src/foo.rs", "edits": []});
+        assert!(
+            matches_with_workspace("MultiEdit:src/**/*.rs", &ctx("MultiEdit", &i), ws),
+            "MultiEdit rule must match against the tool's `path` field"
+        );
+    }
+
+    #[test]
+    fn notebook_edit_path_matches_workspace_glob() {
+        // Same regression as MultiEdit — NotebookEdit also uses `path`.
+        let ws = std::path::Path::new("/repo");
+        let i = json!({"path": "/repo/nb.ipynb", "cell_id": "x", "new_source": ""});
+        assert!(matches_with_workspace(
+            "NotebookEdit:**/*.ipynb",
+            &ctx("NotebookEdit", &i),
+            ws
+        ));
     }
 
     #[test]
@@ -230,7 +256,7 @@ mod tests {
 
     #[test]
     fn bash_anywhere_only_for_bash() {
-        let i = json!({"file_path": "rm"});
+        let i = json!({"path": "rm"});
         // ~glob on Read is not allowed; should return false (NOT match).
         assert!(!matches_with_workspace(
             "Read:~rm",

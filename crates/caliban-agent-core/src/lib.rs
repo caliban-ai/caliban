@@ -51,7 +51,7 @@ pub use permission_mode::{
 };
 pub use permissions::{
     Action, AskHandler, NonInteractiveAskHandler, PermissionsHook, PermissionsLoadError, Rule,
-    RuntimeRule, RuntimeRuleStore, default_rules, derive_pattern, evaluate_rules,
+    RuntimeRule, RuntimeRuleStore, default_rules, evaluate_rules,
 };
 // `load_rules` / `load_rules_file` are `#[deprecated]` in favor of
 // `caliban-settings` (PR-T3-B). Re-exported with `#[allow(deprecated)]`

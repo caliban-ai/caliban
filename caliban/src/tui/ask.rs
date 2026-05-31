@@ -41,8 +41,13 @@ pub(crate) struct AskRequest {
     /// Pretty summary of the tool input for display in the modal.
     pub(crate) input_summary: String,
     /// Pattern shown in the "Always" branches so the user knows what
-    /// they're committing to. Computed via
-    /// [`caliban_agent_core::derive_pattern`].
+    /// they're committing to. Derived as the narrowest entry produced by
+    /// [`derive_suggestions`] — same source of truth used by the
+    /// subprompt suggestion list, so the displayed label and the
+    /// persisted rule are guaranteed to use the same shape (previously
+    /// these were two independent code paths that disagreed on both
+    /// shape and key, producing labels like `Edit(/tmp/*)` while saving
+    /// `Edit:`).
     pub(crate) always_pattern: String,
     /// Raw tool input value — used by Phase 4 [`derive_suggestions`] to build
     /// the broadest→narrowest suggestion list in the [`AlwaysSubprompt`].
@@ -126,7 +131,10 @@ impl AskHandler for TuiAskHandler {
         let req = AskRequest {
             tool_name: ctx.tool_name.to_string(),
             input_summary: input_summary(ctx.input),
-            always_pattern: caliban_agent_core::derive_pattern(ctx.tool_name, ctx.input),
+            always_pattern: derive_suggestions(ctx.tool_name, ctx.input)
+                .last()
+                .cloned()
+                .unwrap_or_else(|| ctx.tool_name.to_string()),
             tool_input: ctx.input.clone(),
             respond: respond_tx,
         };
@@ -226,16 +234,32 @@ pub(crate) fn derive_suggestions(tool: &str, input: &serde_json::Value) -> Vec<S
             out.push(format!("Bash:{cmd}")); // exact
         }
         "Edit" | "Read" | "Write" | "MultiEdit" | "NotebookEdit" => {
-            let path = input
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let p = std::path::Path::new(path);
-            if let Some(parent) = p.parent().and_then(|p| p.to_str()) {
-                out.push(format!("{tool}:{parent}/**"));
-                out.push(format!("{tool}:{parent}/*"));
+            // Route through the canonical accessor in caliban-common so
+            // the modal, the matcher, and any future caller agree on
+            // which JSON key holds the path. Hand-rolled lookups here
+            // previously diverged from the real schema (`file_path` vs
+            // `path`) and produced unmatchable `Tool:` rules.
+            let path = caliban_common::glob_match::first_arg(tool, input).unwrap_or_default();
+            if path.is_empty() {
+                // Schema lookup failed (real input didn't carry the
+                // expected key). Emit only the bare-tool suggestion so
+                // the operator can't accidentally commit a broken
+                // `Tool:` rule with no args, and log so any future
+                // schema drift surfaces in the debug log.
+                tracing::warn!(
+                    target: "caliban::tui::ask",
+                    tool = %tool,
+                    "permissions modal: no path arg in file-edit input; falling back to bare-tool suggestion"
+                );
+                out.push(tool.to_string());
+            } else {
+                let p = std::path::Path::new(&path);
+                if let Some(parent) = p.parent().and_then(|p| p.to_str()) {
+                    out.push(format!("{tool}:{parent}/**"));
+                    out.push(format!("{tool}:{parent}/*"));
+                }
+                out.push(format!("{tool}:{path}")); // exact
             }
-            out.push(format!("{tool}:{path}")); // exact
         }
         other if other.starts_with("mcp__") => {
             out.push(other.to_string());
@@ -477,10 +501,50 @@ mod tests {
 
     #[test]
     fn derive_suggestions_edit_emits_dir_globs_and_exact() {
-        let i = serde_json::json!({"file_path": "/repo/src/foo.rs"});
+        // Input shape must match the real Edit schema (`path`), not the
+        // historical wrong key (`file_path`).
+        let i = serde_json::json!({"path": "/repo/src/foo.rs"});
         let s = derive_suggestions("Edit", &i);
         assert!(s.iter().any(|x| x == "Edit:/repo/src/**"));
         assert!(s.iter().any(|x| x == "Edit:/repo/src/*"));
         assert!(s.last().unwrap().ends_with("foo.rs"));
+    }
+
+    #[test]
+    fn derive_suggestions_multi_edit_emits_dir_globs_and_exact() {
+        // Regression: prior to the schema-key fix, MultiEdit (and
+        // NotebookEdit) produced `MultiEdit:` — empty args — which
+        // could never match and accumulated as duplicate rules in
+        // permissions.toml every time the operator hit "always allow".
+        let i = serde_json::json!({"path": "/repo/src/foo.rs", "edits": []});
+        let s = derive_suggestions("MultiEdit", &i);
+        assert!(s.iter().any(|x| x == "MultiEdit:/repo/src/**"));
+        assert!(s.iter().any(|x| x == "MultiEdit:/repo/src/*"));
+        assert_eq!(s.last().unwrap(), "MultiEdit:/repo/src/foo.rs");
+    }
+
+    #[test]
+    fn derive_suggestions_notebook_edit_emits_dir_globs_and_exact() {
+        let i = serde_json::json!({"path": "/repo/nb.ipynb", "cell_id": "x", "new_source": ""});
+        let s = derive_suggestions("NotebookEdit", &i);
+        assert!(s.iter().any(|x| x == "NotebookEdit:/repo/**"));
+        assert!(s.iter().any(|x| x == "NotebookEdit:/repo/*"));
+        assert_eq!(s.last().unwrap(), "NotebookEdit:/repo/nb.ipynb");
+    }
+
+    #[test]
+    fn derive_suggestions_falls_back_when_path_arg_missing() {
+        // Defensive guard: if a future tool refactor renames the path
+        // arg without updating this lookup, we must NOT emit a `Tool:`
+        // suggestion with empty args — that's what caused the bug this
+        // test is guarding against. Bare-tool fallback is acceptable
+        // (operator can still pick `[custom]` for something narrower).
+        let i = serde_json::json!({"file_path": "/oops/wrong/key.rs"});
+        let s = derive_suggestions("Edit", &i);
+        assert_eq!(s, vec!["Edit".to_string()]);
+        assert!(
+            !s.iter().any(|x| x == "Edit:"),
+            "must not emit broken `Edit:` suggestion when path lookup fails"
+        );
     }
 }

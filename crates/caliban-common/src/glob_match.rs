@@ -49,7 +49,7 @@ pub fn first_arg(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     let key = match tool_name {
         "Bash" => "command",
         "WebFetch" => "url",
-        "Read" | "Write" | "Edit" => "path",
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "path",
         _ => return None,
     };
     input.get(key).and_then(|v| v.as_str()).map(str::to_string)
@@ -114,6 +114,23 @@ mod tests {
     fn first_arg_read_returns_path() {
         let v = serde_json::json!({"path": "/a/b"});
         assert_eq!(first_arg("Read", &v).as_deref(), Some("/a/b"));
+    }
+
+    #[test]
+    fn first_arg_multi_edit_returns_path() {
+        // MultiEdit's input shape is `{"path": "...", "edits": [...]}`
+        // (see caliban-tools-builtin/src/fs/multi_edit.rs). The permissions
+        // engine must use the same key — previously this returned None,
+        // which collapsed any `MultiEdit:<glob>` rule into a never-match.
+        let v = serde_json::json!({"path": "/a/b", "edits": []});
+        assert_eq!(first_arg("MultiEdit", &v).as_deref(), Some("/a/b"));
+    }
+
+    #[test]
+    fn first_arg_notebook_edit_returns_path() {
+        // NotebookEdit shares the file-edit input shape.
+        let v = serde_json::json!({"path": "/nb.ipynb", "cell_id": "x", "new_source": ""});
+        assert_eq!(first_arg("NotebookEdit", &v).as_deref(), Some("/nb.ipynb"));
     }
 
     #[test]
