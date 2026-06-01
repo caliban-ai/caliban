@@ -117,10 +117,20 @@ impl SlashCommand for StatuslineCommand {
             immediate: false,
         }
     }
-    async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
-        Ok(SlashOutcome::StatusMessage(
-            "/statusline \u{2014} shell-template support arrives with the Settings hierarchy spec's `status_line` key".into(),
-        ))
+    async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
+        let configured = ctx
+            .app
+            .settings_handle
+            .as_ref()
+            .and_then(|h| h.current().status_line.clone());
+        let msg = match configured {
+            Some(cfg) => format!(
+                "/statusline \u{2014} active: `{}` (timeout {} ms, padding {}); refreshed after each turn",
+                cfg.command, cfg.timeout_ms, cfg.padding,
+            ),
+            None => "/statusline \u{2014} unset; configure `statusLine.command` in settings.toml/.json to prefix a custom segment on the status bar".into(),
+        };
+        Ok(SlashOutcome::StatusMessage(msg))
     }
 }
 

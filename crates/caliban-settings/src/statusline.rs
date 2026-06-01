@@ -69,6 +69,10 @@ pub struct StatuslineRunner {
     config: StatuslineConfig,
     cache: Mutex<Option<(Instant, String)>>,
     consecutive_timeouts: Mutex<u8>,
+    /// One-shot latch: warn at most once per misconfiguration. Reset
+    /// the next time a spawn succeeds, so a user who fixes the script
+    /// path and then breaks it again sees a fresh warning.
+    spawn_warned: Mutex<bool>,
 }
 
 impl std::fmt::Debug for StatuslineRunner {
@@ -87,6 +91,7 @@ impl StatuslineRunner {
             config,
             cache: Mutex::new(None),
             consecutive_timeouts: Mutex::new(0),
+            spawn_warned: Mutex::new(false),
         }
     }
 
@@ -112,8 +117,24 @@ impl StatuslineRunner {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        let Ok(mut child) = cmd.spawn() else {
-            return self.cached().await;
+        let mut child = match cmd.spawn() {
+            Ok(c) => {
+                *self.spawn_warned.lock().await = false;
+                c
+            }
+            Err(e) => {
+                let mut warned = self.spawn_warned.lock().await;
+                if !*warned {
+                    tracing::warn!(
+                        target: "caliban::statusline",
+                        error = %e,
+                        program = %prog,
+                        "failed to spawn statusline command; check `statusLine.command` in settings.toml",
+                    );
+                    *warned = true;
+                }
+                return self.cached().await;
+            }
         };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(payload.as_bytes()).await;
@@ -181,6 +202,28 @@ mod tests {
         });
         let out = runner.refresh(StatuslineContext::default()).await;
         assert_eq!(out.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn runner_returns_cached_when_spawn_fails() {
+        // Point at a path that definitely doesn't exist so spawn returns
+        // Err. The runner must fall back to the cached value (here:
+        // empty seed cleared) rather than crashing, and on a real
+        // session the WARN side-effect tells the operator their
+        // `statusLine.command` is misconfigured.
+        let runner = StatuslineRunner::new(StatuslineConfig {
+            command: "/this/path/does/not/exist/statusline-bin".into(),
+            timeout_ms: 200,
+            padding: 1,
+        });
+        runner.set_cached_for_test("prior".into()).await;
+        let out = runner.refresh(StatuslineContext::default()).await;
+        assert_eq!(out, "prior");
+        // Refreshing again must not panic and must still return cached;
+        // the WARN latch suppresses additional log noise after the
+        // first spawn failure.
+        let out2 = runner.refresh(StatuslineContext::default()).await;
+        assert_eq!(out2, "prior");
     }
 
     #[tokio::test]

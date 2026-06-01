@@ -16,6 +16,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::StatuslineConfig;
+
 // ---------------------------------------------------------------------------
 // Permissions
 // ---------------------------------------------------------------------------
@@ -231,6 +233,10 @@ pub struct Settings {
     pub editor_mode: Option<String>,
     /// Compact vs. expanded TUI layout.
     pub view_mode: Option<String>,
+    /// Custom statusline command. Uses Claude Code-compatible `statusLine`
+    /// casing on disk; `status_line` is accepted as a TOML-friendly alias.
+    #[serde(rename = "statusLine", alias = "status_line")]
+    pub status_line: Option<StatuslineConfig>,
     /// TUI knobs (theme, etc.). Opaque.
     pub tui: Option<serde_json::Value>,
 

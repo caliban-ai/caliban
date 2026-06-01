@@ -547,11 +547,7 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         crate::ProviderKind::Ollama => "ollama",
         crate::ProviderKind::Google => "google",
     };
-    let model = app
-        .args
-        .model
-        .clone()
-        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+    let model = app.agent.active_model().as_ref().clone();
 
     let cwd = app.cwd_display();
     let session_part = if let Some(sess) = &app.session {
@@ -609,8 +605,13 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
         .map(|seg| format!(" \u{00B7} {seg}"))
         .unwrap_or_default();
 
+    let custom_part = if app.custom_statusline.is_empty() {
+        String::new()
+    } else {
+        format!(" {} \u{00B7}", app.custom_statusline)
+    };
     let main_text = format!(
-        " {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{perm_mode_part}{overlay_part}{running_part}{context_part}"
+        "{custom_part} {cwd} \u{00B7} {provider} {model}{session_part}{plan_part}{perm_mode_part}{overlay_part}{running_part}{context_part}"
     );
     let mut spans: Vec<Span<'static>> = vec![Span::styled(
         main_text,

@@ -342,6 +342,11 @@ pub(crate) struct App {
     /// loader ran (even in `--bare` mode, where it returns an empty
     /// `Settings`).
     pub(crate) settings_handle: Option<caliban_settings::SettingsHandle>,
+    /// Optional custom statusline runner loaded from `settings.statusLine`.
+    /// Refreshed outside the render path; render reads `custom_statusline`.
+    pub(crate) statusline_runner: Option<Arc<caliban_settings::StatuslineRunner>>,
+    /// Last rendered custom statusline segment. Empty when unset/failed.
+    pub(crate) custom_statusline: String,
     /// `/config` provenance lines: `scope-label  path  format`. Lifted
     /// from the loader outcome so the overlay can render the scope
     /// chain without re-running discovery.
@@ -449,6 +454,11 @@ impl App {
                 ))
             }),
         );
+        let statusline_runner = settings_handle
+            .as_ref()
+            .and_then(|h| h.current().status_line.clone())
+            .map(caliban_settings::StatuslineRunner::new)
+            .map(Arc::new);
         // Initialize capacity from the provider's capabilities for the
         // configured model so the status-bar segment shows up immediately.
         let model = args
@@ -501,6 +511,8 @@ impl App {
             checkpoint_store: None,
             last_esc_at: None,
             settings_handle,
+            statusline_runner,
+            custom_statusline: String::new(),
             settings_sources,
             slash_registry: slash::register_builtin(),
             last_status_message: None,
@@ -623,6 +635,41 @@ impl App {
             None,
             Vec::new(),
         )
+    }
+
+    /// Build the Claude-compatible context object passed to a custom
+    /// statusline script.
+    pub(crate) fn statusline_context(&self) -> caliban_settings::StatuslineContext {
+        let model = self.agent.active_model().as_ref().clone();
+        let cost_usd = format!("{:.4}", self.cost_accumulator.total_usd_f64());
+        let permission_mode = self.permission_mode.load().to_string();
+        let effort = self.agent.config().effort.load_full();
+        let effort = match *effort {
+            caliban_provider::Effort::Low => "low",
+            caliban_provider::Effort::Medium => "medium",
+            caliban_provider::Effort::High => "high",
+            caliban_provider::Effort::Max => "max",
+            caliban_provider::Effort::Auto => "auto",
+        }
+        .to_string();
+        let workspace_root = self.cwd.display().to_string();
+        let session_id = self
+            .session
+            .as_ref()
+            .map_or_else(String::new, |s| s.name.clone());
+        let turn_count = self
+            .session
+            .as_ref()
+            .map_or(0, caliban_sessions::PersistedSession::turn_count);
+        caliban_settings::StatuslineContext {
+            model,
+            cost_usd,
+            permission_mode,
+            effort,
+            workspace_root,
+            session_id,
+            turn_count,
+        }
     }
 
     /// Test-only helper — borrow a `SlashCtx` against this `App`.

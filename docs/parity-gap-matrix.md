@@ -18,7 +18,7 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-05-31 (permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
+**Last refreshed:** 2026-05-31 (custom statusline: ticked row K — TUI render integration landed, `/statusline` reports active config. Prior refresh 2026-05-31 permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
 
 ## Design coverage
 
@@ -206,7 +206,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Metric set (`session.count`, `lines_of_code.count`, `cost.usage`, `token.usage`, etc.) | ✅ | ADR-0033; `caliban-telemetry::MetricEmitter` mirrors Claude Code's `claude_code.*` names |
 | Turn-loop resilience (MaxTokens 2-stage recovery, stream-idle watchdog, refusal/content-filter surfacing, reactive-compact on ContextTooLong, failure-aware hook dispatch, TurnDecision) | ✅ | Plan A 2026-05-26; counter names exposed via `caliban_telemetry::metrics::RECOVERY_*` |
 | `/doctor`, `/heapdump` diagnostics | 🟡 | `/doctor` real checks + `caliban doctor` headless shipped 2026-05-26 (Plan C Task 7); `/heapdump` still a stub naming the jemalloc-prof feature. |
-| Status line (custom script) | 🟡 | `StatuslineRunner` shipped 2026-05-26 (Plan C Task 12) in `caliban-settings`; schema + claude-code-compatible context wired; TUI render-prefix integration deferred. |
+| Status line (custom script) | ✅ | `StatuslineRunner` shipped 2026-05-26 (Plan C Task 12) in `caliban-settings`; TUI render-prefix integration landed 2026-05-31 — refreshed off-thread after each `TurnEnd`/`RunEnd`, cached so it never runs in the render path, prefixed onto the status bar; `/statusline` reports the active config. |
 | `feedbackSurveyRate` + `/feedback` | 🔴 | |
 
 ## L. Output styles

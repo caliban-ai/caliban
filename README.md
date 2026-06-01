@@ -333,6 +333,20 @@ Pressing **y** or **n** in the Ask modal opens a sub-prompt:
 | `caliban perms export [--scope <s>] [--format toml\|json]` | Print rules in TOML or JSON shape. |
 | `caliban perms audit [--since <when>] [--tool <name>] [--action <a>] [--head <N>]` | Read the decision log. |
 
+### Headless / non-interactive (`-p`, `--print`)
+
+There's no modal in headless mode, so any `Ask` rule converts to a
+hard deny — read-only tools (`Read`/`Glob`/`Grep`) sail through under
+the built-in defaults, but `Write`/`Edit`/`Bash` will fail on the
+first invocation unless you opt in. Pick one:
+
+- `--permission-mode acceptEdits` — auto-allow `Write`/`Edit`/`MultiEdit`/`NotebookEdit`.
+- `--allow 'Bash(git *)'` — narrow allow rule (repeatable; see Pattern grammar).
+- `--auto-allow` — broad: every `Ask` rule resolves to allow. Use sparingly.
+
+The deny message itself names the right flag for the tool class, so
+the first failure is also the documentation.
+
 ### Configuration polarity
 
 caliban's native config format is TOML. JSON is accepted on read as

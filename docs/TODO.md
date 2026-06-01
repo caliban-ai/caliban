@@ -27,10 +27,6 @@ removed from this list. Two items remain partially done:
   - File: crates/caliban-agent-core/src/agent.rs:62,101 (`max_tokens_recovery: bool`, default `false`); crates/caliban-agent-core/src/stream/mod.rs:1076,1194 (recovery gate); :354–355 (per-turn escalation tracking).
   - Remaining work: (1) confirm/fix Stage A's `TurnEnd` double-count so recovery can be safely re-enabled (split attempt-end vs turn-end semantics); (2) add a CLI flag (e.g. `--max-tokens-recovery`) to opt back in — there is no flag today, the field is only settable in code. Pair with an `/effort low` suggestion in the surfacing message so the user has a one-keystroke remediation.
 
-- Finding: the custom statusline runs but is never rendered. `StatuslineRunner`, the `settings.statusLine` schema, and the claude-code-compatible stdin context shipped in `caliban-settings` (Plan C 2026-05-26), but nothing in the TUI invokes it — `/statusline` is still a stub (caliban/src/tui.rs:707) and `render.rs` has no status-line prefix path. Matrix row K is 🟡 pending this.
-  - File: crates/caliban-settings/src/statusline.rs (runner — done); caliban/src/tui/render.rs (render-prefix integration — missing); invocation site after `TurnEnd`/`RunEnd`.
-  - Remaining work: spawn the configured command after each `TurnEnd`/`RunEnd` (and at session start), cap stdout to one line (~120 chars), cache between turns so it doesn't run mid-render, and render it as a prefix/suffix on the existing statusline. Default timeout 200 ms; on timeout render the previous output and log.
-
 ---
 
 ## Ollama probe follow-ups (2026-05-27)
@@ -55,16 +51,13 @@ Probe ran caliban's OpenAI provider against LMStudio
 `google/gemma-4-e4b`). Full writeup:
 [`docs/2026-05-27-lmstudio-probe-findings.md`](2026-05-27-lmstudio-probe-findings.md).
 
-**Resolution status (2026-05-28):** F2/F3/F4 landed in #71, F6 in #69,
-F7/F12 in #70, F11 in #69, F13/F14/F15 in #72 — all merged, so their
-entries were pruned. Only **F16** (below) remains open; it isn't
-addressed by any PR yet.
-
-- Finding (LMStudio F16 — NOT yet addressed by any PR): Headless `-p` running a `Write`/`Edit`/`Bash` prompt without `--auto-allow` fails on the first such tool call. Surfaced while documenting F15 in #72. Headless `-p` resolves to `PermissionMode::Default`, whose rule tail **Asks** for mutating tools; in a non-interactive context the `Ask` resolves to a hard deny, so a headless prompt that needs to write a file or run a command fails on the first mutating call. Read-only tools (Read/Glob/Grep) are Allowed by the default tail, which is why F15/E5 saw tools "just work" — they only exercised reads.
-  - Commit: 8b87b35 (LMStudio probe baseline)
-  - File: crates/caliban-agent-core/src/permissions.rs (default-rules tail + `NonInteractiveAskHandler { auto_allow: false }` at :576); headless dispatch path in caliban/src/headless/mod.rs
-  - Severity: Medium — a whole tool class fails silently in the headline headless mode.
-  - Suggested fix: decide the intended headless default. Either (a) emit a clear error ("tool X requires --auto-allow or an --allow rule in headless mode") instead of an opaque deny, plus document the requirement loudly; or (b) make headless `-p` default to a more permissive mode for workspace-scoped mutating tools. Pairs with F15's `permission_mode` surfacing (now in `system/init` per #72) so the failure is at least diagnosable.
+**Resolution status (2026-05-31):** F2/F3/F4 landed in #71, F6/F11 in
+#69, F7/F12 in #70, F13/F14/F15 in #72, and F16 (headless `Ask` → deny
+with no actionable hint) landed on `feature/recommendations` —
+`NonInteractiveAskHandler` now returns a tool-class-aware remediation
+(`--permission-mode acceptEdits` for file-edit tools, narrow `--allow
+'Bash(<glob>)'` for Bash, generic `--allow '<Tool>'` otherwise). No
+open findings remain in this section.
 
 ---
 
@@ -122,4 +115,18 @@ PRs #78 and #79 surfaced two CI/DX gaps that landed fixes here (this PR), plus o
   - Investigation hints: (a) instrument `dispatch` to log `output.stdout.len()` and `output.status` when the JSON parse fails — confirm whether stdout is empty in the failing case. (b) try replacing `wait_with_output()` with explicit `child.stdout.take()` + `read_to_end` after `wait()` to control the drain ordering. (c) repro under `stress-ng --cpu 4` locally to mimic runner load.
   - Fix candidates: (1) drop the test's `heredoc` for a single-line `echo` (smaller pipe-write window); (2) loop the test under a retry decorator (Rust doesn't have built-in; add a per-test helper that re-runs once on `unexpected: Allow`); (3) read stdout explicitly post-wait.
   - Not done here because: deeper investigation belongs in its own focused PR — guessing at the fix would risk masking the root cause.
+
+---
+
+## Performance & scaling (2026-05-31)
+
+- Finding: every turn snapshots the full tool registry into the request payload. As built-in tools, MCP tools, plugin tools, and sub-agent tools grow, this inflates token usage per turn, slows request serialisation, and degrades the model's tool-selection accuracy (a larger menu of irrelevant tools). The parity matrix already flags `ToolSearch` (lazy MCP schema loading) at row F as 🔴; the broader opportunity is to introduce a two-stage tool surface that applies to built-ins / plugins / sub-agent tools as well.
+  - File: `crates/caliban-agent-core/src/stream/mod.rs:497–523` (`self.tools.to_caliban_tools()` snapshot per request); `crates/caliban-agent-core/src/registry.rs:56–68` (registry shape).
+  - Severity: Medium today, growing with the MCP/plugins ecosystem.
+  - Suggested approach (not turnkey — needs a design doc):
+    1. Default palette of `Read`, `Grep`, `Glob`, `TodoWrite`, `ToolSearch`, `AgentTool` always present.
+    2. `ToolSearch` returns matching tool names / descriptions / schemas on demand and activates them for the session.
+    3. Subsequent requests include only the active set; activations persist per session.
+    4. New settings keys: `tools.default_palette`, `tools.lazy_mcp`, `tools.max_active_schemas`, per-MCP-server lazy/eager mode.
+  - Not done here because: this is a model-facing contract change (the model has to learn the search-then-call pattern) with regression risk across every turn. Belongs in `docs/superpowers/specs/` as its own design doc + multi-PR sequence rather than bundled with smaller branches.
 

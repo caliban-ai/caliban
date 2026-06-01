@@ -346,12 +346,29 @@ impl AskHandler for NonInteractiveAskHandler {
         if self.auto_allow {
             HookDecision::Allow
         } else {
-            HookDecision::Deny(format!(
-                "permission denied: '{}' requires interactive approval (no TTY)",
-                ctx.tool_name
-            ))
+            HookDecision::Deny(non_interactive_deny_message(ctx.tool_name))
         }
     }
+}
+
+/// Build the deny message a [`NonInteractiveAskHandler`] returns when an
+/// `Ask` rule fires without a TTY. The message names a concrete CLI
+/// remediation tailored to the tool class so operators don't have to
+/// guess between `--auto-allow`, `--permission-mode acceptEdits`, and a
+/// targeted `--allow` rule.
+fn non_interactive_deny_message(tool_name: &str) -> String {
+    let head = format!("permission denied: '{tool_name}' requires interactive approval (no TTY)");
+    let hint = if crate::permission_mode::is_file_edit_tool(tool_name) {
+        "re-run with `--permission-mode acceptEdits` to auto-allow file edits, \
+         or `--allow '<Tool>(<glob>)'` for a narrower rule"
+    } else if tool_name == "Bash" {
+        "re-run with `--allow 'Bash(<glob>)'` to allow specific commands, \
+         or `--auto-allow` to allow all Ask-rule tools (dangerous)"
+    } else {
+        "re-run with `--allow '<Tool>'` to allow this tool, \
+         or `--auto-allow` to allow all Ask-rule tools (dangerous)"
+    };
+    format!("{head}; {hint}")
 }
 
 /// Pluggable [`Hooks`] impl that gates tool dispatch via the rule set + an
@@ -685,6 +702,60 @@ mod tests {
         let i = serde_json::json!({"command": "x"});
         let d = h.before_tool(&ctx("Bash", &i)).await.unwrap();
         assert!(matches!(d, HookDecision::Deny(_)));
+    }
+
+    /// File-edit tools should suggest `--permission-mode acceptEdits` because
+    /// that is the existing one-flag remediation. `--auto-allow` is broader
+    /// and shouldn't be the first thing we recommend for the common edit case.
+    #[tokio::test]
+    async fn non_interactive_deny_for_file_edit_suggests_accept_edits() {
+        let h = hook(default_rules());
+        let i = serde_json::json!({"file_path": "/tmp/x", "content": "y"});
+        let d = h.before_tool(&ctx("Write", &i)).await.unwrap();
+        let HookDecision::Deny(msg) = d else {
+            panic!("expected Deny, got {d:?}");
+        };
+        assert!(msg.contains("--permission-mode acceptEdits"), "got: {msg}");
+        assert!(msg.contains("'Write'"), "got: {msg}");
+    }
+
+    /// Bash should suggest a narrowly-scoped `--allow 'Bash(<glob>)'` rule,
+    /// not `--permission-mode acceptEdits` (which doesn't cover Bash) and
+    /// flag `--auto-allow` as dangerous.
+    #[tokio::test]
+    async fn non_interactive_deny_for_bash_suggests_targeted_allow_rule() {
+        let h = hook(default_rules());
+        let i = serde_json::json!({"command": "ls"});
+        let d = h.before_tool(&ctx("Bash", &i)).await.unwrap();
+        let HookDecision::Deny(msg) = d else {
+            panic!("expected Deny, got {d:?}");
+        };
+        assert!(msg.contains("--allow 'Bash"), "got: {msg}");
+        assert!(msg.contains("dangerous"), "got: {msg}");
+        assert!(
+            !msg.contains("acceptEdits"),
+            "acceptEdits doesn't cover Bash; got: {msg}"
+        );
+    }
+
+    /// Other tools (anything not file-edit and not Bash) should get a
+    /// generic `--allow '<Tool>'` suggestion. `WebFetch` is a real built-in
+    /// that defaults to Ask, so we use it here rather than a synthetic name.
+    #[tokio::test]
+    async fn non_interactive_deny_for_other_tool_suggests_generic_allow_rule() {
+        let mut rules = vec![rule("WebFetch", Action::Ask)];
+        rules.extend(default_rules());
+        let h = hook(rules);
+        let i = serde_json::json!({"url": "https://example.com"});
+        let d = h.before_tool(&ctx("WebFetch", &i)).await.unwrap();
+        let HookDecision::Deny(msg) = d else {
+            panic!("expected Deny, got {d:?}");
+        };
+        assert!(msg.contains("--allow '<Tool>'"), "got: {msg}");
+        assert!(
+            !msg.contains("acceptEdits"),
+            "acceptEdits doesn't cover WebFetch; got: {msg}"
+        );
     }
 
     #[tokio::test]

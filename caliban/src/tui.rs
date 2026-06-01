@@ -138,6 +138,29 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Run the configured statusline command and return the latest cached segment.
+async fn refresh_statusline(
+    runner: Option<Arc<caliban_settings::StatuslineRunner>>,
+    ctx: caliban_settings::StatuslineContext,
+) -> String {
+    match runner {
+        Some(r) => r.refresh(ctx).await,
+        None => String::new(),
+    }
+}
+
+fn queue_statusline_refresh(
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    runner: Option<Arc<caliban_settings::StatuslineRunner>>,
+    ctx: caliban_settings::StatuslineContext,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let line = refresh_statusline(runner, ctx).await;
+        let _ = tx.send(line);
+    });
+}
+
 /// Run the TUI until the user exits (Ctrl+D or Ctrl+C with empty input).
 ///
 /// Saves the session on clean exit if `--no-save` was not set.
@@ -178,6 +201,12 @@ pub(crate) async fn run(
     );
     let mut term_events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
+    let (statusline_tx, mut statusline_rx) = tokio::sync::mpsc::unbounded_channel();
+    queue_statusline_refresh(
+        &statusline_tx,
+        app.statusline_runner.clone(),
+        app.statusline_context(),
+    );
 
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -230,7 +259,21 @@ pub(crate) async fn run(
                 }
             } => {
                 match agent_event {
-                    Some(Ok(evt)) => events::handle_agent_event(evt, &mut app),
+                    Some(Ok(evt)) => {
+                        let should_refresh_statusline = matches!(
+                            evt,
+                            caliban_agent_core::TurnEvent::TurnEnd { .. }
+                                | caliban_agent_core::TurnEvent::RunEnd { .. }
+                        );
+                        events::handle_agent_event(evt, &mut app);
+                        if should_refresh_statusline {
+                            queue_statusline_refresh(
+                                &statusline_tx,
+                                app.statusline_runner.clone(),
+                                app.statusline_context(),
+                            );
+                        }
+                    }
                     Some(Err(ref e)) => {
                         events::handle_agent_error(e, &mut app);
                         agent_stream = None;
@@ -264,6 +307,11 @@ pub(crate) async fn run(
                         app.view = ViewState::Overlay(Overlay::AskModal);
                         app.auto_scroll = false;
                     }
+                }
+            }
+            statusline = statusline_rx.recv() => {
+                if let Some(line) = statusline {
+                    app.custom_statusline = line;
                 }
             }
             _ = tick.tick() => {
@@ -1140,7 +1188,9 @@ mod tests {
             ("/agents", "Sub-agent isolation"),
             // /effort is no longer a stub — it sets reasoning effort via
             // AgentConfig.effort (Plan C, Task 3). Removed from this list.
-            ("/statusline", "Settings hierarchy"),
+            // /statusline is no longer a stub — it reports the active
+            // settings.statusLine config and the runner is wired into
+            // the TUI status bar. Removed from this list.
             // /permissions is no longer a stub — it opens the
             // Permissions overlay (see `tui/overlay.rs::permissions_lines`
             // and `tui/events.rs::handle_permissions_overlay_key`).
