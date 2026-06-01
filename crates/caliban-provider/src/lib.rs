@@ -22,7 +22,7 @@ pub use capabilities::{
     Capabilities, ModelInfo, PromptCachingCapability, SystemPromptCapability, ToolUseCapability,
 };
 pub use effort::Effort;
-pub use error::{Error, Result};
+pub use error::{Error, Result, is_auth_error};
 pub use message::{ContentBlock, ImageBlock, ImageSource, Message, Role, TextBlock};
 pub use provider::Provider;
 pub use request::{CompletionRequest, CompletionRequestBuilder, RequestMetadata, RequestPurpose};

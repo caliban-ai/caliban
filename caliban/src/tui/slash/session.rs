@@ -214,12 +214,9 @@ impl SlashCommand for RecapCommand {
                 .push(TranscriptLine::Info("recap: no messages yet".into()));
             return Ok(SlashOutcome::Continue);
         }
-        let model = ctx
-            .app
-            .args
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::default_model_for(ctx.app.args.provider).to_string());
+        let model = ctx.app.args.model.clone().unwrap_or_else(|| {
+            crate::default_model_for(crate::resolved_provider(&ctx.app.args)).to_string()
+        });
         let caps = ctx.app.agent.provider().capabilities(&model);
         let compactor = ctx.app.agent.compactor();
         let messages = ctx.app.messages.clone();
@@ -284,12 +281,9 @@ impl SlashCommand for BtwCommand {
             ));
             return Ok(SlashOutcome::Continue);
         }
-        let model = ctx
-            .app
-            .args
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::default_model_for(ctx.app.args.provider).to_string());
+        let model = ctx.app.args.model.clone().unwrap_or_else(|| {
+            crate::default_model_for(crate::resolved_provider(&ctx.app.args)).to_string()
+        });
         let provider = ctx.app.agent.provider();
         let req = btw::build_request(&model, q);
         match provider.complete(req).await {

@@ -72,6 +72,7 @@ url                      = { workspace = true }
 chrono                   = { workspace = true }
 tempfile                 = { workspace = true }
 uuid                     = { workspace = true }
+arc-swap                 = { workspace = true }
 
 [dev-dependencies]
 caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }

@@ -16,7 +16,7 @@ use clap::{Parser, ValueEnum};
 use crate::headless;
 use crate::router;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProviderKind {
     Anthropic,
     Openai,
@@ -31,6 +31,17 @@ pub(crate) fn default_model_for(p: ProviderKind) -> &'static str {
         ProviderKind::Ollama => "llama3.1",
         ProviderKind::Google => "gemini-2.0-flash",
     }
+}
+
+/// Unwrap the CLI-resolved provider. `main.rs` writes
+/// `args.provider = Some(effective.provider)` after `EffectiveModel`
+/// resolution, so this accessor returns the precedence-resolved
+/// provider in all normal call paths. The `unwrap_or(Anthropic)` is a
+/// safety net for code paths that read `args.provider` before main has
+/// run resolution (e.g. early-startup error reporting).
+#[must_use]
+pub(crate) fn resolved_provider(args: &Args) -> ProviderKind {
+    args.provider.unwrap_or(ProviderKind::Anthropic)
 }
 
 pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
@@ -151,9 +162,11 @@ pub(crate) struct Args {
     #[arg(long = "permission-prompt-tool", value_name = "MCP_TOOL")]
     pub(crate) permission_prompt_tool: Option<String>,
 
-    /// Which provider to use
-    #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
-    pub(crate) provider: ProviderKind,
+    /// Which provider to use. If omitted, resolved from `Settings.model`
+    /// (project/local/user/managed scope); falls back to Anthropic when
+    /// neither CLI nor Settings supply one.
+    #[arg(long, value_enum)]
+    pub(crate) provider: Option<ProviderKind>,
 
     /// Model name (defaults per provider)
     #[arg(long)]

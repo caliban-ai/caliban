@@ -226,17 +226,15 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
                 app.last_turn_ttft_ms = Some(millis);
             }
             // Record cost against the rate card for this turn.
-            let provider = match app.args.provider {
+            let provider = match crate::resolved_provider(&app.args) {
                 crate::ProviderKind::Anthropic => "anthropic",
                 crate::ProviderKind::Openai => "openai",
                 crate::ProviderKind::Ollama => "ollama",
                 crate::ProviderKind::Google => "google",
             };
-            let model = app
-                .args
-                .model
-                .clone()
-                .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+            let model = app.args.model.clone().unwrap_or_else(|| {
+                crate::default_model_for(crate::resolved_provider(&app.args)).to_string()
+            });
             app.cost_accumulator.record(provider, &model, &usage, None);
             // Mirror the assistant message into context-window bookkeeping.
             let snapshot = {
@@ -542,11 +540,9 @@ pub(crate) fn handle_compact_command(app: &mut App) {
         ));
         return;
     }
-    let model = app
-        .args
-        .model
-        .clone()
-        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+    let model = app.args.model.clone().unwrap_or_else(|| {
+        crate::default_model_for(crate::resolved_provider(&app.args)).to_string()
+    });
     let caps = app.agent.provider().capabilities(&model);
     let before = caliban_agent_core::estimate_tokens(&app.messages);
     let before_count = app.messages.len();

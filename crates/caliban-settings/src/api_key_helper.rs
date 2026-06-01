@@ -88,6 +88,14 @@ impl ApiKeyHelperPool {
             .or_else(|| self.specs.iter().find(|h| h.provider == "*"))
     }
 
+    /// Return `true` if a helper is configured for `provider` (or via the
+    /// `"*"` fallback). Exposed so callers can branch between the helper
+    /// path and the env-var path without invoking the script first.
+    #[must_use]
+    pub fn has_spec_for(&self, provider: &str) -> bool {
+        self.spec_for(provider).is_some()
+    }
+
     /// Fetch (and cache) a key. The optional `clock` lets tests inject
     /// a deterministic time source.
     ///

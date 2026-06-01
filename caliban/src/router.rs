@@ -28,8 +28,13 @@ pub(crate) struct RouterWiring {
 
 /// Try to discover + build a router from `caliban.toml`. Returns `Ok(None)`
 /// if no config is found anywhere; the caller falls back to the single-
-/// provider path.
-pub(crate) fn try_load(explicit: Option<&Path>, start_dir: &Path) -> Result<Option<RouterWiring>> {
+/// provider path. `pool` supplies API keys via `api_key_helper` when
+/// configured; an empty pool falls through to the env-var path.
+pub(crate) fn try_load(
+    explicit: Option<&Path>,
+    start_dir: &Path,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Option<RouterWiring>> {
     // The discovery error already names the path and the parse failure;
     // no extra context is needed (M5 doc-chain dedup).
     let Some(discovered) = discover_caliban_toml(explicit, start_dir).map_err(|e| anyhow!(e))?
@@ -41,7 +46,7 @@ pub(crate) fn try_load(explicit: Option<&Path>, start_dir: &Path) -> Result<Opti
         // caliban.toml exists but doesn't define [router].
         return Ok(None);
     };
-    let providers = build_provider_handles(&router_cfg, &config.providers)?;
+    let providers = build_provider_handles(&router_cfg, &config.providers, pool)?;
     let router = ModelRouter::from_config(router_cfg, providers)
         .with_context(|| format!("building ModelRouter from {}", path.display()))?;
     Ok(Some(RouterWiring {
@@ -54,6 +59,7 @@ pub(crate) fn try_load(explicit: Option<&Path>, start_dir: &Path) -> Result<Opti
 pub(crate) fn build_provider_handles(
     router_cfg: &RouterConfig,
     provider_blocks: &HashMap<String, ProviderBlock>,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
 ) -> Result<HashMap<String, Arc<dyn Provider + Send + Sync>>> {
     let mut names: Vec<&str> = router_cfg
         .routes
@@ -66,36 +72,87 @@ pub(crate) fn build_provider_handles(
     let mut out: HashMap<String, Arc<dyn Provider + Send + Sync>> = HashMap::new();
     for name in names {
         let block = provider_blocks.get(name).cloned().unwrap_or_default();
-        let handle =
-            build_one(name, &block).with_context(|| format!("constructing provider '{name}'"))?;
+        let handle = build_one(name, &block, pool)
+            .with_context(|| format!("constructing provider '{name}'"))?;
         out.insert(name.to_string(), handle);
     }
     Ok(out)
 }
 
-fn build_one(name: &str, block: &ProviderBlock) -> Result<Arc<dyn Provider + Send + Sync>> {
+/// Resolve the API key for `(provider_id, api_key_env)`. Helper wins
+/// when configured; env var is the fallback.
+fn resolve_key(
+    provider_id: &str,
+    api_key_env: &str,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<secrecy::SecretString> {
+    if pool.has_spec_for(provider_id) {
+        let outcome = pool
+            .key_for(provider_id)
+            .map_err(|e| anyhow!("api_key_helper for {provider_id}: {e}"))?;
+        Ok(secrecy::SecretString::from(outcome.key))
+    } else {
+        let key = std::env::var(api_key_env)
+            .with_context(|| format!("env var {api_key_env} is unset"))?;
+        Ok(secrecy::SecretString::from(key))
+    }
+}
+
+fn build_one(
+    name: &str,
+    block: &ProviderBlock,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
     match name {
         "anthropic" => {
             use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY");
-            let key = std::env::var(api_key_env)
-                .with_context(|| format!("env var {api_key_env} is unset"))?;
-            let mut cfg = DirectConfig::new(secrecy::SecretString::from(key));
-            if let Some(url) = block.base_url.as_ref() {
-                cfg.base_url = url::Url::parse(url)?;
-            }
-            Ok(Arc::new(AnthropicProvider::direct(cfg)?))
+            let base_url = block.base_url.clone();
+            let make_cfg = move |key: secrecy::SecretString| -> Result<DirectConfig> {
+                let mut cfg = DirectConfig::new(key);
+                if let Some(url) = base_url.as_ref() {
+                    cfg.base_url = url::Url::parse(url)?;
+                }
+                Ok(cfg)
+            };
+            let key = resolve_key("anthropic", api_key_env, pool)?;
+            let inner = AnthropicProvider::direct(make_cfg(key)?)?;
+            Ok(wrap_with_refresh_if_helper(
+                inner,
+                pool,
+                "anthropic",
+                "anthropic",
+                move |k| {
+                    let cfg =
+                        make_cfg(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+                    AnthropicProvider::direct(cfg).map_err(caliban_provider::Error::adapter)
+                },
+            ))
         }
         "openai" => {
             use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-            let key = std::env::var(api_key_env)
-                .with_context(|| format!("env var {api_key_env} is unset"))?;
-            let mut cfg = DirectConfig::new(secrecy::SecretString::from(key));
-            if let Some(url) = block.base_url.as_ref() {
-                cfg.base_url = url::Url::parse(url)?;
-            }
-            Ok(Arc::new(OpenAIProvider::direct(cfg)?))
+            let base_url = block.base_url.clone();
+            let make_cfg = move |key: secrecy::SecretString| -> Result<DirectConfig> {
+                let mut cfg = DirectConfig::new(key);
+                if let Some(url) = base_url.as_ref() {
+                    cfg.base_url = url::Url::parse(url)?;
+                }
+                Ok(cfg)
+            };
+            let key = resolve_key("openai", api_key_env, pool)?;
+            let inner = OpenAIProvider::direct(make_cfg(key)?)?;
+            Ok(wrap_with_refresh_if_helper(
+                inner,
+                pool,
+                "openai",
+                "openai",
+                move |k| {
+                    let cfg =
+                        make_cfg(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+                    OpenAIProvider::direct(cfg).map_err(caliban_provider::Error::adapter)
+                },
+            ))
         }
         "ollama" => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
@@ -110,17 +167,54 @@ fn build_one(name: &str, block: &ProviderBlock) -> Result<Arc<dyn Provider + Sen
         "google" => {
             use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("GEMINI_API_KEY");
-            let key = std::env::var(api_key_env)
-                .with_context(|| format!("env var {api_key_env} is unset"))?;
-            let cfg = AIStudioConfig::new(secrecy::SecretString::from(key));
             // base_url override is provider-specific; ignored for AI Studio's
             // fixed endpoint in v2 (operator can pin via env vars).
             let _ = block.base_url;
-            Ok(Arc::new(GoogleProvider::ai_studio(cfg)?))
+            let key = resolve_key("google", api_key_env, pool)?;
+            let inner = GoogleProvider::ai_studio(AIStudioConfig::new(key))?;
+            Ok(wrap_with_refresh_if_helper(
+                inner,
+                pool,
+                "google",
+                "google",
+                move |k| {
+                    GoogleProvider::ai_studio(AIStudioConfig::new(k))
+                        .map_err(caliban_provider::Error::adapter)
+                },
+            ))
         }
         other => Err(anyhow!(
             "unknown provider '{other}' — supported: anthropic, openai, ollama, google"
         )),
+    }
+}
+
+/// Wrap `inner` in a `RefreshingProvider` iff the pool has a spec for
+/// `provider_id`. Without a spec, no refresh path is needed and the
+/// inner provider is returned as-is.
+fn wrap_with_refresh_if_helper<P>(
+    inner: P,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+    provider_id: &str,
+    static_name: &'static str,
+    rebuild: impl Fn(secrecy::SecretString) -> std::result::Result<P, caliban_provider::Error>
+    + Send
+    + Sync
+    + 'static,
+) -> Arc<dyn Provider + Send + Sync>
+where
+    P: Provider + 'static,
+{
+    if pool.has_spec_for(provider_id) {
+        Arc::new(crate::refreshing_provider::RefreshingProvider::new(
+            inner,
+            pool.clone(),
+            provider_id.to_string(),
+            static_name,
+            rebuild,
+        ))
+    } else {
+        Arc::new(inner)
     }
 }
 
@@ -213,7 +307,10 @@ pub(crate) fn run_debug(
     start_dir: &Path,
 ) -> Result<String> {
     use std::fmt::Write as _;
-    let Some(wiring) = try_load(explicit_config, start_dir)? else {
+    // Router debug uses an empty helper pool — diagnostics shouldn't
+    // spawn external scripts.
+    let empty_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+    let Some(wiring) = try_load(explicit_config, start_dir, &empty_pool)? else {
         return render_no_config(args);
     };
 
@@ -348,7 +445,13 @@ model = "x"
         )
         .unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-        let err = try_load(Some(&tmp.path().join("caliban.toml")), tmp.path()).unwrap_err();
+        let empty_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+        let err = try_load(
+            Some(&tmp.path().join("caliban.toml")),
+            tmp.path(),
+            &empty_pool,
+        )
+        .unwrap_err();
         let s = format!("{err:?}");
         assert!(s.contains("unknown provider"), "{s}");
     }

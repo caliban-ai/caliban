@@ -541,7 +541,7 @@ pub(crate) fn format_spinner_cell(
 }
 
 pub(crate) fn render_status(app: &App) -> Line<'static> {
-    let provider = match app.args.provider {
+    let provider = match crate::resolved_provider(&app.args) {
         crate::ProviderKind::Anthropic => "anthropic",
         crate::ProviderKind::Openai => "openai",
         crate::ProviderKind::Ollama => "ollama",

@@ -6,9 +6,11 @@
 mod agents_cli;
 mod args;
 mod diagnostics;
+mod effective_model;
 mod headless;
 mod perms_cli;
 mod plugin_cli;
+mod refreshing_provider;
 mod router;
 mod settings_cli;
 mod startup;
@@ -32,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 #[allow(unused_imports)]
 pub(crate) use crate::args::{
     AgentsCommand, Args, CalibanCommand, DaemonCommand, PermsCommand, ProviderKind, RouterCommand,
-    SettingsCommand, default_model_for, provider_name,
+    SettingsCommand, default_model_for, provider_name, resolved_provider,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -40,7 +42,7 @@ pub(crate) use crate::args::{
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Cross-flag validation that clap can't express natively. Fail loud
     // with EX_USAGE (64) so operators don't debug silent prompt-bypass
@@ -154,6 +156,38 @@ async fn main() -> Result<()> {
     let _settings_sources = settings_outcome.sources.clone();
     let _ = settings_handle.current(); // touch to ensure the handle is connected
     let settings_snapshot = settings_outcome.settings.clone();
+
+    // Resolve effective (provider, model) from CLI > Settings > builtin
+    // default, then mutate `args` so every downstream site that reads
+    // `args.provider` / `args.model` sees the precedence-resolved value.
+    // The `EffectiveModel` itself carries provenance for `/config` and
+    // `caliban doctor`.
+    let effective = crate::effective_model::EffectiveModel::resolve(&args, &settings_snapshot)
+        .context("resolving effective model from CLI args + settings")?;
+    args.provider = Some(effective.provider);
+    if args.model.is_none() {
+        args.model = Some(effective.name.clone());
+    }
+    if args.fallback_model.is_none() {
+        args.fallback_model = effective.fallback.as_ref().map(|(_, n)| n.clone());
+    }
+    tracing::info!(
+        target: "caliban::config",
+        provider = ?effective.provider,
+        model = %effective.name,
+        source = effective.source.label(),
+        "effective model resolved",
+    );
+
+    // ApiKeyHelperPool — built once from settings. Consumed by provider
+    // construction (both single-provider and router paths) and by
+    // `RefreshingProvider` for on-401 re-acquisition. Empty pool ⇒
+    // `has_spec_for(...)` returns false everywhere and the env-var path
+    // runs exactly as before.
+    let helper_pool = std::sync::Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(
+        settings_snapshot.api_key_helper.as_ref(),
+    ));
+
     // Honor `enable_telemetry` from settings when the env override is
     // unset.
     if settings_snapshot.enable_telemetry == Some(true)
@@ -167,7 +201,7 @@ async fn main() -> Result<()> {
     // present (preserving v1 behavior). ADR 0038.
     let cwd_for_router = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let provider: Arc<dyn Provider + Send + Sync> =
-        match router::try_load(args.config_path.as_deref(), &cwd_for_router)? {
+        match router::try_load(args.config_path.as_deref(), &cwd_for_router, &helper_pool)? {
             Some(wiring) => {
                 tracing::info!(
                     target: caliban_common::tracing_targets::TARGET_ROUTER,
@@ -177,7 +211,7 @@ async fn main() -> Result<()> {
                 );
                 wiring.router
             }
-            None => startup::build_provider(&args)?,
+            None => startup::build_provider(&args, &helper_pool)?,
         };
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
@@ -240,7 +274,7 @@ async fn main() -> Result<()> {
     let model = args
         .model
         .clone()
-        .unwrap_or_else(|| default_model_for(args.provider).to_string());
+        .unwrap_or_else(|| default_model_for(resolved_provider(&args)).to_string());
 
     // F4 pre-flight: when targeting a non-canonical OpenAI endpoint
     // (LM Studio etc.), confirm the model is loaded *before* the agent

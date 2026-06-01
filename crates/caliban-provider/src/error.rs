@@ -105,6 +105,21 @@ impl Error {
     }
 }
 
+/// Classify an error as authentication-shaped. Used by `RefreshingProvider`
+/// to decide whether to invalidate the cached API key and retry once.
+///
+/// Treats both the explicit `Error::Auth` variant and HTTP 401 / 403
+/// `ServerError`s as auth-shaped; everything else (rate limit, network,
+/// invalid request, etc.) is passed through unchanged.
+#[must_use]
+pub fn is_auth_error(err: &Error) -> bool {
+    match err {
+        Error::Auth(_) => true,
+        Error::ServerError { status, .. } => *status == 401 || *status == 403,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +144,48 @@ mod tests {
         let e = Error::stream_interrupted(io);
         assert!(matches!(e, Error::StreamInterrupted(_)));
         assert!(e.to_string().contains("eof"));
+    }
+
+    #[test]
+    fn is_auth_error_matches_explicit_auth_variant() {
+        assert!(is_auth_error(&Error::Auth("bad key".into())));
+    }
+
+    #[test]
+    fn is_auth_error_matches_server_error_401() {
+        assert!(is_auth_error(&Error::ServerError {
+            status: 401,
+            body: "unauthorized".into(),
+        }));
+    }
+
+    #[test]
+    fn is_auth_error_matches_server_error_403() {
+        assert!(is_auth_error(&Error::ServerError {
+            status: 403,
+            body: "forbidden".into(),
+        }));
+    }
+
+    #[test]
+    fn is_auth_error_rejects_other_server_errors() {
+        assert!(!is_auth_error(&Error::ServerError {
+            status: 500,
+            body: "boom".into(),
+        }));
+        assert!(!is_auth_error(&Error::ServerError {
+            status: 429,
+            body: "slow down".into(),
+        }));
+    }
+
+    #[test]
+    fn is_auth_error_rejects_unrelated_variants() {
+        assert!(!is_auth_error(&Error::RateLimit { retry_after: None }));
+        assert!(!is_auth_error(&Error::InvalidRequest("nope".into())));
+        assert!(!is_auth_error(&Error::Cancelled));
+        assert!(!is_auth_error(&Error::Network(Box::new(
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "x")
+        ))));
     }
 }

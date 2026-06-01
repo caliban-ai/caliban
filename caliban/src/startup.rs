@@ -17,7 +17,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
@@ -32,7 +32,9 @@ use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents_cli;
-use crate::args::{Args, ProviderKind, provider_name, summarize, summarize_blocks};
+use crate::args::{
+    Args, ProviderKind, provider_name, resolved_provider, summarize, summarize_blocks,
+};
 use crate::{headless, system_prompt, tui};
 
 /// Install a file-backed `tracing` subscriber when `--debug` or
@@ -81,37 +83,14 @@ pub(crate) async fn init_debug_tracing(args: &Args) {
     tracing::info!("caliban debug logging started — {}", log_path.display());
 }
 
-pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sync>> {
+pub(crate) fn build_provider(
+    args: &Args,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
     use ProviderKind::{Anthropic, Google, Ollama, Openai};
-    Ok(match args.provider {
-        Anthropic => {
-            use caliban_provider_anthropic::error::AnthropicError;
-            use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
-            // `from_env` can fail two ways: API key missing OR
-            // `ANTHROPIC_BASE_URL` unparseable. Discriminate so the
-            // surface line names the right env var (F2 — was previously
-            // collapsing the URL-parse path into "API key is not set").
-            let cfg = DirectConfig::from_env().map_err(|e| match e {
-                AnthropicError::MissingConfig(name) => missing_key_err(name),
-                AnthropicError::Transport(inner) => anyhow::anyhow!(
-                    "invalid ANTHROPIC_BASE_URL: {inner} — unset it or supply a valid URL"
-                ),
-                other => anyhow::anyhow!(other),
-            })?;
-            Arc::new(AnthropicProvider::direct(cfg)?)
-        }
-        Openai => {
-            use caliban_provider_openai::error::OpenAIError;
-            use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
-            let cfg = DirectConfig::from_env().map_err(|e| match e {
-                OpenAIError::MissingConfig(name) => missing_key_err(name.as_str()),
-                OpenAIError::InvalidBaseUrl { value, source } => anyhow::anyhow!(
-                    "invalid OPENAI_BASE_URL {value:?}: {source} — unset it or supply a valid URL"
-                ),
-                other => anyhow::anyhow!(other),
-            })?;
-            Arc::new(OpenAIProvider::direct(cfg)?)
-        }
+    Ok(match resolved_provider(args) {
+        Anthropic => build_anthropic(pool)?,
+        Openai => build_openai(pool)?,
         Ollama => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
             // `from_env` already returns the local default when
@@ -122,19 +101,165 @@ pub(crate) fn build_provider(args: &Args) -> Result<Arc<dyn Provider + Send + Sy
                 DirectConfig::from_env().context("invalid OLLAMA_BASE_URL")?,
             )?)
         }
-        Google => {
-            use caliban_provider_google::error::GoogleError;
-            use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
-            let cfg = AIStudioConfig::from_env().map_err(|e| match e {
-                GoogleError::MissingConfig(name) => missing_key_err(name),
-                GoogleError::Transport(inner) => anyhow::anyhow!(
-                    "invalid GEMINI_BASE_URL: {inner} — unset it or supply a valid URL"
-                ),
-                other => anyhow::anyhow!(other),
-            })?;
-            Arc::new(GoogleProvider::ai_studio(cfg)?)
-        }
+        Google => build_google(pool)?,
     })
+}
+
+fn build_anthropic(
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
+    use caliban_provider_anthropic::error::AnthropicError;
+    use caliban_provider_anthropic::{AnthropicProvider, config::DirectConfig};
+    use secrecy::SecretString;
+
+    let provider_id = "anthropic";
+    // Capture env-driven overrides once so they survive a rebuild.
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    let version = std::env::var("ANTHROPIC_VERSION").ok();
+
+    let make_cfg = move |key: SecretString| -> Result<DirectConfig> {
+        let mut cfg = DirectConfig::new(key);
+        if let Some(url) = base_url.as_deref() {
+            cfg.base_url = url::Url::parse(url)
+                .with_context(|| format!("invalid ANTHROPIC_BASE_URL {url:?}"))?;
+        }
+        if let Some(v) = version.as_deref() {
+            cfg.anthropic_version = v.to_string();
+        }
+        Ok(cfg)
+    };
+
+    if pool.has_spec_for(provider_id) {
+        let outcome = pool
+            .key_for(provider_id)
+            .map_err(|e| anyhow!("api_key_helper for {provider_id}: {e}"))?;
+        let inner = AnthropicProvider::direct(make_cfg(SecretString::from(outcome.key))?)?;
+        let pool_cl = pool.clone();
+        let make_cfg2 = make_cfg.clone();
+        let rebuild = move |k: SecretString| -> std::result::Result<_, caliban_provider::Error> {
+            let cfg = make_cfg2(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+            AnthropicProvider::direct(cfg).map_err(caliban_provider::Error::adapter)
+        };
+        Ok(Arc::new(
+            crate::refreshing_provider::RefreshingProvider::new(
+                inner,
+                pool_cl,
+                provider_id.to_string(),
+                "anthropic",
+                rebuild,
+            ),
+        ))
+    } else {
+        // Env-only path (preserves the existing F2 diagnostics).
+        let cfg = DirectConfig::from_env().map_err(|e| match e {
+            AnthropicError::MissingConfig(name) => missing_key_err(name),
+            AnthropicError::Transport(inner) => {
+                anyhow!("invalid ANTHROPIC_BASE_URL: {inner} — unset it or supply a valid URL")
+            }
+            other => anyhow!(other),
+        })?;
+        Ok(Arc::new(AnthropicProvider::direct(cfg)?))
+    }
+}
+
+fn build_openai(
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
+    use caliban_provider_openai::error::OpenAIError;
+    use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
+    use secrecy::SecretString;
+
+    let provider_id = "openai";
+    let base_url = std::env::var("OPENAI_BASE_URL").ok();
+    let organization = std::env::var("OPENAI_ORG_ID").ok();
+    let project = std::env::var("OPENAI_PROJECT").ok();
+
+    let make_cfg = move |key: SecretString| -> Result<DirectConfig> {
+        DirectConfig::from_parts(
+            key,
+            base_url.as_deref(),
+            organization.clone(),
+            project.clone(),
+        )
+        .map_err(|e| match e {
+            OpenAIError::InvalidBaseUrl { value, source } => {
+                anyhow!("invalid OPENAI_BASE_URL {value:?}: {source}")
+            }
+            other => anyhow!(other),
+        })
+    };
+
+    if pool.has_spec_for(provider_id) {
+        let outcome = pool
+            .key_for(provider_id)
+            .map_err(|e| anyhow!("api_key_helper for {provider_id}: {e}"))?;
+        let inner = OpenAIProvider::direct(make_cfg(SecretString::from(outcome.key))?)?;
+        let pool_cl = pool.clone();
+        let make_cfg2 = make_cfg.clone();
+        let rebuild = move |k: SecretString| -> std::result::Result<_, caliban_provider::Error> {
+            let cfg = make_cfg2(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+            OpenAIProvider::direct(cfg).map_err(caliban_provider::Error::adapter)
+        };
+        Ok(Arc::new(
+            crate::refreshing_provider::RefreshingProvider::new(
+                inner,
+                pool_cl,
+                provider_id.to_string(),
+                "openai",
+                rebuild,
+            ),
+        ))
+    } else {
+        let cfg = DirectConfig::from_env().map_err(|e| match e {
+            OpenAIError::MissingConfig(name) => missing_key_err(name.as_str()),
+            OpenAIError::InvalidBaseUrl { value, source } => anyhow!(
+                "invalid OPENAI_BASE_URL {value:?}: {source} — unset it or supply a valid URL"
+            ),
+            other => anyhow!(other),
+        })?;
+        Ok(Arc::new(OpenAIProvider::direct(cfg)?))
+    }
+}
+
+fn build_google(
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
+    use caliban_provider_google::error::GoogleError;
+    use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
+    use secrecy::SecretString;
+
+    let provider_id = "google";
+
+    if pool.has_spec_for(provider_id) {
+        let outcome = pool
+            .key_for(provider_id)
+            .map_err(|e| anyhow!("api_key_helper for {provider_id}: {e}"))?;
+        let inner =
+            GoogleProvider::ai_studio(AIStudioConfig::new(SecretString::from(outcome.key)))?;
+        let pool_cl = pool.clone();
+        let rebuild = move |k: SecretString| -> std::result::Result<_, caliban_provider::Error> {
+            GoogleProvider::ai_studio(AIStudioConfig::new(k))
+                .map_err(caliban_provider::Error::adapter)
+        };
+        Ok(Arc::new(
+            crate::refreshing_provider::RefreshingProvider::new(
+                inner,
+                pool_cl,
+                provider_id.to_string(),
+                "google",
+                rebuild,
+            ),
+        ))
+    } else {
+        let cfg = AIStudioConfig::from_env().map_err(|e| match e {
+            GoogleError::MissingConfig(name) => missing_key_err(name),
+            GoogleError::Transport(inner) => {
+                anyhow!("invalid GEMINI_BASE_URL: {inner} — unset it or supply a valid URL")
+            }
+            other => anyhow!(other),
+        })?;
+        Ok(Arc::new(GoogleProvider::ai_studio(cfg)?))
+    }
 }
 
 /// Format the canonical "API key is missing" surface line. Centralized so
@@ -163,7 +288,7 @@ fn missing_key_err(env_var: &str) -> anyhow::Error {
 /// - Network errors on the listing (treat as informational warning;
 ///   the actual request will surface a more specific error).
 pub(crate) async fn preflight_model_check(args: &Args, model: &str) -> Result<()> {
-    if !matches!(args.provider, ProviderKind::Openai) {
+    if !matches!(resolved_provider(args), ProviderKind::Openai) {
         return Ok(());
     }
     let Ok(base) = std::env::var("OPENAI_BASE_URL") else {
@@ -762,7 +887,7 @@ pub(crate) async fn run_headless(
         v
     };
 
-    let model_summary = format!("{}/{}", provider_name(args.provider), model);
+    let model_summary = format!("{}/{}", provider_name(resolved_provider(args)), model);
     let session_id = args
         .session
         .clone()
@@ -821,7 +946,7 @@ pub(crate) async fn run_headless(
                 .or(args.resume.as_deref())
                 .unwrap_or("ephemeral"),
             cwd: &cwd_now,
-            provider: provider_name(args.provider),
+            provider: provider_name(resolved_provider(args)),
             model: &model,
         };
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
@@ -864,7 +989,7 @@ pub(crate) async fn run_headless(
                 .or(args.resume.as_deref())
                 .unwrap_or("ephemeral"),
             cwd: &cwd_now,
-            provider: provider_name(args.provider),
+            provider: provider_name(resolved_provider(args)),
             model: &model,
         };
         if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome_ctx).await {
@@ -1355,7 +1480,7 @@ pub(crate) async fn fire_session_start(args: &Args, agent: &Arc<Agent>, model: &
     let session_ctx = caliban_agent_core::SessionCtx {
         session_id: &session_id,
         cwd: &cwd_now,
-        provider: provider_name(args.provider),
+        provider: provider_name(resolved_provider(args)),
         model,
     };
     if let Err(e) = agent.hooks().session_start(&session_ctx).await {
@@ -1376,7 +1501,7 @@ pub(crate) async fn fire_session_end(
     let session_ctx = caliban_agent_core::SessionCtx {
         session_id: &session_id,
         cwd: &cwd_now,
-        provider: provider_name(args.provider),
+        provider: provider_name(resolved_provider(args)),
         model,
     };
     let outcome = caliban_agent_core::SessionOutcome {
@@ -1610,7 +1735,7 @@ pub(crate) fn resolve_session(
             Some(existing) => existing,
             None => PersistedSession::new(
                 name.clone(),
-                provider_name(args.provider),
+                provider_name(resolved_provider(args)),
                 model.to_string(),
             ),
         })

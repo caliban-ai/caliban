@@ -461,10 +461,9 @@ impl App {
             .map(Arc::new);
         // Initialize capacity from the provider's capabilities for the
         // configured model so the status-bar segment shows up immediately.
-        let model = args
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::default_model_for(args.provider).to_string());
+        let model = args.model.clone().unwrap_or_else(|| {
+            crate::default_model_for(crate::resolved_provider(&args)).to_string()
+        });
         let caps = agent.provider().capabilities(&model);
         context_window.set_capacity(caps.max_input_tokens);
         if !messages.is_empty() {

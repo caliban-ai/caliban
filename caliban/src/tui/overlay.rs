@@ -345,17 +345,15 @@ pub(crate) fn slash_help_lines(registry: &slash::SlashCommandRegistry) -> Vec<Li
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn config_lines(app: &App) -> Vec<Line<'_>> {
-    let provider = match app.args.provider {
+    let provider = match crate::resolved_provider(&app.args) {
         crate::ProviderKind::Anthropic => "anthropic",
         crate::ProviderKind::Openai => "openai",
         crate::ProviderKind::Ollama => "ollama",
         crate::ProviderKind::Google => "google",
     };
-    let model = app
-        .args
-        .model
-        .clone()
-        .unwrap_or_else(|| crate::default_model_for(app.args.provider).to_string());
+    let model = app.args.model.clone().unwrap_or_else(|| {
+        crate::default_model_for(crate::resolved_provider(&app.args)).to_string()
+    });
 
     let workspace = app
         .args
