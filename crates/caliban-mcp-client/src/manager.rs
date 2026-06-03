@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use caliban_agent_core::ToolRegistry;
+use caliban_agent_core::mcp_activation::McpToolInfo;
+use caliban_agent_core::{Tool, ToolRegistry};
 
 use crate::client::{Conn, Transport};
 use crate::config::McpConfig;
@@ -240,6 +241,22 @@ impl McpClientManager {
     /// diagnostics + tests.
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
         self.pending.iter().map(|t| t.full_name())
+    }
+
+    /// Snapshot every registered MCP tool as a [`McpToolInfo`] vector
+    /// for consumption by `ToolSearch` (ADR-0046). The result is a
+    /// point-in-time copy; resources stay owned by the manager. Tools
+    /// from servers that failed handshake are not included.
+    #[must_use]
+    pub fn list_mcp_tools(&self) -> Vec<McpToolInfo> {
+        self.pending
+            .iter()
+            .map(|t| McpToolInfo {
+                full_name: t.full_name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema().clone(),
+            })
+            .collect()
     }
 
     /// Register every discovered MCP tool with `registry`.

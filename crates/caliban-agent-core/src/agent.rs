@@ -75,6 +75,14 @@ pub struct AgentConfig {
     /// snapshots this with `load_full()` and copies into
     /// `CompletionRequest.effort`. Default is [`Effort::Auto`].
     pub effort: Arc<ArcSwap<Effort>>,
+    // ── ADR-0046 (two-stage tool surface) ────────────────────────
+    /// When `true`, MCP tools are hidden from the wire payload until
+    /// the model activates them via the `ToolSearch` built-in.
+    /// Default `false` in v1.
+    pub lazy_mcp: bool,
+    /// Soft LRU cap on the activation set. `0` is treated as
+    /// `lazy_mcp = false` by callers. Default `24`.
+    pub max_active_schemas: usize,
 }
 
 impl Default for AgentConfig {
@@ -106,6 +114,9 @@ impl Default for AgentConfig {
             min_cache_block_tokens: 1024,
             // Plan C
             effort: Arc::new(ArcSwap::from_pointee(Effort::Auto)),
+            // ADR-0046
+            lazy_mcp: false,
+            max_active_schemas: 24,
         }
     }
 }
@@ -162,6 +173,17 @@ pub struct Agent {
     /// before the message is appended to the conversation history.
     /// Defaults to [`NoopPostProcessor`], which is a zero-cost identity.
     pub(crate) post_processor: Arc<dyn AssistantPostProcessor>,
+    /// Sidecar activation set for lazy MCP tool loading (ADR-0046).
+    /// Reads via `ArcSwap::load` are lock-free; writes go through
+    /// `rcu` from `ToolSearch::invoke`. Snapshotted by
+    /// `install_sub_agent` when frontmatter `inherit_active_mcp` is
+    /// true (the default).
+    pub(crate) mcp_active: Arc<ArcSwap<crate::mcp_activation::McpActivationSet>>,
+    /// Names of MCP servers that opt out of lazy loading via
+    /// `[server.X] lazy = false`. Tools belonging to these servers
+    /// always ride the wire payload even when `config.lazy_mcp` is true.
+    /// Resolved once at startup from `mcp.toml` / unified settings.
+    pub(crate) mcp_eager_servers: Arc<std::collections::HashSet<String>>,
 }
 
 /// Error returned by [`Agent::try_swap_model`].
@@ -243,6 +265,20 @@ impl Agent {
         self.active_model.load_full()
     }
 
+    /// Return the shared MCP activation set handle (ADR-0046).
+    /// Used by `ToolSearch::invoke` and `install_sub_agent`.
+    #[must_use]
+    pub fn mcp_active(&self) -> Arc<ArcSwap<crate::mcp_activation::McpActivationSet>> {
+        Arc::clone(&self.mcp_active)
+    }
+
+    /// Return the eager-MCP-server set (ADR-0046). Sub-agent install
+    /// shares this Arc with the child unchanged.
+    #[must_use]
+    pub fn mcp_eager_servers(&self) -> Arc<std::collections::HashSet<String>> {
+        Arc::clone(&self.mcp_eager_servers)
+    }
+
     /// Swap the active model in place (same-provider only). Returns
     /// [`ModelSwapError::UnsupportedByProvider`] if the model isn't
     /// recognised by the active provider's `list_models()` (when that
@@ -285,6 +321,8 @@ pub struct AgentBuilder {
     parallel_tool_limit: NonZeroUsize,
     plan_mode: Option<crate::plan_mode::SharedPlanMode>,
     post_processor: Option<Arc<dyn AssistantPostProcessor>>,
+    mcp_active: Option<Arc<ArcSwap<crate::mcp_activation::McpActivationSet>>>,
+    mcp_eager_servers: Option<Arc<std::collections::HashSet<String>>>,
 }
 
 impl Default for AgentBuilder {
@@ -303,6 +341,8 @@ impl Default for AgentBuilder {
             parallel_tool_limit: default_parallel_tool_limit(),
             plan_mode: None,
             post_processor: None,
+            mcp_active: None,
+            mcp_eager_servers: None,
         }
     }
 }
@@ -427,6 +467,26 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the shared MCP activation set (ADR-0046). Default: a fresh
+    /// set sized by `config.max_active_schemas`. Supply an externally
+    /// constructed Arc when `ToolSearch` and the `Agent` need to share
+    /// the same activation surface.
+    #[must_use]
+    pub fn mcp_active(
+        mut self,
+        active: Arc<ArcSwap<crate::mcp_activation::McpActivationSet>>,
+    ) -> Self {
+        self.mcp_active = Some(active);
+        self
+    }
+
+    /// Set the eager-MCP-server set (ADR-0046). Default: empty.
+    #[must_use]
+    pub fn mcp_eager_servers(mut self, servers: Arc<std::collections::HashSet<String>>) -> Self {
+        self.mcp_eager_servers = Some(servers);
+        self
+    }
+
     /// Finalise the builder, validating required fields.
     ///
     /// # Errors
@@ -443,6 +503,14 @@ impl AgentBuilder {
             return Err(Error::Misconfigured("Agent::max_tokens must be > 0".into()));
         }
         let active_model = Arc::new(ArcSwap::from_pointee(self.config.model.clone()));
+        let mcp_active = self.mcp_active.unwrap_or_else(|| {
+            Arc::new(ArcSwap::from_pointee(
+                crate::mcp_activation::McpActivationSet::new(self.config.max_active_schemas),
+            ))
+        });
+        let mcp_eager_servers = self
+            .mcp_eager_servers
+            .unwrap_or_else(|| Arc::new(std::collections::HashSet::new()));
         Ok(Agent {
             provider,
             tools: self.tools,
@@ -460,6 +528,8 @@ impl AgentBuilder {
             post_processor: self
                 .post_processor
                 .unwrap_or_else(|| Arc::new(NoopPostProcessor)),
+            mcp_active,
+            mcp_eager_servers,
         })
     }
 }

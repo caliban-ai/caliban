@@ -150,6 +150,11 @@ pub struct McpServerSetting {
     pub permissions: caliban_mcp_client::ServerPermissions,
     /// Mark this server as disabled.
     pub disabled: bool,
+    /// Per-server lazy override (ADR-0046). When `tools.lazy_mcp` is
+    /// true globally, individual servers can opt back to eager loading
+    /// by setting `lazy = false`. `None` follows the global default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lazy: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +173,25 @@ pub enum ApiKeyHelperRaw {
     Object(BTreeMap<String, serde_json::Value>),
     /// `"api_key_helper": [ { ... }, { ... } ]`.
     List(Vec<BTreeMap<String, serde_json::Value>>),
+}
+
+// ---------------------------------------------------------------------------
+// tools — lazy MCP tool loading (ADR-0046)
+// ---------------------------------------------------------------------------
+
+/// Knobs for the two-stage tool surface. When `lazy_mcp` is true,
+/// MCP tools are dropped from the wire payload until the model
+/// activates them via the `ToolSearch` built-in; `max_active_schemas`
+/// is the soft LRU cap on the activation set.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    /// Hide MCP tools behind `ToolSearch` activation. Default `false`
+    /// in v1; opt-in.
+    pub lazy_mcp: Option<bool>,
+    /// Soft cap on simultaneously-active MCP tools. LRU eviction
+    /// applies when exceeded. Default `24`.
+    pub max_active_schemas: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +284,10 @@ pub struct Settings {
     /// conversation-level cache marker.
     pub min_cache_block_tokens: Option<usize>,
 
+    // ----- tool surface (ADR-0046) ------------------------------------------
+    /// Lazy MCP tool loading knobs. Default off in v1.
+    pub tools: Option<ToolsConfig>,
+
     // ----- managed-scope escape hatch ---------------------------------------
     /// When set in the managed scope, flips the managed layer to the top
     /// of the merge chain (enterprise lockdown). The string value
@@ -328,6 +356,7 @@ impl Settings {
                     oauth,
                     manual_oauth: caliban_mcp_client::ManualOauthConfig::default(),
                     disabled: s.disabled,
+                    lazy: s.lazy,
                     permissions: s.permissions.clone(),
                 },
             );
@@ -545,6 +574,30 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(42)
         );
+    }
+
+    #[test]
+    fn tools_config_roundtrip() {
+        let raw = r#"{"tools": {"lazy_mcp": true, "max_active_schemas": 32}}"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let tools = s.tools.expect("tools should parse");
+        assert_eq!(tools.lazy_mcp, Some(true));
+        assert_eq!(tools.max_active_schemas, Some(32));
+    }
+
+    #[test]
+    fn tools_config_absent_leaves_field_none() {
+        let s: Settings = serde_json::from_str(r#"{"model": "test"}"#).unwrap();
+        assert!(s.tools.is_none());
+    }
+
+    #[test]
+    fn tools_config_partial_fields_default_to_none_inside() {
+        let raw = r#"{"tools": {"lazy_mcp": true}}"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let tools = s.tools.expect("tools should parse");
+        assert_eq!(tools.lazy_mcp, Some(true));
+        assert_eq!(tools.max_active_schemas, None);
     }
 
     #[test]

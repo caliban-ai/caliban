@@ -120,13 +120,20 @@ PRs #78 and #79 surfaced two CI/DX gaps that landed fixes here (this PR), plus o
 
 ## Performance & scaling (2026-05-31)
 
-- Finding: every turn snapshots the full tool registry into the request payload. As built-in tools, MCP tools, plugin tools, and sub-agent tools grow, this inflates token usage per turn, slows request serialisation, and degrades the model's tool-selection accuracy (a larger menu of irrelevant tools). The parity matrix already flags `ToolSearch` (lazy MCP schema loading) at row F as 🔴; the broader opportunity is to introduce a two-stage tool surface that applies to built-ins / plugins / sub-agent tools as well.
-  - File: `crates/caliban-agent-core/src/stream/mod.rs:497–523` (`self.tools.to_caliban_tools()` snapshot per request); `crates/caliban-agent-core/src/registry.rs:56–68` (registry shape).
-  - Severity: Medium today, growing with the MCP/plugins ecosystem.
-  - Suggested approach (not turnkey — needs a design doc):
-    1. Default palette of `Read`, `Grep`, `Glob`, `TodoWrite`, `ToolSearch`, `AgentTool` always present.
-    2. `ToolSearch` returns matching tool names / descriptions / schemas on demand and activates them for the session.
-    3. Subsequent requests include only the active set; activations persist per session.
-    4. New settings keys: `tools.default_palette`, `tools.lazy_mcp`, `tools.max_active_schemas`, per-MCP-server lazy/eager mode.
-  - Not done here because: this is a model-facing contract change (the model has to learn the search-then-call pattern) with regression risk across every turn. Belongs in `docs/superpowers/specs/` as its own design doc + multi-PR sequence rather than bundled with smaller branches.
+**Closed 2026-06-01:** the two-stage tool surface — design half — landed
+as ADR-0046 and spec
+`docs/superpowers/specs/2026-05-31-two-stage-tool-surface-design.md`.
+Implementation (Phases 1–6 of `docs/superpowers/plans/2026-05-31-two-stage-tool-surface.md`)
+shipped on `strategic/two-stage-tool-surface`: `tools.lazy_mcp = true`
+opt-in hides MCP tools from the wire payload behind a new
+`ToolSearch` built-in that activates matches into a sidecar
+`McpActivationSet` (LRU at `tools.max_active_schemas`, default 24).
+Per-server eager override via `[mcp_servers.X] lazy = false`.
+Sub-agent inheritance via frontmatter `inherit_active_mcp`. `/context`
+shows the active set when the feature is on.
+
+Built-in / plugin laziness is **not** in scope yet — see the spec's
+"Non-goals" section. Track follow-ups (activation persistence across
+session restart, `/tools` overlay, telemetry counters, `caliban tools`
+CLI) under "Open questions for v1.1" in the spec.
 

@@ -18,7 +18,7 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-05-31 (custom statusline: ticked row K — TUI render integration landed, `/statusline` reports active config. Prior refresh 2026-05-31 permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
+**Last refreshed:** 2026-06-01 (two-stage tool surface — ticked F.ToolSearch + F.WaitForMcpServers 🔴 → 🟡 per ADR-0046; v1 machinery shipped opt-in via `tools.lazy_mcp`. Prior refresh 2026-05-31 custom statusline: ticked row K — TUI render integration landed, `/statusline` reports active config. Prior refresh 2026-05-31 permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
 
 ## Design coverage
 
@@ -131,8 +131,8 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | NotebookEdit (Jupyter) | ✅ | nbformat v4; atomic write; FileChanged |
 | MultiEdit semantics (atomic multi-replace) | ✅ | sequential + rollback-on-miss |
 | PowerShell tool | 🔴 | low priority |
-| `ToolSearch` (lazy MCP schema loading) | 🔴 | only matters once MCP is real |
-| `WaitForMcpServers` | 🔴 | same |
+| `ToolSearch` (lazy MCP schema loading) | 🟡 | ADR-0046; v1 ships machinery (`tools.lazy_mcp = true` opt-in, per-server `lazy = false` override, LRU activation cap, sub-agent inheritance via frontmatter `inherit_active_mcp`, `/context` surfaces active set). Default flips to on in v1.1 after a feedback cycle. |
+| `WaitForMcpServers` | 🟡 | ADR-0046 covers the design space (ToolSearch is the discovery primitive). Standalone `WaitForMcpServers` tool deferred to v1.1. |
 
 ## G. Sub-agents
 

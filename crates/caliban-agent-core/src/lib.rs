@@ -7,10 +7,12 @@ pub mod auto_mode;
 pub mod cache;
 pub mod compact;
 pub mod decision_log;
+pub mod deferred_block;
 pub mod error;
 pub mod hooks;
 pub mod hooks_config;
 pub mod hooks_router;
+pub mod mcp_activation;
 pub mod mode_filter;
 pub mod permission_mode;
 pub mod permissions;
@@ -24,6 +26,7 @@ pub mod stream;
 pub mod todos;
 pub mod tool;
 pub mod turn;
+pub mod wire_filter;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, ModelSwapError, default_parallel_tool_limit};
 pub use auto_mode::{

@@ -57,6 +57,7 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
                         oauth,
                         permissions: sc.permissions,
                         disabled: sc.disabled,
+                        lazy: sc.lazy,
                     },
                 );
             }

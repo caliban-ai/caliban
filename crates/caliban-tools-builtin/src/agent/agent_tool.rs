@@ -72,6 +72,13 @@ pub struct AgentToolInput {
     /// that must run with a fresh chain.
     #[serde(default = "default_inherit_hooks")]
     pub inherit_hooks: bool,
+    /// Inherit the parent's active MCP set (ADR-0046). Defaults to
+    /// `true`. When false the child starts with an empty activation
+    /// set and must call `ToolSearch` to populate it. Independent of
+    /// `tool_allowlist`: the allowlist runs first, then activation
+    /// inheritance only affects MCP tools that survive the allowlist.
+    #[serde(default = "default_inherit_active_mcp")]
+    pub inherit_active_mcp: bool,
     /// Optional human-readable label that appears in `/agents` and logs.
     #[serde(default)]
     pub label: Option<String>,
@@ -81,6 +88,10 @@ pub struct AgentToolInput {
 }
 
 fn default_inherit_hooks() -> bool {
+    true
+}
+
+fn default_inherit_active_mcp() -> bool {
     true
 }
 

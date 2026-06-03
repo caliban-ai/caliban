@@ -59,6 +59,8 @@ decision with context, the decision itself, and consequences.
 | [0042](0042-caliband-binary-placement.md) | `caliband` sibling-binary placement (under `caliban-supervisor`) | accepted |
 | [0043](0043-arc-swap-shared-state.md) | `arc-swap` as the read-mostly shared-state primitive | accepted |
 | [0044](0044-rmcp-version-pin.md) | `rmcp` 1.7 version pin (dedicated-PR bumps) | accepted |
+| [0045](0045-permissions-v2-and-toml-primary-config.md) | Permissions v2 — TOML-primary config + richer rule schema | accepted |
+| [0046](0046-two-stage-tool-surface.md) | Two-stage tool surface — lazy MCP schema loading + ToolSearch | accepted |
 
 ## Adding a new ADR
 

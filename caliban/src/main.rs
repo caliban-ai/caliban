@@ -268,8 +268,30 @@ async fn main() -> Result<()> {
     // rule list. MCP servers come from the unified Settings snapshot
     // (caliban-settings already folds legacy `mcp.toml` via its compat
     // shim).
-    let (mcp_summaries, mcp_server_cfg) =
+    let (mcp_summaries, mcp_server_cfg, mcp_tools_for_search) =
         startup::start_mcp(&args, &settings_snapshot, &mut registry).await;
+
+    // ADR-0046 — set up the shared MCP activation surface for lazy
+    // schema loading. The Arc<ArcSwap<McpActivationSet>> must be the
+    // same instance held by both ToolSearchTool and the Agent so the
+    // model's activations propagate into the per-turn wire filter.
+    let mcp_eager_servers = Arc::new(startup::compute_mcp_eager_servers(&mcp_server_cfg));
+    let max_active_schemas = settings_snapshot
+        .tools
+        .as_ref()
+        .and_then(|t| t.max_active_schemas)
+        .unwrap_or(24);
+    let mcp_active = Arc::new(arc_swap::ArcSwap::from_pointee(
+        caliban_agent_core::mcp_activation::McpActivationSet::new(max_active_schemas),
+    ));
+    // Register ToolSearch BEFORE install_sub_agent so sub-agents
+    // inherit the discovery tool in their registry snapshot.
+    startup::install_tool_search(
+        &args,
+        &mut registry,
+        mcp_tools_for_search,
+        Arc::clone(&mcp_active),
+    );
 
     let model = args
         .model
@@ -288,7 +310,20 @@ async fn main() -> Result<()> {
     // the registry so sub-agents cannot recurse. Background-handoff
     // spawner asks the per-repo supervisor daemon to register new agents
     // (ADR 0037).
-    startup::install_sub_agent(&args, &mut registry, &provider, &model);
+    startup::install_sub_agent(
+        &args,
+        &mut registry,
+        &provider,
+        &model,
+        Arc::clone(&mcp_active),
+        Arc::clone(&mcp_eager_servers),
+        max_active_schemas,
+        settings_snapshot
+            .tools
+            .as_ref()
+            .and_then(|t| t.lazy_mcp)
+            .unwrap_or(false),
+    );
 
     // Project hooks config out of the layered Settings snapshot (ADR 0026).
     // The in-process PermissionsHook still runs even when --no-hooks /
@@ -345,6 +380,9 @@ async fn main() -> Result<()> {
         &plan_mode,
         permissions_hook,
         hook_event_buffer.as_ref(),
+        &settings_snapshot,
+        Arc::clone(&mcp_active),
+        Arc::clone(&mcp_eager_servers),
     )?;
 
     // Fire SessionStart hook (best-effort).

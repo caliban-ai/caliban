@@ -28,6 +28,7 @@ fn server_with_permissions(perms: ServerPermissions) -> ServerConfig {
         oauth: OauthMode::Off,
         manual_oauth: ManualOauthConfig::default(),
         disabled: false,
+        lazy: None,
         permissions: perms,
     }
 }

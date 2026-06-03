@@ -40,6 +40,7 @@ fn server_config(extra_args: &[&str], env: BTreeMap<String, String>) -> ServerCo
         oauth: OauthMode::Off,
         manual_oauth: ManualOauthConfig::default(),
         disabled: false,
+        lazy: None,
         permissions: ServerPermissions::default(),
     }
 }
@@ -190,6 +191,7 @@ async fn failed_server_does_not_abort_startup() {
             oauth: OauthMode::Off,
             manual_oauth: ManualOauthConfig::default(),
             disabled: false,
+            lazy: None,
             permissions: ServerPermissions::default(),
         },
     );
@@ -250,6 +252,7 @@ async fn handshake_timeout_marks_server_failed() {
             oauth: OauthMode::Off,
             manual_oauth: ManualOauthConfig::default(),
             disabled: false,
+            lazy: None,
             permissions: ServerPermissions::default(),
         },
     );

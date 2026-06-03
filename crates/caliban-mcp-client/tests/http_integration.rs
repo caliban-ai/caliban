@@ -245,6 +245,7 @@ fn http_config(url: &str, headers: BTreeMap<String, String>) -> ServerConfig {
         oauth: OauthMode::Off,
         manual_oauth: ManualOauthConfig::default(),
         disabled: false,
+        lazy: None,
         permissions: ServerPermissions::default(),
     }
 }
@@ -390,6 +391,7 @@ async fn sse_transport_happy_path() {
             oauth: OauthMode::Off,
             manual_oauth: ManualOauthConfig::default(),
             disabled: false,
+            lazy: None,
             permissions: ServerPermissions::default(),
         },
     );
@@ -427,6 +429,7 @@ async fn sse_transport_get_stream_attempted() {
             oauth: OauthMode::Off,
             manual_oauth: ManualOauthConfig::default(),
             disabled: false,
+            lazy: None,
             permissions: ServerPermissions::default(),
         },
     );

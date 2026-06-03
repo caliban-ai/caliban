@@ -496,7 +496,26 @@ impl Agent {
 
                 // ---- Build completion request ----
                 let mut req_messages = history.clone();
-                let mut req_tools = self.tools.to_caliban_tools();
+                // ADR-0046: apply the per-turn MCP wire filter. When
+                // `config.lazy_mcp` is false this is a passthrough.
+                let active_guard = self.mcp_active.load();
+                let filter = crate::wire_filter::WireFilter {
+                    lazy_mcp: self.config.lazy_mcp,
+                    active: &active_guard,
+                    eager_servers: &self.mcp_eager_servers,
+                };
+                let crate::wire_filter::WireFilterResult {
+                    tools: mut req_tools,
+                    dropped_mcp_count,
+                } = self.tools.to_caliban_tools_filtered(&filter);
+                // Splice the deferred-block paragraph into the system
+                // message when lazy mode is active and the filter dropped
+                // at least one MCP tool (ADR-0046).
+                crate::deferred_block::splice_into_messages(
+                    &mut req_messages,
+                    self.config.lazy_mcp,
+                    dropped_mcp_count,
+                );
                 if self.prompt_cache {
                     crate::cache::apply_prompt_cache(
                         &mut req_messages,

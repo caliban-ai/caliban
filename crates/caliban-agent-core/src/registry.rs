@@ -67,4 +67,57 @@ impl ToolRegistry {
             })
             .collect()
     }
+
+    /// Variant of [`Self::to_caliban_tools`] that applies a
+    /// [`crate::wire_filter::WireFilter`] so MCP tools can be
+    /// elided from the wire payload unless activated (ADR-0046).
+    /// Returns the filtered set plus the count of MCP tools that
+    /// were dropped (used by the stream layer to splice a deferred-
+    /// block paragraph into the system prompt).
+    #[must_use]
+    pub fn to_caliban_tools_filtered(
+        &self,
+        f: &crate::wire_filter::WireFilter<'_>,
+    ) -> crate::wire_filter::WireFilterResult {
+        let mut tools = Vec::with_capacity(self.tools.len());
+        let mut dropped = 0_usize;
+
+        for t in self.tools.values() {
+            let name = t.name();
+            if !crate::wire_filter::is_mcp(name) {
+                tools.push(caliban_provider::Tool {
+                    name: name.to_string(),
+                    description: t.description().to_string(),
+                    input_schema: t.input_schema().clone(),
+                    cache_control: None,
+                });
+                continue;
+            }
+            if !f.lazy_mcp {
+                tools.push(caliban_provider::Tool {
+                    name: name.to_string(),
+                    description: t.description().to_string(),
+                    input_schema: t.input_schema().clone(),
+                    cache_control: None,
+                });
+                continue;
+            }
+            let server_match = crate::wire_filter::mcp_server_of(name)
+                .is_some_and(|s| f.eager_servers.contains(s));
+            if server_match || f.active.is_active(name) {
+                tools.push(caliban_provider::Tool {
+                    name: name.to_string(),
+                    description: t.description().to_string(),
+                    input_schema: t.input_schema().clone(),
+                    cache_control: None,
+                });
+                continue;
+            }
+            dropped += 1;
+        }
+        crate::wire_filter::WireFilterResult {
+            tools,
+            dropped_mcp_count: dropped,
+        }
+    }
 }

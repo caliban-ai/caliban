@@ -21,6 +21,7 @@ pub(crate) mod parallel;
 pub mod plan;
 pub mod search;
 pub mod shell;
+pub mod tool_search;
 pub mod web;
 pub mod workspace;
 

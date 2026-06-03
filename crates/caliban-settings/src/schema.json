@@ -118,6 +118,14 @@
     "additional_directories":   { "type": "array", "items": { "type": "string" } },
     "claude_md_excludes":       { "type": "array", "items": { "type": "string" } },
     "env": { "type": "object", "additionalProperties": { "type": "string" } },
+    "tools": {
+      "type": "object",
+      "properties": {
+        "lazy_mcp":           { "type": "boolean", "default": false },
+        "max_active_schemas": { "type": "integer", "minimum": 0, "default": 24 }
+      },
+      "additionalProperties": false
+    },
     "effort": {
       "type": "string",
       "enum": ["low", "medium", "high", "max", "auto"]

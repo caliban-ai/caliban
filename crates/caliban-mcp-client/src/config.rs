@@ -118,6 +118,10 @@ pub struct ServerConfig {
     // ---- common ----
     /// Skip this server entirely.
     pub disabled: bool,
+    /// Per-server lazy override (ADR-0046). When `tools.lazy_mcp` is
+    /// true globally, individual servers can opt back to eager loading
+    /// by setting `lazy = false`. `None` follows the global default.
+    pub lazy: Option<bool>,
     /// Per-server permission scoping (composes with global rules).
     pub permissions: ServerPermissions,
 }
@@ -154,6 +158,9 @@ struct RawServerConfig {
     oauth: Option<String>,
     #[serde(default)]
     disabled: bool,
+    /// Per-server lazy override (ADR-0046). See `ServerConfig::lazy`.
+    #[serde(default)]
+    lazy: Option<bool>,
     #[serde(default)]
     permissions: ServerPermissions,
     /// `[server.X.oauth_config]` table block. Required when `oauth = "manual"`.
@@ -386,6 +393,7 @@ fn normalize_stdio(
         oauth,
         manual_oauth: ManualOauthConfig::default(),
         disabled: raw.disabled,
+        lazy: raw.lazy,
         permissions: raw.permissions,
     })
 }
@@ -475,6 +483,7 @@ fn normalize_remote(
         oauth,
         manual_oauth,
         disabled: raw.disabled,
+        lazy: raw.lazy,
         permissions: raw.permissions,
     })
 }
@@ -573,6 +582,33 @@ mod tests {
         assert_eq!(cfg.command, "echo");
         assert!(cfg.args.is_empty());
         assert!(cfg.url.is_none());
+    }
+
+    #[test]
+    fn server_config_lazy_parses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = "[server.s1]\ncommand = \"echo\"\nlazy = false\n";
+        let raw = parse_one(body);
+        let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.lazy, Some(false));
+    }
+
+    #[test]
+    fn server_config_lazy_absent_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = "[server.s1]\ncommand = \"echo\"\n";
+        let raw = parse_one(body);
+        let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.lazy, None);
+    }
+
+    #[test]
+    fn server_config_lazy_true_parses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let body = "[server.s1]\ncommand = \"echo\"\nlazy = true\n";
+        let raw = parse_one(body);
+        let cfg = normalize("s1", raw.server.into_values().next().unwrap(), tmp.path()).unwrap();
+        assert_eq!(cfg.lazy, Some(true));
     }
 
     #[test]

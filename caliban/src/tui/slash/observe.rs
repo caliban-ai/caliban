@@ -50,6 +50,24 @@ impl SlashCommand for ContextCommand {
         for line in crate::tui::render_context_lines(ctx.app) {
             ctx.app.transcript.push(TranscriptLine::Info(line));
         }
+        // ADR-0046: when lazy_mcp is enabled, surface the activation set.
+        // Omitted when off — every MCP tool is always present so the
+        // line would carry no information.
+        let cfg = ctx.app.agent.config();
+        if cfg.lazy_mcp {
+            let active_guard = ctx.app.agent.mcp_active();
+            let snap = active_guard.load();
+            ctx.app.transcript.push(TranscriptLine::Info(format!(
+                "MCP active: {}/{}",
+                snap.len(),
+                cfg.max_active_schemas,
+            )));
+            for name in snap.iter_active() {
+                ctx.app
+                    .transcript
+                    .push(TranscriptLine::Info(format!("  {name}")));
+            }
+        }
         // Top-N largest blocks across the in-memory history. Reaches
         // into messages directly because `ContextWindow` only retains
         // per-kind totals, not per-block sizes.

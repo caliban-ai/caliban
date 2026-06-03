@@ -35,6 +35,9 @@ pub use config::{
 // `load_config` is `#[deprecated]` in favor of `caliban-settings` (PR-T3-B).
 // Re-exported with `#[allow(deprecated)]` so the lint surfaces at the call
 // site, not at the crate boundary.
+/// Re-export — actual definition in `caliban-agent-core::mcp_activation`
+/// so `caliban-tools-builtin` can consume it without depending on this crate.
+pub use caliban_agent_core::mcp_activation::McpToolInfo;
 #[allow(deprecated)]
 pub use config::load_config;
 pub use elicitation::{

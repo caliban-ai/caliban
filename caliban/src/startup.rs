@@ -1114,14 +1114,18 @@ pub(crate) async fn start_mcp(
 ) -> (
     Vec<caliban_mcp_client::ServerSummary>,
     std::collections::BTreeMap<String, caliban_mcp_client::ServerConfig>,
+    Vec<caliban_agent_core::mcp_activation::McpToolInfo>,
 ) {
     if args.no_mcp || args.bare {
-        return (Vec::new(), std::collections::BTreeMap::new());
+        return (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
     }
     let cfg = settings_snapshot.mcp_config();
     let servers_for_perms = cfg.servers.clone();
     match caliban_mcp_client::McpClientManager::start(&cfg).await {
         Ok(mgr) => {
+            // Snapshot the MCP tool directory for ToolSearch (ADR-0046)
+            // BEFORE register_all consumes the manager state.
+            let mcp_tools_for_search = mgr.list_mcp_tools();
             mgr.register_all(registry);
             if mgr.enabled_count() > 0 || mgr.skipped_disabled() > 0 || mgr.failed_count() > 0 {
                 tracing::info!(
@@ -1132,13 +1136,56 @@ pub(crate) async fn start_mcp(
                     "mcp manager started",
                 );
             }
-            (mgr.summaries().to_vec(), servers_for_perms)
+            (
+                mgr.summaries().to_vec(),
+                servers_for_perms,
+                mcp_tools_for_search,
+            )
         }
         Err(e) => {
             tracing::warn!(target: caliban_common::tracing_targets::TARGET_MCP, error = %e, "mcp manager start failed; continuing without MCP");
-            (Vec::new(), servers_for_perms)
+            (Vec::new(), servers_for_perms, Vec::new())
         }
     }
+}
+
+/// Compute the eager-MCP-server set from a server config map (ADR-0046).
+/// A server is eager when `[mcp_servers.X] lazy = false`.
+pub(crate) fn compute_mcp_eager_servers(
+    server_cfg: &std::collections::BTreeMap<String, caliban_mcp_client::ServerConfig>,
+) -> std::collections::HashSet<String> {
+    server_cfg
+        .iter()
+        .filter(|(_, cfg)| cfg.lazy == Some(false))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Register the `ToolSearch` built-in into `registry` (ADR-0046).
+///
+/// `mcp_tools` is a snapshot taken at MCP startup time; the closure
+/// captures it so `ToolSearch` can enumerate without holding the
+/// manager. `mcp_active` is the shared activation set — the same Arc
+/// must be threaded into the Agent so subsequent turns see the model's
+/// activations.
+///
+/// Skipped when `--no-tools` is set or when MCP loading is disabled
+/// entirely. In the latter case `ToolSearch` could still be registered
+/// (it gracefully no-ops with "No MCP servers configured"), but
+/// dropping it keeps the wire palette one entry leaner.
+pub(crate) fn install_tool_search(
+    args: &Args,
+    registry: &mut ToolRegistry,
+    mcp_tools: Vec<caliban_agent_core::mcp_activation::McpToolInfo>,
+    mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
+) {
+    if args.no_tools || args.no_mcp || args.bare {
+        return;
+    }
+    let directory: caliban_tools_builtin::tool_search::DirectoryFn =
+        Arc::new(move || mcp_tools.clone());
+    let tool = caliban_tools_builtin::tool_search::ToolSearchTool::new(directory, mcp_active);
+    registry.register(Arc::new(tool));
 }
 
 /// Wire `AgentTool` (the sub-agent primitive) into `registry`.
@@ -1149,11 +1196,16 @@ pub(crate) async fn start_mcp(
 /// currently use `NoopHooks`. The background-handoff spawner asks the
 /// per-repo supervisor daemon (auto-spawned if needed) to register a new
 /// agent and return its socket (ADR 0037).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_sub_agent(
     args: &Args,
     registry: &mut ToolRegistry,
     provider: &Arc<dyn Provider + Send + Sync>,
     model: &str,
+    parent_mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
+    parent_mcp_eager: Arc<std::collections::HashSet<String>>,
+    parent_max_active_schemas: usize,
+    parent_lazy_mcp: bool,
 ) {
     if args.no_sub_agent || args.no_tools {
         return;
@@ -1185,12 +1237,30 @@ pub(crate) fn install_sub_agent(
             }
             None => snapshot.clone(),
         };
+        // ADR-0046: snapshot the parent's MCP activation set when the
+        // frontmatter opts in (default true). The shared eager-server
+        // set is always inherited because it reflects configuration
+        // (per-server lazy = false), not session state.
+        let child_active_set = if input.inherit_active_mcp {
+            parent_mcp_active.load().snapshot()
+        } else {
+            caliban_agent_core::mcp_activation::McpActivationSet::new(parent_max_active_schemas)
+        };
+        let child_active = Arc::new(arc_swap::ArcSwap::from_pointee(child_active_set));
+        let cfg = caliban_agent_core::AgentConfig {
+            model: chosen_model,
+            max_tokens: parent_max_tokens,
+            max_turns: 20,
+            lazy_mcp: parent_lazy_mcp,
+            max_active_schemas: parent_max_active_schemas,
+            ..caliban_agent_core::AgentConfig::default()
+        };
         Agent::builder()
             .provider(Arc::clone(&provider_for_factory))
             .tools(child_registry)
-            .model(chosen_model)
-            .max_tokens(parent_max_tokens)
-            .max_turns(20)
+            .config(cfg)
+            .mcp_active(child_active)
+            .mcp_eager_servers(Arc::clone(&parent_mcp_eager))
             .build()
             .expect("sub-agent builder")
     });
@@ -1647,16 +1717,36 @@ pub(crate) fn build_agent(
     plan_mode: &caliban_agent_core::SharedPlanMode,
     permissions_hook: Option<Arc<dyn caliban_agent_core::Hooks + Send + Sync>>,
     hook_event_buffer: Option<&headless::HookEventBuffer>,
+    settings_snapshot: &caliban_settings::Settings,
+    mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
+    mcp_eager_servers: Arc<std::collections::HashSet<String>>,
 ) -> Result<Arc<Agent>> {
+    // ADR-0046: resolve lazy_mcp / max_active_schemas from settings.
+    // Builder defaults match the spec (off / 24) when absent.
+    let (lazy_mcp, max_active_schemas) = match settings_snapshot.tools.as_ref() {
+        Some(t) => (
+            t.lazy_mcp.unwrap_or(false),
+            t.max_active_schemas.unwrap_or(24),
+        ),
+        None => (false, 24),
+    };
+    let cfg = caliban_agent_core::AgentConfig {
+        model: model.to_string(),
+        max_tokens: args.max_tokens,
+        max_turns: args.max_turns,
+        lazy_mcp,
+        max_active_schemas,
+        ..caliban_agent_core::AgentConfig::default()
+    };
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(registry)
-        .model(model.to_string())
-        .max_tokens(args.max_tokens)
-        .max_turns(args.max_turns)
+        .config(cfg)
         .prompt_cache(!args.no_prompt_cache)
         .parallel_tools(!args.no_parallel_tools)
-        .plan_mode(Arc::clone(plan_mode));
+        .plan_mode(Arc::clone(plan_mode))
+        .mcp_active(mcp_active)
+        .mcp_eager_servers(mcp_eager_servers);
     // Install the output-style post-processor. Today only the `Learning`
     // style mutates assistant text; everything else uses the identity
     // post-processor (which the agent core already defaults to).
