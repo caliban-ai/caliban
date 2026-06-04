@@ -180,6 +180,15 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 50)]
     pub(crate) max_turns: u32,
 
+    /// Enable Stage A budget escalation + Stage B meta-continuation when a
+    /// turn ends in `MaxTokens` (the "max-tokens recovery" two-stage flow).
+    /// Default is `true`; pass `--max-tokens-recovery=false` to opt out.
+    ///
+    /// Precedence: CLI flag > settings `max_tokens_recovery` > built-in
+    /// default. Honored by `caliban-agent-core::stream::Agent`.
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    pub(crate) max_tokens_recovery: Option<bool>,
+
     /// Sampling temperature in `[0.0, 2.0]`. Above 2.0 is rejected
     /// rather than silently clamped — providers disagree on the
     /// max-acceptable value, and passing a bad temperature through

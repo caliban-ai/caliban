@@ -21,11 +21,20 @@ surfacing, reactive compaction, failure-aware hook dispatch +
 tool-result size cap, `/effort`, `/resume`, `/context`, `/export`, the
 4-button permission modal, and the conversation-level prompt-cache
 marker all shipped — verified in code on `main` as of 2026-05-28 and
-removed from this list. Two items remain partially done:
+removed from this list.
 
-- Finding: MaxTokens budget-blowout recovery is implemented but disabled by default. The two-stage recovery (Stage A one-shot budget escalation to `escalated_max_tokens = 16_384`, Stage B meta-continuation) shipped in #60, and the clean halt + `StopCondition::MaxTokensExhausted` shipped in #68 — which also set `max_tokens_recovery = false` by default because Stage A's re-issue re-emitted `TurnEnd` and inflated the turn count past the cap.
-  - File: crates/caliban-agent-core/src/agent.rs:62,101 (`max_tokens_recovery: bool`, default `false`); crates/caliban-agent-core/src/stream/mod.rs:1076,1194 (recovery gate); :354–355 (per-turn escalation tracking).
-  - Remaining work: (1) confirm/fix Stage A's `TurnEnd` double-count so recovery can be safely re-enabled (split attempt-end vs turn-end semantics); (2) add a CLI flag (e.g. `--max-tokens-recovery`) to opt back in — there is no flag today, the field is only settable in code. Pair with an `/effort low` suggestion in the surfacing message so the user has a one-keystroke remediation.
+**Closed 2026-06-01:** MaxTokens recovery is re-enabled by default.
+Stage A budget escalation is now hoisted above the `TurnEnd` yield
++ `turns_completed +=1` increment (`stream/mod.rs` post-stream-drain
+silent-retry block, mirroring the reactive-compact arm at ~line 595),
+so the retry is invisible to consumers and doesn't burn turn slots.
+Regression test
+`stage_a_retry_does_not_double_count_turn` guards the invariant.
+CLI flag `--max-tokens-recovery [bool]` and settings key
+`max_tokens_recovery` (default `true`) are wired with CLI > settings
+> default precedence in `caliban/src/startup.rs::build_agent`. The
+CLI + headless surfacing messages now include the `/effort low`
+one-keystroke remediation hint (TUI already had it).
 
 ---
 

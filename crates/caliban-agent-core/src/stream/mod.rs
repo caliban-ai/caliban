@@ -754,6 +754,45 @@ impl Agent {
                 let turn_usage = acc.usage;
                 let mut assistant_message = acc.into_message();
 
+                // ---- Plan A — Stage A: silent budget-escalation retry ----
+                //
+                // When recovery is enabled and the provider stopped on
+                // `MaxTokens` (and we haven't already escalated this
+                // turn), redo the request with `escalated_max_tokens`.
+                // The retry is invisible to the consumer:
+                //   - the truncated assistant_message is NOT pushed to
+                //     history (it's a failed attempt);
+                //   - tool-dispatch phases are skipped (the assistant
+                //     may have produced partial tool_use blocks);
+                //   - no `after_turn` hook fires;
+                //   - no `TurnEnd` event is yielded;
+                //   - `turns_completed` is NOT incremented.
+                //
+                // We do merge `turn_usage` so the user is still billed
+                // for the failed attempt. Same shape as the reactive-
+                // compact arm above (see line ~595).
+                //
+                // PR #68 disabled this feature because the previous
+                // implementation ran AFTER yield/counter — hoisting it
+                // here is the fix that lets us flip the default to
+                // true.
+                if self.config.max_tokens_recovery
+                    && turn_stop_reason == StopReason::MaxTokens
+                    && !stage_a_attempted_this_turn
+                {
+                    tracing::warn!(
+                        target: "caliban::recovery",
+                        from = self.config.max_tokens,
+                        to = self.config.escalated_max_tokens,
+                        "recovery.max_tokens.stage_a"
+                    );
+                    stage_a_attempted_this_turn = true;
+                    override_max_tokens_for_request =
+                        Some(self.config.escalated_max_tokens);
+                    total_usage.merge(turn_usage);
+                    continue 'inner;
+                }
+
                 // Apply the assistant-text post-processor (set via
                 // `AgentBuilder::post_processor`; defaults to identity). The
                 // canonical use today is the `Learning` output style, which
@@ -1211,21 +1250,15 @@ impl Agent {
                         break 'inner;
                     }
                     StopReason::MaxTokens if self.config.max_tokens_recovery => {
-                        if !stage_a_attempted_this_turn {
-                            // Stage A: re-issue the same request with the
-                            // escalated max_tokens budget, without consuming
-                            // a turn-index slot.
-                            tracing::warn!(
-                                target: "caliban::recovery",
-                                from = self.config.max_tokens,
-                                to = self.config.escalated_max_tokens,
-                                "recovery.max_tokens.stage_a"
-                            );
-                            stage_a_attempted_this_turn = true;
-                            override_max_tokens_for_request =
-                                Some(self.config.escalated_max_tokens);
-                            continue 'inner;
-                        }
+                        // Stage A handled earlier (silent retry above
+                        // tool-dispatch / TurnEnd yield / counter inc).
+                        // If we reach this arm it's because Stage A
+                        // already fired this turn and the retry still
+                        // hit MaxTokens — try Stage B.
+                        debug_assert!(
+                            stage_a_attempted_this_turn,
+                            "Stage A must have fired before we land here"
+                        );
                         if meta_continuation_count < self.config.max_meta_continuations {
                             // Stage B: inject the meta-continuation prompt
                             // and advance to the next turn.

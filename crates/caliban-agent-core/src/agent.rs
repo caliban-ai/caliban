@@ -101,12 +101,13 @@ impl Default for AgentConfig {
             escalated_max_tokens: 16_384,
             max_meta_continuations: 3,
             stream_idle_timeout_ms: 90_000,
-            // Default off: Stage A budget escalation + Stage B meta-continuation
-            // currently re-enter the inner turn body and re-emit `TurnEnd`,
-            // which makes the headless driver report `turns > 1` and silently
-            // exceed the user's `--max-tokens` cap. Opt-in via `AgentConfig`
-            // until the recovery flows account for the turn counter cleanly.
-            max_tokens_recovery: false,
+            // Stage A hoisted above TurnEnd yield + counter inc (PR #90+
+            // follow-up); regression test
+            // `stage_a_retry_does_not_double_count_turn` guards the
+            // invariant. Default-on: opt out via CLI
+            // `--max-tokens-recovery=false` or settings
+            // `max_tokens_recovery = false`.
+            max_tokens_recovery: true,
             // Plan B
             auto_compact_threshold: Some(0.75),
             micro_compact_enabled: true,
@@ -131,8 +132,10 @@ mod recovery_config_tests {
         assert_eq!(cfg.escalated_max_tokens, 16_384);
         assert_eq!(cfg.max_meta_continuations, 3);
         assert_eq!(cfg.stream_idle_timeout_ms, 90_000);
-        // Recovery is opt-in until Stage A/B account for turn counting.
-        assert!(!cfg.max_tokens_recovery);
+        // Stage A no longer double-counts the turn — recovery is
+        // safely default-on. See stream/mod.rs Stage A hoist + the
+        // stage_a_retry_does_not_double_count_turn regression test.
+        assert!(cfg.max_tokens_recovery);
     }
 }
 
@@ -387,6 +390,15 @@ impl AgentBuilder {
     #[must_use]
     pub fn max_turns(mut self, n: u32) -> Self {
         self.config.max_turns = n;
+        self
+    }
+
+    /// Toggle the two-stage `MaxTokens` recovery flow. Default `true`.
+    /// Stage A silently retries with `escalated_max_tokens`; Stage B
+    /// injects a meta-continuation prompt and advances a turn.
+    #[must_use]
+    pub fn max_tokens_recovery(mut self, on: bool) -> Self {
+        self.config.max_tokens_recovery = on;
         self
     }
 

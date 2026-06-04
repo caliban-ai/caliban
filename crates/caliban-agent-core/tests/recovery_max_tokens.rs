@@ -58,6 +58,65 @@ async fn stage_a_escalates_then_succeeds() {
     );
 }
 
+/// PR #68 disabled `max_tokens_recovery` by default because Stage A's
+/// silent retry was re-yielding `TurnEnd` and bumping
+/// `turns_completed`, inflating the user-visible turn count past the
+/// `--max-turns` cap. Stage A is supposed to be invisible to the
+/// consumer: a single logical turn that internally re-issues with a
+/// larger budget. This test asserts both invariants — exactly one
+/// `TurnEnd` event and `turn_count == 1` — for a run that completes
+/// successfully via Stage A.
+#[tokio::test]
+async fn stage_a_retry_does_not_double_count_turn() {
+    let provider = MockProvider::builder()
+        .with_response_max_tokens(1024)
+        .with_response_end_turn("All done.")
+        .build();
+
+    let cfg = AgentConfig {
+        max_tokens: 1024,
+        max_tokens_recovery: true,
+        escalated_max_tokens: 16_384,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut last_stop = None;
+    let mut run_turn_count = 0u32;
+    let mut turn_end_count = 0u32;
+    while let Some(Ok(ev)) = stream.next().await {
+        match ev {
+            TurnEvent::TurnEnd { .. } => turn_end_count += 1,
+            TurnEvent::RunEnd {
+                stopped_for,
+                turn_count,
+                ..
+            } => {
+                last_stop = Some(stopped_for);
+                run_turn_count = turn_count;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "expected EndOfTurn after Stage A success, got {last_stop:?}"
+    );
+    assert_eq!(
+        run_turn_count, 1,
+        "Stage A re-issue must not bump turn_count; got {run_turn_count}",
+    );
+    assert_eq!(
+        turn_end_count, 1,
+        "exactly one TurnEnd event is observable to the consumer; got {turn_end_count}",
+    );
+}
+
+/// Companion to the regression above: with recovery off, the existing
+/// halt-in-one-turn invariant still holds (the catch-all `_` arm in
+/// the stop-reason match should not be reachable for Stage A retries).
 #[tokio::test]
 async fn stage_b_injects_meta_then_continues() {
     let provider = MockProvider::builder()

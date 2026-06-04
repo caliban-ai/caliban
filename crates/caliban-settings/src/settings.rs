@@ -283,6 +283,11 @@ pub struct Settings {
     /// Minimum estimated tokens on the last user message to merit the
     /// conversation-level cache marker.
     pub min_cache_block_tokens: Option<usize>,
+    /// Stage A budget escalation + Stage B meta-continuation when a turn
+    /// ends in `MaxTokens` (the "max-tokens recovery" two-stage flow).
+    /// Default `true` when unset; opt out with `false`. CLI flag
+    /// `--max-tokens-recovery` overrides.
+    pub max_tokens_recovery: Option<bool>,
 
     // ----- tool surface (ADR-0046) ------------------------------------------
     /// Lazy MCP tool loading knobs. Default off in v1.
@@ -589,6 +594,54 @@ mod tests {
     fn tools_config_absent_leaves_field_none() {
         let s: Settings = serde_json::from_str(r#"{"model": "test"}"#).unwrap();
         assert!(s.tools.is_none());
+    }
+
+    #[test]
+    fn apply_context_management_overrides_each_field() {
+        // Round-trip a settings.toml fragment that sets all four Plan B
+        // context-management knobs to non-default values, then assert
+        // apply_context_management copies each onto a fresh AgentConfig.
+        // Guards the historical wiring gap (PR #60 added the Settings
+        // fields + the helper but never wired the call from build_agent).
+        let raw = r#"{
+            "auto_compact_threshold": 0.42,
+            "micro_compact_enabled": false,
+            "tool_result_cap_chars": 12345,
+            "min_cache_block_tokens": 789
+        }"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        s.apply_context_management(&mut cfg);
+        assert!((cfg.auto_compact_threshold.unwrap() - 0.42_f32).abs() < 1e-6);
+        assert!(!cfg.micro_compact_enabled);
+        assert_eq!(cfg.tool_result_cap_chars, 12_345);
+        assert_eq!(cfg.min_cache_block_tokens, 789);
+    }
+
+    #[test]
+    fn apply_context_management_leaves_defaults_when_unset() {
+        // No knobs set → AgentConfig::default() values survive untouched.
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        let snap_threshold = cfg.auto_compact_threshold;
+        let snap_micro = cfg.micro_compact_enabled;
+        let snap_cap = cfg.tool_result_cap_chars;
+        let snap_min = cfg.min_cache_block_tokens;
+        s.apply_context_management(&mut cfg);
+        assert_eq!(cfg.auto_compact_threshold, snap_threshold);
+        assert_eq!(cfg.micro_compact_enabled, snap_micro);
+        assert_eq!(cfg.tool_result_cap_chars, snap_cap);
+        assert_eq!(cfg.min_cache_block_tokens, snap_min);
+    }
+
+    #[test]
+    fn max_tokens_recovery_roundtrip() {
+        let s: Settings = serde_json::from_str(r#"{"max_tokens_recovery": true}"#).unwrap();
+        assert_eq!(s.max_tokens_recovery, Some(true));
+        let s: Settings = serde_json::from_str(r#"{"max_tokens_recovery": false}"#).unwrap();
+        assert_eq!(s.max_tokens_recovery, Some(false));
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        assert!(s.max_tokens_recovery.is_none());
     }
 
     #[test]

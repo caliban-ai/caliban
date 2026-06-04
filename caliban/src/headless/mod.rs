@@ -804,7 +804,8 @@ impl<W: Write> HeadlessDriver<W> {
             // carries. Distinct subtype (`max_tokens`) keeps the failure mode
             // visible to callers without conflating with provider errors.
             TerminalStop::MaxTokens => Err(HeadlessError::Run(
-                "max output token budget exhausted".into(),
+                "max output token budget exhausted — try `/effort low` to reduce reasoning budget"
+                    .into(),
             )),
         }
     }

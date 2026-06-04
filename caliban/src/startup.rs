@@ -663,9 +663,10 @@ fn stopped_for_surface_line(stopped_for: &caliban_agent_core::StopCondition) -> 
         }
         StopCondition::MaxTurnsReached(n) => Some(format!("[caliban: max-turns ({n}) reached]")),
         StopCondition::Cancelled => Some("[caliban: cancelled]".to_string()),
-        StopCondition::MaxTokensExhausted => {
-            Some("[caliban: max-tokens recovery exhausted]".to_string())
-        }
+        StopCondition::MaxTokensExhausted => Some(
+            "[caliban: max-tokens recovery exhausted — try /effort low to reduce reasoning budget]"
+                .to_string(),
+        ),
         StopCondition::Refusal(msg) => Some(format!("[caliban: model refusal: {msg}]")),
         StopCondition::ContentFilter(msg) => Some(format!("[caliban: content filter: {msg}]")),
         StopCondition::StreamIdle(d) => Some(format!("[caliban: stream idle for {d:?}]")),
@@ -1730,14 +1731,28 @@ pub(crate) fn build_agent(
         ),
         None => (false, 24),
     };
-    let cfg = caliban_agent_core::AgentConfig {
+    // CLI > settings > built-in default for max_tokens_recovery.
+    let max_tokens_recovery = args
+        .max_tokens_recovery
+        .or(settings_snapshot.max_tokens_recovery)
+        .unwrap_or_else(|| caliban_agent_core::AgentConfig::default().max_tokens_recovery);
+    let mut cfg = caliban_agent_core::AgentConfig {
         model: model.to_string(),
         max_tokens: args.max_tokens,
         max_turns: args.max_turns,
+        max_tokens_recovery,
         lazy_mcp,
         max_active_schemas,
         ..caliban_agent_core::AgentConfig::default()
     };
+    // Plan B context-management knobs from Settings — auto_compact_threshold,
+    // micro_compact_enabled, tool_result_cap_chars, min_cache_block_tokens.
+    // Without this call the four fields parse off disk but never reach the
+    // agent (PR #60 introduced both the Settings fields and this helper but
+    // the wiring step was missed). Sub-agent inheritance for these knobs is
+    // a separate follow-up — install_sub_agent does not yet thread the same
+    // Settings snapshot into the factory closure.
+    settings_snapshot.apply_context_management(&mut cfg);
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(registry)
@@ -2110,6 +2125,17 @@ mod tests {
             .expect("max-turns must surface");
         assert!(line.contains("max-turns"));
         assert!(line.contains("50"));
+    }
+
+    #[test]
+    fn max_tokens_exhausted_surfaces_with_effort_low_hint() {
+        let line = stopped_for_surface_line(&StopCondition::MaxTokensExhausted)
+            .expect("max-tokens-exhausted must surface");
+        assert!(line.contains("max-tokens recovery exhausted"));
+        assert!(
+            line.contains("/effort low"),
+            "must hint at the one-keystroke remediation; got {line}"
+        );
     }
 
     #[test]
