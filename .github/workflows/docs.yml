@@ -1,0 +1,62 @@
+name: docs
+
+# Builds the mdBook user guide and deploys it to GitHub Pages.
+# Kept separate from the Rust CI. The deploy job only runs on pushes to main;
+# it is a no-op until Pages is enabled in repo Settings (Source = GitHub Actions).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/guide/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/guide/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pinned tool versions for reproducible builds.
+env:
+  MDBOOK_VERSION: "0.4.52"
+  MDBOOK_ADMONISH_VERSION: "1.20.0"
+  MDBOOK_MERMAID_VERSION: "0.14.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook toolchain
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }},mdbook-admonish@${{ env.MDBOOK_ADMONISH_VERSION }},mdbook-mermaid@${{ env.MDBOOK_MERMAID_VERSION }}
+
+      - name: Build the book
+        run: mdbook build docs/guide
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/guide/book
+
+  deploy:
+    # Only deploy from main (or a manual dispatch). PRs build but never publish.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

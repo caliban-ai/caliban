@@ -1,0 +1,39 @@
+[book]
+title = "Caliban User Guide"
+description = "The user and operator guide for Caliban — a Rust-native, provider-agnostic agent harness."
+authors = ["John Ford"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/johnford2002/caliban"
+edit-url-template = "https://github.com/johnford2002/caliban/edit/main/docs/guide/{path}"
+preferred-dark-theme = "navy"
+additional-css = ["mdbook-admonish.css", "theme/custom.css"]
+no-section-label = false
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+
+# Preprocessors. The `mdbook-admonish install` and `mdbook-mermaid install`
+# commands (run during scaffolding / in CI) drop the referenced asset files and
+# keep these blocks in sync. mdbook-catppuccin was dropped — it is unmaintained
+# and refuses to run (catppuccin/mdBook#107); flair comes from theme/custom.css.
+[preprocessor.admonish]
+command = "mdbook-admonish"
+assets_version = "3.1.0" # do not edit: managed by `mdbook-admonish install`
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

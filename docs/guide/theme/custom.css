@@ -1,0 +1,62 @@
+/* Caliban User Guide — custom theme polish.
+ *
+ * Layered on top of mdBook's built-in themes. Keeps the default themes intact
+ * while adding an accent colour, softer typography, and nicer code/table styling.
+ * (Replaces the unmaintained mdbook-catppuccin preprocessor.) */
+
+:root {
+    --caliban-accent: #7c5cff;        /* violet — primary accent */
+    --caliban-accent-soft: #9b86ff;
+    --caliban-radius: 8px;
+}
+
+/* Accent links + sidebar active item */
+.content a:not(.header):hover {
+    color: var(--caliban-accent);
+    text-decoration: underline;
+}
+.chapter li.chapter-item a.active {
+    color: var(--caliban-accent);
+    font-weight: 600;
+}
+
+/* Headings: a little more presence + an accent underline on h2 */
+.content h1 {
+    letter-spacing: -0.01em;
+}
+.content h2 {
+    padding-bottom: 0.25rem;
+    border-bottom: 2px solid color-mix(in srgb, var(--caliban-accent) 35%, transparent);
+}
+
+/* Inline code + code blocks: rounded, subtle */
+.content code {
+    border-radius: 5px;
+}
+.content pre {
+    border-radius: var(--caliban-radius);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+/* Tables: zebra striping + rounded frame for readability of the many
+ * reference tables in this guide. */
+.content table {
+    border-radius: var(--caliban-radius);
+    overflow: hidden;
+}
+.content table thead th {
+    background: color-mix(in srgb, var(--caliban-accent) 16%, transparent);
+}
+.content table tbody tr:nth-child(even) {
+    background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+/* Blockquotes pick up the accent rail */
+.content blockquote {
+    border-inline-start: 4px solid var(--caliban-accent-soft);
+}
+
+/* Menu title (book title in the top bar) */
+.menu-title {
+    font-weight: 600;
+}
