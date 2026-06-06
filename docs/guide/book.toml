@@ -10,8 +10,8 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-git-repository-url = "https://github.com/johnford2002/caliban"
-edit-url-template = "https://github.com/johnford2002/caliban/edit/main/docs/guide/{path}"
+git-repository-url = "https://github.com/caliban-ai/caliban"
+edit-url-template = "https://github.com/caliban-ai/caliban/edit/main/docs/guide/{path}"
 preferred-dark-theme = "navy"
 additional-css = ["mdbook-admonish.css", "theme/custom.css"]
 no-section-label = false

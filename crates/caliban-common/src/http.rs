@@ -16,11 +16,11 @@ use std::time::Duration;
 
 /// User-agent string applied to every client built by this module.
 ///
-/// Format: `caliban/<CARGO_PKG_VERSION> (+https://github.com/johnford2002/caliban)`.
+/// Format: `caliban/<CARGO_PKG_VERSION> (+https://github.com/caliban-ai/caliban)`.
 pub const USER_AGENT: &str = concat!(
     "caliban/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/johnford2002/caliban)",
+    " (+https://github.com/caliban-ai/caliban)",
 );
 
 /// Default per-request timeout applied to every client built by this module.
@@ -32,7 +32,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Build a [`reqwest::ClientBuilder`] pre-configured with the shared defaults.
 ///
 /// The returned builder has:
-/// - `User-Agent: caliban/<version> (+https://github.com/johnford2002/caliban)`
+/// - `User-Agent: caliban/<version> (+https://github.com/caliban-ai/caliban)`
 /// - Redirect follow ≤ 10 (the `reqwest` default — limit kept explicit)
 /// - HTTP/2 preferred (negotiated via ALPN)
 /// - 30-second per-request timeout

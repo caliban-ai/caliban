@@ -15,7 +15,7 @@ Caliban is distributed as source. You build it with Cargo and install the result
 ## Clone
 
 ```bash
-git clone https://github.com/johnford2002/caliban.git
+git clone https://github.com/caliban-ai/caliban.git
 cd caliban
 ```
 

@@ -1,6 +1,6 @@
 # Parity vs Claude Code
 
-Caliban tracks feature parity with Claude Code in a living matrix. This page summarises the current state by theme. The full matrix — including per-row notes and ADR cross-references — lives at [`docs/parity-gap-matrix.md`](https://github.com/johnford2002/caliban/blob/main/docs/parity-gap-matrix.md) in the repository.
+Caliban tracks feature parity with Claude Code in a living matrix. This page summarises the current state by theme. The full matrix — including per-row notes and ADR cross-references — lives at [`docs/parity-gap-matrix.md`](https://github.com/caliban-ai/caliban/blob/main/docs/parity-gap-matrix.md) in the repository.
 
 **Legend:** ✅ parity · 🟡 partial · 🔴 not yet
 
