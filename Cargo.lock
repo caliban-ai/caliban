@@ -1325,6 +1325,7 @@ dependencies = [
 name = "caliban-tools-builtin"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "caliban-agent-core",
