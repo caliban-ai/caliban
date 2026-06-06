@@ -32,7 +32,7 @@ pub(crate) fn build_default(cwd: &Path, tool_names: &[&str], no_tools: bool) -> 
 
     format!(
         "You are caliban, an agentic command-line assistant running inside the caliban harness \
-        (a from-scratch Rust replacement for Claude Code).\n\
+        (a from-scratch, provider-agnostic Rust agent runtime).\n\
         \n\
         You are operating in the following directory:\n  {cwd_str}\n\
         \n\

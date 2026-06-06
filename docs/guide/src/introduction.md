@@ -14,8 +14,8 @@
 
 # Caliban User Guide
 
-Caliban is a Rust-native, provider-agnostic AI agent harness — a replacement for Claude Code
-that puts you in control of model routing, memory, permissions, and prompt context.
+Caliban is a Rust-native, provider-agnostic AI agent harness that puts you in control
+of model routing, memory, permissions, and prompt context.
 This guide is for **users** who run `caliban` day-to-day and **operators** who deploy
 and configure it for a team or homelab; it describes behavior and workflows, not Rust internals.
 

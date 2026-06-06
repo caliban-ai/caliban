@@ -7,7 +7,7 @@ license.workspace      = true
 repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-keywords    = ["agent", "ai", "llm", "cli", "claude"]
+keywords    = ["agent", "ai", "llm", "cli", "coding-agent"]
 categories  = ["command-line-utilities", "development-tools"]
 readme      = "README.md"
 

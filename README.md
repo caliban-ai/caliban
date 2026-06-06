@@ -7,8 +7,8 @@
 
 # caliban
 
-A from-scratch Rust agent harness — a replacement for Claude Code that puts
-the operator in control of model routing, memory, skills, and prompt context.
+A from-scratch Rust agent harness that puts the operator in control of model
+routing, memory, skills, and prompt context.
 
 > **Project status.** Daily-usable on `main`. The core agent loop, persistent
 > sessions, ratatui TUI, headless `--print` mode, sub-agents, MCP, sandbox,
