@@ -1,12 +1,12 @@
 [package]
 name        = "caliban-sandbox"
 version.workspace = true
-description = "OS-level sandbox (macOS Seatbelt + Linux bubblewrap) for caliban subprocess tools"
+description = "OS-level sandbox (macOS Seatbelt + Linux bubblewrap) for caliban subprocess tools — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
 serde      = { workspace = true }

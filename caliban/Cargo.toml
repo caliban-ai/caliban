@@ -4,9 +4,12 @@ version.workspace = true
 description = "User-facing binary for the caliban agent harness"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
+keywords    = ["agent", "ai", "llm", "cli", "claude"]
+categories  = ["command-line-utilities", "development-tools"]
+readme      = "README.md"
 
 [[bin]]
 name = "caliban"
@@ -23,27 +26,27 @@ default   = ["clipboard"]
 clipboard = ["dep:arboard"]
 
 [dependencies]
-caliban-common             = { path = "../crates/caliban-common" }
-caliban-provider           = { path = "../crates/caliban-provider" }
-caliban-provider-anthropic = { path = "../crates/caliban-provider-anthropic" }
-caliban-provider-openai    = { path = "../crates/caliban-provider-openai" }
-caliban-provider-ollama    = { path = "../crates/caliban-provider-ollama" }
-caliban-provider-google    = { path = "../crates/caliban-provider-google" }
-caliban-agent-core         = { path = "../crates/caliban-agent-core" }
-caliban-sessions           = { path = "../crates/caliban-sessions" }
-caliban-checkpoint         = { path = "../crates/caliban-checkpoint" }
-caliban-tools-builtin      = { path = "../crates/caliban-tools-builtin" }
-caliban-memory             = { path = "../crates/caliban-memory" }
-caliban-output-styles      = { path = "../crates/caliban-output-styles" }
-caliban-skills             = { path = "../crates/caliban-skills" }
-caliban-mcp-client         = { path = "../crates/caliban-mcp-client" }
-caliban-model-router       = { path = "../crates/caliban-model-router" }
-caliban-plugins            = { path = "../crates/caliban-plugins" }
-caliban-telemetry          = { path = "../crates/caliban-telemetry" }
-caliban-images             = { path = "../crates/caliban-images" }
-caliban-worktrees          = { path = "../crates/caliban-worktrees" }
-caliban-supervisor         = { path = "../crates/caliban-supervisor" }
-caliban-settings           = { path = "../crates/caliban-settings" }
+caliban-common             = { workspace = true }
+caliban-provider           = { workspace = true }
+caliban-provider-anthropic = { workspace = true }
+caliban-provider-openai    = { workspace = true }
+caliban-provider-ollama    = { workspace = true }
+caliban-provider-google    = { workspace = true }
+caliban-agent-core         = { workspace = true }
+caliban-sessions           = { workspace = true }
+caliban-checkpoint         = { workspace = true }
+caliban-tools-builtin      = { workspace = true }
+caliban-memory             = { workspace = true }
+caliban-output-styles      = { workspace = true }
+caliban-skills             = { workspace = true }
+caliban-mcp-client         = { workspace = true }
+caliban-model-router       = { workspace = true }
+caliban-plugins            = { workspace = true }
+caliban-telemetry          = { workspace = true }
+caliban-images             = { workspace = true }
+caliban-worktrees          = { workspace = true }
+caliban-supervisor         = { workspace = true }
+caliban-settings           = { workspace = true }
 rust_decimal               = { version = "1", default-features = false }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
@@ -75,7 +78,7 @@ uuid                     = { workspace = true }
 arc-swap                 = { workspace = true }
 
 [dev-dependencies]
-caliban-provider = { path = "../crates/caliban-provider", features = ["mock"] }
+caliban-provider = { workspace = true, features = ["mock"] }
 tokio-util       = { workspace = true }
 wiremock         = { workspace = true }
 async-trait      = { workspace = true }

@@ -1,16 +1,16 @@
 [package]
 name        = "caliban-telemetry"
 version.workspace = true
-description = "OTLP export + cost accounting + context-window tracker for caliban (ADR 0033)"
+description = "OTLP export + cost accounting + context-window tracker for caliban (ADR 0033) — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
-caliban-common   = { path = "../caliban-common" }
-caliban-provider = { path = "../caliban-provider" }
+caliban-common   = { workspace = true }
+caliban-provider = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 serde_yaml       = "0.9"

@@ -1,21 +1,21 @@
 [package]
 name        = "caliban-provider-vertex"
 version.workspace = true
-description = "Google Vertex AI provider (Claude on Vertex) for the caliban agent harness"
+description = "Google Vertex AI provider (Claude on Vertex) for the caliban agent harness — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [features]
 default     = []
 live-tests  = []
 
 [dependencies]
-caliban-common             = { path = "../caliban-common" }
-caliban-provider           = { path = "../caliban-provider" }
-caliban-provider-anthropic = { path = "../caliban-provider-anthropic", features = ["vertex"] }
+caliban-common             = { workspace = true }
+caliban-provider           = { workspace = true }
+caliban-provider-anthropic = { workspace = true, features = ["vertex"] }
 async-trait                = { workspace = true }
 gcp_auth                   = { workspace = true }
 reqwest                    = { workspace = true }

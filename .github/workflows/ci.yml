@@ -26,6 +26,8 @@ jobs:
     name: fmt · clippy · build · test (default features)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
 
     steps:
       - name: Checkout
@@ -80,3 +82,25 @@ jobs:
       - name: Docs-only change — Rust CI skipped
         if: steps.changes.outputs.code != 'true'
         run: echo "Only docs/markdown/license changed; skipping cargo fmt/clippy/build/test."
+
+  package-check:
+    name: cargo publish --workspace --dry-run
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        if: needs.check.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry & target
+        if: needs.check.outputs.code == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Verify all crates package cleanly
+        if: needs.check.outputs.code == 'true'
+        run: cargo publish --workspace --dry-run
+      - name: Docs-only change — package-check skipped
+        if: needs.check.outputs.code != 'true'
+        run: echo "Only docs/markdown/license changed; skipping package dry-run."

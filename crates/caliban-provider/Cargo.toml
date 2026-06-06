@@ -1,12 +1,12 @@
 [package]
 name        = "caliban-provider"
 version.workspace = true
-description = "Provider-neutral message IR and trait for the caliban agent harness"
+description = "Provider-neutral message IR and trait for the caliban agent harness — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [features]
 default = []

@@ -1,16 +1,16 @@
 [package]
 name        = "caliban-output-styles"
 version.workspace = true
-description = "Output-style loader + system-prompt splice for the caliban agent harness"
+description = "Output-style loader + system-prompt splice for the caliban agent harness — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
-caliban-common     = { path = "../caliban-common" }
-caliban-agent-core = { path = "../caliban-agent-core" }
+caliban-common     = { workspace = true }
+caliban-agent-core = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = "0.9"
 ignore      = { workspace = true }

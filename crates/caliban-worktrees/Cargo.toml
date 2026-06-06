@@ -1,12 +1,12 @@
 [package]
 name        = "caliban-worktrees"
 version.workspace = true
-description = "Git worktree manager for caliban sub-agent isolation (ADR 0037)"
+description = "Git worktree manager for caliban sub-agent isolation (ADR 0037) — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
 git2      = { workspace = true }

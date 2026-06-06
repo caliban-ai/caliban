@@ -1,12 +1,12 @@
 [package]
 name        = "caliban-common"
 version.workspace = true
-description = "Cross-crate plumbing (paths, env-var expansion, atomic writes, globs, tracing targets) for caliban"
+description = "Cross-crate plumbing (paths, env-var expansion, atomic writes, globs, tracing targets) for caliban — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
 dirs       = { workspace = true }

@@ -1,17 +1,17 @@
 [package]
 name        = "caliban-model-router"
 version.workspace = true
-description = "Provider-impl router that dispatches completion requests to different (provider, model) pairs by RequestPurpose"
+description = "Provider-impl router that dispatches completion requests to different (provider, model) pairs by RequestPurpose — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
-caliban-common   = { path = "../caliban-common" }
-caliban-provider = { path = "../caliban-provider" }
-caliban-memory   = { path = "../caliban-memory" }
+caliban-common   = { workspace = true }
+caliban-provider = { workspace = true }
+caliban-memory   = { workspace = true }
 async-trait      = { workspace = true }
 serde            = { workspace = true }
 toml             = { workspace = true }
@@ -24,7 +24,7 @@ futures          = { workspace = true }
 dirs             = { workspace = true }
 
 [dev-dependencies]
-caliban-provider = { path = "../caliban-provider", features = ["mock"] }
+caliban-provider = { workspace = true, features = ["mock"] }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tempfile         = { workspace = true }
 serde_json       = { workspace = true }

@@ -1,15 +1,15 @@
 [package]
 name        = "caliban-memory"
 version.workspace = true
-description = "File-backed memory tiers spliced into the caliban system prompt"
+description = "File-backed memory tiers spliced into the caliban system prompt — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
-caliban-common = { path = "../caliban-common" }
+caliban-common = { workspace = true }
 tokio       = { workspace = true, features = ["fs", "io-util"] }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }

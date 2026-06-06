@@ -1,20 +1,20 @@
 [package]
 name        = "caliban-images"
 version.workspace = true
-description = "Image ingest pipeline + graphics-protocol detection for caliban"
+description = "Image ingest pipeline + graphics-protocol detection for caliban — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [features]
 default   = ["clipboard"]
 clipboard = ["dep:arboard"]
 
 [dependencies]
-caliban-common   = { path = "../caliban-common" }
-caliban-provider = { path = "../caliban-provider" }
+caliban-common   = { workspace = true }
+caliban-provider = { workspace = true }
 serde       = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }

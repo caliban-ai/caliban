@@ -1,17 +1,17 @@
 [package]
 name        = "caliban-sessions"
 version.workspace = true
-description = "Session persistence for the caliban agent harness"
+description = "Session persistence for the caliban agent harness — internal crate for the caliban binary; no API stability, pin exact versions"
 edition.workspace      = true
 license.workspace      = true
+repository.workspace   = true
 authors.workspace      = true
 rust-version.workspace = true
-publish     = false
 
 [dependencies]
-caliban-provider   = { path = "../caliban-provider" }
-caliban-agent-core = { path = "../caliban-agent-core" }
-caliban-common     = { path = "../caliban-common" }
+caliban-provider   = { workspace = true }
+caliban-agent-core = { workspace = true }
+caliban-common     = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
