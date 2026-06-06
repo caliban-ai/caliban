@@ -57,6 +57,21 @@
 }
 
 /* Menu title (book title in the top bar) */
+/* Prefix the book title in the top bar with the caliban mark. The mark is the
+ * site favicon (mdBook copies theme/favicon.svg to the book root) used as a CSS
+ * mask, so it inherits the menu bar's text colour and adapts to every theme. */
 .menu-title {
     font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55em;
+}
+.menu-title::before {
+    content: "";
+    width: 1.25em;
+    height: 1.25em;
+    flex: 0 0 auto;
+    background-color: currentColor;
+    -webkit-mask: url("../favicon.svg") center / contain no-repeat;
+    mask: url("../favicon.svg") center / contain no-repeat;
 }

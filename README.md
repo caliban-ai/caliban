@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/mark-white.svg">
+    <img alt="caliban" src="docs/assets/brand/mark-ink.svg" width="96" height="96">
+  </picture>
+</p>
+
 # caliban
 
 A from-scratch Rust agent harness — a replacement for Claude Code that puts

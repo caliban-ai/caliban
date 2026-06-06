@@ -1,3 +1,17 @@
+<div align="center" style="margin: 0.5rem 0 1.75rem;">
+  <svg viewBox="0 0 120 120" width="104" height="104" fill="none" role="img" aria-label="caliban">
+    <circle cx="60" cy="60" r="44" stroke="currentColor" stroke-width="3"/>
+    <g stroke="currentColor" stroke-width="7" stroke-linecap="round" transform="translate(120,0) scale(-1,1)">
+      <path d="M60 56 C80 47 93 60 85 75" transform="rotate(0 60 60)"/>
+      <path d="M60 56 C80 47 93 60 85 75" transform="rotate(72 60 60)"/>
+      <path d="M60 56 C80 47 93 60 85 75" transform="rotate(144 60 60)"/>
+      <path d="M60 56 C80 47 93 60 85 75" transform="rotate(216 60 60)"/>
+      <path d="M60 56 C80 47 93 60 85 75" transform="rotate(288 60 60)"/>
+    </g>
+    <circle cx="60" cy="60" r="6.5" fill="currentColor"/>
+  </svg>
+</div>
+
 # Caliban User Guide
 
 Caliban is a Rust-native, provider-agnostic AI agent harness — a replacement for Claude Code
