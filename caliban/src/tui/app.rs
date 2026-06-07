@@ -249,23 +249,23 @@ pub(crate) struct App {
     /// IE2: messages typed by the user while a turn was already running.
     /// Drained FIFO on `RunEnd` and dispatched as the next user turn.
     /// Render path shows the front as a `QUEUED:` hint near the input.
-    /// See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// See caliban-ai/caliban#14 (queued-message drain).
     pub(crate) queued: std::collections::VecDeque<String>,
     /// IE2: set when Esc is pressed with a non-empty queue (which clears
     /// the queue rather than cancelling the running turn). A second Esc
     /// within `ESC_REARM_WINDOW` (2 s) then cancels the running turn;
-    /// otherwise the arm expires. See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// otherwise the arm expires. See caliban-ai/caliban#14 (queued-message drain).
     pub(crate) esc_armed_at: Option<std::time::Instant>,
     /// IE3: in-progress / just-completed mouse text selection on the
     /// transcript pane. Driven by `events::handle_mouse` Down/Drag/Up
     /// events; consumed by `render` for the highlight overlay and by
     /// the mouse handler on `Up(Left)` for the OSC-52 clipboard write.
-    /// See `docs/TODO.md` § TUI ergonomics § IE3.
+    /// See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
     pub(crate) mouse_selection: super::mouse_select::MouseSelection,
     /// IE3: per-frame `(row, col) → char` map built by the renderer as
     /// it lays out the transcript. Read by the mouse handler on
     /// `Up(Left)` to extract the dragged text. Reset to empty each
-    /// frame. See `docs/TODO.md` § TUI ergonomics § IE3.
+    /// frame. See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
     pub(crate) position_map: super::mouse_select::PositionMap,
     /// `/permissions` overlay state (tab, cursor, filters).
     /// The cursor is clamped to `[0, len)` on each render so removals
@@ -786,7 +786,7 @@ mod tests {
     /// IE2 Task 5 (RED): App carries a FIFO queue of user-typed messages
     /// captured while a turn was running, plus a `esc_armed_at` timestamp
     /// for the two-stage Esc UX. Both empty/None on a fresh App.
-    /// See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// See caliban-ai/caliban#14 (queued-message drain).
     #[test]
     fn app_initializes_queued_empty_and_esc_unarmed() {
         let app = App::for_tests();

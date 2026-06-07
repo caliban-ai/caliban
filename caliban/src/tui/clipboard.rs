@@ -25,7 +25,7 @@
 //!
 //! `Pc = c` selects the system clipboard. Terminator is `BEL` (`\x07`).
 //!
-//! See `docs/TODO.md` § TUI ergonomics § IE3.
+//! See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
 
 use std::io::Write;
 

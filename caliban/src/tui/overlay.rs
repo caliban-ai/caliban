@@ -109,16 +109,67 @@ pub(crate) fn centered_rect(
         .split(popup_layout[1])[1]
 }
 
+/// Like [`centered_rect`] but with an absolute `height` (clamped to `r`'s
+/// height) centered vertically, and a percentage width. Used for
+/// content-aware popups like the Ask modal whose height tracks their
+/// contents instead of a flat percentage.
+pub(crate) fn centered_rect_abs(
+    percent_x: u16,
+    height: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let height = height.min(r.height);
+    let top = r.height.saturating_sub(height) / 2;
+    let vert = ratatui::layout::Rect {
+        x: r.x,
+        y: r.y + top,
+        width: r.width,
+        height,
+    };
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert)[1]
+}
+
+/// Estimate how many terminal rows `lines` occupy when soft-wrapped to
+/// `width` columns (ceil per line, minimum one row each). Approximates
+/// ratatui's `Wrap` closely enough to size a popup so its contents are not
+/// clipped.
+fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
+    if width == 0 {
+        return u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    }
+    let w = usize::from(width);
+    let mut rows: usize = 0;
+    for line in lines {
+        let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        rows += chars.div_ceil(w).max(1);
+    }
+    u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
 pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     use ratatui::widgets::Wrap;
 
-    // The transcript viewer wants a tall overlay; the Ask modal stays compact.
-    let (px, py) = match overlay {
-        Overlay::AskModal => (60, 30),
-        Overlay::ReverseHistory => (70, 50),
-        _ => (80, 80),
+    // Size the popup. The Ask modal is content-aware: its height tracks its
+    // (capped) body plus the action rows so a long input can never push the
+    // Deny controls off-screen (#58). Other overlays use a flat percentage.
+    let area = match overlay {
+        Overlay::AskModal => {
+            let inner_w = frame.area().width.saturating_mul(60) / 100;
+            let actions = u16::try_from(ask_modal_action_lines().len()).unwrap_or(6);
+            let body =
+                wrapped_height(&ask_modal_body_lines(app), inner_w.saturating_sub(2)).clamp(3, 12);
+            centered_rect_abs(60, actions + body + 2, frame.area())
+        }
+        Overlay::ReverseHistory => centered_rect(70, 50, frame.area()),
+        _ => centered_rect(80, 80, frame.area()),
     };
-    let area = centered_rect(px, py, frame.area());
 
     // Clear the area underneath.
     frame.render_widget(Clear, area);
@@ -130,6 +181,24 @@ pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay:
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    // Ask modal: bottom-anchor the action rows so they are always visible.
+    // The body (tool / input / pattern) takes the remaining space above and
+    // wraps/clips there without ever hiding the controls (#58).
+    if overlay == Overlay::AskModal {
+        let action_lines = ask_modal_action_lines();
+        let n = u16::try_from(action_lines.len()).unwrap_or(0);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(n)])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(ask_modal_body_lines(app)).wrap(Wrap { trim: false }),
+            parts[0],
+        );
+        frame.render_widget(Paragraph::new(action_lines), parts[1]);
+        return;
+    }
 
     let scroll_offset = if overlay == Overlay::TranscriptViewer {
         app.transcript_viewer.scroll
@@ -224,8 +293,20 @@ pub(crate) fn reverse_history_lines(app: &App) -> Vec<Line<'static>> {
     out
 }
 
+/// Full Ask-modal content (body + action rows). Retained for tests and any
+/// caller that wants the lines as one block; the live renderer instead draws
+/// [`ask_modal_body_lines`] and [`ask_modal_action_lines`] into separate
+/// regions so the controls can be bottom-anchored (#58).
 pub(crate) fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut out = ask_modal_body_lines(app);
+    out.extend(ask_modal_action_lines());
+    out
+}
+
+/// Body of the Ask modal — tool name, input summary, and the pattern an
+/// "Always" choice would persist. Separated from the action rows so the
+/// renderer can keep the controls visible regardless of body length (#58).
+pub(crate) fn ask_modal_body_lines(app: &App) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut out: Vec<Line<'static>> = Vec::new();
     let Some(req) = app.ask_modal.as_ref() else {
@@ -249,25 +330,29 @@ pub(crate) fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
         Span::styled("Pattern: ", bold),
         Span::raw(req.always_pattern.clone()),
     ]));
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "   [y] Allow once       [a] Always allow (opens scope picker)",
-        Style::default().fg(Color::Cyan),
-    ));
-    out.push(Line::styled(
-        "   [n] Deny once        [d] Always deny  (opens scope picker)",
-        Style::default().fg(Color::Cyan),
-    ));
-    out.push(Line::styled(
-        "   [Esc] Deny once",
-        Style::default().fg(Color::Cyan),
-    ));
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "   Modal blocks the agent loop until you decide.",
-        dim,
-    ));
     out
+}
+
+/// Action rows + footer for the Ask modal. Always rendered (bottom-anchored
+/// by the live renderer) so the Deny options can never be clipped by a long
+/// body (#58).
+pub(crate) fn ask_modal_action_lines() -> Vec<Line<'static>> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let cyan = Style::default().fg(Color::Cyan);
+    vec![
+        Line::raw(""),
+        Line::styled(
+            "   [y] Allow once       [a] Always allow (opens scope picker)",
+            cyan,
+        ),
+        Line::styled(
+            "   [n] Deny once        [d] Always deny  (opens scope picker)",
+            cyan,
+        ),
+        Line::styled("   [Esc] Deny once", cyan),
+        Line::raw(""),
+        Line::styled("   Modal blocks the agent loop until you decide.", dim),
+    ]
 }
 
 pub(crate) fn slash_help_lines(registry: &slash::SlashCommandRegistry) -> Vec<Line<'static>> {
@@ -1117,5 +1202,61 @@ mod permissions_overlay_tests {
             .collect::<String>();
         assert!(joined.contains("Edit(▶)"), "Edit should be active");
         assert!(!joined.contains("View(▶)"), "View should not be active");
+    }
+}
+
+#[cfg(test)]
+mod ask_modal_render_tests {
+    use super::*;
+    use crate::tui::App;
+    use crate::tui::ask::AskRequest;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Flatten the whole rendered backbuffer into one string for substring
+    /// assertions. A clipped (off-screen) row is simply absent from the
+    /// buffer, so `contains` is a faithful "is this visible?" check.
+    fn buffer_text(term: &Terminal<TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    fn app_with_ask(input_summary: String, pattern: String) -> App {
+        let mut app = App::for_tests();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        app.ask_modal = Some(AskRequest {
+            tool_name: "Bash".into(),
+            input_summary,
+            always_pattern: pattern,
+            tool_input: serde_json::json!({"command": "x"}),
+            respond: tx,
+        });
+        app
+    }
+
+    /// Regression for #58: a long / overflowing input must not push the
+    /// Deny action rows off the bottom of the Ask modal.
+    #[test]
+    fn ask_modal_keeps_deny_actions_visible_with_long_input() {
+        let app = app_with_ask(
+            format!("command={}", "x".repeat(2000)),
+            format!("Bash:{}", "y".repeat(400)),
+        );
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::AskModal))
+            .unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("[n]"),
+            "Deny-once hint must stay visible with long input; rendered:\n{text}"
+        );
+        assert!(
+            text.contains("[d]"),
+            "Always-deny hint must stay visible with long input; rendered:\n{text}"
+        );
     }
 }

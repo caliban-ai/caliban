@@ -343,7 +343,7 @@ pub(crate) fn handle_agent_error(e: &caliban_agent_core::Error, app: &mut App) {
 /// loading the text into `app.input.buffer` and re-entering the submit
 /// path (the main TUI loop does this between turns via a synthetic
 /// Enter event). Returns `None` if the queue is empty.
-/// See `docs/TODO.md` § TUI ergonomics § IE2.
+/// See caliban-ai/caliban#14 (queued-message drain).
 pub(crate) fn drain_one_queued(app: &mut App) -> Option<String> {
     app.queued.pop_front()
 }
@@ -354,7 +354,7 @@ pub(crate) fn drain_one_queued(app: &mut App) -> Option<String> {
 /// returns `false` and the existing logic (cancel running / clear
 /// input / Esc-Esc chord for `/rewind`) runs as before, so a second
 /// Esc with `running.is_some()` falls through to the cancel branch.
-/// See `docs/TODO.md` § TUI ergonomics § IE2.
+/// See caliban-ai/caliban#14 (queued-message drain).
 pub(crate) fn handle_esc_queue_clear(app: &mut App, now: std::time::Instant) -> bool {
     if app.queued.is_empty() {
         return false;
@@ -369,7 +369,7 @@ pub(crate) fn handle_esc_queue_clear(app: &mut App, now: std::time::Instant) -> 
 /// already running (and the prompt isn't an immediate slash command,
 /// which would be handled by IE1's intercept). No-op on whitespace-only
 /// input so accidental Enters during inference don't enqueue blanks.
-/// See `docs/TODO.md` § TUI ergonomics § IE2.
+/// See caliban-ai/caliban#14 (queued-message drain).
 pub(crate) fn push_user_input_to_queue(app: &mut App) {
     let line = app.input.buffer.trim().to_string();
     if line.is_empty() {
@@ -713,7 +713,7 @@ pub(crate) fn handle_mouse(event: MouseEvent, app: &mut App) {
         // emits an OSC-52 clipboard write of the selected text resolved
         // through `app.position_map`. The render layer overlays the
         // highlight from `app.mouse_selection.range()` each frame.
-        // See `docs/TODO.md` § TUI ergonomics § IE3.
+        // See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
         MouseEventKind::Down(MouseButton::Left) => {
             app.mouse_selection
                 .on_down(super::mouse_select::Cell::new(event.row, event.column));
@@ -914,7 +914,7 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             // A subsequent Esc with the queue empty falls through to
             // the existing logic below (cancel running / clear input /
             // Esc-Esc chord for `/rewind`).
-            // See `docs/TODO.md` § TUI ergonomics § IE2.
+            // See caliban-ai/caliban#14 (queued-message drain).
             if handle_esc_queue_clear(app, std::time::Instant::now()) {
                 return;
             }
@@ -981,7 +981,7 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             // IE1: immediate slash commands (e.g. `/context`, `/cost`,
             // `/help`) dispatch even while a turn is in flight. The
             // classifier reads `SlashCommandMeta.immediate` set per
-            // command; see `docs/TODO.md` § TUI ergonomics § IE1.
+            // command; see caliban-ai/caliban#13 (immediate slash commands).
             if slash::is_immediate_slash(&prompt, &app.slash_registry) {
                 let _line = app.input.submit();
                 app.auto_scroll = true;
@@ -990,7 +990,7 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             }
             // IE2: if a turn is already running, queue this prompt for
             // the next turn instead of dropping it. Drained on `RunEnd`.
-            // See `docs/TODO.md` § TUI ergonomics § IE2.
+            // See caliban-ai/caliban#14 (queued-message drain).
             if app.running.is_some() {
                 push_user_input_to_queue(app);
                 return;

@@ -96,7 +96,21 @@ impl TuiAskHandler {
     }
 }
 
-/// Format a tool input value for compact display in the modal header.
+/// Collapse all whitespace runs (including newlines and tabs) into single
+/// spaces, trim the ends, and cap to `max` characters. Keeps a multi-line or
+/// huge value rendering as one tidy line in the modal header instead of
+/// inflating the modal body height (#58).
+fn one_line(s: &str, max: usize) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// Format a tool input value for compact, single-line display in the modal
+/// header.
 fn input_summary(input: &serde_json::Value) -> String {
     use serde_json::Value;
     match input {
@@ -104,8 +118,7 @@ fn input_summary(input: &serde_json::Value) -> String {
             // Prefer the "command" key for Bash; else "path"; else first key.
             for k in ["command", "path", "url", "pattern"] {
                 if let Some(v) = map.get(k).and_then(Value::as_str) {
-                    let s: String = v.chars().take(160).collect();
-                    return format!("{k}={s}");
+                    return format!("{k}={}", one_line(v, 160));
                 }
             }
             let mut parts: Vec<String> = Vec::new();
@@ -114,13 +127,12 @@ fn input_summary(input: &serde_json::Value) -> String {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                let trimmed: String = s.chars().take(40).collect();
-                parts.push(format!("{k}={trimmed}"));
+                parts.push(format!("{k}={}", one_line(&s, 40)));
             }
             parts.join(", ")
         }
-        Value::String(s) => s.chars().take(160).collect(),
-        other => other.to_string(),
+        Value::String(s) => one_line(s, 160),
+        other => one_line(&other.to_string(), 160),
     }
 }
 
@@ -280,6 +292,10 @@ pub(crate) fn derive_suggestions(tool: &str, input: &serde_json::Value) -> Vec<S
 // render_always_subprompt — ratatui rendering for the sub-prompt modal
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single cohesive ratatui render fn; splitting would scatter the layout"
+)]
 pub(crate) fn render_always_subprompt(
     f: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
@@ -293,6 +309,9 @@ pub(crate) fn render_always_subprompt(
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Paragraph};
 
+    /// Cap on the pending-call excerpt height (see body below).
+    const MAX_EXCERPT_LINES: usize = 6;
+
     let title = match sp.action {
         caliban_agent_core::Action::Allow => " Always allow ",
         caliban_agent_core::Action::Deny => " Always deny ",
@@ -302,27 +321,40 @@ pub(crate) fn render_always_subprompt(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let line_count = u16::try_from(input_excerpt.lines().count()).unwrap_or(u16::MAX);
+    // Cap the pending-call excerpt to a few lines so a long, multi-line
+    // pasted command can't dominate the layout and squeeze the interactive
+    // rows (suggestions / scope / footer) down to their headers (#58).
+    let total_excerpt = input_excerpt.lines().count();
+    let shown: Vec<&str> = input_excerpt.lines().take(MAX_EXCERPT_LINES).collect();
+    let truncated = total_excerpt > shown.len();
+    let body_rows = u16::try_from(shown.len() + usize::from(truncated)).unwrap_or(u16::MAX);
     let suggestion_count = u16::try_from(sp.suggestions.len()).unwrap_or(u16::MAX);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2 + line_count),
+            Constraint::Length(2 + body_rows),
             Constraint::Length(1),
-            Constraint::Length(suggestion_count + 1),
+            // header + one row per suggestion + custom row + preview row.
+            Constraint::Length(suggestion_count + 3),
             Constraint::Length(1),
             Constraint::Length(5), // scope picker (4 options + header)
             Constraint::Length(1),
             Constraint::Length(2), // comment + reason
-            Constraint::Min(1),
+            Constraint::Min(0),
             Constraint::Length(1), // footer
         ])
         .split(inner);
 
     // Pending call summary
     let mut summary = vec![Line::from(format!("Pending tool call: {tool}"))];
-    for l in input_excerpt.lines() {
+    for l in &shown {
         summary.push(Line::from(format!("  {l}")));
+    }
+    if truncated {
+        summary.push(Line::from(format!(
+            "  … ({} more line(s))",
+            total_excerpt - shown.len()
+        )));
     }
     f.render_widget(Paragraph::new(summary), chunks[0]);
 
@@ -488,6 +520,67 @@ mod tests {
             render_always_subprompt(f, area, &sp, "Bash", "command: cargo test --all");
         })
         .unwrap();
+    }
+
+    /// Regression for #58: a long, multi-line input excerpt must not squeeze
+    /// the sub-prompt's interactive rows. The footer controls, the selected
+    /// suggestion, and the scope options must all stay visible.
+    #[test]
+    fn always_subprompt_keeps_controls_visible_with_long_input() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let sp = AlwaysSubprompt {
+            suggestions: vec![
+                "Bash:cargo *".into(),
+                "Bash:cargo test*".into(),
+                "Bash:cargo test --all".into(),
+            ],
+            selected: 2,
+            custom: None,
+            preview_matches: true,
+            scope: caliban_settings::Scope::Project,
+            comment: String::new(),
+            reason: String::new(),
+            action: caliban_agent_core::Action::Allow,
+        };
+        // A pasted multi-line command far taller than the modal.
+        let long_excerpt = (0..80)
+            .map(|i| format!("line {i} of a very long pasted command"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        term.draw(|f| {
+            let area = f.area();
+            render_always_subprompt(f, area, &sp, "Bash", &long_excerpt);
+        })
+        .unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        for needle in [
+            "[enter] save",          // footer controls
+            "Bash:cargo test --all", // the selected suggestion
+            "[custom]",              // the custom-pattern row
+            "project",               // a scope option
+        ] {
+            assert!(
+                text.contains(needle),
+                "sub-prompt must keep {needle:?} visible with long input; rendered:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_summary_collapses_newlines_to_single_line() {
+        let v = serde_json::json!({"command": "echo one\nrm -rf two\nthree"});
+        let s = input_summary(&v);
+        assert!(
+            !s.contains('\n'),
+            "input summary must be single-line (newlines collapsed); got: {s:?}"
+        );
     }
 
     #[test]

@@ -99,8 +99,7 @@ EOF
 // isn't fully drained by `wait_with_output()` under runner load, so
 // `parse_decision_blob` sees empty stdout and falls back to `Allow`.
 // `gh run rerun --failed <run-id>` is the short-term unblock. Root
-// cause investigation tracked under `docs/TODO.md`
-// § CI / developer experience § CI/DX-1.
+// cause investigation tracked under caliban-ai/caliban#41.
 #[tokio::test]
 async fn stdout_json_updated_input_parses() {
     let dir = TempDir::new().unwrap();
