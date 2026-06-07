@@ -109,31 +109,29 @@ pub(crate) fn centered_rect(
         .split(popup_layout[1])[1]
 }
 
-/// Like [`centered_rect`] but with an absolute `height` (clamped to `r`'s
-/// height) centered vertically, and a percentage width. Used for
-/// content-aware popups like the Ask modal whose height tracks their
-/// contents instead of a flat percentage.
+/// Like [`centered_rect`] but with an absolute `width` and `height` in cells
+/// (each clamped to `r`), centered both ways. Used for content-aware popups
+/// like the Ask modal whose size tracks their contents instead of a flat
+/// percentage, so neither the controls nor the body get clipped (#58).
 pub(crate) fn centered_rect_abs(
-    percent_x: u16,
+    width: u16,
     height: u16,
     r: ratatui::layout::Rect,
 ) -> ratatui::layout::Rect {
+    let width = width.min(r.width);
     let height = height.min(r.height);
-    let top = r.height.saturating_sub(height) / 2;
-    let vert = ratatui::layout::Rect {
-        x: r.x,
-        y: r.y + top,
-        width: r.width,
+    ratatui::layout::Rect {
+        x: r.x + r.width.saturating_sub(width) / 2,
+        y: r.y + r.height.saturating_sub(height) / 2,
+        width,
         height,
-    };
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vert)[1]
+    }
+}
+
+/// Display width of a line in cells (sum of its spans' character counts).
+fn line_width(line: &Line<'_>) -> u16 {
+    u16::try_from(line.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .unwrap_or(u16::MAX)
 }
 
 /// Estimate how many terminal rows `lines` occupy when soft-wrapped to
@@ -147,8 +145,7 @@ fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
     let w = usize::from(width);
     let mut rows: usize = 0;
     for line in lines {
-        let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        rows += chars.div_ceil(w).max(1);
+        rows += usize::from(line_width(line)).div_ceil(w).max(1);
     }
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
@@ -156,16 +153,24 @@ fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
 pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay: Overlay) {
     use ratatui::widgets::Wrap;
 
-    // Size the popup. The Ask modal is content-aware: its height tracks its
-    // (capped) body plus the action rows so a long input can never push the
-    // Deny controls off-screen (#58). Other overlays use a flat percentage.
+    // Size the popup. The Ask modal is content-aware in BOTH dimensions: it
+    // is made wide enough for its longest action row (so the Deny controls
+    // never clip horizontally) and tall enough for the capped body plus the
+    // action rows (so they never clip vertically) — clamped to the frame
+    // (#58). Other overlays use a flat percentage.
     let area = match overlay {
         Overlay::AskModal => {
-            let inner_w = frame.area().width.saturating_mul(60) / 100;
-            let actions = u16::try_from(ask_modal_action_lines().len()).unwrap_or(6);
-            let body =
-                wrapped_height(&ask_modal_body_lines(app), inner_w.saturating_sub(2)).clamp(3, 12);
-            centered_rect_abs(60, actions + body + 2, frame.area())
+            // Comfortable minimum body column so short prompts still read well.
+            const MIN_BODY_COLS: u16 = 48;
+            let body_lines = ask_modal_body_lines(app);
+            let action_lines = ask_modal_action_lines();
+            let widest_action = action_lines.iter().map(line_width).max().unwrap_or(0);
+            let inner_w = widest_action.max(MIN_BODY_COLS);
+            let width = (inner_w + 2).min(frame.area().width);
+            let avail = width.saturating_sub(2);
+            let body_h = wrapped_height(&body_lines, avail).clamp(3, 12);
+            let action_h = wrapped_height(&action_lines, avail);
+            centered_rect_abs(width, body_h + action_h + 2, frame.area())
         }
         Overlay::ReverseHistory => centered_rect(70, 50, frame.area()),
         _ => centered_rect(80, 80, frame.area()),
@@ -187,16 +192,22 @@ pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay:
     // wraps/clips there without ever hiding the controls (#58).
     if overlay == Overlay::AskModal {
         let action_lines = ask_modal_action_lines();
-        let n = u16::try_from(action_lines.len()).unwrap_or(0);
+        // Reserve the actions' *wrapped* height so that on a terminal too
+        // narrow for the two-column rows they wrap onto more lines instead of
+        // being truncated at the right border. Both paragraphs wrap.
+        let action_h = wrapped_height(&action_lines, inner.width).max(1);
         let parts = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(n)])
+            .constraints([Constraint::Min(1), Constraint::Length(action_h)])
             .split(inner);
         frame.render_widget(
             Paragraph::new(ask_modal_body_lines(app)).wrap(Wrap { trim: false }),
             parts[0],
         );
-        frame.render_widget(Paragraph::new(action_lines), parts[1]);
+        frame.render_widget(
+            Paragraph::new(action_lines).wrap(Wrap { trim: false }),
+            parts[1],
+        );
         return;
     }
 
@@ -1258,5 +1269,32 @@ mod ask_modal_render_tests {
             text.contains("[d]"),
             "Always-deny hint must stay visible with long input; rendered:\n{text}"
         );
+    }
+
+    /// Regression for #58: on a narrower (e.g. half-screen) terminal the
+    /// action labels must not be truncated at the right border (the modal was
+    /// observed clipping "[a] Always allow (opens scope picker)" down to
+    /// "[a] Always a"). The modal width is content-aware so the controls fit.
+    #[test]
+    fn ask_modal_keeps_action_labels_intact_on_narrow_terminal() {
+        let app = app_with_ask(
+            "command=find target -type f -executable".into(),
+            "Bash:find target -type f -executable".into(),
+        );
+        // ~half-screen width that previously clipped the action rows.
+        let mut term = Terminal::new(TestBackend::new(64, 24)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::AskModal))
+            .unwrap();
+        let text = buffer_text(&term);
+        for needle in [
+            "Always allow",
+            "Always deny",
+            "(opens scope picker)",
+        ] {
+            assert!(
+                text.contains(needle),
+                "action label {needle:?} must not be truncated on a narrow terminal; rendered:\n{text}"
+            );
+        }
     }
 }
