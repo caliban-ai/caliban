@@ -24,8 +24,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-
       - name: Verify tag matches workspace version
         # Guard 3: tag v0.1.0 must equal the workspace package version.
         run: |
@@ -38,11 +36,15 @@ jobs:
             exit 1
           fi
 
-      - name: Package dry-run
-        run: cargo publish --workspace --dry-run
-
       - name: Publish to crates.io
-        # Guard 2: token exists ONLY as a secret in caliban-ai/caliban.
+        # Guard 2: token exists ONLY as a secret in caliban-ai/caliban (repo or
+        # org). scripts/publish.sh publishes crates not yet on the registry, in
+        # dependency order, with --no-verify (CI's package-check already verified
+        # packaging — no recompile here). MAX_SLEEP_SECS=0 means the runner never
+        # idles on a crates.io new-crate 429: it publishes what the burst allows
+        # and exits non-zero. Finish the rest locally by running scripts/publish.sh
+        # (which sleeps through the rate-limit windows for free). See docs/releasing.md.
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace
+          MAX_SLEEP_SECS: "0"
+        run: bash scripts/publish.sh
