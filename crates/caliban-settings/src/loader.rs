@@ -397,13 +397,27 @@ fn read_scope(
     };
 
     // Compute the scope directory once — needed both for the per-feature
-    // file sibling lookup AND for the standalone-permissions.toml case.
+    // file sibling lookup AND for the standalone-permissions case.
     let scope_dir = toml_path.parent().or_else(|| json_path.parent());
 
-    // If no primary settings file exists but a sibling `permissions.toml`
+    // The permissions file is the scope's settings filename with
+    // `settings` swapped for `permissions`, so each scope reads its OWN
+    // permissions file rather than a shared `permissions.toml`:
+    //   settings.toml        → permissions.toml        (project, user)
+    //   settings.local.toml  → permissions.local.toml  (local)
+    //   managed-settings.toml→ managed-permissions.toml (managed)
+    // Without this, Local and Project (both rooted at `.caliban`) each
+    // claimed `permissions.toml`, double-listing one file in `/permissions`
+    // and never reading `permissions.local.toml` at all.
+    let perm_filename = toml_path.file_name().and_then(|f| f.to_str()).map_or_else(
+        || "permissions.toml".to_string(),
+        |f| f.replace("settings", "permissions"),
+    );
+
+    // If no primary settings file exists but a sibling permissions file
     // does, bootstrap an empty value so the per-feature override below
     // can populate it. This honors the v2 spec's split-file form
-    // (operators can use `permissions.toml` standalone, without ever
+    // (operators can use a standalone permissions file without ever
     // creating a `settings.toml`).
     let (mut value, source_path, source_format) = if let Some((path, format)) = chosen {
         let body = std::fs::read_to_string(&path).map_err(|e| LoadError::Io {
@@ -412,22 +426,22 @@ fn read_scope(
         })?;
         let value = parse_body(&path, &body)?;
         (value, Some(path), Some(format))
-    } else if scope_dir.is_some_and(|d| d.join("permissions.toml").exists()) {
+    } else if scope_dir.is_some_and(|d| d.join(&perm_filename).exists()) {
         (
             serde_json::Value::Object(serde_json::Map::new()),
-            scope_dir.map(|d| d.join("permissions.toml")),
+            scope_dir.map(|d| d.join(&perm_filename)),
             Some("toml"),
         )
     } else {
         return Ok(None);
     };
 
-    // Per-feature file precedence: `permissions.toml` in the same scope
-    // directory overrides the `permissions` slice from the primary settings
-    // file. This lets operators manage permissions independently of the
-    // main settings document.
+    // Per-feature file precedence: the scope's permissions file overrides
+    // the `permissions` slice from the primary settings file. This lets
+    // operators manage permissions independently of the main settings
+    // document.
     if let Some(dir) = scope_dir {
-        let perm_path = dir.join("permissions.toml");
+        let perm_path = dir.join(&perm_filename);
         if perm_path.exists()
             && let Ok(perm_body) = std::fs::read_to_string(&perm_path)
             && let Ok(perm_val) = parse_body(&perm_path, &perm_body)

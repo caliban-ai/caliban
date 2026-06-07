@@ -376,6 +376,12 @@ fn non_interactive_deny_message(tool_name: &str) -> String {
 /// (e.g. logging, audit) compose naturally.
 pub struct PermissionsHook {
     rules: Vec<Rule>,
+    /// Session-scoped runtime overlay, consulted *before* `rules` so an
+    /// "Always allow/deny" added in the TUI modal takes effect on the next
+    /// tool call without rebuilding the hook or restarting (the modal and
+    /// this gate share the same `Arc`). Empty by default — wired via
+    /// [`Self::with_runtime_rules`].
+    runtime: Arc<RuntimeRuleStore>,
     ask: Arc<dyn AskHandler>,
     inner: Arc<dyn Hooks>,
 }
@@ -393,7 +399,23 @@ impl PermissionsHook {
     /// the gate composes with (e.g. [`crate::hooks::NoopHooks`]).
     #[must_use]
     pub fn new(rules: Vec<Rule>, ask: Arc<dyn AskHandler>, inner: Arc<dyn Hooks>) -> Self {
-        Self { rules, ask, inner }
+        Self {
+            rules,
+            runtime: Arc::new(RuntimeRuleStore::new()),
+            ask,
+            inner,
+        }
+    }
+
+    /// Wire a shared [`RuntimeRuleStore`] consulted before the static rule
+    /// set. The TUI passes the same `Arc` it appends to from the Ask
+    /// modal's "Always allow/deny" branches, so a freshly-added rule gates
+    /// the very next tool call (fixes the "rule saved but still re-prompts"
+    /// bug for both session and file scopes).
+    #[must_use]
+    pub fn with_runtime_rules(mut self, runtime: Arc<RuntimeRuleStore>) -> Self {
+        self.runtime = runtime;
+        self
     }
 
     /// Find the first matching rule and return its action + comment. `*`
@@ -411,6 +433,12 @@ impl PermissionsHook {
         &self,
         ctx: &ToolCtx<'_>,
     ) -> (Action, Option<String>, Option<String>) {
+        // Session runtime overlay wins over the static rule set so an
+        // "Always allow/deny" picked in the modal beats a config/default
+        // rule on the next call. Runtime rules carry no comment/reason.
+        if let Some(action) = self.runtime.evaluate(ctx) {
+            return (action, None, None);
+        }
         for r in &self.rules {
             if rule_matches(r, ctx) {
                 return (r.action, r.comment.clone(), r.reason.clone());
@@ -642,6 +670,27 @@ mod tests {
         rules.extend(default_rules());
         let h = hook(rules);
         let i = serde_json::json!({"command": "anything"});
+        assert_eq!(h.evaluate(&ctx("Bash", &i)), Action::Allow);
+    }
+
+    #[test]
+    fn runtime_rule_overrides_config_ask_live() {
+        // Regression (#55): a rule added to the shared RuntimeRuleStore
+        // *after* the hook is built must take effect on the very next
+        // evaluation, beating a config/default `Ask`. This is the live
+        // "Always allow" path — without it every "Always allow" (session
+        // OR file scope) re-prompts until the process restarts.
+        let store = Arc::new(RuntimeRuleStore::new());
+        let h = hook(default_rules()).with_runtime_rules(Arc::clone(&store));
+        let i = serde_json::json!({"command": "ls -F"});
+        // Base rules: Bash → Ask.
+        assert_eq!(h.evaluate(&ctx("Bash", &i)), Action::Ask);
+        // Operator picks "Always allow" → rule lands in the shared store.
+        store.add(RuntimeRule {
+            pattern: "Bash:ls *".into(),
+            action: Action::Allow,
+        });
+        // Next evaluation must see it live — no rebuild, no restart.
         assert_eq!(h.evaluate(&ctx("Bash", &i)), Action::Allow);
     }
 

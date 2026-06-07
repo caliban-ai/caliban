@@ -353,6 +353,7 @@ async fn main() -> Result<()> {
         permissions_hook,
         tui_ask_rx,
         auto_mode_classifier,
+        runtime_rules,
     } = startup::build_permissions(
         &args,
         &settings_snapshot,
@@ -507,6 +508,7 @@ async fn main() -> Result<()> {
                 tui_ask_rx,
                 Some(settings_handle.clone()),
                 settings_sources_view,
+                runtime_rules,
             )
             .await;
         }

@@ -378,6 +378,13 @@ pub(crate) struct App {
     /// in the Edit tab). The operator types a tool name + JSON input; Enter
     /// runs the matcher and populates `last_outcome`.
     pub(crate) permissions_test: Option<PermissionsTestPane>,
+    /// Test-only override for settings scope-path resolution. Lets
+    /// `/permissions` overlay tests run hermetically instead of reading the
+    /// developer's real `~/.config/caliban` and project files (which made
+    /// `displayed_rules`-based tests fail on machines that happen to have a
+    /// user-scope `permissions.toml`). Absent from production builds.
+    #[cfg(test)]
+    pub(crate) scope_paths_override: Option<caliban_settings::ScopePaths>,
 }
 
 impl App {
@@ -518,6 +525,8 @@ impl App {
             last_delta_at: std::time::Instant::now(),
             runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
             always_subprompt: None,
+            #[cfg(test)]
+            scope_paths_override: None,
         }
     }
 
@@ -549,8 +558,37 @@ impl App {
     pub(crate) fn displayed_rules(&self) -> Vec<DisplayedRule> {
         let mut out: Vec<DisplayedRule> = Vec::new();
 
-        // 1. Session rules (highest priority).
+        // Load file-sourced rules first so we can suppress any session
+        // runtime rule that merely mirrors a persisted one. A project/user/
+        // local "Always allow" is applied live AND written to disk (#55), so
+        // it must surface once — under its persistent File origin — rather
+        // than twice (once Session, once File).
+        let cwd = self
+            .cwd
+            .to_str()
+            .map_or_else(|| ".".to_string(), ToOwned::to_owned);
+        let opts = caliban_settings::LoadOptions::new(cwd);
+        // Tests may pin scope paths at an isolated location so the overlay
+        // doesn't read the developer's real config dirs (see `for_tests`).
+        #[cfg(test)]
+        let opts = match &self.scope_paths_override {
+            Some(paths) => {
+                let mut opts = opts;
+                opts.paths = paths.clone();
+                opts
+            }
+            None => opts,
+        };
+        let file_rules = caliban_settings::load_rules_with_provenance(&opts).unwrap_or_default();
+
+        // 1. Session rules (highest priority), minus persisted mirrors.
         for r in self.runtime_rules.snapshot() {
+            let mirrors_persisted = file_rules.iter().any(|(fr, prov)| {
+                prov.path.is_some() && fr.tool == r.pattern && fr.action == r.action
+            });
+            if mirrors_persisted {
+                continue;
+            }
             out.push(DisplayedRule {
                 pattern: r.pattern.clone(),
                 action: r.action,
@@ -560,26 +598,19 @@ impl App {
         }
 
         // 2. File-sourced rules (local → project → user → managed).
-        let cwd = self
-            .cwd
-            .to_str()
-            .map_or_else(|| ".".to_string(), ToOwned::to_owned);
-        let opts = caliban_settings::LoadOptions::new(cwd);
-        if let Ok(file_rules) = caliban_settings::load_rules_with_provenance(&opts) {
-            for (rule, prov) in file_rules {
-                // Only include rules that have an actual path — skip Cli scope.
-                if let Some(path) = prov.path {
-                    out.push(DisplayedRule {
-                        pattern: rule.tool.clone(),
-                        action: rule.action,
-                        comment: rule.comment.clone(),
-                        origin: RuleOrigin::File {
-                            scope: prov.scope,
-                            path,
-                            index_in_scope: prov.index_in_scope,
-                        },
-                    });
-                }
+        for (rule, prov) in file_rules {
+            // Only include rules that have an actual path — skip Cli scope.
+            if let Some(path) = prov.path {
+                out.push(DisplayedRule {
+                    pattern: rule.tool.clone(),
+                    action: rule.action,
+                    comment: rule.comment.clone(),
+                    origin: RuleOrigin::File {
+                        scope: prov.scope,
+                        path,
+                        index_in_scope: prov.index_in_scope,
+                    },
+                });
             }
         }
 
@@ -634,6 +665,7 @@ impl App {
             None,
             Vec::new(),
         )
+        .isolate_for_tests()
     }
 
     /// Build the Claude-compatible context object passed to a custom
@@ -714,6 +746,23 @@ impl App {
             None,
             Vec::new(),
         )
+        .isolate_for_tests()
+    }
+
+    /// Pin the workspace and every settings scope at an empty,
+    /// process-unique location so `/permissions`-style tests run
+    /// hermetically instead of reading the developer's real
+    /// `~/.config/caliban` and project files. The paths need not exist —
+    /// the settings loader simply finds no files there.
+    #[cfg(test)]
+    fn isolate_for_tests(mut self) -> Self {
+        let iso = std::env::temp_dir().join(format!("caliban-for-tests-{}", std::process::id()));
+        self.cwd = iso.join("workspace");
+        self.scope_paths_override = Some(caliban_settings::ScopePaths {
+            managed_root: Some(iso.join("managed")),
+            user_config_dir: Some(iso.join("user-config")),
+        });
+        self
     }
 
     /// Return the current working directory as a tilde-collapsed display string.
@@ -743,5 +792,63 @@ mod tests {
         let app = App::for_tests();
         assert!(app.queued.is_empty());
         assert!(app.esc_armed_at.is_none());
+    }
+
+    #[test]
+    fn displayed_rules_dedups_session_mirror_of_persisted_rule() {
+        // A project-scope "Always allow" is both persisted to disk AND
+        // mirrored into the live runtime store so it gates the next call
+        // without a restart (#55). The `/permissions` overlay must show it
+        // once — as its persistent File origin — not duplicated as a
+        // separate Session row.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::for_tests();
+        app.cwd = tmp.path().to_path_buf();
+
+        let target = caliban_settings::scope_path(
+            caliban_settings::Scope::Project,
+            caliban_settings::FileKind::Permissions,
+            tmp.path(),
+        )
+        .expect("project scope path");
+        caliban_settings::append_rule_to_file(
+            &target,
+            &caliban_settings::RuleSpec {
+                pattern: "Bash:ls -F".into(),
+                action: "allow".into(),
+                comment: None,
+                reason: None,
+                expires_at: None,
+                tool: None,
+            },
+        )
+        .unwrap();
+        // Same rule mirrored into the session store (what commit_subprompt does).
+        app.runtime_rules.add(caliban_agent_core::RuntimeRule {
+            pattern: "Bash:ls -F".into(),
+            action: caliban_agent_core::Action::Allow,
+        });
+
+        let shown = app.displayed_rules();
+        // The session mirror must be suppressed: the rule surfaces only
+        // under its persistent File origin, never as a duplicate Session
+        // row. (A separate pre-existing quirk may list the same file under
+        // more than one File scope; that's out of scope for #55.)
+        let session_hits = shown
+            .iter()
+            .filter(|r| r.pattern == "Bash:ls -F" && matches!(r.origin, RuleOrigin::Session))
+            .count();
+        assert_eq!(
+            session_hits, 0,
+            "session mirror of a persisted rule must be hidden in favor of its File origin; got {shown:?}"
+        );
+        let file_hits = shown
+            .iter()
+            .filter(|r| r.pattern == "Bash:ls -F" && matches!(r.origin, RuleOrigin::File { .. }))
+            .count();
+        assert!(
+            file_hits >= 1,
+            "the persisted File rule must still be shown; got {shown:?}"
+        );
     }
 }

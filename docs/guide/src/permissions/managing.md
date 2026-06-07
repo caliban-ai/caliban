@@ -21,11 +21,15 @@ When you choose "Always allow" or "Always reject", caliban opens a sub-prompt wi
 
 Type `/permissions` in the TUI input bar to open the interactive permissions overlay. It shows:
 
-- The full effective rule list (runtime rules, then config rules by scope, then built-in defaults).
-- Runtime-only rules added by "Always allow/reject" during this session (not yet persisted).
-- Keybind `d` removes the selected runtime rule for the current session.
+- The full effective rule list (runtime rules, then config rules by scope, then built-in defaults), each tagged with its origin.
+- Runtime-only rules added by "Always allow/reject" during this session.
+- Keybind `d` deletes the selected rule: a session rule is dropped from the live store immediately; a file-scoped rule is removed from its TOML file; built-in defaults are read-only.
 
 Use the overlay to inspect the live rule list and verify which rule would match a given tool call before running it.
+
+```admonish note title="Live vs. persisted changes"
+Adding a rule through the Ask modal applies to the running session immediately — the next matching tool call won't re-prompt. **Removing** a file-scoped rule (via the overlay's `d` key or `caliban perms remove`), or editing a `permissions.toml` outside caliban, does **not** retroactively change the current session's decisions; those changes take effect at the next session start. Deleting a *session* rule with `d` is the exception — it takes effect live.
+```
 
 ## `caliban perms` CLI
 
