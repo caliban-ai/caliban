@@ -181,6 +181,7 @@ pub(crate) async fn run(
     ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ask::AskRequest>>,
     settings_handle: Option<caliban_settings::SettingsHandle>,
     settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
+    runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(
@@ -199,6 +200,10 @@ pub(crate) async fn run(
         settings_handle,
         settings_sources,
     );
+    // Share the same runtime-rule store the permission gate consults, so a
+    // rule added via the Ask modal's "Always allow/deny" takes effect on
+    // the next tool call without a restart (#55).
+    app.runtime_rules = runtime_rules;
     let mut term_events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
     let (statusline_tx, mut statusline_rx) = tokio::sync::mpsc::unbounded_channel();

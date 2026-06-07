@@ -1758,19 +1758,30 @@ fn commit_subprompt(app: &mut App) {
     let pattern = sp.selected_pattern().to_string();
     let action = sp.action;
 
-    if sp.scope == caliban_settings::Scope::Cli {
-        // Session-only path: add to RuntimeRuleStore.
-        app.runtime_rules
-            .add(caliban_agent_core::RuntimeRule { pattern, action });
-    } else {
+    // Apply the rule live for the remainder of this session regardless of
+    // scope. The permission gate consults this same shared runtime store
+    // (see `PermissionsHook::with_runtime_rules`), so the next matching
+    // tool call resolves without re-prompting. File scopes additionally
+    // persist below so the rule also survives a restart — without this
+    // live step a "project" rule was written to disk but ignored until
+    // the process restarted (#55).
+    app.runtime_rules.add(caliban_agent_core::RuntimeRule {
+        pattern: pattern.clone(),
+        action,
+    });
+
+    if sp.scope != caliban_settings::Scope::Cli {
         let kind = caliban_settings::FileKind::Permissions;
-        let cwd = std::env::current_dir().unwrap_or_default();
+        // Use the session's workspace root (same source the `/permissions`
+        // overlay reads) rather than the process CWD so the rule lands in
+        // the project the operator is actually working in.
+        let cwd = app.cwd.clone();
         if let Some(target) = caliban_settings::scope_path(sp.scope, kind, &cwd) {
             let comment = sp.comment.clone();
             let reason = sp.reason.clone();
             let deny = action == caliban_agent_core::Action::Deny;
             let rule = caliban_settings::RuleSpec {
-                pattern: pattern.clone(),
+                pattern,
                 action: action_str(action).into(),
                 comment: (!comment.is_empty()).then_some(comment),
                 reason: (deny && !reason.is_empty()).then_some(reason),
@@ -1778,25 +1789,22 @@ fn commit_subprompt(app: &mut App) {
                 tool: None,
             };
             if let Err(e) = caliban_settings::append_rule_to_file(&target, &rule) {
+                // Already applied live above; the gesture isn't lost, it
+                // just won't outlive the session.
                 tracing::warn!(
                     error = %e,
                     path = %target.display(),
-                    "failed to persist permission rule; falling back to session-only"
+                    "failed to persist permission rule; applied for this session only"
                 );
-                // Fall back to runtime so the user's gesture isn't lost.
-                app.runtime_rules
-                    .add(caliban_agent_core::RuntimeRule { pattern, action });
             } else {
                 app.toast = Some(toast::Toast::info(format!(
                     "rule saved to {}",
                     target.display()
                 )));
             }
-        } else {
-            // scope_path returned None (e.g., Managed) — fall back to session.
-            app.runtime_rules
-                .add(caliban_agent_core::RuntimeRule { pattern, action });
         }
+        // scope_path returned None (e.g., Managed) — nothing to persist;
+        // the rule is already applied live for this session.
     }
 
     // Resolve the pending Ask channel.
@@ -2654,6 +2662,53 @@ mod tests {
         assert!(
             matches!(rx3.try_recv(), Ok(crate::tui::ask::AskResponse::AllowOnce)),
             "queued request #3 must receive AllowOnce, NOT Deny"
+        );
+    }
+
+    #[test]
+    fn commit_project_scope_rule_applies_live_in_session() {
+        // Regression (#55): committing "Always allow" at *project* scope
+        // must both (a) persist to .caliban/permissions.toml AND (b) take
+        // effect in the running session by landing in the shared runtime
+        // store the permission gate consults. Without (b), the model
+        // re-prompts for the identical command until the process restarts.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::for_tests();
+        app.cwd = tmp.path().to_path_buf();
+        app.always_subprompt = Some(crate::tui::ask::AlwaysSubprompt {
+            suggestions: vec!["Bash:ls -F".into()],
+            selected: 0,
+            custom: None,
+            preview_matches: false,
+            scope: caliban_settings::Scope::Project,
+            comment: String::new(),
+            reason: String::new(),
+            action: caliban_agent_core::Action::Allow,
+        });
+
+        commit_subprompt(&mut app);
+
+        // (a) persisted under the project's .caliban dir.
+        let toml = tmp.path().join(".caliban").join("permissions.toml");
+        assert!(
+            toml.exists(),
+            "project rule must be persisted to {}",
+            toml.display()
+        );
+
+        // (b) live in-session: the shared runtime store now matches the
+        // identical command, so the gate won't re-prompt.
+        let input = serde_json::json!({"command": "ls -F"});
+        let ctx = caliban_agent_core::ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t",
+            tool_name: "Bash",
+            input: &input,
+        };
+        assert_eq!(
+            app.runtime_rules.evaluate(&ctx),
+            Some(caliban_agent_core::Action::Allow),
+            "committed project rule must apply live via the shared runtime store"
         );
     }
 

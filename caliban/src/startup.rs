@@ -1339,6 +1339,12 @@ pub(crate) struct PermissionsSetup {
     pub permissions_hook: Option<Arc<dyn caliban_agent_core::Hooks + Send + Sync>>,
     pub tui_ask_rx: Option<tokio::sync::mpsc::UnboundedReceiver<tui::ask::AskRequest>>,
     pub auto_mode_classifier: Option<Arc<caliban_agent_core::AutoModeClassifier>>,
+    /// Shared session-scoped runtime-rule store. The same `Arc` is held by
+    /// the permission gate (`PermissionsHook`) and the TUI `App`, so an
+    /// "Always allow/deny" added in the Ask modal gates the next tool call
+    /// without a restart (#55). Always present, even when the gate is
+    /// disabled — the TUI still needs a store for the modal/overlay.
+    pub runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
 }
 
 /// Build the permissions chain (rules → `ModeFilter` → `PermissionsHook`).
@@ -1370,6 +1376,7 @@ pub(crate) fn build_permissions(
             permissions_hook: None,
             tui_ask_rx: None,
             auto_mode_classifier: None,
+            runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
         };
     }
     let mut cli_rules: Vec<Rule> = Vec::new();
@@ -1426,8 +1433,14 @@ pub(crate) fn build_permissions(
             None,
         )
     };
-    let inner: Arc<dyn caliban_agent_core::Hooks> =
-        Arc::new(PermissionsHook::new(rules, ask, Arc::new(NoopHooks)));
+    // Shared runtime-rule store: the gate consults it before the static
+    // rule set, and the TUI appends to this same `Arc` from the Ask modal's
+    // "Always allow/deny" branches (#55).
+    let runtime_rules = Arc::new(caliban_agent_core::RuntimeRuleStore::new());
+    let inner: Arc<dyn caliban_agent_core::Hooks> = Arc::new(
+        PermissionsHook::new(rules, ask, Arc::new(NoopHooks))
+            .with_runtime_rules(Arc::clone(&runtime_rules)),
+    );
 
     // Build the auto-mode classifier. The provider is the same one wired
     // for the agent; when it's a router, FastClassifier requests route
@@ -1464,6 +1477,7 @@ pub(crate) fn build_permissions(
         permissions_hook: Some(hooks_chain),
         tui_ask_rx: ask_rx,
         auto_mode_classifier: Some(classifier),
+        runtime_rules,
     }
 }
 
