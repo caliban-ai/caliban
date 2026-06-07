@@ -378,6 +378,13 @@ pub(crate) struct App {
     /// in the Edit tab). The operator types a tool name + JSON input; Enter
     /// runs the matcher and populates `last_outcome`.
     pub(crate) permissions_test: Option<PermissionsTestPane>,
+    /// Test-only override for settings scope-path resolution. Lets
+    /// `/permissions` overlay tests run hermetically instead of reading the
+    /// developer's real `~/.config/caliban` and project files (which made
+    /// `displayed_rules`-based tests fail on machines that happen to have a
+    /// user-scope `permissions.toml`). Absent from production builds.
+    #[cfg(test)]
+    pub(crate) scope_paths_override: Option<caliban_settings::ScopePaths>,
 }
 
 impl App {
@@ -518,6 +525,8 @@ impl App {
             last_delta_at: std::time::Instant::now(),
             runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
             always_subprompt: None,
+            #[cfg(test)]
+            scope_paths_override: None,
         }
     }
 
@@ -559,6 +568,17 @@ impl App {
             .to_str()
             .map_or_else(|| ".".to_string(), ToOwned::to_owned);
         let opts = caliban_settings::LoadOptions::new(cwd);
+        // Tests may pin scope paths at an isolated location so the overlay
+        // doesn't read the developer's real config dirs (see `for_tests`).
+        #[cfg(test)]
+        let opts = match &self.scope_paths_override {
+            Some(paths) => {
+                let mut opts = opts;
+                opts.paths = paths.clone();
+                opts
+            }
+            None => opts,
+        };
         let file_rules = caliban_settings::load_rules_with_provenance(&opts).unwrap_or_default();
 
         // 1. Session rules (highest priority), minus persisted mirrors.
@@ -645,6 +665,7 @@ impl App {
             None,
             Vec::new(),
         )
+        .isolate_for_tests()
     }
 
     /// Build the Claude-compatible context object passed to a custom
@@ -725,6 +746,23 @@ impl App {
             None,
             Vec::new(),
         )
+        .isolate_for_tests()
+    }
+
+    /// Pin the workspace and every settings scope at an empty,
+    /// process-unique location so `/permissions`-style tests run
+    /// hermetically instead of reading the developer's real
+    /// `~/.config/caliban` and project files. The paths need not exist —
+    /// the settings loader simply finds no files there.
+    #[cfg(test)]
+    fn isolate_for_tests(mut self) -> Self {
+        let iso = std::env::temp_dir().join(format!("caliban-for-tests-{}", std::process::id()));
+        self.cwd = iso.join("workspace");
+        self.scope_paths_override = Some(caliban_settings::ScopePaths {
+            managed_root: Some(iso.join("managed")),
+            user_config_dir: Some(iso.join("user-config")),
+        });
+        self
     }
 
     /// Return the current working directory as a tilde-collapsed display string.

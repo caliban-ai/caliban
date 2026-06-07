@@ -108,6 +108,79 @@ mod tests {
     }
 
     #[test]
+    fn standalone_project_permissions_not_double_counted_as_local() {
+        // Regression: a standalone `.caliban/permissions.toml` is the
+        // PROJECT-scope permissions file. The Local scope's file is
+        // `.caliban/permissions.local.toml`. The loader used to look for
+        // `permissions.toml` in both scope dirs (both resolve to
+        // `.caliban`), so the same file was attributed to Local AND
+        // Project and listed twice in `/permissions`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(
+            &ws.join(".caliban/permissions.toml"),
+            r#"
+[permissions]
+rules = [
+  { pattern = "Bash:ls *", action = "allow" },
+]
+"#,
+        );
+
+        let opts = LoadOptions {
+            workspace_root: ws.clone(),
+            paths: fake_paths(tmp.path()),
+            scope_filter: Some(vec![Scope::Local, Scope::Project]),
+            cli_overlay: None,
+            bare: false,
+            schema_validate: false,
+        };
+
+        let result = load_rules_with_provenance(&opts).unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "project permissions.toml must be counted once, not also as Local; got {result:?}"
+        );
+        assert_eq!(result[0].1.scope, Scope::Project);
+    }
+
+    #[test]
+    fn standalone_local_permissions_attributed_to_local_scope() {
+        // The Local-scope counterpart: `permissions.local.toml` must load
+        // as Local (and only Local).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(
+            &ws.join(".caliban/permissions.local.toml"),
+            r#"
+[permissions]
+rules = [
+  { pattern = "Bash:rm *", action = "deny" },
+]
+"#,
+        );
+
+        let opts = LoadOptions {
+            workspace_root: ws.clone(),
+            paths: fake_paths(tmp.path()),
+            scope_filter: Some(vec![Scope::Local, Scope::Project]),
+            cli_overlay: None,
+            bare: false,
+            schema_validate: false,
+        };
+
+        let result = load_rules_with_provenance(&opts).unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "permissions.local.toml must be counted once as Local; got {result:?}"
+        );
+        assert_eq!(result[0].1.scope, Scope::Local);
+        assert_eq!(result[0].0.tool, "Bash:rm *");
+    }
+
+    #[test]
     fn two_scope_fixture_returns_project_before_user_with_correct_paths() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ws = tmp.path().to_path_buf();

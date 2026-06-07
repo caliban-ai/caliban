@@ -57,6 +57,24 @@ ports between machines; (4) there was no full management surface
   writes deprecate immediately. After three minor releases only the
   canonical TOML schema loads.
 
+### Runtime application semantics
+
+Rules added through the Ask modal's "Always allow/reject" are applied to
+the running session immediately: the gate and the TUI share one
+`RuntimeRuleStore`, so the just-added rule gates the next matching tool
+call without re-prompting — regardless of which scope it is also persisted
+to on disk.
+
+Rule **removals** and **out-of-band file edits** are intentionally *not*
+hot-reloaded into a running session. Deleting a file-scoped rule via the
+`/permissions` overlay or `caliban perms remove` updates the on-disk file
+but does not retroactively tighten the live gate; the change takes effect
+on the next session start. Deleting a *session* (runtime) rule with `[d]`
+in the overlay does take effect live, because it mutates the in-memory
+store directly. This asymmetry keeps the gate cheap — no per-call disk
+re-read or file watcher — while making the common "allow this now" gesture
+feel instant.
+
 ## Revisit if
 
 - Operators report concrete cases where the `~glob` or dotted-key
