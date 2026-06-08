@@ -160,13 +160,21 @@ pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay:
     // (#58). Other overlays use a flat percentage.
     let area = match overlay {
         Overlay::AskModal => {
-            // Comfortable minimum body column so short prompts still read well.
-            const MIN_BODY_COLS: u16 = 48;
+            // Right padding mirrors the 3-cell left indent baked into every
+            // content line, so the box has symmetric inner margins.
+            const PAD: u16 = 3;
+            // Don't grow unboundedly wide for a long input — wrap past this.
+            const MAX_INNER: u16 = 80;
             let body_lines = ask_modal_body_lines(app);
-            let action_lines = ask_modal_action_lines();
-            let widest_action = action_lines.iter().map(line_width).max().unwrap_or(0);
-            let inner_w = widest_action.max(MIN_BODY_COLS);
-            let width = (inner_w + 2).min(frame.area().width);
+            let action_lines = ask_modal_action_lines(None);
+            let widest = body_lines
+                .iter()
+                .chain(&action_lines)
+                .map(line_width)
+                .max()
+                .unwrap_or(0)
+                .min(MAX_INNER);
+            let width = (widest + PAD + 2).min(frame.area().width);
             let avail = width.saturating_sub(2);
             let body_h = wrapped_height(&body_lines, avail).clamp(3, 12);
             let action_h = wrapped_height(&action_lines, avail);
@@ -191,7 +199,7 @@ pub(crate) fn render_overlay(frame: &mut ratatui::Frame<'_>, app: &App, overlay:
     // The body (tool / input / pattern) takes the remaining space above and
     // wraps/clips there without ever hiding the controls (#58).
     if overlay == Overlay::AskModal {
-        let action_lines = ask_modal_action_lines();
+        let action_lines = ask_modal_action_lines(Some(app.ask_cursor));
         // Reserve the actions' *wrapped* height so that on a terminal too
         // narrow for the two-column rows they wrap onto more lines instead of
         // being truncated at the right border. Both paragraphs wrap.
@@ -310,7 +318,7 @@ pub(crate) fn reverse_history_lines(app: &App) -> Vec<Line<'static>> {
 /// regions so the controls can be bottom-anchored (#58).
 pub(crate) fn ask_modal_lines(app: &App) -> Vec<Line<'static>> {
     let mut out = ask_modal_body_lines(app);
-    out.extend(ask_modal_action_lines());
+    out.extend(ask_modal_action_lines(None));
     out
 }
 
@@ -349,19 +357,44 @@ pub(crate) fn ask_modal_body_lines(app: &App) -> Vec<Line<'static>> {
 /// body (#58). Laid out as a single-column "escalating" stack — allow once,
 /// deny once, then the more-committal always-allow / always-deny, then Esc —
 /// so the rows stay short and never wrap awkwardly side-by-side.
-pub(crate) fn ask_modal_action_lines() -> Vec<Line<'static>> {
+///
+/// `selected` highlights one row (driven by the Up/Down cursor); pass `None`
+/// for an unhighlighted block (sizing / the combined `ask_modal_lines`). The
+/// selected/unselected prefixes are the same width so highlighting never
+/// changes the modal's size.
+pub(crate) fn ask_modal_action_lines(selected: Option<usize>) -> Vec<Line<'static>> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let cyan = Style::default().fg(Color::Cyan);
-    vec![
-        Line::raw(""),
-        Line::styled("   [y] Allow once", cyan),
-        Line::styled("   [n] Deny once", cyan),
-        Line::styled("   [a] Always allow (opens scope picker)", cyan),
-        Line::styled("   [d] Always deny  (opens scope picker)", cyan),
-        Line::styled("   [Esc] Deny once", cyan),
-        Line::raw(""),
-        Line::styled("   Modal blocks the agent loop until you decide.", dim),
-    ]
+    // Row order must match `events::ask_choice_for_cursor`.
+    let labels = [
+        "[y] Allow once",
+        "[n] Deny once",
+        "[a] Always allow (opens scope picker)",
+        "[d] Always deny  (opens scope picker)",
+        "[Esc] Deny once",
+    ];
+    let mut out = vec![Line::raw("")];
+    for (i, label) in labels.iter().enumerate() {
+        let is_sel = selected == Some(i);
+        // 3-cell prefix either way so width is identical highlighted or not.
+        let prefix = if is_sel { " \u{25b8} " } else { "   " };
+        let style = if is_sel {
+            cyan.add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            cyan
+        };
+        out.push(Line::styled(format!("{prefix}{label}"), style));
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "   \u{2191}/\u{2193} move \u{00b7} Enter select \u{00b7} or press the [key].",
+        dim,
+    ));
+    out.push(Line::styled(
+        "   Modal blocks the agent loop until you decide.",
+        dim,
+    ));
+    out
 }
 
 pub(crate) fn slash_help_lines(registry: &slash::SlashCommandRegistry) -> Vec<Line<'static>> {
@@ -1267,6 +1300,34 @@ mod ask_modal_render_tests {
             text.contains("[d]"),
             "Always-deny hint must stay visible with long input; rendered:\n{text}"
         );
+    }
+
+    /// The selected action row carries the cursor marker and others don't,
+    /// and the marker never changes a row's width (so the modal can't resize
+    /// as the cursor moves).
+    #[test]
+    fn ask_modal_action_lines_mark_only_the_selected_row() {
+        let none = ask_modal_action_lines(None);
+        let sel2 = ask_modal_action_lines(Some(2));
+        let text = |l: &Line<'_>| -> String {
+            l.spans.iter().map(|s| s.content.to_string()).collect()
+        };
+        // Row indices in the returned vec: [blank, r0, r1, r2, r3, r4, blank, footer].
+        assert!(text(&sel2[3]).starts_with(" \u{25b8} "), "row 2 must be marked");
+        assert!(
+            text(&sel2[3]).contains("Always allow"),
+            "row 2 is the always-allow row"
+        );
+        for i in [1usize, 2, 4, 5] {
+            assert!(
+                text(&sel2[i]).starts_with("   "),
+                "non-selected row {i} keeps the plain indent"
+            );
+        }
+        // Highlighting must not change widths.
+        for (a, b) in none.iter().zip(sel2.iter()) {
+            assert_eq!(line_width(a), line_width(b), "marker must preserve width");
+        }
     }
 
     /// Regression for #58: on a narrower (e.g. half-screen) terminal the

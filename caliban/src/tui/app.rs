@@ -316,6 +316,11 @@ pub(crate) struct App {
     /// Currently-pending Ask request. While `Some(_)`, the input is locked
     /// and the modal is rendered.
     pub(crate) ask_modal: Option<ask::AskRequest>,
+    /// Highlighted row in the Ask modal's action stack (0=allow once,
+    /// 1=deny once, 2=always allow, 3=always deny, 4=Esc/deny). Driven by
+    /// Up/Down; `Enter` activates it. Reset to 0 each time a modal opens.
+    /// The bound letter keys (y/n/a/d) work regardless of this cursor.
+    pub(crate) ask_cursor: usize,
     /// Concurrent Ask requests that arrived while another modal was already
     /// open. Drained after each modal answer: each item is re-evaluated
     /// against the (potentially updated) `runtime_rules` and either
@@ -510,6 +515,7 @@ impl App {
             cost_accumulator,
             ask_rx,
             ask_modal: None,
+            ask_cursor: 0,
             ask_queue: std::collections::VecDeque::new(),
             transcript_viewer: transcript_viewer::TranscriptViewerState::default(),
             reverse_history: None,

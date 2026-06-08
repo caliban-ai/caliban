@@ -309,6 +309,7 @@ pub(crate) async fn run(
                         app.ask_queue.push_back(req);
                     } else {
                         app.ask_modal = Some(req);
+                        app.ask_cursor = 0;
                         app.view = ViewState::Overlay(Overlay::AskModal);
                         app.auto_scroll = false;
                     }

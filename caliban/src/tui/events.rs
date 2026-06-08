@@ -1364,6 +1364,73 @@ pub(crate) fn handle_mcp_overlay_key(key: KeyEvent, app: &mut App) -> bool {
     }
 }
 
+/// Number of selectable rows in the Ask modal's action stack: allow once,
+/// deny once, always allow, always deny, Esc/deny. Mirrors the row order
+/// built by `overlay::ask_modal_action_lines`.
+pub(crate) const ASK_ACTION_COUNT: usize = 5;
+
+/// One actionable choice in the Ask modal — shared by the bound letter keys
+/// and by `Enter` on the highlighted row so the two paths can never diverge.
+#[derive(Clone, Copy)]
+enum AskChoice {
+    AllowOnce,
+    DenyOnce,
+    AlwaysAllow,
+    AlwaysDeny,
+}
+
+/// Map the action-stack cursor to the choice that `Enter` performs.
+/// Rows 1 and 4 (and any out-of-range value) are "deny once".
+fn ask_choice_for_cursor(cursor: usize) -> AskChoice {
+    match cursor {
+        0 => AskChoice::AllowOnce,
+        2 => AskChoice::AlwaysAllow,
+        3 => AskChoice::AlwaysDeny,
+        _ => AskChoice::DenyOnce,
+    }
+}
+
+/// Open the always-allow / always-deny sub-prompt for the pending request.
+fn open_always_subprompt(app: &mut App, action: caliban_agent_core::Action) {
+    if let Some(req) = app.ask_modal.as_ref() {
+        let mut sp = ask::AlwaysSubprompt {
+            suggestions: ask::derive_suggestions(&req.tool_name, &req.tool_input),
+            selected: 0,
+            custom: None,
+            preview_matches: true, // exact-match suggestion matches by definition
+            scope: caliban_settings::Scope::Project,
+            comment: String::new(),
+            reason: String::new(),
+            action,
+        };
+        sp.selected = sp.suggestions.len().saturating_sub(1); // narrowest by default
+        app.always_subprompt = Some(sp);
+    }
+}
+
+/// Perform an Ask choice: resolve the pending oneshot (allow/deny once) or
+/// open the appropriate always sub-prompt.
+fn perform_ask_choice(app: &mut App, choice: AskChoice) {
+    match choice {
+        AskChoice::AllowOnce => {
+            if let Some(req) = app.ask_modal.take() {
+                let _ = req.respond.send(ask::AskResponse::AllowOnce);
+                app.view = ViewState::Main;
+            }
+            drain_ask_queue(app);
+        }
+        AskChoice::DenyOnce => {
+            if let Some(req) = app.ask_modal.take() {
+                let _ = req.respond.send(ask::AskResponse::Deny);
+                app.view = ViewState::Main;
+            }
+            drain_ask_queue(app);
+        }
+        AskChoice::AlwaysAllow => open_always_subprompt(app, caliban_agent_core::Action::Allow),
+        AskChoice::AlwaysDeny => open_always_subprompt(app, caliban_agent_core::Action::Deny),
+    }
+}
+
 pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
     // If the always-sub-prompt is open, route all keys there first.
     if app.always_subprompt.is_some() {
@@ -1372,58 +1439,25 @@ pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('y'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
-            // Allow once — resolve immediately, no rule written.
-            if let Some(req) = app.ask_modal.take() {
-                let _ = req.respond.send(ask::AskResponse::AllowOnce);
-                app.view = ViewState::Main;
-            }
-            drain_ask_queue(app);
+        // Arrow keys move the highlight over the action stack; Enter activates
+        // the highlighted row. These are additive — the bound letter keys
+        // below still work regardless of where the cursor sits.
+        (KeyCode::Up, _) => app.ask_cursor = app.ask_cursor.saturating_sub(1),
+        (KeyCode::Down, _) => {
+            app.ask_cursor = (app.ask_cursor + 1).min(ASK_ACTION_COUNT - 1);
         }
-        // Lowercase `a` → open the always-allow sub-prompt (Phase 4).
-        // Lowercase `d` → open the always-deny sub-prompt (Phase 4).
-        // (Replaces capital A/R from v1; lowercase is easier to hit.)
-        (KeyCode::Char('a'), KeyModifiers::NONE) => {
-            if let Some(req) = app.ask_modal.as_ref() {
-                let mut sp = ask::AlwaysSubprompt {
-                    suggestions: ask::derive_suggestions(&req.tool_name, &req.tool_input),
-                    selected: 0, // re-assigned below
-                    custom: None,
-                    preview_matches: true, // exact-match suggestion matches by definition
-                    scope: caliban_settings::Scope::Project,
-                    comment: String::new(),
-                    reason: String::new(),
-                    action: caliban_agent_core::Action::Allow,
-                };
-                sp.selected = sp.suggestions.len().saturating_sub(1); // narrowest by default
-                app.always_subprompt = Some(sp);
-            }
-        }
-        (KeyCode::Char('d'), KeyModifiers::NONE) => {
-            if let Some(req) = app.ask_modal.as_ref() {
-                let mut sp = ask::AlwaysSubprompt {
-                    suggestions: ask::derive_suggestions(&req.tool_name, &req.tool_input),
-                    selected: 0,
-                    custom: None,
-                    preview_matches: true,
-                    scope: caliban_settings::Scope::Project,
-                    comment: String::new(),
-                    reason: String::new(),
-                    action: caliban_agent_core::Action::Deny,
-                };
-                sp.selected = sp.suggestions.len().saturating_sub(1); // narrowest by default
-                app.always_subprompt = Some(sp);
-            }
-        }
+        (KeyCode::Enter, _) => perform_ask_choice(app, ask_choice_for_cursor(app.ask_cursor)),
+
+        // Bound letter keys — always available regardless of the cursor.
+        // Lowercase `a`/`d` open the always-allow / always-deny sub-prompt.
+        (KeyCode::Char('y'), KeyModifiers::NONE) => perform_ask_choice(app, AskChoice::AllowOnce),
+        (KeyCode::Char('a'), KeyModifiers::NONE) => perform_ask_choice(app, AskChoice::AlwaysAllow),
+        (KeyCode::Char('d'), KeyModifiers::NONE) => perform_ask_choice(app, AskChoice::AlwaysDeny),
+        // Deny once (Esc / Ctrl+C are a hard cancel, independent of cursor).
         (KeyCode::Char('n'), KeyModifiers::NONE)
         | (KeyCode::Esc, _)
         | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            // Deny once.
-            if let Some(req) = app.ask_modal.take() {
-                let _ = req.respond.send(ask::AskResponse::Deny);
-                app.view = ViewState::Main;
-            }
-            drain_ask_queue(app);
+            perform_ask_choice(app, AskChoice::DenyOnce);
         }
         _ => {}
     }
@@ -1855,6 +1889,7 @@ pub(crate) fn drain_ask_queue(app: &mut App) {
             None | Some(caliban_agent_core::Action::Ask) => {
                 // No session rule matches — surface as the next modal.
                 app.ask_modal = Some(req);
+                app.ask_cursor = 0;
                 app.view = ViewState::Overlay(crate::tui::Overlay::AskModal);
                 return;
             }
@@ -2449,6 +2484,73 @@ mod tests {
         let (mut app, _rx) = build_app_with_ask_modal();
         handle_ask_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
         assert!(app.ask_modal.is_none(), "[Esc] must resolve the modal");
+    }
+
+    #[test]
+    fn ask_modal_arrow_keys_move_and_clamp_cursor() {
+        let (mut app, _rx) = build_app_with_ask_modal();
+        assert_eq!(app.ask_cursor, 0, "cursor starts at the top row");
+
+        // Up at the top is a no-op (clamps at 0).
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.ask_cursor, 0);
+
+        // Down walks to the last row and then clamps.
+        for expected in 1..ASK_ACTION_COUNT {
+            handle_ask_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+            assert_eq!(app.ask_cursor, expected);
+        }
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        assert_eq!(
+            app.ask_cursor,
+            ASK_ACTION_COUNT - 1,
+            "Down clamps at the last row"
+        );
+
+        // Arrow keys alone never resolve the modal.
+        assert!(app.ask_modal.is_some());
+    }
+
+    #[test]
+    fn ask_modal_enter_activates_highlighted_row() {
+        // Default cursor (row 0 = allow once): Enter resolves to allow.
+        let (mut app, _rx) = build_app_with_ask_modal();
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(app.ask_modal.is_none(), "Enter on 'allow once' resolves");
+        assert!(app.always_subprompt.is_none());
+
+        // Row 1 = deny once.
+        let (mut app, _rx) = build_app_with_ask_modal();
+        app.ask_cursor = 1;
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(app.ask_modal.is_none(), "Enter on 'deny once' resolves");
+        assert!(app.always_subprompt.is_none());
+
+        // Row 2 = always allow → opens the allow sub-prompt, modal stays armed.
+        let (mut app, _rx) = build_app_with_ask_modal();
+        app.ask_cursor = 2;
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert_eq!(
+            app.always_subprompt.as_ref().map(|sp| sp.action),
+            Some(caliban_agent_core::Action::Allow),
+            "Enter on 'always allow' opens the allow sub-prompt"
+        );
+
+        // Row 3 = always deny → opens the deny sub-prompt.
+        let (mut app, _rx) = build_app_with_ask_modal();
+        app.ask_cursor = 3;
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert_eq!(
+            app.always_subprompt.as_ref().map(|sp| sp.action),
+            Some(caliban_agent_core::Action::Deny),
+            "Enter on 'always deny' opens the deny sub-prompt"
+        );
+
+        // Row 4 = Esc/deny once.
+        let (mut app, _rx) = build_app_with_ask_modal();
+        app.ask_cursor = 4;
+        handle_ask_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(app.ask_modal.is_none(), "Enter on last row denies once");
     }
 
     #[test]
