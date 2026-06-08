@@ -345,21 +345,19 @@ pub(crate) fn ask_modal_body_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 /// Action rows + footer for the Ask modal. Always rendered (bottom-anchored
-/// by the live renderer) so the Deny options can never be clipped by a long
-/// body (#58).
+/// by the live renderer) so the controls can never be clipped by a long
+/// body (#58). Laid out as a single-column "escalating" stack — allow once,
+/// deny once, then the more-committal always-allow / always-deny, then Esc —
+/// so the rows stay short and never wrap awkwardly side-by-side.
 pub(crate) fn ask_modal_action_lines() -> Vec<Line<'static>> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let cyan = Style::default().fg(Color::Cyan);
     vec![
         Line::raw(""),
-        Line::styled(
-            "   [y] Allow once       [a] Always allow (opens scope picker)",
-            cyan,
-        ),
-        Line::styled(
-            "   [n] Deny once        [d] Always deny  (opens scope picker)",
-            cyan,
-        ),
+        Line::styled("   [y] Allow once", cyan),
+        Line::styled("   [n] Deny once", cyan),
+        Line::styled("   [a] Always allow (opens scope picker)", cyan),
+        Line::styled("   [d] Always deny  (opens scope picker)", cyan),
         Line::styled("   [Esc] Deny once", cyan),
         Line::raw(""),
         Line::styled("   Modal blocks the agent loop until you decide.", dim),
