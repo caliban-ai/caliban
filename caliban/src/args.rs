@@ -173,7 +173,12 @@ pub(crate) struct Args {
     pub(crate) model: Option<String>,
 
     /// Per-turn output token limit (must be ≥ 1).
-    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u32).range(1..))]
+    //
+    // 8192 (not the older 2048) gives verbose reasoning models enough room to
+    // finish a turn — thinking + tool call — without tripping the `MaxTokens`
+    // recovery escalation on nearly every substantial turn. Half the
+    // `escalated_max_tokens` ceiling (16384), so Stage A still has headroom.
+    #[arg(long, default_value_t = 8192, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) max_tokens: u32,
 
     /// Maximum agent loop iterations

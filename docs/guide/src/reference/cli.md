@@ -56,7 +56,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | `--provider <PROVIDER>` | Resolved from settings, then `anthropic` | Provider to use. Values: `anthropic`, `openai`, `ollama`, `google`. |
 | `--model <MODEL>` | Provider default (see table below) | Model name. |
 | `--fallback-model <MODEL>` | From settings | Fallback model when the primary errors (ADR 0038). |
-| `--max-tokens <N>` | `2048` | Per-turn output token limit (must be ≥ 1). |
+| `--max-tokens <N>` | `8192` | Per-turn output token limit (must be ≥ 1). |
 | `--max-turns <N>` | `50` | Maximum agent loop iterations. |
 | `--temperature <F>` | — | Sampling temperature in `[0.0, 2.0]`. |
 

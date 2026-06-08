@@ -72,7 +72,7 @@ Control token usage and sampling with these flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--max-tokens N` | `2048` | Per-turn output token limit. Must be ≥ 1. |
+| `--max-tokens N` | `8192` | Per-turn output token limit. Must be ≥ 1. |
 | `--temperature F` | *(provider default)* | Sampling temperature in `[0.0, 2.0]`. Values outside this range are rejected at startup. |
 
 ```bash
