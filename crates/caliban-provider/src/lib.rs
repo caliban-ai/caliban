@@ -13,6 +13,7 @@ pub mod response;
 pub mod stream;
 pub mod thinking;
 pub mod tool;
+pub mod transport;
 
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -32,6 +33,7 @@ pub use stream::{
 };
 pub use thinking::{ThinkingBlock, ThinkingConfig};
 pub use tool::{Tool, ToolChoice, ToolResultBlock, ToolUseBlock};
+pub use transport::{TransportErrorClass, classify_reqwest_error, render_source_chain};
 
 #[cfg(feature = "mock")]
 pub use mock::{MockProvider, MockProviderBuilder};

@@ -26,7 +26,6 @@ url              = { workspace = true }
 bytes            = { workspace = true }
 http             = { workspace = true }
 tokio            = { workspace = true }
-tracing          = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

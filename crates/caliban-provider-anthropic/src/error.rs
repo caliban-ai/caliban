@@ -37,12 +37,15 @@ pub enum AnthropicError {
 
 impl From<AnthropicError> for ProviderError {
     fn from(e: AnthropicError) -> Self {
+        use caliban_provider::TransportErrorClass;
         match e {
-            AnthropicError::Http(ref reqwest_err) => {
-                if reqwest_err.is_connect() || reqwest_err.is_timeout() {
-                    ProviderError::network(e)
-                } else {
-                    ProviderError::adapter(e)
+            AnthropicError::Http(ref err) => {
+                match caliban_provider::classify_reqwest_error("anthropic", err) {
+                    TransportErrorClass::StreamInterrupted => ProviderError::stream_interrupted(
+                        caliban_provider::render_source_chain(err),
+                    ),
+                    TransportErrorClass::Network => ProviderError::network(e),
+                    TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
             AnthropicError::BadStatus { status, ref body } => match status {
