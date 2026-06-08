@@ -41,12 +41,15 @@ pub enum OllamaError {
 
 impl From<OllamaError> for ProviderError {
     fn from(e: OllamaError) -> Self {
+        use caliban_provider::TransportErrorClass;
         match e {
             OllamaError::Http(ref err) => {
-                if err.is_connect() || err.is_timeout() {
-                    ProviderError::network(e)
-                } else {
-                    ProviderError::adapter(e)
+                match caliban_provider::classify_reqwest_error("ollama", err) {
+                    TransportErrorClass::StreamInterrupted => ProviderError::stream_interrupted(
+                        caliban_provider::render_source_chain(err),
+                    ),
+                    TransportErrorClass::Network => ProviderError::network(e),
+                    TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
             OllamaError::BadStatus { status, ref body } => match status {
