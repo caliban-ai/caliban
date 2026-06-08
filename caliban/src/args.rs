@@ -247,6 +247,13 @@ pub(crate) struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub(crate) debug: bool,
 
+    /// Redirect debug output to this path instead of the default
+    /// `~/.cache/caliban/debug.log`. Implies `--debug` (naming a destination
+    /// turns logging on). Relative paths resolve against the current
+    /// directory. `CALIBAN_DEBUG_FILE` is also honored.
+    #[arg(long, value_name = "PATH", env = "CALIBAN_DEBUG_FILE")]
+    pub(crate) debug_file: Option<PathBuf>,
+
     /// Maximum size of a single `@`-attachment in bytes (default 256 KB).
     #[arg(long, default_value_t = 262_144, env = "CALIBAN_MAX_ATTACH_BYTES")]
     pub(crate) max_attach_bytes: u64,
@@ -818,5 +825,22 @@ mod tests {
         // Inline prompts are obviously fine in the default text mode.
         let args = parse(&["-p", "hello"]);
         assert!(validate_stream_json_input(&args).is_ok());
+    }
+
+    #[test]
+    fn debug_file_flag_parses_to_path() {
+        let args = parse(&["--debug-file", "/var/log/caliban.log"]);
+        assert_eq!(
+            args.debug_file,
+            Some(std::path::PathBuf::from("/var/log/caliban.log"))
+        );
+    }
+
+    #[test]
+    fn debug_file_absent_by_default() {
+        // Guard on the env var so an exported CALIBAN_DEBUG_FILE doesn't flake.
+        if std::env::var_os("CALIBAN_DEBUG_FILE").is_none() {
+            assert!(parse(&[]).debug_file.is_none());
+        }
     }
 }

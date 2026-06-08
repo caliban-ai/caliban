@@ -37,19 +37,37 @@ use crate::args::{
 };
 use crate::{headless, system_prompt, tui};
 
-/// Install a file-backed `tracing` subscriber when `--debug` or
-/// `CALIBAN_DEBUG` is set. No-op otherwise. Idempotent once initialized:
+/// Returns `true` when file-backed debug logging should be installed:
+/// `--debug`, an explicit `--debug-file`/`CALIBAN_DEBUG_FILE`, or
+/// `CALIBAN_DEBUG` in the environment. Naming a destination implies
+/// debug-on, so `--debug-file` alone is enough.
+fn debug_enabled(args: &Args) -> bool {
+    args.debug || args.debug_file.is_some() || std::env::var("CALIBAN_DEBUG").is_ok()
+}
+
+/// Resolve the destination for the debug log, or `None` when debug logging
+/// is disabled. An explicit `--debug-file` path wins verbatim (relative
+/// paths resolve against CWD at open time); otherwise the default
+/// `<cache_dir>/caliban/debug.log` is used.
+fn resolve_debug_log_path(args: &Args) -> Option<std::path::PathBuf> {
+    if !debug_enabled(args) {
+        return None;
+    }
+    if let Some(path) = args.debug_file.clone() {
+        return Some(path);
+    }
+    dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"))
+}
+
+/// Install a file-backed `tracing` subscriber when debug logging is enabled
+/// (see [`debug_enabled`]). No-op otherwise. Idempotent once initialized:
 /// runs at most once at startup before any `tracing::*!` site fires.
 pub(crate) async fn init_debug_tracing(args: &Args) {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let debug = args.debug || std::env::var("CALIBAN_DEBUG").is_ok();
-    if !debug {
-        return;
-    }
-    let Some(log_path) = dirs::cache_dir().map(|d| d.join("caliban").join("debug.log")) else {
+    let Some(log_path) = resolve_debug_log_path(args) else {
         return;
     };
     if let Some(parent) = log_path.parent() {
@@ -1993,9 +2011,65 @@ fn apply_memory_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{last_assistant_thinking_only, stopped_for_surface_line};
+    use super::{
+        debug_enabled, last_assistant_thinking_only, resolve_debug_log_path,
+        stopped_for_surface_line,
+    };
+    use crate::args::Args;
     use caliban_agent_core::StopCondition;
     use caliban_provider::{ContentBlock, Message, Role, TextBlock, ThinkingBlock};
+    use clap::Parser as _;
+
+    /// Parse an `Args` from the given extra flags (always with `caliban` as
+    /// argv[0]). Mirrors the helper in `args.rs`'s own test module.
+    fn parse_args(extra: &[&str]) -> Args {
+        let mut argv: Vec<&str> = vec!["caliban"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn debug_disabled_without_any_flag() {
+        // Guard on the ambient env var so a dev with CALIBAN_DEBUG exported
+        // doesn't make this flake (issue #41 territory).
+        if std::env::var_os("CALIBAN_DEBUG").is_none()
+            && std::env::var_os("CALIBAN_DEBUG_FILE").is_none()
+        {
+            assert!(!debug_enabled(&parse_args(&[])));
+            assert!(resolve_debug_log_path(&parse_args(&[])).is_none());
+        }
+    }
+
+    #[test]
+    fn debug_file_override_wins() {
+        let args = parse_args(&["--debug-file", "/tmp/caliban-test.log"]);
+        assert_eq!(
+            resolve_debug_log_path(&args),
+            Some(std::path::PathBuf::from("/tmp/caliban-test.log")),
+        );
+    }
+
+    #[test]
+    fn debug_file_implies_debug_on() {
+        // No `--debug`, just `--debug-file` — logging must still turn on.
+        let args = parse_args(&["--debug-file", "/tmp/caliban-test.log"]);
+        assert!(debug_enabled(&args));
+    }
+
+    #[test]
+    fn debug_flag_keeps_default_path() {
+        let args = parse_args(&["--debug"]);
+        assert!(debug_enabled(&args));
+        // dirs::cache_dir() is Some on supported platforms; when it is, the
+        // default destination is unchanged.
+        if let Some(path) = resolve_debug_log_path(&args) {
+            assert!(
+                path.ends_with("caliban/debug.log"),
+                "default path should be <cache>/caliban/debug.log; got {}",
+                path.display()
+            );
+        }
+    }
 
     fn thinking(text: &str) -> ContentBlock {
         ContentBlock::Thinking(ThinkingBlock {
