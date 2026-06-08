@@ -130,8 +130,13 @@ pub(crate) fn centered_rect_abs(
 
 /// Display width of a line in cells (sum of its spans' character counts).
 fn line_width(line: &Line<'_>) -> u16 {
-    u16::try_from(line.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
-        .unwrap_or(u16::MAX)
+    u16::try_from(
+        line.spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>(),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 /// Estimate how many terminal rows `lines` occupy when soft-wrapped to
@@ -1309,11 +1314,13 @@ mod ask_modal_render_tests {
     fn ask_modal_action_lines_mark_only_the_selected_row() {
         let none = ask_modal_action_lines(None);
         let sel2 = ask_modal_action_lines(Some(2));
-        let text = |l: &Line<'_>| -> String {
-            l.spans.iter().map(|s| s.content.to_string()).collect()
-        };
+        let text =
+            |l: &Line<'_>| -> String { l.spans.iter().map(|s| s.content.to_string()).collect() };
         // Row indices in the returned vec: [blank, r0, r1, r2, r3, r4, blank, footer].
-        assert!(text(&sel2[3]).starts_with(" \u{25b8} "), "row 2 must be marked");
+        assert!(
+            text(&sel2[3]).starts_with(" \u{25b8} "),
+            "row 2 must be marked"
+        );
         assert!(
             text(&sel2[3]).contains("Always allow"),
             "row 2 is the always-allow row"
@@ -1345,11 +1352,7 @@ mod ask_modal_render_tests {
         term.draw(|f| render_overlay(f, &app, Overlay::AskModal))
             .unwrap();
         let text = buffer_text(&term);
-        for needle in [
-            "Always allow",
-            "Always deny",
-            "(opens scope picker)",
-        ] {
+        for needle in ["Always allow", "Always deny", "(opens scope picker)"] {
             assert!(
                 text.contains(needle),
                 "action label {needle:?} must not be truncated on a narrow terminal; rendered:\n{text}"
