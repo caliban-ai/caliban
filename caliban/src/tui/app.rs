@@ -249,23 +249,23 @@ pub(crate) struct App {
     /// IE2: messages typed by the user while a turn was already running.
     /// Drained FIFO on `RunEnd` and dispatched as the next user turn.
     /// Render path shows the front as a `QUEUED:` hint near the input.
-    /// See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// See caliban-ai/caliban#14 (queued-message drain).
     pub(crate) queued: std::collections::VecDeque<String>,
     /// IE2: set when Esc is pressed with a non-empty queue (which clears
     /// the queue rather than cancelling the running turn). A second Esc
     /// within `ESC_REARM_WINDOW` (2 s) then cancels the running turn;
-    /// otherwise the arm expires. See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// otherwise the arm expires. See caliban-ai/caliban#14 (queued-message drain).
     pub(crate) esc_armed_at: Option<std::time::Instant>,
     /// IE3: in-progress / just-completed mouse text selection on the
     /// transcript pane. Driven by `events::handle_mouse` Down/Drag/Up
     /// events; consumed by `render` for the highlight overlay and by
     /// the mouse handler on `Up(Left)` for the OSC-52 clipboard write.
-    /// See `docs/TODO.md` § TUI ergonomics § IE3.
+    /// See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
     pub(crate) mouse_selection: super::mouse_select::MouseSelection,
     /// IE3: per-frame `(row, col) → char` map built by the renderer as
     /// it lays out the transcript. Read by the mouse handler on
     /// `Up(Left)` to extract the dragged text. Reset to empty each
-    /// frame. See `docs/TODO.md` § TUI ergonomics § IE3.
+    /// frame. See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
     pub(crate) position_map: super::mouse_select::PositionMap,
     /// `/permissions` overlay state (tab, cursor, filters).
     /// The cursor is clamped to `[0, len)` on each render so removals
@@ -316,6 +316,11 @@ pub(crate) struct App {
     /// Currently-pending Ask request. While `Some(_)`, the input is locked
     /// and the modal is rendered.
     pub(crate) ask_modal: Option<ask::AskRequest>,
+    /// Highlighted row in the Ask modal's action stack (0=allow once,
+    /// 1=deny once, 2=always allow, 3=always deny, 4=Esc/deny). Driven by
+    /// Up/Down; `Enter` activates it. Reset to 0 each time a modal opens.
+    /// The bound letter keys (y/n/a/d) work regardless of this cursor.
+    pub(crate) ask_cursor: usize,
     /// Concurrent Ask requests that arrived while another modal was already
     /// open. Drained after each modal answer: each item is re-evaluated
     /// against the (potentially updated) `runtime_rules` and either
@@ -510,6 +515,7 @@ impl App {
             cost_accumulator,
             ask_rx,
             ask_modal: None,
+            ask_cursor: 0,
             ask_queue: std::collections::VecDeque::new(),
             transcript_viewer: transcript_viewer::TranscriptViewerState::default(),
             reverse_history: None,
@@ -786,7 +792,7 @@ mod tests {
     /// IE2 Task 5 (RED): App carries a FIFO queue of user-typed messages
     /// captured while a turn was running, plus a `esc_armed_at` timestamp
     /// for the two-stage Esc UX. Both empty/None on a fresh App.
-    /// See `docs/TODO.md` § TUI ergonomics § IE2.
+    /// See caliban-ai/caliban#14 (queued-message drain).
     #[test]
     fn app_initializes_queued_empty_and_esc_unarmed() {
         let app = App::for_tests();

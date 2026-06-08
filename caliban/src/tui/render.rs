@@ -87,7 +87,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     // of the same area. Done in this order so the position map reflects
     // the *original* glyphs (used for clipboard extract), and the user
     // sees the highlight over the chars they're about to copy. See
-    // `docs/TODO.md` § TUI ergonomics § IE3.
+    // the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
     let transcript_area = chunks[0];
     {
         let buf = frame.buffer_mut();
@@ -120,7 +120,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             frame.render_widget(line, chunks[2]);
         } else if let Some(text) = format_queued_indicator(&app.queued) {
             // IE2: QUEUED hint. Dim italic so it doesn't compete visually
-            // with the input bar. See `docs/TODO.md` § TUI ergonomics § IE2.
+            // with the input bar. See caliban-ai/caliban#14 (queued-message drain).
             let line = Paragraph::new(Line::from(Span::styled(
                 text,
                 Style::default()
@@ -220,7 +220,10 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     // covers the overlay underneath so the operator knows they're
     // interacting with the sub-prompt, not the original modal.
     if let Some(sp) = app.always_subprompt.as_ref() {
-        let area = super::overlay::centered_rect(70, 60, frame.area());
+        // 80%×80% gives this dense form (excerpt + suggestions + scope +
+        // comment + footer) enough vertical room that its controls stay
+        // visible on normal-height terminals (#58).
+        let area = super::overlay::centered_rect(80, 80, frame.area());
         frame.render_widget(ratatui::widgets::Clear, area);
         let (tool, input_excerpt) = match app.ask_modal.as_ref() {
             Some(req) => (req.tool_name.as_str(), req.input_summary.as_str()),
@@ -637,7 +640,7 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
 /// `map` is cleared first so each frame starts fresh. Cells whose
 /// symbol is empty or pure whitespace at the start of a run are still
 /// recorded (so selection across padding produces coherent output).
-/// See `docs/TODO.md` § TUI ergonomics § IE3.
+/// See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
 pub(crate) fn record_transcript_cells_into_position_map(
     buf: &ratatui::buffer::Buffer,
     area: Rect,
@@ -662,7 +665,7 @@ pub(crate) fn record_transcript_cells_into_position_map(
 /// from `start.col` to end-of-area on the first row, full row width
 /// on intermediate rows, and from area start to `end.col` on the
 /// last row. Order of endpoints is normalised. No-op for selections
-/// fully outside `area`. See `docs/TODO.md` § TUI ergonomics § IE3.
+/// fully outside `area`. See the TUI ergonomics design (mouse drag-select + OSC-52; shipped).
 pub(crate) fn apply_selection_highlight(
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
@@ -701,7 +704,7 @@ pub(crate) fn apply_selection_highlight(
 /// `None` for an empty queue, otherwise a single-line preview capped
 /// at `QUEUED_PREVIEW_CHARS` characters, with a `(+N more)` suffix
 /// when more than one message is queued. Caller wraps the result in
-/// a styled `Paragraph`. See `docs/TODO.md` § TUI ergonomics § IE2.
+/// a styled `Paragraph`. See caliban-ai/caliban#14 (queued-message drain).
 const QUEUED_PREVIEW_CHARS: usize = 48;
 pub(crate) fn format_queued_indicator(
     queue: &std::collections::VecDeque<String>,

@@ -119,6 +119,20 @@ impl Tool for TrackingTool {
     }
 }
 
+/// `Hooks` impl that counts how many times `before_tool` (the permission /
+/// Ask gate) fires. Used to prove the gate runs exactly once per tool call.
+struct CountingHooks {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Hooks for CountingHooks {
+    async fn before_tool(&self, _ctx: &ToolCtx<'_>) -> caliban_agent_core::Result<HookDecision> {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(HookDecision::Allow)
+    }
+}
+
 /// `Hooks` impl that denies tool calls whose name appears in `deny_names`.
 struct DenyingHooks {
     deny_names: Vec<String>,
@@ -220,6 +234,49 @@ async fn one_tool_one_turn_still_works() {
         }
     }
     assert_eq!(tool_call_ends, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn before_tool_runs_exactly_once_per_tool_call() {
+    // Regression for #58: the permission/Ask gate (`before_tool`) used to run
+    // twice per tool call — once in the serial planning gate and again inside
+    // `dispatch_tool` — so an "Ask" policy prompted the user twice. It must
+    // fire exactly once per call.
+    let mp = Arc::new(MockProvider::new());
+    mp.enqueue_stream(parallel_tool_turn(&[("t1", "sleepy_a")]));
+    mp.enqueue_stream(end_turn_events());
+
+    let mut registry = ToolRegistry::default();
+    registry.register(Arc::new(SleepyTool::new(
+        "sleepy_a",
+        Duration::from_millis(1),
+    )));
+
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hooks = Arc::new(CountingHooks {
+        count: Arc::clone(&count),
+    });
+
+    let agent = Agent::builder()
+        .provider(mp as Arc<dyn Provider + Send + Sync>)
+        .tools(registry)
+        .hooks(hooks)
+        .model("mock-model")
+        .max_tokens(64)
+        .build()
+        .unwrap();
+
+    let mut s =
+        Arc::new(agent).stream_until_done(vec![Message::user_text("hi")], CancellationToken::new());
+    while let Some(ev) = s.next().await {
+        ev.unwrap();
+    }
+
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "before_tool (permission/Ask gate) must run exactly once per tool call, not twice"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

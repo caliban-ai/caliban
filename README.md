@@ -15,8 +15,8 @@ routing, memory, skills, and prompt context.
 > permissions, checkpoints, auto-memory, image input, and a multi-tier
 > settings system are all shipped. Many small parity gaps with Claude Code
 > remain — see [`docs/parity-gap-matrix.md`](docs/parity-gap-matrix.md) for
-> the scoreboard and [`docs/TODO.md`](docs/TODO.md) for the actionable
-> backlog. Private repo, designed to be open-sourced.
+> the scoreboard and the [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1)
+> for the actionable backlog. Private repo, designed to be open-sourced.
 
 ## Why
 
@@ -219,8 +219,8 @@ synthetic request.
 | Slash command registry | ✅ | [ADR 0040](adrs/0040-slash-command-registry.md) |
 | Model router v2 (declarative routes, capability filters) | ✅ | [ADR 0038](adrs/0038-model-router-v2.md) |
 | Health-check `caliban doctor` / `/doctor` | ✅ | `caliban/src/diagnostics.rs` |
-| Cost surfacing in TUI / `/cost` slash | 🟡 backlog | [`docs/TODO.md`](docs/TODO.md) |
-| Stream-idle watchdog, MaxTokens recovery, reactive compaction | 🟡 backlog | [`docs/TODO.md`](docs/TODO.md) |
+| Cost surfacing in TUI / `/cost` slash | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
+| Stream-idle watchdog, MaxTokens recovery, reactive compaction | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
 
 `✅` = shipped on `main`. `🟡` = identified, scoped, not yet built — see
 the linked TODO entry for the exact file and suggested fix.
@@ -244,7 +244,7 @@ list with descriptions. The registry currently includes (non-exhaustive):
 - **Exit:** `/quit`, `/exit`
 
 Some entries (e.g. `/cost`, `/effort`, `/resume`) are tracked as
-backlog work in [`docs/TODO.md`](docs/TODO.md) — check there before
+backlog work in [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) — check there before
 assuming a slash listed here is fully implemented vs. registered as a
 stub.
 
@@ -548,7 +548,7 @@ caliban tracks parity against Claude Code in two living documents:
   `docs.claude.com`. Re-baselined manually before each parity review.
 
 Concrete actionable items (small enough to skip a full design spec but
-specific enough to act on) live in [`docs/TODO.md`](docs/TODO.md).
+specific enough to act on) live in [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1).
 
 ## Architecture decisions
 

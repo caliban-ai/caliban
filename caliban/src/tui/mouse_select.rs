@@ -1,6 +1,6 @@
 //! Mouse-driven text selection for the transcript pane (IE3).
 //!
-//! See `docs/TODO.md` § TUI ergonomics § IE3 for the design. This
+//! See the TUI ergonomics design (mouse drag-select + OSC-52; shipped). This
 //! module provides two orthogonal pieces:
 //!
 //! - [`PositionMap`] — a per-frame `(row, col) → str` mapping built by

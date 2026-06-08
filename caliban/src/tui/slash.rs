@@ -44,7 +44,7 @@ pub(crate) struct SlashCommandMeta {
     /// When `true`, the command can fire while a turn is in flight
     /// (IE1: it doesn't need the model). The submit handler intercepts
     /// immediate commands before the running-turn bail.
-    /// Default `false`. See `docs/TODO.md` § TUI ergonomics § IE1.
+    /// Default `false`. See caliban-ai/caliban#13 (immediate slash commands).
     pub(crate) immediate: bool,
 }
 
@@ -192,8 +192,8 @@ impl SlashCommandRegistry {
     /// (e.g. `"/context"`). Returns `None` if no command is registered
     /// under that name. Used by the [`is_immediate_slash`] classifier
     /// so the submit handler can read the `immediate` flag without
-    /// going through the full async dispatch path. See `docs/TODO.md`
-    /// § TUI ergonomics § IE1.
+    /// going through the full async dispatch path. See
+    /// caliban-ai/caliban#13 (immediate slash commands).
     pub(crate) fn lookup_meta(&self, name: &str) -> Option<&SlashCommandMeta> {
         self.by_name.get(name).map(|c| c.meta())
     }
@@ -222,8 +222,8 @@ impl SlashCommandRegistry {
 /// whitespace to extract the leading slash token (so `/context` and
 /// `/context --foo` both classify the same way). Returns `false` for
 /// empty prompts, non-slash prompts, unknown commands, or commands
-/// whose `immediate` flag is `false`. See `docs/TODO.md`
-/// § TUI ergonomics § IE1.
+/// whose `immediate` flag is `false`. See
+/// caliban-ai/caliban#13 (immediate slash commands).
 #[must_use]
 pub(crate) fn is_immediate_slash(prompt: &str, registry: &SlashCommandRegistry) -> bool {
     let name = prompt.split_whitespace().next().unwrap_or("");
@@ -389,7 +389,7 @@ mod tests {
     /// IE1 Task 3 (RED): builtin registry tags non-model-touching
     /// commands as `immediate: true` so the submit handler dispatches
     /// them during inference; agent-loop-touching commands stay
-    /// `immediate: false`. See `docs/TODO.md` § TUI ergonomics § IE1.
+    /// `immediate: false`. See caliban-ai/caliban#13 (immediate slash commands).
     #[test]
     fn known_immediate_commands_are_tagged_in_builtin_registry() {
         let r = register_builtin();

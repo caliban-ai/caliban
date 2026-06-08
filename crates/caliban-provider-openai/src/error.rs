@@ -245,7 +245,8 @@ mod tests {
     #[test]
     fn classifies_lmstudio_input_tokens_exceed_message() {
         // The exact body shape observed in production:
-        //   docs/TODO.md — context_length_exceeded against a 272K-token model
+        //   docs/2026-05-27-lmstudio-probe-findings.md — context_length_exceeded
+        //   against a 272K-token model
         let body = r#"{"error":{"message":"Input tokens exceed the configured limit of 272000 tokens. Your messages resulted in 281292 tokens. Please reduce the length of the messages.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
         assert_context_too_long(body, 272_000, 281_292);
     }

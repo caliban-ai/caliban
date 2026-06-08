@@ -13,17 +13,23 @@ use tracing::instrument;
 
 use super::StopCondition;
 use crate::agent::Agent;
-use crate::hooks::{HookDecision, ToolCtx};
+use crate::hooks::ToolCtx;
 use crate::tool::{ToolContext, ToolError};
 
 // ---------------------------------------------------------------------------
 // Helper: dispatch a single tool call
 // ---------------------------------------------------------------------------
 
-/// Dispatch one tool call: run `before_tool` hook, invoke the tool, run
+/// Dispatch one already-gated tool call: invoke the tool, then run the
 /// `after_tool` hook. Returns the [`ToolResultBlock`] (possibly synthesized
-/// for errors / denials). Returns `Err(StopCondition)` only on cancellation
-/// or a hook failure that should abort the run.
+/// for errors). Returns `Err(StopCondition)` only on cancellation.
+///
+/// The `before_tool` gate (permissions / Ask prompt / `UpdatedInput` rewrite)
+/// already ran in the serial planning phase (`stream/mod.rs` Phase 1): `input`
+/// is the effective, post-rewrite input, and denied calls were turned into
+/// `DispatchPlan::Denied` and never reach here. Re-running the gate in this
+/// phase would evaluate the policy twice and double-prompt the user for "Ask"
+/// rules (#58), so dispatch only invokes + runs `after_tool`.
 #[instrument(skip(agent, input, cancel), fields(tool = tool_name, id = tool_use_id))]
 pub(crate) async fn dispatch_tool(
     agent: &Agent,
@@ -37,7 +43,7 @@ pub(crate) async fn dispatch_tool(
         return Err(StopCondition::Cancelled);
     }
 
-    // Keep `input` alive through all hook calls by cloning for the invoke call.
+    // Borrow `input` for the after_tool ctx; cloned into the invoke call below.
     let tool_ctx = ToolCtx {
         turn_index,
         tool_use_id,
@@ -45,55 +51,8 @@ pub(crate) async fn dispatch_tool(
         input: &input,
     };
 
-    // before_tool hook
-    let decision = agent
-        .hooks
-        .before_tool(&tool_ctx)
-        .await
-        .map_err(|e| StopCondition::HookDenied(format!("before_tool hook failed: {e}")))?;
-
-    // Choose the effective input: `UpdatedInput` overrides the original.
-    let mut effective_input = input.clone();
-    let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> = match decision {
-        HookDecision::Deny(msg) => {
-            let content = vec![ContentBlock::Text(TextBlock {
-                text: format!("Tool call denied: {msg}"),
-                cache_control: None,
-            })];
-            // Inform the after_tool hook about the denial.
-            let denial_err = ToolError::execution(std::io::Error::other(format!("denied: {msg}")));
-            if let Err(e) = agent.hooks.after_tool(&tool_ctx, &Err(denial_err)).await {
-                tracing::warn!(tool = tool_name, error = %e, "after_tool hook error (non-fatal)");
-            }
-            return Ok(ToolResultBlock {
-                tool_use_id: tool_use_id.to_string(),
-                content,
-                is_error: true,
-            });
-        }
-        HookDecision::UpdatedInput(new_input) => {
-            tracing::info!(
-                tool = tool_name,
-                tool_use_id,
-                "hook.updated_input: tool input rewritten by before_tool hook"
-            );
-            effective_input = new_input;
-            match agent.tools.get(tool_name) {
-                None => Err(ToolError::invalid_input(format!(
-                    "tool not found: {tool_name}"
-                ))),
-                Some(tool) => {
-                    let cx = ToolContext {
-                        tool_use_id: tool_use_id.to_string(),
-                        cancel: cancel.clone(),
-                        hooks: Some(Arc::clone(&agent.hooks)),
-                        turn_index,
-                    };
-                    tool.invoke(effective_input.clone(), cx).await
-                }
-            }
-        }
-        HookDecision::Allow => match agent.tools.get(tool_name) {
+    let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> =
+        match agent.tools.get(tool_name) {
             None => Err(ToolError::invalid_input(format!(
                 "tool not found: {tool_name}"
             ))),
@@ -104,13 +63,9 @@ pub(crate) async fn dispatch_tool(
                     hooks: Some(Arc::clone(&agent.hooks)),
                     turn_index,
                 };
-                // Clone `input` so the borrow on `tool_ctx` remains valid for after_tool.
                 tool.invoke(input.clone(), cx).await
             }
-        },
-    };
-    // Reference effective_input to silence dead-code in the Deny arm.
-    let _ = &effective_input;
+        };
 
     // after_tool hook (non-fatal; errors are logged by tracing, not propagated)
     if let Err(e) = agent.hooks.after_tool(&tool_ctx, &invoke_result).await {

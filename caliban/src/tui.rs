@@ -236,7 +236,7 @@ pub(crate) async fn run(
         // The submit handler re-applies IE1 / running-check / shell /
         // hooks / slash / message-build / stream-start identically to
         // what happens on a real Enter, so all invariants are preserved.
-        // See `docs/TODO.md` § TUI ergonomics § IE2.
+        // See caliban-ai/caliban#14 (queued-message drain).
         if app.running.is_none()
             && !app.queued.is_empty()
             && let Some(text) = events::drain_one_queued(&mut app)
@@ -309,6 +309,7 @@ pub(crate) async fn run(
                         app.ask_queue.push_back(req);
                     } else {
                         app.ask_modal = Some(req);
+                        app.ask_cursor = 0;
                         app.view = ViewState::Overlay(Overlay::AskModal);
                         app.auto_scroll = false;
                     }
