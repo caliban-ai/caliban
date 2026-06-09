@@ -59,6 +59,40 @@ caliban appends events and draws to a file under the platform's cache
 directory (e.g. `~/.cache/caliban/debug.log` on Linux,
 `~/Library/Caches/caliban/debug.log` on macOS).
 
+### Test coverage
+
+`scripts/coverage.sh` measures workspace line coverage with
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) and fails when
+it drops below the floor (currently **75%**, defined as `COVERAGE_MIN` in
+the script — measured baseline is ~79%, ratcheted up over time). CI runs
+this exact script, so local and CI results match.
+
+```bash
+cargo install cargo-llvm-cov --locked        # one-time
+rustup component add llvm-tools-preview       # one-time (provides llvm-cov/llvm-profdata)
+
+scripts/coverage.sh            # lcov + json under target/llvm-cov/, enforce floor
+scripts/coverage.sh --open     # also render and open the HTML report
+COVERAGE_MIN=80 scripts/coverage.sh   # try a higher floor before ratcheting it up
+```
+
+On pull requests, CI posts a sticky **coverage comment** — overall stats, a
+per-crate breakdown, and the files with the most uncovered lines — and adds the
+same report to the job summary. To preview that comment locally:
+
+```bash
+scripts/coverage.sh                                   # writes target/llvm-cov/coverage.json
+python3 scripts/coverage-report.py | glow -           # or pipe to any Markdown viewer
+```
+
+On a Homebrew Rust toolchain (no `rustup` component support), point
+cargo-llvm-cov at Homebrew's LLVM instead:
+
+```bash
+export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
+export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+```
+
 ## Quick start
 
 ### One-shot prompt
@@ -515,9 +549,13 @@ boilerplate.
 
 Pull-request CI runs `cargo fmt --check`, `cargo clippy --workspace
 --all-targets -- -D warnings`, `cargo build --workspace --all-targets`,
-and `cargo test --workspace` against the default feature set. Docs-only
-changes (`**.md`, `docs/**`, `LICENSE`, `.github/ISSUE_TEMPLATE/**`)
-skip CI entirely.
+and `cargo test --workspace` against the default feature set. A separate
+**line-coverage gate** job runs `scripts/coverage.sh`, which fails the
+build if workspace line coverage falls below its `COVERAGE_MIN` floor. It
+also posts a sticky coverage comment on the PR, adds the report to the job
+summary, and uploads the LCOV + JSON reports as the `coverage-reports`
+artifact. Docs-only changes (`**.md`, `docs/**`, `LICENSE`,
+`.github/ISSUE_TEMPLATE/**`) skip CI entirely.
 
 Cloud transports (`caliban-provider-anthropic/{bedrock,vertex}`,
 `caliban-provider-openai/azure`, `caliban-provider-google/vertex`) are

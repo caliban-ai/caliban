@@ -83,6 +83,71 @@ jobs:
         if: steps.changes.outputs.code != 'true'
         run: echo "Only docs/markdown/license changed; skipping cargo fmt/clippy/build/test."
 
+  coverage:
+    name: line-coverage gate
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Needed for the sticky coverage comment on pull requests.
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      # llvm-tools-preview provides llvm-cov / llvm-profdata, which
+      # cargo-llvm-cov drives. On CI this comes from rustup (unlike the
+      # Homebrew-toolchain workaround documented in scripts/coverage.sh).
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        if: needs.check.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo registry & target
+        if: needs.check.outputs.code == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        if: needs.check.outputs.code == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # scripts/coverage.sh is the single entrypoint: it writes the LCOV + JSON
+      # reports, then fails when line coverage drops below its COVERAGE_MIN floor.
+      # The reports are written before the gate, so the comment/summary steps
+      # below still run (via !cancelled()) and report on a failing run too.
+      - name: Run coverage gate
+        if: needs.check.outputs.code == 'true'
+        run: scripts/coverage.sh
+      # Render the JSON export into Markdown once and reuse it for both the job
+      # summary (visible on every run, incl. push) and the sticky PR comment.
+      - name: Render coverage report
+        if: ${{ !cancelled() && needs.check.outputs.code == 'true' }}
+        run: |
+          python3 scripts/coverage-report.py target/llvm-cov/coverage.json \
+            --commit "${{ github.sha }}" > coverage-comment.md
+          cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
+      # Post/update a single sticky comment on PRs. Skipped for forks, whose
+      # GITHUB_TOKEN is read-only and can't comment.
+      - name: Post coverage comment
+        if: ${{ !cancelled() && needs.check.outputs.code == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          path: coverage-comment.md
+      - name: Upload coverage reports
+        if: ${{ !cancelled() && needs.check.outputs.code == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            target/llvm-cov/lcov.info
+            target/llvm-cov/coverage.json
+          if-no-files-found: error
+      - name: Docs-only change — coverage skipped
+        if: needs.check.outputs.code != 'true'
+        run: echo "Only docs/markdown/license changed; skipping coverage."
+
   package-check:
     name: cargo publish --workspace --dry-run
     needs: check
