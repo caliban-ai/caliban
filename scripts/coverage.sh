@@ -40,9 +40,12 @@ cd "$(dirname "$0")/.."
 # (.github/workflows/ci.yml) calls this script without overriding COVERAGE_MIN,
 # so this default governs both local and CI runs. Start at/just below the
 # current measured coverage and ratchet upward over time as tests are added.
-# Baseline measured 2026-06-08 was 78.61% line coverage; floor set a few points
-# below to absorb cross-environment/nondeterministic variance, then ratchet up.
-COVERAGE_MIN="${COVERAGE_MIN:-75}"
+#
+# Ratchet history (issue #68, target 85%):
+#   75  initial rollout — a few points below the 78.61% baseline (2026-06-08)
+#   80  step 1 — CLI subcommand + diagnostics test coverage (measured ~81%);
+#       `src/bin` process entrypoints excluded from the denominator (see below)
+COVERAGE_MIN="${COVERAGE_MIN:-80}"
 
 DO_HTML=0
 DO_OPEN=0
@@ -81,6 +84,14 @@ run() {
     "$@"
 }
 
+# Process entrypoints (daemon / `src/bin` mains) are excluded from the
+# coverage denominator: they wire signal handlers and block on an event
+# loop, so unit/integration coverage is low-value and would only depress
+# the ratio. This matches `cargo test`, which never executes a bin `main`.
+# The agent binary's own entrypoint (caliban/src/main.rs) is intentionally
+# NOT excluded — its routing/dispatch logic is testable.
+IGNORE_REGEX='/src/bin/'
+
 OUT_DIR="target/llvm-cov"
 LCOV_PATH="$OUT_DIR/lcov.info"
 JSON_PATH="$OUT_DIR/coverage.json"
@@ -94,14 +105,14 @@ echo "coverage floor: ${COVERAGE_MIN}% line coverage (COVERAGE_MIN)"
 # check.sh / ci.yml) and write the LCOV artifact. The threshold is enforced as a
 # separate final step below, so the reports always exist even when the gate fails
 # — that's exactly when the PR comment / gap report is most useful.
-run cargo llvm-cov --workspace --lcov --output-path "$LCOV_PATH"
+run cargo llvm-cov --workspace --ignore-filename-regex "$IGNORE_REGEX" --lcov --output-path "$LCOV_PATH"
 
 # JSON export that scripts/coverage-report.py renders into the Markdown PR
 # comment / job summary. Reuses the profile data above (no re-test).
-run cargo llvm-cov report --json --output-path "$JSON_PATH"
+run cargo llvm-cov report --ignore-filename-regex "$IGNORE_REGEX" --json --output-path "$JSON_PATH"
 
 if [[ $DO_HTML -eq 1 ]]; then
-    run cargo llvm-cov report --html --output-dir "$OUT_DIR"
+    run cargo llvm-cov report --ignore-filename-regex "$IGNORE_REGEX" --html --output-dir "$OUT_DIR"
     echo "HTML report: $OUT_DIR/html/index.html"
     if [[ $DO_OPEN -eq 1 ]]; then
         open "$OUT_DIR/html/index.html" 2>/dev/null \
@@ -116,5 +127,5 @@ echo "coverage reports written to $LCOV_PATH and $JSON_PATH"
 # Gate last: reuses the gathered data to print the summary table and fail when
 # line coverage is under the floor. Reports above are already on disk.
 if [[ $DO_FAIL -eq 1 ]]; then
-    run cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_MIN"
+    run cargo llvm-cov report --summary-only --ignore-filename-regex "$IGNORE_REGEX" --fail-under-lines "$COVERAGE_MIN"
 fi
