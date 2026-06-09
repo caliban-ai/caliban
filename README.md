@@ -63,8 +63,8 @@ directory (e.g. `~/.cache/caliban/debug.log` on Linux,
 
 `scripts/coverage.sh` measures workspace line coverage with
 [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) and fails when
-it drops below the floor (currently **80%**, defined as `COVERAGE_MIN` in
-the script — ratcheted up over time toward an 85% target, issue #68). CI runs
+it drops below the floor (currently **85%**, defined as `COVERAGE_MIN` in
+the script — ratcheted up over time from the ~79% baseline, issue #68). CI runs
 this exact script, so local and CI results match. Process entrypoints under
 `src/bin/` (daemon mains) are excluded from the measured denominator.
 
@@ -74,7 +74,7 @@ rustup component add llvm-tools-preview       # one-time (provides llvm-cov/llvm
 
 scripts/coverage.sh            # lcov + json under target/llvm-cov/, enforce floor
 scripts/coverage.sh --open     # also render and open the HTML report
-COVERAGE_MIN=85 scripts/coverage.sh   # try a higher floor before ratcheting it up
+COVERAGE_MIN=90 scripts/coverage.sh   # try a higher floor before ratcheting it up
 ```
 
 On pull requests, CI posts a sticky **coverage comment** — overall stats, a

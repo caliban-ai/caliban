@@ -378,4 +378,126 @@ mod tests {
         assert!(demo.enabled);
         assert!(!off.enabled);
     }
+
+    #[test]
+    fn list_empty_when_nothing_installed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli = make_cli(tmp.path());
+        let rows = cli.list().unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn list_reports_invalid_manifest_as_failure_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli = make_cli(tmp.path());
+        // A plugin dir with malformed JSON becomes a failure row, not a load.
+        let dir = cli.user_install_dir.join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), "{ not json").unwrap();
+        let rows = cli.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "broken");
+        assert_eq!(rows[0].version, "?");
+        assert!(!rows[0].enabled);
+        assert!(rows[0].summary.starts_with("invalid:"));
+    }
+
+    #[test]
+    fn list_discovers_project_scope_plugin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli = make_cli(tmp.path());
+        let project_root = cli.workspace_root.join(".caliban").join("plugins");
+        std::fs::create_dir_all(&project_root).unwrap();
+        make_plugin(&project_root, "proj");
+        let rows = cli.list().unwrap();
+        let row = rows.iter().find(|r| r.name == "proj").unwrap();
+        assert_eq!(row.source, "project");
+    }
+
+    #[test]
+    fn list_summary_counts_skill_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli = make_cli(tmp.path());
+        make_plugin(&cli.user_install_dir, "demo");
+        // Auto-discovered skills/ subdirectory contributes to the summary.
+        let skills = cli.user_install_dir.join("demo").join("skills");
+        std::fs::create_dir_all(skills.join("alpha")).unwrap();
+        std::fs::create_dir_all(skills.join("beta")).unwrap();
+        let rows = cli.list().unwrap();
+        let row = rows.iter().find(|r| r.name == "demo").unwrap();
+        assert!(row.summary.contains("2 skills"), "summary={}", row.summary);
+    }
+
+    #[test]
+    fn info_serializes_full_manifest_fields() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli = make_cli(tmp.path());
+        let dir = cli.user_install_dir.join("rich");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{ "name": "rich", "version": "2.3.4", "description": "d", "author": "a", "license": "MIT" }"#,
+        )
+        .unwrap();
+        let v = cli.info("rich").unwrap();
+        assert_eq!(v["version"], "2.3.4");
+        assert_eq!(v["author"], "a");
+        assert_eq!(v["license"], "MIT");
+    }
+
+    #[test]
+    fn remove_missing_plugin_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cli = make_cli(tmp.path());
+        let err = cli.remove("ghost").unwrap_err();
+        assert!(matches!(err, PluginError::PluginNotFound { .. }));
+    }
+
+    #[test]
+    fn remove_without_trust_record_still_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cli = make_cli(tmp.path());
+        make_plugin(&cli.user_install_dir, "demo");
+        // No trust record recorded; forget() on a missing key is a no-op.
+        cli.remove("demo").unwrap();
+        assert!(!cli.user_install_dir.join("demo").exists());
+    }
+
+    #[tokio::test]
+    async fn update_unknown_plugin_errors_without_network() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cli = make_cli(tmp.path());
+        // No trust record for "ghost" => fails before any network call.
+        let err = cli.update("ghost", false).await.unwrap_err();
+        assert!(matches!(err, PluginError::PluginNotFound { .. }));
+    }
+
+    #[test]
+    fn version_lte_semver_ordering() {
+        assert!(version_lte("1.0.0", "1.0.0"));
+        assert!(version_lte("1.0.0", "1.0.1"));
+        assert!(!version_lte("1.0.1", "1.0.0"));
+        // Non-semver falls back to string equality.
+        assert!(version_lte("nope", "nope"));
+        assert!(!version_lte("nope", "other"));
+    }
+
+    #[test]
+    fn plural_suffix() {
+        assert_eq!(plural(1), "");
+        assert_eq!(plural(0), "s");
+        assert_eq!(plural(2), "s");
+    }
+
+    #[test]
+    fn count_dir_counts_entries_and_handles_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), "x").unwrap();
+        std::fs::write(dir.join("b"), "y").unwrap();
+        assert_eq!(count_dir(&dir), 2);
+        assert_eq!(count_dir(&tmp.path().join("missing")), 0);
+    }
 }

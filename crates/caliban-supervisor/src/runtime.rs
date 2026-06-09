@@ -85,4 +85,137 @@ mod tests {
         assert!(p.starts_with("/tmp/runtime"));
         assert!(p.extension().is_some_and(|e| e == "sock"));
     }
+
+    #[test]
+    fn repo_hash_is_lowercase_hex() {
+        let h = repo_hash(Path::new("/some/repo/root"));
+        assert_eq!(h.len(), 16);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+    }
+
+    #[test]
+    fn socket_filename_is_repo_hash_dot_sock() {
+        let dir = PathBuf::from("/tmp/rt");
+        let repo = Path::new("/repo/here");
+        let p = repo_socket_path_in(&dir, repo);
+        let expected = format!("{}.sock", repo_hash(repo));
+        assert_eq!(p.file_name().unwrap().to_str().unwrap(), expected);
+    }
+
+    // The env-mutating tests below share process-global state
+    // (`std::env::set_var`), so they must not run concurrently with each
+    // other. A static mutex serializes them; each restores prior values.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        #[allow(unsafe_code)]
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: all env mutation in these tests is serialized by
+            // ENV_LOCK, so no other thread observes a torn read/write.
+            unsafe { std::env::set_var(key, val) };
+            Self { key, prev }
+        }
+
+        #[allow(unsafe_code)]
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: all env mutation in these tests is serialized by
+            // ENV_LOCK, so no other thread observes a torn read/write.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: all env mutation in these tests is serialized by
+            // ENV_LOCK, so no other thread observes a torn read/write.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_runtime_dir_prefers_caliban_env() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("CALIBAN_DAEMON_RUNTIME_DIR", "/custom/rt");
+        let _x = EnvGuard::set("XDG_RUNTIME_DIR", "/xdg");
+        assert_eq!(default_runtime_dir(), PathBuf::from("/custom/rt"));
+    }
+
+    #[test]
+    fn default_runtime_dir_falls_back_to_xdg() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::unset("CALIBAN_DAEMON_RUNTIME_DIR");
+        let _x = EnvGuard::set("XDG_RUNTIME_DIR", "/xdg-run");
+        assert_eq!(default_runtime_dir(), PathBuf::from("/xdg-run/caliban"));
+    }
+
+    #[test]
+    fn default_runtime_dir_ignores_empty_caliban_env() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("CALIBAN_DAEMON_RUNTIME_DIR", "");
+        let _x = EnvGuard::set("XDG_RUNTIME_DIR", "/xdg-run2");
+        // Empty caliban var must be skipped, falling through to XDG.
+        assert_eq!(default_runtime_dir(), PathBuf::from("/xdg-run2/caliban"));
+    }
+
+    #[test]
+    fn default_runtime_dir_ignores_empty_xdg() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::unset("CALIBAN_DAEMON_RUNTIME_DIR");
+        let _x = EnvGuard::set("XDG_RUNTIME_DIR", "");
+        // Both unusable -> temp_dir based fallback.
+        let got = default_runtime_dir();
+        assert_eq!(got, std::env::temp_dir().join("caliban-daemon"));
+    }
+
+    #[test]
+    fn default_runtime_dir_falls_back_to_tmp() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::unset("CALIBAN_DAEMON_RUNTIME_DIR");
+        let _x = EnvGuard::unset("XDG_RUNTIME_DIR");
+        assert_eq!(
+            default_runtime_dir(),
+            std::env::temp_dir().join("caliban-daemon")
+        );
+    }
+
+    #[test]
+    fn repo_socket_path_uses_default_runtime_dir() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("CALIBAN_DAEMON_RUNTIME_DIR", "/rt/base");
+        let repo = Path::new("/some/repo");
+        let p = repo_socket_path(repo);
+        assert_eq!(
+            p,
+            PathBuf::from("/rt/base").join(format!("{}.sock", repo_hash(repo)))
+        );
+    }
 }

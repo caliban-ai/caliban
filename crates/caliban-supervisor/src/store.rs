@@ -182,4 +182,195 @@ mod tests {
         store.remove("z").unwrap();
         assert!(store.load_manifest("z").unwrap().is_none());
     }
+
+    #[test]
+    fn write_manifest_preserves_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let mut rec = fake_record("full");
+        rec.status = AgentStatus::Running;
+        rec.session_dir = PathBuf::from("/data/sessions/full");
+        rec.socket_path = PathBuf::from("/data/sessions/full/agent.sock");
+        rec.spec = SpawnSpec {
+            label: Some("worker".into()),
+            frontmatter_path: Some(PathBuf::from("/fm/agent.md")),
+            initial_prompt: "do the thing".into(),
+            model: Some("opus".into()),
+            tool_allowlist: Some(vec!["read".into(), "write".into()]),
+            isolation_worktree: true,
+            inherit_hooks: false,
+        };
+        store.write_manifest(&rec).unwrap();
+
+        let loaded = store.load_manifest("full").unwrap().unwrap();
+        assert_eq!(loaded.id, "full");
+        assert_eq!(loaded.status, AgentStatus::Running);
+        assert_eq!(loaded.started_at, rec.started_at);
+        assert_eq!(loaded.session_dir, PathBuf::from("/data/sessions/full"));
+        assert_eq!(
+            loaded.socket_path,
+            PathBuf::from("/data/sessions/full/agent.sock")
+        );
+        assert_eq!(loaded.spec.label.as_deref(), Some("worker"));
+        assert_eq!(
+            loaded.spec.frontmatter_path,
+            Some(PathBuf::from("/fm/agent.md"))
+        );
+        assert_eq!(loaded.spec.initial_prompt, "do the thing");
+        assert_eq!(loaded.spec.model.as_deref(), Some("opus"));
+        assert_eq!(
+            loaded.spec.tool_allowlist,
+            Some(vec!["read".into(), "write".into()])
+        );
+        assert!(loaded.spec.isolation_worktree);
+        assert!(!loaded.spec.inherit_hooks);
+    }
+
+    #[test]
+    fn write_manifest_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let mut rec = fake_record("over");
+        store.write_manifest(&rec).unwrap();
+        rec.status = AgentStatus::Done;
+        rec.name = "renamed".into();
+        store.write_manifest(&rec).unwrap();
+
+        let loaded = store.load_manifest("over").unwrap().unwrap();
+        assert_eq!(loaded.status, AgentStatus::Done);
+        assert_eq!(loaded.name, "renamed");
+    }
+
+    #[test]
+    fn load_manifest_absent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        assert!(store.load_manifest("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn load_manifest_corrupt_json_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let sdir = store.ensure_dir("bad").unwrap();
+        fs::write(sdir.join("manifest.json"), b"{ not valid json").unwrap();
+
+        let err = store.load_manifest("bad").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn load_manifest_wrong_schema_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let sdir = store.ensure_dir("schema").unwrap();
+        // Valid JSON, but missing required AgentRecord fields.
+        fs::write(sdir.join("manifest.json"), br#"{"id":"schema"}"#).unwrap();
+
+        assert!(store.load_manifest("schema").is_err());
+    }
+
+    #[test]
+    fn list_empty_when_base_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("does-not-exist"));
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_empty_when_base_present_but_no_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("agents");
+        fs::create_dir_all(&base).unwrap();
+        let store = AgentStore::new(base);
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_ignores_non_dir_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("agents");
+        let store = AgentStore::new(&base);
+        store.write_manifest(&fake_record("real")).unwrap();
+        // A stray file directly under base should be skipped.
+        fs::write(base.join("stray.txt"), b"junk").unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "real");
+    }
+
+    #[test]
+    fn list_skips_dirs_without_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("agents");
+        let store = AgentStore::new(&base);
+        store.write_manifest(&fake_record("has")).unwrap();
+        // A session dir with no manifest.json must be skipped silently.
+        fs::create_dir_all(base.join("empty-dir")).unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "has");
+    }
+
+    #[test]
+    fn remove_nonexistent_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        // Must not error even though the dir was never created.
+        store.remove("ghost").unwrap();
+    }
+
+    #[test]
+    fn ensure_dir_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let first = store.ensure_dir("idem").unwrap();
+        let second = store.ensure_dir("idem").unwrap();
+        assert_eq!(first, second);
+        assert!(first.is_dir());
+        assert_eq!(first, store.session_dir("idem"));
+    }
+
+    #[test]
+    fn base_and_session_dir_paths() {
+        let base = std::env::temp_dir().join("caliban-test-base");
+        let store = AgentStore::new(&base);
+        assert_eq!(store.base(), base.as_path());
+        assert_eq!(store.session_dir("k"), base.join("k"));
+    }
+
+    #[test]
+    fn default_for_includes_projects_and_agents_and_sanitizes() {
+        let store = AgentStore::default_for(Path::new("/home/me/my repo"));
+        let base = store.base();
+        let s = base.to_string_lossy();
+        assert!(s.ends_with("agents"), "got: {s}");
+        assert!(s.contains("projects"), "got: {s}");
+        // The space in "my repo" must be sanitized away (no raw space).
+        let sanitized_component = base
+            .components()
+            .nth_back(1)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap();
+        assert!(
+            !sanitized_component.contains(' '),
+            "got: {sanitized_component}"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_keeps_safe_chars_and_replaces_others() {
+        let out = sanitize_path(Path::new("/a-b_c.9/x y!z"));
+        // Slash, space, and '!' become '-'; alnum + . - _ are kept.
+        assert!(
+            out.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        );
+        assert!(out.contains("a-b_c.9"));
+        assert!(!out.contains(' '));
+        assert!(!out.contains('/'));
+        assert!(!out.contains('!'));
+    }
 }

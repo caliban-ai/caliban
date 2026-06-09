@@ -1096,6 +1096,440 @@ fn audit_log_exists() -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod overlay_render_tests {
+    use super::*;
+    use crate::tui::App;
+    use crate::tui::reverse_history::ReverseHistoryState;
+    use caliban_provider::Message;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    /// Flatten a slice of lines into one `\n`-joined string for substring
+    /// assertions on the logical (pre-wrap) content.
+    fn join_lines(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Flatten the rendered backbuffer into one string for "is this visible?"
+    /// substring assertions.
+    fn buffer_text(term: &Terminal<TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    // ---- Overlay enum mappers -------------------------------------------
+
+    #[test]
+    fn overlay_title_and_short_name_cover_every_variant() {
+        let variants = [
+            Overlay::SlashHelp,
+            Overlay::Config,
+            Overlay::Mcp,
+            Overlay::Skills,
+            Overlay::System,
+            Overlay::TranscriptViewer,
+            Overlay::ReverseHistory,
+            Overlay::AskModal,
+            Overlay::Rewind,
+            Overlay::Permissions,
+        ];
+        for v in variants {
+            assert!(!v.title().is_empty(), "title must be non-empty: {v:?}");
+            assert!(
+                !v.short_name().is_empty(),
+                "short_name must be non-empty: {v:?}"
+            );
+        }
+        // Spot-check a couple of specific mappings.
+        assert_eq!(Overlay::Config.title(), "Configuration");
+        assert_eq!(Overlay::Mcp.short_name(), "mcp");
+        assert_eq!(Overlay::Permissions.title(), "Permissions");
+    }
+
+    // ---- Geometry helpers ------------------------------------------------
+
+    #[test]
+    fn centered_rect_is_inside_and_centered() {
+        let outer = Rect::new(0, 0, 100, 100);
+        let inner = centered_rect(80, 80, outer);
+        assert!(inner.width <= outer.width && inner.height <= outer.height);
+        // 80% of 100 cells.
+        assert_eq!(inner.width, 80);
+        assert_eq!(inner.height, 80);
+        // Centered: 10-cell margin on each side.
+        assert_eq!(inner.x, 10);
+        assert_eq!(inner.y, 10);
+    }
+
+    #[test]
+    fn centered_rect_abs_clamps_to_outer_and_centers() {
+        let outer = Rect::new(0, 0, 40, 20);
+        // Requested size fits.
+        let r = centered_rect_abs(20, 10, outer);
+        assert_eq!(r.width, 20);
+        assert_eq!(r.height, 10);
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 5);
+        // Requested size larger than outer → clamped to outer dimensions.
+        let big = centered_rect_abs(999, 999, outer);
+        assert_eq!(big.width, 40);
+        assert_eq!(big.height, 20);
+        assert_eq!(big.x, 0);
+        assert_eq!(big.y, 0);
+    }
+
+    #[test]
+    fn centered_rect_abs_respects_outer_origin_offset() {
+        let outer = Rect::new(10, 4, 40, 20);
+        let r = centered_rect_abs(10, 6, outer);
+        // x = 10 + (40-10)/2 = 25; y = 4 + (20-6)/2 = 11.
+        assert_eq!(r.x, 25);
+        assert_eq!(r.y, 11);
+    }
+
+    // ---- line_width / wrapped_height ------------------------------------
+
+    #[test]
+    fn line_width_sums_span_char_counts() {
+        let line = Line::from(vec![Span::raw("abc"), Span::raw("déf")]);
+        // 3 + 3 chars (é counts as one char).
+        assert_eq!(line_width(&line), 6);
+        assert_eq!(line_width(&Line::raw("")), 0);
+    }
+
+    #[test]
+    fn wrapped_height_counts_rows_per_wrap_width() {
+        let lines = vec![Line::raw("0123456789"), Line::raw("")];
+        // 10-char line at width 4 → ceil(10/4)=3 rows; empty line → min 1 row.
+        assert_eq!(wrapped_height(&lines, 4), 4);
+        // A line shorter than width is a single row.
+        assert_eq!(wrapped_height(&[Line::raw("ab")], 10), 1);
+    }
+
+    #[test]
+    fn wrapped_height_zero_width_falls_back_to_line_count() {
+        let lines = vec![Line::raw("x"), Line::raw("y"), Line::raw("z")];
+        assert_eq!(wrapped_height(&lines, 0), 3);
+    }
+
+    // ---- clone_lines -----------------------------------------------------
+
+    #[test]
+    fn clone_lines_preserves_content_and_style() {
+        let style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let src = vec![Line::from(vec![Span::styled("hello", style)])];
+        let cloned = clone_lines(&src);
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned[0].spans[0].content.as_ref(), "hello");
+        assert_eq!(cloned[0].spans[0].style, style);
+    }
+
+    // ---- reverse_history_lines ------------------------------------------
+
+    #[test]
+    fn reverse_history_lines_empty_when_no_active_search() {
+        let app = App::for_tests();
+        let lines = reverse_history_lines(&app);
+        assert!(join_lines(&lines).contains("(no active search)"));
+    }
+
+    #[test]
+    fn reverse_history_lines_show_scope_query_and_matches() {
+        let mut app = App::for_tests();
+        let mut state = ReverseHistoryState::new(
+            vec!["git status".into(), "git push".into(), "echo hi".into()],
+            None,
+            None,
+        );
+        for c in "git".chars() {
+            state.push_char(c);
+        }
+        app.reverse_history = Some(state);
+        let joined = join_lines(&reverse_history_lines(&app));
+        assert!(joined.contains("scope: session"));
+        assert!(joined.contains("query: git"));
+        assert!(joined.contains("git push"));
+        assert!(joined.contains("git status"));
+        assert!(!joined.contains("echo hi"));
+        assert!(joined.contains("Enter: accept"));
+    }
+
+    #[test]
+    fn reverse_history_lines_no_matches_branch() {
+        let mut app = App::for_tests();
+        let mut state = ReverseHistoryState::new(vec!["alpha".into(), "beta".into()], None, None);
+        for c in "zzz".chars() {
+            state.push_char(c);
+        }
+        app.reverse_history = Some(state);
+        assert!(join_lines(&reverse_history_lines(&app)).contains("(no matches)"));
+    }
+
+    // ---- ask_modal_body_lines / ask_modal_lines -------------------------
+
+    #[test]
+    fn ask_modal_body_lines_empty_when_no_pending_ask() {
+        let app = App::for_tests();
+        assert!(join_lines(&ask_modal_body_lines(&app)).contains("(no pending ask)"));
+    }
+
+    #[test]
+    fn ask_modal_lines_combine_body_and_actions() {
+        use crate::tui::ask::AskRequest;
+        let mut app = App::for_tests();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        app.ask_modal = Some(AskRequest {
+            tool_name: "Write".into(),
+            input_summary: "path=/tmp/x".into(),
+            always_pattern: "Write(/tmp/*)".into(),
+            tool_input: serde_json::json!({"path": "/tmp/x"}),
+            respond: tx,
+        });
+        let joined = join_lines(&ask_modal_lines(&app));
+        assert!(joined.contains("Tool: "));
+        assert!(joined.contains("Write"));
+        assert!(joined.contains("path=/tmp/x"));
+        assert!(joined.contains("Write(/tmp/*)"));
+        // Action rows appended.
+        assert!(joined.contains("Allow once"));
+        assert!(joined.contains("[Esc]"));
+    }
+
+    // ---- slash_help_lines -----------------------------------------------
+
+    #[test]
+    fn slash_help_lines_list_commands_and_key_help() {
+        let app = App::for_tests();
+        let joined = join_lines(&slash_help_lines(&app.slash_registry));
+        assert!(joined.contains("Keyboard"));
+        assert!(joined.contains("Submit prompt or slash command"));
+        assert!(joined.contains("Press q or Esc to close"));
+        // The registry should expose at least one visible command.
+        assert!(!app.slash_registry.visible_metas().is_empty());
+    }
+
+    // ---- config_lines ----------------------------------------------------
+
+    #[test]
+    fn config_lines_render_core_fields() {
+        let app = App::for_tests();
+        let joined = join_lines(&config_lines(&app));
+        assert!(joined.contains("Provider"));
+        assert!(joined.contains("Model"));
+        assert!(joined.contains("Max tokens"));
+        assert!(joined.contains("Workspace root"));
+        assert!(joined.contains("Tools"));
+        // No session in for_tests → ephemeral marker.
+        assert!(joined.contains("ephemeral"));
+        assert!(joined.contains("Press q or Esc to close"));
+    }
+
+    // ---- mcp_lines -------------------------------------------------------
+
+    #[test]
+    fn mcp_lines_empty_state_shows_config_help() {
+        let app = App::for_tests();
+        let joined = join_lines(&mcp_lines(&app));
+        assert!(joined.contains("No MCP servers configured."));
+        assert!(joined.contains("(project)"));
+        assert!(joined.contains("[server.silverbullet]"));
+    }
+
+    #[test]
+    fn mcp_lines_populated_renders_each_status_variant() {
+        use caliban_mcp_client::{ServerStatus, ServerSummary};
+        let mut app = App::for_tests();
+        app.mcp_servers = vec![
+            ServerSummary {
+                name: "alpha".into(),
+                status: ServerStatus::Connected { tools: 1 },
+                transport: "stdio",
+            },
+            ServerSummary {
+                name: "beta".into(),
+                status: ServerStatus::Failed {
+                    reason: "boom".into(),
+                },
+                transport: "http",
+            },
+            ServerSummary {
+                name: "gamma".into(),
+                status: ServerStatus::Disabled,
+                transport: "sse",
+            },
+        ];
+        let joined = join_lines(&mcp_lines(&app));
+        assert!(joined.contains("MCP servers:"));
+        assert!(joined.contains("alpha"));
+        // Singular "tool" (no s) when exactly one.
+        assert!(joined.contains("connected — 1 tool"));
+        assert!(!joined.contains("1 tools"));
+        assert!(joined.contains("failed: boom"));
+        assert!(joined.contains("disabled by mcp.toml"));
+        assert!(joined.contains("Config paths:"));
+    }
+
+    #[test]
+    fn mcp_lines_pluralizes_tool_count() {
+        use caliban_mcp_client::{ServerStatus, ServerSummary};
+        let mut app = App::for_tests();
+        app.mcp_servers = vec![ServerSummary {
+            name: "multi".into(),
+            status: ServerStatus::Connected { tools: 3 },
+            transport: "stdio",
+        }];
+        assert!(join_lines(&mcp_lines(&app)).contains("connected — 3 tools"));
+    }
+
+    // ---- skills_lines ----------------------------------------------------
+
+    #[test]
+    fn skills_lines_render_placeholder() {
+        let joined = join_lines(&skills_lines());
+        assert!(joined.contains("No skills configured."));
+        assert!(joined.contains("SKILL.md"));
+        assert!(joined.contains("Press q or Esc to close"));
+    }
+
+    // ---- system_lines ----------------------------------------------------
+
+    #[test]
+    fn system_lines_none_when_no_prompt() {
+        let app = App::for_tests();
+        assert!(join_lines(&system_lines(&app)).contains("no system prompt"));
+    }
+
+    #[test]
+    fn system_lines_render_prompt_from_app_field() {
+        let mut app = App::for_tests();
+        app.system_prompt = Some("line one\nline two".into());
+        let joined = join_lines(&system_lines(&app));
+        assert!(joined.contains("line one"));
+        assert!(joined.contains("line two"));
+        assert!(!joined.contains("no system prompt"));
+    }
+
+    // ---- rewind_lines ----------------------------------------------------
+
+    #[test]
+    fn rewind_lines_disabled_when_no_store() {
+        let app = App::for_tests();
+        // for_tests wires no checkpoint store.
+        assert!(app.checkpoint_store.is_none());
+        let joined = join_lines(&rewind_lines(&app));
+        assert!(joined.contains("checkpointing not enabled"));
+        assert!(joined.contains("CALIBAN_CHECKPOINT_DISABLED"));
+    }
+
+    // ---- render_overlay (TestBackend) -----------------------------------
+
+    #[test]
+    fn render_overlay_draws_title_and_body_for_config() {
+        let app = App::for_tests();
+        let mut term = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::Config))
+            .unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("Configuration"), "title; rendered:\n{text}");
+        assert!(text.contains("Provider"), "body; rendered:\n{text}");
+    }
+
+    #[test]
+    fn render_overlay_draws_slash_help() {
+        let app = App::for_tests();
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::SlashHelp))
+            .unwrap();
+        assert!(buffer_text(&term).contains("Slash Commands"));
+    }
+
+    #[test]
+    fn render_overlay_draws_mcp_empty_state() {
+        let app = App::for_tests();
+        let mut term = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::Mcp))
+            .unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("MCP Servers"), "title; rendered:\n{text}");
+        assert!(text.contains("No MCP servers"), "body; rendered:\n{text}");
+    }
+
+    #[test]
+    fn render_overlay_draws_reverse_history_empty() {
+        let app = App::for_tests();
+        let mut term = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::ReverseHistory))
+            .unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("Reverse History"));
+        assert!(text.contains("no active search"));
+    }
+
+    #[test]
+    fn render_overlay_transcript_viewer_uses_scroll_offset() {
+        let mut app = App::for_tests();
+        app.messages = vec![
+            Message::user_text("first prompt"),
+            Message::assistant_text("a reply"),
+        ];
+        // scroll = 0 → first line visible.
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::TranscriptViewer))
+            .unwrap();
+        let at_top = buffer_text(&term);
+        assert!(at_top.contains("Transcript"));
+        assert!(at_top.contains("first prompt"), "rendered:\n{at_top}");
+
+        // Large scroll offset pushes the first content line out of view.
+        app.transcript_viewer.scroll = 50;
+        let mut term2 = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term2
+            .draw(|f| render_overlay(f, &app, Overlay::TranscriptViewer))
+            .unwrap();
+        assert!(
+            !buffer_text(&term2).contains("first prompt"),
+            "scrolled-away content should not be visible"
+        );
+    }
+
+    #[test]
+    fn render_overlay_skills_and_system_and_rewind_draw_without_panic() {
+        let app = App::for_tests();
+        for overlay in [Overlay::Skills, Overlay::System, Overlay::Rewind] {
+            let mut term = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            term.draw(|f| render_overlay(f, &app, overlay)).unwrap();
+            assert!(buffer_text(&term).contains(overlay.title()));
+        }
+    }
+
+    #[test]
+    fn render_overlay_narrow_frame_does_not_panic() {
+        // A very small frame exercises the clamping/wrap paths in sizing.
+        let app = App::for_tests();
+        let mut term = Terminal::new(TestBackend::new(10, 6)).unwrap();
+        term.draw(|f| render_overlay(f, &app, Overlay::Config))
+            .unwrap();
+        // No assertion on content — the point is that sizing/clamping is hermetic
+        // and panic-free on a tiny terminal.
+    }
+}
+
+#[cfg(test)]
 mod permissions_overlay_tests {
     use super::*;
     use crate::tui::App;

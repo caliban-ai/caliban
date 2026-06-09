@@ -553,6 +553,143 @@ mod tests {
         assert!(s.check_url("https://ok/idx").is_ok());
     }
 
+    #[test]
+    fn settings_default_allows_any_url() {
+        // Default settings (no strict list, no block list) admit any URL.
+        let s = MarketplaceSettings::default();
+        assert!(s.check_url("https://anything/idx").is_ok());
+    }
+
+    #[test]
+    fn settings_blocked_takes_priority_over_strict_allow() {
+        // A URL on both the allow list and the block list is still blocked.
+        let s = MarketplaceSettings {
+            strict_known: Some(vec!["https://x/idx".to_string()]),
+            blocked: vec!["https://x/idx".to_string()],
+        };
+        let err = s.check_url("https://x/idx").unwrap_err();
+        assert!(matches!(err, PluginError::BlockedMarketplace { .. }));
+    }
+
+    #[test]
+    fn settings_empty_strict_list_rejects_everything() {
+        // An empty strict_known Vec disables all marketplace installs.
+        let s = MarketplaceSettings {
+            strict_known: Some(vec![]),
+            blocked: vec![],
+        };
+        let err = s.check_url("https://any/idx").unwrap_err();
+        assert!(matches!(err, PluginError::UnknownMarketplace { .. }));
+    }
+
+    #[test]
+    fn latest_version_none_when_no_metadata() {
+        // Entry with neither versions[] nor a complete flat form yields None.
+        let entry = MarketplaceEntry {
+            name: "demo".into(),
+            version: Some("1.0.0".into()),
+            sha256: None,
+            download_url: None,
+            ..Default::default()
+        };
+        assert!(entry.latest_version().is_none());
+    }
+
+    #[test]
+    fn latest_version_prefers_versions_list() {
+        // When both forms exist, versions[] (last entry) wins over flat.
+        let entry = MarketplaceEntry {
+            name: "demo".into(),
+            version: Some("1.0.0".into()),
+            sha256: Some("flatsha".into()),
+            download_url: Some("https://flat/d.tgz".into()),
+            versions: vec![
+                MarketplaceVersion {
+                    version: "2.0.0".into(),
+                    tarball: "https://m/2.0.0.tgz".into(),
+                    sha256: "sha2".into(),
+                    min_caliban: None,
+                },
+                MarketplaceVersion {
+                    version: "3.0.0".into(),
+                    tarball: "https://m/3.0.0.tgz".into(),
+                    sha256: "sha3".into(),
+                    min_caliban: Some("0.5".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let v = entry.latest_version().unwrap();
+        assert_eq!(v.version, "3.0.0");
+        assert_eq!(v.sha256, "sha3");
+    }
+
+    #[test]
+    fn marketplace_version_accepts_download_url_alias() {
+        // The `tarball` field accepts a `download_url` alias in versions[].
+        let raw = r#"{
+            "version": "1.0.0",
+            "download_url": "https://m/d.tgz",
+            "sha256": "abc"
+        }"#;
+        let v: MarketplaceVersion = serde_json::from_str(raw).unwrap();
+        assert_eq!(v.tarball, "https://m/d.tgz");
+    }
+
+    #[test]
+    fn marketplace_defaults_on_empty_object() {
+        // All top-level fields default; an empty object parses cleanly.
+        let m: Marketplace = serde_json::from_str("{}").unwrap();
+        assert!(m.name.is_empty());
+        assert!(m.url.is_empty());
+        assert!(m.plugins.is_empty());
+    }
+
+    #[test]
+    fn marketplace_serialize_round_trips() {
+        let m = Marketplace {
+            name: "test".into(),
+            url: "https://m/idx".into(),
+            plugins: vec![MarketplaceEntry {
+                name: "demo".into(),
+                version: Some("1.0.0".into()),
+                sha256: Some("abc".into()),
+                download_url: Some("https://m/d.tgz".into()),
+                ..Default::default()
+            }],
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Marketplace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.plugins[0].name, "demo");
+        assert_eq!(back.plugins[0].latest_version().unwrap().version, "1.0.0");
+    }
+
+    #[test]
+    fn trust_decision_equality() {
+        assert_eq!(TrustDecision::Approve, TrustDecision::Approve);
+        assert_ne!(TrustDecision::Approve, TrustDecision::UseCache);
+    }
+
+    #[test]
+    fn client_default_exposes_default_settings() {
+        let client = MarketplaceClient::default();
+        // Default settings admit any URL (no strict list / block list).
+        assert!(client.settings().check_url("https://any/idx").is_ok());
+        assert!(client.settings().strict_known.is_none());
+        assert!(client.settings().blocked.is_empty());
+    }
+
+    #[test]
+    fn client_new_preserves_settings() {
+        let settings = MarketplaceSettings {
+            strict_known: Some(vec!["https://ok/idx".into()]),
+            blocked: vec!["https://bad/idx".into()],
+        };
+        let client = MarketplaceClient::new(reqwest::Client::new(), settings);
+        assert!(client.settings().check_url("https://ok/idx").is_ok());
+        assert!(client.settings().check_url("https://bad/idx").is_err());
+    }
+
     #[tokio::test]
     async fn install_round_trips_and_writes_trust_record() {
         // Spin up a wiremock for both the index and the tarball.

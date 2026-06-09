@@ -670,6 +670,72 @@ mod tests {
         assert!(!is_esc_chord(None, t));
     }
 
+    #[test]
+    fn esc_chord_inclusive_at_window_boundary() {
+        // The policy is `<= ESC_ESC_WINDOW_MS`, so exactly at the window
+        // edge still counts as a chord.
+        let t1 = std::time::Instant::now();
+        let t2 = t1
+            + std::time::Duration::from_millis(
+                u64::try_from(super::ESC_ESC_WINDOW_MS).expect("window fits u64"),
+            );
+        assert!(is_esc_chord(Some(t1), t2));
+    }
+
+    // === statusline plumbing (tui.rs top-level helpers) ===================
+
+    #[tokio::test]
+    async fn refresh_statusline_returns_empty_when_no_runner() {
+        // With no configured runner the helper short-circuits to "" rather
+        // than spawning a subprocess — keeps the test hermetic.
+        let app = make_test_app();
+        let ctx = app.statusline_context();
+        let out = super::refresh_statusline(None, ctx).await;
+        assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn queue_statusline_refresh_sends_segment_on_channel() {
+        // queue_statusline_refresh spawns a task that computes the segment
+        // (empty for a None runner) and forwards it on the channel.
+        let app = make_test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        super::queue_statusline_refresh(&tx, None, app.statusline_context());
+        let received = rx.recv().await.expect("segment delivered");
+        assert_eq!(received, "");
+    }
+
+    #[test]
+    fn statusline_context_populates_model_and_workspace() {
+        // statusline_context mirrors App state into the Claude-compatible
+        // context object the statusline script consumes.
+        let app = make_test_app();
+        let ctx = app.statusline_context();
+        assert_eq!(ctx.model.as_str(), "mock");
+        // No session in the test app → empty session id, zero turns.
+        assert!(ctx.session_id.is_empty());
+        assert_eq!(ctx.turn_count, 0);
+        // permission_mode defaults to "default"; effort/cost are formatted.
+        assert_eq!(ctx.permission_mode, "default");
+        assert!(ctx.cost_usd.starts_with("0."));
+        assert!(!ctx.workspace_root.is_empty());
+    }
+
+    #[test]
+    fn cwd_display_collapses_home_to_tilde() {
+        // cwd_display tilde-collapses paths under $HOME and passes others
+        // through verbatim.
+        let mut app = make_test_app();
+        if let Some(home) = dirs::home_dir() {
+            app.cwd = home.join("projects").join("demo");
+            assert_eq!(app.cwd_display(), "~/projects/demo");
+            app.cwd = home.clone();
+            assert_eq!(app.cwd_display(), "~");
+        }
+        app.cwd = std::path::PathBuf::from("/var/tmp/elsewhere");
+        assert_eq!(app.cwd_display(), "/var/tmp/elsewhere");
+    }
+
     // === Permission-mode cycling (ADR 0029) ===
 
     #[test]

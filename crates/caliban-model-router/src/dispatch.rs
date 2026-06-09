@@ -278,3 +278,316 @@ impl ModelRouter {
         .into_provider_error())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Dispatch-loop tests focused on the paths the crate-level `tests`
+    //! module doesn't exercise: `rewrite_for_route` directly and the
+    //! `dispatch_stream` fallback/breaker/stats loop. Hedging is intentionally
+    //! disabled here — the hedge race is covered by the timer-driven tests in
+    //! `crate::tests` and isn't reachable from `dispatch_stream` at all.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use caliban_provider::{
+        CacheControl, CompletionRequest, ContentBlock, Error as ProviderError, ImageBlock,
+        ImageSource, Message, MockProvider, Provider, RequestPurpose, Role, StreamEvent, TextBlock,
+        Tool,
+    };
+    use serde_json::json;
+
+    use crate::ModelRouter;
+    use crate::config::{
+        BreakerPolicy, CapabilityRequirements, EffortMap, HedgePolicy, RouteEntry, RouterConfig,
+    };
+
+    // --- fixtures -----------------------------------------------------------
+
+    fn mock() -> Arc<MockProvider> {
+        Arc::new(MockProvider::new())
+    }
+
+    /// A `MainLoop` text request with no cache markers.
+    fn req_main_loop() -> CompletionRequest {
+        let mut r = CompletionRequest {
+            model: String::new(),
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            tool_choice: caliban_provider::ToolChoice::default(),
+            max_tokens: 64,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: Default::default(),
+        };
+        r.metadata.purpose = Some(RequestPurpose::MainLoop);
+        r
+    }
+
+    /// A request carrying an `Ephemeral` cache marker on its only text block
+    /// plus a cache-marked tool, used to exercise cross-route stripping.
+    fn req_with_markers() -> CompletionRequest {
+        let mut r = req_main_loop();
+        r.messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text(TextBlock {
+                text: "hi".into(),
+                cache_control: Some(CacheControl::Ephemeral),
+            })],
+        }];
+        r.tools = vec![Tool {
+            name: "T".into(),
+            description: "d".into(),
+            input_schema: json!({"type":"object"}),
+            cache_control: Some(CacheControl::Ephemeral),
+        }];
+        r
+    }
+
+    /// A minimal but complete streaming response.
+    fn stream_events() -> Vec<caliban_provider::error::Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::MessageStart {
+                id: "m".into(),
+                model: "mock".into(),
+            }),
+            Ok(StreamEvent::MessageStop),
+        ]
+    }
+
+    fn route(id: &str, provider: &str, model: &str) -> RouteEntry {
+        RouteEntry {
+            id: id.into(),
+            purpose: RequestPurpose::MainLoop,
+            provider: provider.into(),
+            model: model.into(),
+            requires: CapabilityRequirements::default(),
+            fallback: None,
+            hedge: HedgePolicy::Disabled,
+            breaker: BreakerPolicy::disabled(),
+            effort: None,
+            effort_map: EffortMap::default(),
+        }
+    }
+
+    fn router_from(
+        routes: Vec<RouteEntry>,
+        providers: Vec<(&str, Arc<dyn Provider + Send + Sync>)>,
+    ) -> ModelRouter {
+        let map: HashMap<String, Arc<dyn Provider + Send + Sync>> = providers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        ModelRouter::from_config(
+            RouterConfig {
+                default_purpose: RequestPurpose::MainLoop,
+                routes,
+            },
+            map,
+        )
+        .unwrap()
+    }
+
+    // --- rewrite_for_route --------------------------------------------------
+
+    #[test]
+    fn rewrite_swaps_model_and_keeps_markers_when_not_cross_route() {
+        let r = router_from(vec![route("primary", "a", "claude")], vec![("a", mock())]);
+        let base = req_with_markers();
+        let route = &r.routes[0];
+        let out = r.rewrite_for_route(&base, route, false);
+        // Model is swapped to the route's model.
+        assert_eq!(out.model, "claude");
+        // Not cross-route → markers retained.
+        match &out.messages[0].content[0] {
+            ContentBlock::Text(t) => assert!(t.cache_control.is_some()),
+            other => panic!("expected text block, got {other:?}"),
+        }
+        assert!(out.tools[0].cache_control.is_some());
+        // No cross-route hop → no markers counted as cleared.
+        assert_eq!(r.stats().cache_markers_cleared, 0);
+    }
+
+    #[test]
+    fn rewrite_strips_markers_and_records_stats_on_cross_route() {
+        let r = router_from(vec![route("primary", "a", "claude")], vec![("a", mock())]);
+        let base = req_with_markers();
+        let route = &r.routes[0];
+        let out = r.rewrite_for_route(&base, route, true);
+        // Cross-route → text + tool markers stripped.
+        match &out.messages[0].content[0] {
+            ContentBlock::Text(t) => assert!(t.cache_control.is_none()),
+            other => panic!("expected text block, got {other:?}"),
+        }
+        assert!(out.tools[0].cache_control.is_none());
+        // Two markers (one text, one tool) recorded as cleared.
+        assert_eq!(r.stats().cache_markers_cleared, 2);
+        // The base request is untouched (rewrite clones).
+        match &base.messages[0].content[0] {
+            ContentBlock::Text(t) => assert!(t.cache_control.is_some()),
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_cross_route_with_no_markers_does_not_touch_stats() {
+        let r = router_from(vec![route("primary", "a", "claude")], vec![("a", mock())]);
+        let base = req_main_loop();
+        let route = &r.routes[0];
+        let out = r.rewrite_for_route(&base, route, true);
+        assert_eq!(out.model, "claude");
+        // No markers present → stripping records nothing.
+        assert_eq!(r.stats().cache_markers_cleared, 0);
+    }
+
+    // --- dispatch_stream ----------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_success_records_call_and_breaker_success() {
+        let p = mock();
+        p.enqueue_stream(stream_events());
+        let r = router_from(vec![route("primary", "a", "x")], vec![("a", p)]);
+        let s = r.dispatch_stream(req_main_loop()).await;
+        assert!(s.is_ok(), "expected stream ok");
+        let stats = r.stats();
+        // Stream success records a call with default (zero) usage.
+        assert_eq!(stats.per_route["primary"].call_count, 1);
+        assert_eq!(stats.per_route["primary"].input_tokens, 0);
+        assert_eq!(stats.per_route["primary"].failures, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_falls_back_on_fatal_error() {
+        let primary = mock();
+        primary.enqueue_stream_error(ProviderError::ServerError {
+            status: 503,
+            body: "down".into(),
+        });
+        let secondary = mock();
+        secondary.enqueue_stream(stream_events());
+        let r = router_from(
+            vec![route("primary", "a", "x"), route("secondary", "b", "y")],
+            vec![("a", primary), ("b", secondary)],
+        );
+        let s = r.dispatch_stream(req_main_loop()).await;
+        assert!(s.is_ok(), "expected fallback to succeed");
+        let stats = r.stats();
+        assert_eq!(stats.per_route["primary"].failures, 1);
+        assert_eq!(stats.per_route["primary"].fallback_engaged, 1);
+        assert_eq!(stats.per_route["secondary"].call_count, 1);
+        // Both routes have breaker snapshots after the dispatch loop ran.
+        assert!(stats.breakers.contains_key("primary"));
+        assert!(stats.breakers.contains_key("secondary"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_does_not_fall_back_on_non_fatal_error() {
+        let primary = mock();
+        primary.enqueue_stream_error(ProviderError::Auth("bad".into()));
+        // Secondary has nothing queued; if fallback engaged it would surface a
+        // different (queue-empty) error.
+        let secondary = mock();
+        let r = router_from(
+            vec![route("primary", "a", "x"), route("secondary", "b", "y")],
+            vec![("a", primary), ("b", secondary)],
+        );
+        let err = match r.dispatch_stream(req_main_loop()).await {
+            Ok(_) => panic!("expected non-fatal error to propagate"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, ProviderError::Auth(_)), "got {err:?}");
+        let stats = r.stats();
+        assert_eq!(stats.per_route["primary"].failures, 1);
+        // No fallback engaged.
+        assert_eq!(stats.per_route["primary"].fallback_engaged, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_exhausted_chain_returns_fallback_exhausted() {
+        let primary = mock();
+        primary.enqueue_stream_error(ProviderError::ModelUnavailable("a".into()));
+        let secondary = mock();
+        secondary.enqueue_stream_error(ProviderError::ModelUnavailable("b".into()));
+        let r = router_from(
+            vec![route("primary", "a", "x"), route("secondary", "b", "y")],
+            vec![("a", primary), ("b", secondary)],
+        );
+        let err = match r.dispatch_stream(req_main_loop()).await {
+            Ok(_) => panic!("expected exhausted chain to error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        // Both tried route ids appear in the exhausted error.
+        assert!(msg.contains("primary"), "msg: {msg}");
+        assert!(msg.contains("secondary"), "msg: {msg}");
+        let stats = r.stats();
+        assert_eq!(stats.per_route["primary"].failures, 1);
+        assert_eq!(stats.per_route["secondary"].failures, 1);
+        // Fallback engaged once (primary → secondary); last route doesn't.
+        assert_eq!(stats.per_route["primary"].fallback_engaged, 1);
+        assert_eq!(stats.per_route["secondary"].fallback_engaged, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_strips_cache_markers_on_cross_route_hop() {
+        let primary = mock();
+        primary.enqueue_stream_error(ProviderError::ServerError {
+            status: 503,
+            body: "down".into(),
+        });
+        let secondary = mock();
+        secondary.enqueue_stream(stream_events());
+        let r = router_from(
+            vec![route("primary", "a", "x"), route("secondary", "b", "y")],
+            vec![("a", primary), ("b", secondary)],
+        );
+        let s = r.dispatch_stream(req_with_markers()).await;
+        assert!(s.is_ok());
+        // The cross-route hop to `secondary` stripped the text + tool markers.
+        assert!(r.stats().cache_markers_cleared >= 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_empty_candidates_returns_no_candidate_error() {
+        // The mock's default capabilities have vision=false, so a request
+        // bearing an image resolves to an empty candidate list.
+        let p = mock();
+        let r = router_from(vec![route("primary", "a", "x")], vec![("a", p)]);
+        let mut req = req_main_loop();
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image(ImageBlock {
+                source: ImageSource::Url {
+                    url: "https://x/y.png".into(),
+                },
+                cache_control: None,
+                sha256: None,
+                dims: None,
+            })],
+        }];
+        let err = match r.dispatch_stream(req).await {
+            Ok(_) => panic!("expected no-candidate error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("no candidate"), "got: {err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_default_usage_recorded_on_success() {
+        // Distinguishes the stream success path: it records `Usage::default()`
+        // (all zeros) regardless of what events the stream would carry.
+        let p = mock();
+        p.enqueue_stream(stream_events());
+        let r = router_from(vec![route("primary", "a", "x")], vec![("a", p)]);
+        let _ = r.dispatch_stream(req_main_loop()).await.unwrap();
+        let stats = r.stats();
+        let usage = &stats.per_route["primary"];
+        assert_eq!(usage.call_count, 1);
+        // Stream success records `Usage::default()` — all token counters zero.
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+}
