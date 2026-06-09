@@ -143,6 +143,9 @@ pub(crate) struct HeadlessRunConfig {
     pub(crate) include_hook_events: bool,
     /// Echo user prompts back as `user` frames.
     pub(crate) replay_user_messages: bool,
+    /// Dump full, untruncated tool I/O to stderr in `--output-format text`
+    /// (`--verbose`). No effect on stream-json (already full) or json.
+    pub(crate) verbose: bool,
     /// `--bare` flag in effect.
     pub(crate) bare_mode: bool,
     /// `--fallback-model` (passes through for router v2; ignored otherwise).
@@ -190,6 +193,7 @@ impl HeadlessRunConfig {
             include_partial_messages: false,
             include_hook_events: false,
             replay_user_messages: false,
+            verbose: false,
             bare_mode: false,
             fallback_model: None,
             session_id: "test-session".into(),
@@ -328,6 +332,16 @@ impl<W: Write> HeadlessDriver<W> {
     /// `RunEnd` event (e.g. an early I/O error from the driver itself).
     pub(crate) fn take_final_messages(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.final_messages)
+    }
+
+    /// Whether this run needs to buffer streamed tool-input JSON so the full
+    /// input can be surfaced at `ToolCallEnd`. True for stream-json (emits
+    /// `tool_use` frames) and for `--verbose` text mode (emits the stderr
+    /// block). False otherwise, so non-verbose text and json runs stay free
+    /// of the per-call bookkeeping.
+    fn buffers_tool_io(&self) -> bool {
+        matches!(self.config.output_format, OutputFormat::StreamJson)
+            || (matches!(self.config.output_format, OutputFormat::Text) && self.config.verbose)
     }
 
     /// Emit the `system/init` frame (stream-json mode only). No-op for
@@ -563,10 +577,11 @@ impl<W: Write> HeadlessDriver<W> {
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
             } => {
-                // Stash the tool name; the matching `tool_use` frame is
+                // Stash the tool name; the matching tool I/O (stream-json
+                // `tool_use` frame, or the `--verbose` text-mode block) is
                 // emitted at `ToolCallEnd` time so it can carry the fully
                 // streamed input JSON instead of `null`.
-                if matches!(self.config.output_format, OutputFormat::StreamJson) {
+                if self.buffers_tool_io() {
                     self.pending_tool_calls.insert(
                         tool_use_id,
                         ToolCallBuf {
@@ -581,7 +596,7 @@ impl<W: Write> HeadlessDriver<W> {
                 partial_json,
                 ..
             } => {
-                if matches!(self.config.output_format, OutputFormat::StreamJson)
+                if self.buffers_tool_io()
                     && let Some(buf) = self.pending_tool_calls.get_mut(&tool_use_id)
                 {
                     buf.input_json.push_str(&partial_json);
@@ -597,18 +612,37 @@ impl<W: Write> HeadlessDriver<W> {
                 // counter feeds the non-`success` result frame (F7 follow-up),
                 // not just the stream-json `tool_result` frame.
                 self.tool_calls_seen = self.tool_calls_seen.saturating_add(1);
-                if matches!(self.config.output_format, OutputFormat::StreamJson) {
-                    // Pair the `tool_use` frame with the matching
-                    // `tool_result`: emit the deferred tool_use now that
-                    // the input JSON has finished streaming. Parse the
-                    // accumulated JSON; on parse failure fall back to a
-                    // string so the frame is never silently dropped.
-                    if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
-                        let input = parse_tool_input(&buf.input_json);
-                        self.write_ndjson(&events::tool_use(&tool_use_id, &buf.name, input))?;
+                match self.config.output_format {
+                    OutputFormat::StreamJson => {
+                        // Pair the `tool_use` frame with the matching
+                        // `tool_result`: emit the deferred tool_use now that
+                        // the input JSON has finished streaming. Parse the
+                        // accumulated JSON; on parse failure fall back to a
+                        // string so the frame is never silently dropped.
+                        if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
+                            let input = parse_tool_input(&buf.input_json);
+                            self.write_ndjson(&events::tool_use(&tool_use_id, &buf.name, input))?;
+                        }
+                        let content_value = content_blocks_to_json(&content);
+                        self.write_ndjson(&events::tool_result(
+                            &tool_use_id,
+                            is_error,
+                            content_value,
+                        ))?;
                     }
-                    let content_value = content_blocks_to_json(&content);
-                    self.write_ndjson(&events::tool_result(&tool_use_id, is_error, content_value))?;
+                    // `--verbose` text mode: dump the full, untruncated tool
+                    // call to stderr (stdout stays the assistant answer, so
+                    // pipes/`$(...)` capture is unaffected). Mirrors the
+                    // driver's existing stderr convention for warnings.
+                    OutputFormat::Text if self.config.verbose => {
+                        if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
+                            let input = parse_tool_input(&buf.input_json);
+                            let block =
+                                render_verbose_tool_io(&buf.name, &input, is_error, &content);
+                            eprintln!("{block}");
+                        }
+                    }
+                    _ => {}
                 }
             }
             TurnEvent::TurnEnd {
@@ -1060,6 +1094,47 @@ fn content_blocks_to_json(blocks: &[ContentBlock]) -> serde_json::Value {
     serde_json::Value::Array(arr)
 }
 
+/// Render a completed tool call as a fully-untruncated, human-readable
+/// two-line block for `--verbose` text mode (written to stderr):
+///
+/// ```text
+/// 🔧 <name>(<full input JSON>)
+///    → [(error) ]<full result body>
+/// ```
+///
+/// Unlike the interactive single-prompt path's `summarize(.., 80)` rendering,
+/// nothing here is truncated — the whole point of `--verbose`.
+fn render_verbose_tool_io(
+    name: &str,
+    input: &serde_json::Value,
+    is_error: bool,
+    content: &[ContentBlock],
+) -> String {
+    let input_str = serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
+    let result = verbose_tool_result_body(content);
+    let prefix = if is_error { "(error) " } else { "" };
+    format!("\u{1f527} {name}({input_str})\n   \u{2192} {prefix}{result}")
+}
+
+/// Build the result body for [`render_verbose_tool_io`]. When every block is
+/// plain `Text`, the concatenated raw text is returned (full, untruncated);
+/// otherwise the structured content is serialized as full JSON so nothing is
+/// lost.
+fn verbose_tool_result_body(content: &[ContentBlock]) -> String {
+    if content.iter().all(|b| matches!(b, ContentBlock::Text(_))) {
+        let mut s = String::new();
+        for b in content {
+            if let ContentBlock::Text(t) = b {
+                s.push_str(&t.text);
+            }
+        }
+        s
+    } else {
+        let v = content_blocks_to_json(content);
+        serde_json::to_string(&v).unwrap_or_else(|_| v.to_string())
+    }
+}
+
 /// Split a `provider/model` summary into its parts. Falls back to empty
 /// strings if the format is unexpected (which short-circuits rate-card lookup
 /// in [`BudgetTracker::record_with_model`]).
@@ -1166,6 +1241,81 @@ mod tests {
         let v = content_blocks_to_json(&blocks);
         assert_eq!(v[0]["type"], "text");
         assert_eq!(v[0]["text"], "hi");
+    }
+
+    fn text_block(s: &str) -> ContentBlock {
+        ContentBlock::Text(caliban_provider::TextBlock {
+            text: s.into(),
+            cache_control: None,
+        })
+    }
+
+    #[test]
+    fn render_verbose_tool_io_includes_name_input_and_result() {
+        let input = serde_json::json!({ "command": "ls -la" });
+        let content = vec![text_block("total 0")];
+        let block = render_verbose_tool_io("Bash", &input, false, &content);
+        assert!(block.contains("Bash"), "missing tool name: {block}");
+        assert!(block.contains("ls -la"), "missing input: {block}");
+        assert!(block.contains("total 0"), "missing result: {block}");
+        assert!(
+            !block.contains("(error)"),
+            "non-error call must not be tagged: {block}"
+        );
+    }
+
+    #[test]
+    fn render_verbose_tool_io_tags_errors() {
+        let input = serde_json::json!({});
+        let content = vec![text_block("boom")];
+        let block = render_verbose_tool_io("Bash", &input, true, &content);
+        assert!(block.contains("(error)"), "error not tagged: {block}");
+    }
+
+    #[test]
+    fn render_verbose_tool_io_does_not_truncate() {
+        // The whole point of --verbose vs the single-prompt path's 80-char
+        // summaries: long input AND long result survive in full.
+        let long_arg = "x".repeat(200);
+        let long_out = "y".repeat(200);
+        let input = serde_json::json!({ "data": long_arg });
+        let content = vec![text_block(&long_out)];
+        let block = render_verbose_tool_io("Tool", &input, false, &content);
+        assert!(block.contains(&long_arg), "input was truncated");
+        assert!(block.contains(&long_out), "result was truncated");
+    }
+
+    #[test]
+    fn verbose_tool_result_body_joins_plain_text() {
+        let content = vec![text_block("foo"), text_block("bar")];
+        assert_eq!(verbose_tool_result_body(&content), "foobar");
+    }
+
+    #[test]
+    fn verbose_tool_result_body_falls_back_to_json_for_structured() {
+        let content = vec![ContentBlock::ToolResult(
+            caliban_provider::ToolResultBlock {
+                tool_use_id: "t1".into(),
+                is_error: false,
+                content: vec![text_block("inner")],
+            },
+        )];
+        let body = verbose_tool_result_body(&content);
+        assert!(body.contains("tool_result"), "expected JSON form: {body}");
+        assert!(body.contains("inner"), "inner content lost: {body}");
+    }
+
+    #[test]
+    fn buffers_tool_io_only_for_streamjson_or_text_verbose() {
+        let driver = |fmt, verbose| {
+            let mut cfg = HeadlessRunConfig::minimal(fmt);
+            cfg.verbose = verbose;
+            HeadlessDriver::new(Vec::<u8>::new(), cfg)
+        };
+        assert!(driver(OutputFormat::StreamJson, false).buffers_tool_io());
+        assert!(driver(OutputFormat::Text, true).buffers_tool_io());
+        assert!(!driver(OutputFormat::Text, false).buffers_tool_io());
+        assert!(!driver(OutputFormat::Json, true).buffers_tool_io());
     }
 
     // -------------------------------------------------------------------

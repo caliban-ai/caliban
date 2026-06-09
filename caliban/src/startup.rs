@@ -938,6 +938,7 @@ pub(crate) async fn run_headless(
         include_partial_messages: args.include_partial_messages,
         include_hook_events: args.include_hook_events,
         replay_user_messages: args.replay_user_messages,
+        verbose: args.verbose,
         bare_mode: args.bare,
         fallback_model: args.fallback_model.clone(),
         session_id,

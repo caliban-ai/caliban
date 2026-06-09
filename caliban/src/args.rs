@@ -254,6 +254,17 @@ pub(crate) struct Args {
     #[arg(long, value_name = "PATH", env = "CALIBAN_DEBUG_FILE")]
     pub(crate) debug_file: Option<PathBuf>,
 
+    /// Dump full, untruncated tool inputs/outputs to stderr in headless
+    /// `--output-format text`. No effect on `stream-json` (already emits full
+    /// `tool_use`/`tool_result` frames) or `json`. `CALIBAN_VERBOSE` is also
+    /// honored.
+    #[arg(
+        long,
+        env = "CALIBAN_VERBOSE",
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
+    pub(crate) verbose: bool,
+
     /// Maximum size of a single `@`-attachment in bytes (default 256 KB).
     #[arg(long, default_value_t = 262_144, env = "CALIBAN_MAX_ATTACH_BYTES")]
     pub(crate) max_attach_bytes: u64,
@@ -841,6 +852,19 @@ mod tests {
         // Guard on the env var so an exported CALIBAN_DEBUG_FILE doesn't flake.
         if std::env::var_os("CALIBAN_DEBUG_FILE").is_none() {
             assert!(parse(&[]).debug_file.is_none());
+        }
+    }
+
+    #[test]
+    fn verbose_flag_parses() {
+        assert!(parse(&["--verbose"]).verbose);
+    }
+
+    #[test]
+    fn verbose_absent_by_default() {
+        // Guard on the env var so an exported CALIBAN_VERBOSE doesn't flake.
+        if std::env::var_os("CALIBAN_VERBOSE").is_none() {
+            assert!(!parse(&[]).verbose);
         }
     }
 }
