@@ -77,13 +77,14 @@ Cloud transport features are not built in default CI runs. They are exercised by
 
 ## Helper scripts
 
-The `scripts/` directory contains one helper:
+The `scripts/` directory contains these helpers:
 
 | Script | Purpose |
 |---|---|
 | `scripts/check.sh` | Mirrors the full PR CI suite locally: `cargo fmt --check`, `cargo clippy`, `cargo build`, `cargo test`. Accepts `--cloud` to additionally run the cloud-features build, and `--no-test` to skip the test step. |
+| `scripts/coverage.sh` | Measures workspace line coverage with `cargo-llvm-cov` and fails below the `COVERAGE_MIN` floor — the same gate CI enforces. Accepts `--html`/`--open` to render an HTML report and `--no-fail` to report without gating. |
 
-Run `scripts/check.sh --help` for the full usage summary.
+Run `scripts/check.sh --help` or `scripts/coverage.sh --help` for the full usage summary.
 
 ```admonish tip title="Headless / CI builds"
 On headless Linux hosts, the default binary features include `clipboard` (the `arboard` crate). If your CI image lacks the X11/Wayland clipboard libraries, build with `--no-default-features` to avoid the link-time dependency.

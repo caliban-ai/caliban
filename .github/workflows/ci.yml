@@ -83,6 +83,47 @@ jobs:
         if: steps.changes.outputs.code != 'true'
         run: echo "Only docs/markdown/license changed; skipping cargo fmt/clippy/build/test."
 
+  coverage:
+    name: line-coverage gate
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      # llvm-tools-preview provides llvm-cov / llvm-profdata, which
+      # cargo-llvm-cov drives. On CI this comes from rustup (unlike the
+      # Homebrew-toolchain workaround documented in scripts/coverage.sh).
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        if: needs.check.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo registry & target
+        if: needs.check.outputs.code == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        if: needs.check.outputs.code == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # scripts/coverage.sh is the single entrypoint: it produces the LCOV
+      # report and fails when line coverage drops below its COVERAGE_MIN floor.
+      - name: Run coverage gate
+        if: needs.check.outputs.code == 'true'
+        run: scripts/coverage.sh
+      - name: Upload LCOV report
+        if: needs.check.outputs.code == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: target/llvm-cov/lcov.info
+          if-no-files-found: error
+      - name: Docs-only change — coverage skipped
+        if: needs.check.outputs.code != 'true'
+        run: echo "Only docs/markdown/license changed; skipping coverage."
+
   package-check:
     name: cargo publish --workspace --dry-run
     needs: check
