@@ -27,6 +27,7 @@
 #
 # Outputs (under target/llvm-cov/):
 #   target/llvm-cov/lcov.info      LCOV report (consumed by CI artifact / Codecov)
+#   target/llvm-cov/coverage.json  JSON export (rendered by scripts/coverage-report.py)
 #   target/llvm-cov/html/          HTML report (only with --html / --open)
 #
 # Exit code is non-zero when coverage is under COVERAGE_MIN (unless --no-fail).
@@ -82,25 +83,24 @@ run() {
 
 OUT_DIR="target/llvm-cov"
 LCOV_PATH="$OUT_DIR/lcov.info"
+JSON_PATH="$OUT_DIR/coverage.json"
 
 # cargo-llvm-cov does not create the parent dir for a custom --output-path.
 mkdir -p "$OUT_DIR"
 
-# Threshold enforcement is a flag on the cargo-llvm-cov invocation itself, so
-# the same run produces the report *and* gates on it.
-fail_args=()
-if [[ $DO_FAIL -eq 1 ]]; then
-    fail_args=(--fail-under-lines "$COVERAGE_MIN")
-fi
-
 echo "coverage floor: ${COVERAGE_MIN}% line coverage (COVERAGE_MIN)"
 
-# Always produce an LCOV artifact + a stdout summary table. --workspace mirrors
-# the default-features test suite that check.sh / ci.yml run.
-run cargo llvm-cov --workspace --lcov --output-path "$LCOV_PATH" "${fail_args[@]}"
+# Gather coverage once (runs the workspace test suite, default features — mirrors
+# check.sh / ci.yml) and write the LCOV artifact. The threshold is enforced as a
+# separate final step below, so the reports always exist even when the gate fails
+# — that's exactly when the PR comment / gap report is most useful.
+run cargo llvm-cov --workspace --lcov --output-path "$LCOV_PATH"
+
+# JSON export that scripts/coverage-report.py renders into the Markdown PR
+# comment / job summary. Reuses the profile data above (no re-test).
+run cargo llvm-cov report --json --output-path "$JSON_PATH"
 
 if [[ $DO_HTML -eq 1 ]]; then
-    # A second pass reuses the gathered profile data (no re-test) to render HTML.
     run cargo llvm-cov report --html --output-dir "$OUT_DIR"
     echo "HTML report: $OUT_DIR/html/index.html"
     if [[ $DO_OPEN -eq 1 ]]; then
@@ -111,4 +111,10 @@ if [[ $DO_HTML -eq 1 ]]; then
 fi
 
 echo
-echo "coverage report written to $LCOV_PATH"
+echo "coverage reports written to $LCOV_PATH and $JSON_PATH"
+
+# Gate last: reuses the gathered data to print the summary table and fail when
+# line coverage is under the floor. Reports above are already on disk.
+if [[ $DO_FAIL -eq 1 ]]; then
+    run cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_MIN"
+fi
