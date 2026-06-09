@@ -2013,8 +2013,8 @@ fn apply_memory_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        debug_enabled, last_assistant_thinking_only, resolve_debug_log_path,
-        stopped_for_surface_line,
+        debug_enabled, last_assistant_thinking_only, missing_key_err, resolve_debug_log_path,
+        stop_condition_exit_code, stopped_for_surface_line,
     };
     use crate::args::Args;
     use caliban_agent_core::StopCondition;
@@ -2232,5 +2232,53 @@ mod tests {
         let line =
             stopped_for_surface_line(&StopCondition::Cancelled).expect("cancellation must surface");
         assert!(line.contains("cancelled"));
+    }
+
+    // -- stop_condition_exit_code ----------------------------------------
+
+    #[test]
+    fn exit_code_end_of_turn_is_zero() {
+        assert_eq!(stop_condition_exit_code(&StopCondition::EndOfTurn), 0);
+    }
+
+    #[test]
+    fn exit_code_max_turns_is_seventyfive() {
+        assert_eq!(
+            stop_condition_exit_code(&StopCondition::MaxTurnsReached(50)),
+            75
+        );
+    }
+
+    #[test]
+    fn exit_code_cancelled_is_onetwentyfour() {
+        assert_eq!(stop_condition_exit_code(&StopCondition::Cancelled), 124);
+    }
+
+    #[test]
+    fn exit_code_error_conditions_are_one() {
+        for stop in [
+            StopCondition::ProviderError("boom".into()),
+            StopCondition::HookDenied("policy".into()),
+            StopCondition::CompactionFailed("503".into()),
+            StopCondition::MaxTokensExhausted,
+        ] {
+            assert_eq!(
+                stop_condition_exit_code(&stop),
+                1,
+                "{stop:?} should map to exit 1"
+            );
+        }
+    }
+
+    // -- missing_key_err -------------------------------------------------
+
+    #[test]
+    fn missing_key_err_names_the_env_var() {
+        let msg = missing_key_err("ANTHROPIC_API_KEY").to_string();
+        assert!(msg.contains("ANTHROPIC_API_KEY"), "got: {msg}");
+        assert!(
+            msg.contains("apiKeyHelper"),
+            "should hint at the helper path: {msg}"
+        );
     }
 }

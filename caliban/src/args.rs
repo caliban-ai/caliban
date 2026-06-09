@@ -867,4 +867,115 @@ mod tests {
             assert!(!parse(&[]).verbose);
         }
     }
+
+    // -- pure CLI helpers -------------------------------------------------
+
+    #[test]
+    fn read_prompt_prefers_flag_over_positional() {
+        let args = parse(&["positional-prompt", "--prompt", "flag-prompt"]);
+        assert_eq!(read_prompt(&args).unwrap(), "flag-prompt");
+    }
+
+    #[test]
+    fn read_prompt_falls_back_to_positional() {
+        let args = parse(&["positional-prompt"]);
+        assert_eq!(read_prompt(&args).unwrap(), "positional-prompt");
+    }
+
+    #[test]
+    fn read_prompt_errors_when_missing() {
+        let args = parse(&[]);
+        assert!(read_prompt(&args).is_err());
+    }
+
+    #[test]
+    fn read_prompt_errors_on_whitespace_only() {
+        let args = parse(&["--prompt", "   "]);
+        let err = read_prompt(&args).unwrap_err().to_string();
+        assert!(err.contains("empty prompt"), "got: {err}");
+    }
+
+    #[test]
+    fn summarize_passes_through_short_single_line() {
+        assert_eq!(summarize("hello", 80), "hello");
+    }
+
+    #[test]
+    fn summarize_truncates_long_line_with_ellipsis() {
+        let out = summarize("abcdefghij", 4);
+        assert_eq!(out, "abcd\u{2026}");
+    }
+
+    #[test]
+    fn summarize_marks_multiline_with_ellipsis() {
+        let out = summarize("line one\nline two", 80);
+        assert_eq!(out, "line one\u{2026}");
+    }
+
+    #[test]
+    fn summarize_blocks_returns_first_text_block() {
+        let blocks = vec![
+            ContentBlock::Text(caliban_provider::TextBlock {
+                text: "first line\nsecond line".into(),
+                cache_control: None,
+            }),
+            ContentBlock::Text(caliban_provider::TextBlock {
+                text: "ignored".into(),
+                cache_control: None,
+            }),
+        ];
+        // First text block wins, and multiline summarization applies.
+        assert_eq!(summarize_blocks(&blocks, 80), "first line\u{2026}");
+    }
+
+    #[test]
+    fn summarize_blocks_handles_no_text() {
+        assert_eq!(summarize_blocks(&[], 80), "(no text)");
+    }
+
+    #[test]
+    fn parse_temperature_accepts_boundaries() {
+        assert!(parse_temperature("0.0").unwrap().abs() < f32::EPSILON);
+        assert!((parse_temperature("2.0").unwrap() - 2.0).abs() < f32::EPSILON);
+        assert!((parse_temperature("0.7").unwrap() - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_temperature_rejects_out_of_range_and_garbage() {
+        assert!(parse_temperature("2.5").is_err());
+        assert!(parse_temperature("-0.1").is_err());
+        assert!(parse_temperature("NaN").is_err());
+        assert!(parse_temperature("inf").is_err());
+        assert!(parse_temperature("not-a-number").is_err());
+    }
+
+    #[test]
+    fn default_model_for_covers_every_provider() {
+        assert_eq!(
+            default_model_for(ProviderKind::Anthropic),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(default_model_for(ProviderKind::Openai), "gpt-5.5");
+        assert_eq!(default_model_for(ProviderKind::Ollama), "llama3.1");
+        assert_eq!(default_model_for(ProviderKind::Google), "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn provider_name_covers_every_provider() {
+        assert_eq!(provider_name(ProviderKind::Anthropic), "anthropic");
+        assert_eq!(provider_name(ProviderKind::Openai), "openai");
+        assert_eq!(provider_name(ProviderKind::Ollama), "ollama");
+        assert_eq!(provider_name(ProviderKind::Google), "google");
+    }
+
+    #[test]
+    fn resolved_provider_defaults_to_anthropic() {
+        assert_eq!(resolved_provider(&parse(&[])), ProviderKind::Anthropic);
+    }
+
+    #[test]
+    fn resolved_provider_reflects_explicit_flag() {
+        let args = parse(&["--provider", "openai"]);
+        assert_eq!(resolved_provider(&args), ProviderKind::Openai);
+    }
 }
