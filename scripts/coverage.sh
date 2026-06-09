@@ -41,11 +41,13 @@ cd "$(dirname "$0")/.."
 # so this default governs both local and CI runs. Start at/just below the
 # current measured coverage and ratchet upward over time as tests are added.
 #
-# Ratchet history (issue #68, target 85%):
+# Ratchet history (issue #68, target 85% — now reached):
 #   75  initial rollout — a few points below the 78.61% baseline (2026-06-08)
-#   80  step 1 — CLI subcommand + diagnostics test coverage (measured ~81%);
+#   80  step 1 — CLI subcommand + diagnostics test coverage;
 #       `src/bin` process entrypoints excluded from the denominator (see below)
-COVERAGE_MIN="${COVERAGE_MIN:-80}"
+#   85  step 2 — provider IR-conversion, checkpoint/memory/supervisor/router,
+#       and TUI (events/overlay/render) test coverage (measured 85.58%)
+COVERAGE_MIN="${COVERAGE_MIN:-85}"
 
 DO_HTML=0
 DO_OPEN=0

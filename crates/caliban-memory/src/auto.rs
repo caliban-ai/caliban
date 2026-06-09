@@ -771,4 +771,392 @@ mod tests {
         let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
         assert!(!index.contains("tmp-topic.md"));
     }
+
+    // --- TopicKind ----------------------------------------------------------
+
+    #[test]
+    fn topic_kind_as_str_covers_all_variants() {
+        assert_eq!(TopicKind::User.as_str(), "user");
+        assert_eq!(TopicKind::Feedback.as_str(), "feedback");
+        assert_eq!(TopicKind::Project.as_str(), "project");
+        assert_eq!(TopicKind::Reference.as_str(), "reference");
+    }
+
+    #[test]
+    fn topic_kind_parse_is_case_and_whitespace_insensitive() {
+        assert_eq!(TopicKind::parse("USER"), Some(TopicKind::User));
+        assert_eq!(TopicKind::parse("  Feedback  "), Some(TopicKind::Feedback));
+        assert_eq!(TopicKind::parse("Project"), Some(TopicKind::Project));
+        assert_eq!(TopicKind::parse("rEfErEnCe"), Some(TopicKind::Reference));
+    }
+
+    #[test]
+    fn topic_kind_parse_rejects_unknown_and_empty() {
+        assert_eq!(TopicKind::parse(""), None);
+        assert_eq!(TopicKind::parse("   "), None);
+        assert_eq!(TopicKind::parse("junk"), None);
+    }
+
+    // --- TopicLoader accessors / list edge cases ----------------------------
+
+    #[test]
+    fn loader_dir_returns_managed_directory() {
+        let tmp = TempDir::new().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        assert_eq!(loader.dir(), tmp.path());
+    }
+
+    #[test]
+    fn list_on_nonexistent_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let loader = TopicLoader::new(missing);
+        assert!(loader.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_skips_non_md_files_and_subdirectories() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("notes.txt"), "not markdown").unwrap();
+        std::fs::create_dir(dir.join("subdir")).unwrap();
+        // A `.md` directory entry must also be ignored (not a file).
+        std::fs::create_dir(dir.join("dir.md")).unwrap();
+        std::fs::write(
+            dir.join("ok.md"),
+            topic_md("ok", "project", "ok desc", "body"),
+        )
+        .unwrap();
+
+        let loader = TopicLoader::new(dir.to_path_buf());
+        let topics = loader.list().unwrap();
+        let names: Vec<_> = topics.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"]);
+    }
+
+    #[test]
+    fn list_skips_malformed_topic_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // Malformed: no frontmatter delimiters at all.
+        std::fs::write(dir.join("broken.md"), "no frontmatter here\n").unwrap();
+        std::fs::write(
+            dir.join("good.md"),
+            topic_md("good", "reference", "good desc", "body"),
+        )
+        .unwrap();
+
+        let loader = TopicLoader::new(dir.to_path_buf());
+        let topics = loader.list().unwrap();
+        let names: Vec<_> = topics.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["good"]);
+        assert_eq!(topics[0].kind, TopicKind::Reference);
+    }
+
+    #[test]
+    fn list_uses_filename_when_frontmatter_name_mismatches() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // Frontmatter name "wrong" but file stem is "actual-stem".
+        std::fs::write(
+            dir.join("actual-stem.md"),
+            topic_md("wrong", "user", "desc", "body"),
+        )
+        .unwrap();
+
+        let loader = TopicLoader::new(dir.to_path_buf());
+        let topics = loader.list().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name, "actual-stem");
+        assert_eq!(topics[0].description, "desc");
+    }
+
+    // --- read error paths ---------------------------------------------------
+
+    #[test]
+    fn read_rejects_invalid_slug() {
+        let tmp = TempDir::new().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        let err = loader.read("../escape").unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidSlug { .. }));
+    }
+
+    #[test]
+    fn read_missing_file_is_io_error() {
+        let tmp = TempDir::new().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        let err = loader.read("nope").unwrap_err();
+        assert!(matches!(err, MemoryError::Io { .. }));
+    }
+
+    // --- parse_frontmatter edge cases ---------------------------------------
+
+    #[test]
+    fn parse_frontmatter_strips_bom() {
+        let raw = format!(
+            "\u{feff}{}",
+            topic_md("bom", "user", "with bom", "body line")
+        );
+        let path = Path::new("bom.md");
+        let (fm, body) = parse_frontmatter(&raw, path).unwrap();
+        assert_eq!(fm.name, "bom");
+        assert!(body.contains("body line"));
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_missing_leading_delimiter() {
+        let raw = "name: x\ndescription: y\n---\nbody\n";
+        let err = parse_frontmatter(raw, Path::new("x.md")).unwrap_err();
+        match err {
+            MemoryError::InvalidTopic { reason, .. } => assert!(reason.contains("leading")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_missing_closing_delimiter() {
+        let raw = "---\nname: x\ndescription: y\nno closing here\n";
+        let err = parse_frontmatter(raw, Path::new("x.md")).unwrap_err();
+        match err {
+            MemoryError::InvalidTopic { reason, .. } => assert!(reason.contains("closing")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frontmatter_accepts_closing_delimiter_at_eof_without_body() {
+        // Closing `\n---` with no trailing newline and no body.
+        let raw = "---\nname: eof\ndescription: d\nmetadata:\n  type: user\n---";
+        let (fm, body) = parse_frontmatter(raw, Path::new("eof.md")).unwrap();
+        assert_eq!(fm.name, "eof");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_empty_name() {
+        let raw = "---\nname: \"  \"\ndescription: d\n---\nbody\n";
+        let err = parse_frontmatter(raw, Path::new("x.md")).unwrap_err();
+        match err {
+            MemoryError::InvalidTopic { reason, .. } => assert!(reason.contains("name")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_empty_description() {
+        let raw = "---\nname: x\ndescription: \"  \"\n---\nbody\n";
+        let err = parse_frontmatter(raw, Path::new("x.md")).unwrap_err();
+        match err {
+            MemoryError::InvalidTopic { reason, .. } => assert!(reason.contains("description")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_invalid_yaml() {
+        let raw = "---\nname: [unbalanced\ndescription: d\n---\nbody\n";
+        let err = parse_frontmatter(raw, Path::new("x.md")).unwrap_err();
+        match err {
+            MemoryError::InvalidTopic { reason, .. } => assert!(reason.contains("yaml")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // --- render_topic_file / escape_yaml_string -----------------------------
+
+    #[test]
+    fn render_topic_file_appends_trailing_newline_when_missing() {
+        let draft = TopicDraft {
+            name: "no-nl".to_string(),
+            description: "desc".to_string(),
+            kind: TopicKind::Project,
+            body: "body without newline".to_string(),
+        };
+        let rendered = render_topic_file(&draft);
+        assert!(rendered.ends_with("body without newline\n"));
+        assert!(rendered.contains("type: project"));
+    }
+
+    #[test]
+    fn render_topic_file_preserves_single_trailing_newline() {
+        let draft = TopicDraft {
+            name: "has-nl".to_string(),
+            description: "desc".to_string(),
+            kind: TopicKind::User,
+            body: "body\n".to_string(),
+        };
+        let rendered = render_topic_file(&draft);
+        // Exactly one trailing newline (no double newline appended).
+        assert!(rendered.ends_with("body\n"));
+        assert!(!rendered.ends_with("body\n\n"));
+    }
+
+    #[test]
+    fn escape_yaml_string_escapes_special_chars() {
+        assert_eq!(escape_yaml_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_yaml_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_yaml_string("a\nb"), "a\\nb");
+        assert_eq!(escape_yaml_string("a\rb"), "a\\rb");
+        assert_eq!(escape_yaml_string("plain"), "plain");
+    }
+
+    #[test]
+    fn write_then_read_round_trips_description_with_quotes() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let loader = TopicLoader::new(dir.to_path_buf());
+        loader
+            .write(&TopicDraft {
+                name: "quoted".to_string(),
+                description: "use \"smart\" quotes \\ backslash".to_string(),
+                kind: TopicKind::Reference,
+                body: "body".to_string(),
+            })
+            .unwrap();
+        let topic = loader.read("quoted").unwrap();
+        assert_eq!(topic.description, "use \"smart\" quotes \\ backslash");
+        assert_eq!(topic.kind, TopicKind::Reference);
+    }
+
+    // --- index handling -----------------------------------------------------
+
+    #[test]
+    fn write_creates_index_with_header_when_none_exists() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let loader = TopicLoader::new(dir.to_path_buf());
+        loader
+            .write(&TopicDraft {
+                name: "first".to_string(),
+                description: "first desc".to_string(),
+                kind: TopicKind::User,
+                body: "body".to_string(),
+            })
+            .unwrap();
+        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
+        assert!(index.starts_with("# Memory index\n\n"));
+        assert!(index.contains("[first](first.md)"));
+    }
+
+    #[test]
+    fn write_appends_after_last_bullet_line() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("MEMORY.md"),
+            "# Memory index\n\n- [aaa](aaa.md) — user: a\n\nTrailing prose paragraph.\n",
+        )
+        .unwrap();
+        let loader = TopicLoader::new(dir.to_path_buf());
+        loader
+            .write(&TopicDraft {
+                name: "bbb".to_string(),
+                description: "b desc".to_string(),
+                kind: TopicKind::User,
+                body: "body".to_string(),
+            })
+            .unwrap();
+        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
+        let lines: Vec<&str> = index.lines().collect();
+        let aaa_idx = lines.iter().position(|l| l.contains("aaa.md")).unwrap();
+        let bbb_idx = lines.iter().position(|l| l.contains("bbb.md")).unwrap();
+        let prose_idx = lines
+            .iter()
+            .position(|l| l.contains("Trailing prose"))
+            .unwrap();
+        // New bullet inserted right after the last existing bullet, before prose.
+        assert_eq!(bbb_idx, aaa_idx + 1);
+        assert!(bbb_idx < prose_idx);
+    }
+
+    #[test]
+    fn rewrite_with_index_line_appends_at_eof_when_no_bullets() {
+        let out = rewrite_with_index_line(
+            "# Memory index\n\nSome prose.\n",
+            "x",
+            "- [x](x.md) — user: d",
+        );
+        assert!(out.contains("Some prose."));
+        assert!(out.trim_end().ends_with("- [x](x.md) — user: d"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn rewrite_with_index_line_adds_trailing_newline_when_existing_lacks_one() {
+        // existing does not end with '\n' and is non-empty.
+        let out =
+            rewrite_with_index_line("- [x](x.md) — user: old", "x", "- [x](x.md) — user: new");
+        assert!(out.contains("new"));
+        assert!(!out.contains("old"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn remove_index_line_on_missing_index_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // No MEMORY.md exists; remove_index_line must succeed silently.
+        remove_index_line(dir, "ghost").unwrap();
+        assert!(!dir.join("MEMORY.md").exists());
+    }
+
+    #[test]
+    fn remove_index_line_preserves_other_entries_and_trailing_newline() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("MEMORY.md"),
+            "# Memory index\n\n- [keep](keep.md) — user: k\n- [drop](drop.md) — user: d\n",
+        )
+        .unwrap();
+        remove_index_line(dir, "drop").unwrap();
+        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
+        assert!(index.contains("[keep](keep.md)"));
+        assert!(!index.contains("drop.md"));
+        assert!(index.ends_with('\n'));
+    }
+
+    // --- delete edge cases --------------------------------------------------
+
+    #[test]
+    fn delete_rejects_invalid_slug() {
+        let tmp = TempDir::new().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        let err = loader.delete("a/b").unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidSlug { .. }));
+    }
+
+    #[test]
+    fn delete_missing_topic_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        // Deleting a topic that was never written succeeds.
+        loader.delete("never-existed").unwrap();
+    }
+
+    // --- validate_slug NUL --------------------------------------------------
+
+    #[test]
+    fn validate_slug_rejects_nul() {
+        let err = validate_slug("a\0b").unwrap_err();
+        match err {
+            MemoryError::InvalidSlug { reason, .. } => assert!(reason.contains("NUL")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // --- strip_html_comments edge cases -------------------------------------
+
+    #[test]
+    fn strip_html_comments_drops_unterminated_comment_tail() {
+        let input = "keep me <!-- never closed";
+        let out = strip_html_comments(input);
+        assert_eq!(out, "keep me ");
+    }
+
+    #[test]
+    fn strip_html_comments_no_comment_is_identity() {
+        let input = "plain text with < and > but no comment";
+        assert_eq!(strip_html_comments(input), input);
+    }
 }

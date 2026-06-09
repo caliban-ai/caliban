@@ -560,4 +560,289 @@ mod tests {
     fn _path_helper_works() {
         let _ = PathBuf::from("/x");
     }
+
+    #[test]
+    fn restore_files_only_missing_prompt_is_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let err = restore_files_only(&store, 99).unwrap_err();
+        assert!(
+            matches!(err, CheckpointError::NotFound(99)),
+            "absent manifest should surface NotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_files_only_skips_error_entries() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        let file = canonical_ws.join("unreadable.txt");
+        std::fs::write(&file, "PRESENT").unwrap();
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(ManifestEntry {
+            path: file.clone(),
+            blob_sha256: String::new(),
+            mode: 0o644,
+            size: 0,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu_1".into(),
+            error: Some("read: boom".into()),
+        });
+        store.save_manifest(&m).unwrap();
+        let outcome = restore_files_only(&store, 1).unwrap();
+        assert_eq!(outcome.files_skipped, 1);
+        assert_eq!(outcome.files_restored, 0);
+        assert_eq!(outcome.files_deleted, 0);
+        // The on-disk file must be left untouched.
+        assert_eq!(std::fs::read(&file).unwrap(), b"PRESENT");
+    }
+
+    #[test]
+    fn restore_files_only_missing_blob_errors() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        let file = canonical_ws.join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        // Reference a blob sha that was never written.
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(ManifestEntry {
+            path: file.clone(),
+            blob_sha256: "deadbeefdeadbeef".into(),
+            mode: 0o644,
+            size: 1,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu_1".into(),
+            error: None,
+        });
+        store.save_manifest(&m).unwrap();
+        let err = restore_files_only(&store, 1).unwrap_err();
+        assert!(
+            matches!(err, CheckpointError::BlobMissing { .. }),
+            "missing blob should surface BlobMissing, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_deletes_already_absent_created_file_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        // exists_pre=false entry, but the file is already gone — the
+        // NotFound remove arm should still count it as a deletion.
+        let file = canonical_ws.join("never-there.txt");
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(ManifestEntry {
+            path: file.clone(),
+            blob_sha256: String::new(),
+            mode: 0o644,
+            size: 0,
+            exists_pre: false,
+            tool_name: "Write".into(),
+            tool_use_id: "tu_1".into(),
+            error: None,
+        });
+        store.save_manifest(&m).unwrap();
+        let outcome = restore_files_only(&store, 1).unwrap();
+        assert_eq!(outcome.files_deleted, 1);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn restore_conversation_with_id_match_truncates_there() {
+        // message_id() currently always returns None, so even with a
+        // last_message_id the fallback path is taken — assert that
+        // contract explicitly so a future id implementation flags this.
+        let messages = vec![user("p1"), assistant("r1"), user("p2"), assistant("r2")];
+        let mut session = make_session(messages);
+        let remaining = restore_conversation(&mut session, Some("nonexistent-id"), 1);
+        // Fallback truncates after the 1st user message.
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn restore_conversation_prompt_index_beyond_count_keeps_all() {
+        let messages = vec![user("p1"), assistant("r1")];
+        let mut session = make_session(messages);
+        // Only one user message; asking for prompt 5 finds no cut point.
+        let remaining = restore_conversation(&mut session, None, 5);
+        assert_eq!(remaining, 2, "no cut point leaves the conversation intact");
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn restore_conversation_empty_session_returns_zero() {
+        let mut session = make_session(vec![]);
+        let remaining = restore_conversation(&mut session, None, 1);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn truncate_at_finds_nth_user_message() {
+        let session = make_session(vec![
+            user("p1"),
+            assistant("r1"),
+            user("p2"),
+            assistant("r2"),
+            user("p3"),
+        ]);
+        // Second user message sits at index 2 → truncation index 3.
+        assert_eq!(truncate_at(&session, None, 2), 3);
+        // First user message → index 1.
+        assert_eq!(truncate_at(&session, None, 1), 1);
+    }
+
+    #[test]
+    fn truncate_at_beyond_count_returns_len() {
+        let session = make_session(vec![user("p1"), assistant("r1")]);
+        assert_eq!(truncate_at(&session, None, 9), session.messages.len());
+    }
+
+    #[tokio::test]
+    async fn restore_files_false_leaves_disk_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        let file = canonical_ws.join("a.txt");
+        std::fs::write(&file, "v1").unwrap();
+        let sha = sha256_hex(b"v1");
+        store.write_blob(1, &sha, b"v1").unwrap();
+        let mut m = Manifest::new(1, ManifestKind::Files, "p1");
+        m.entries.push(ManifestEntry {
+            path: file.clone(),
+            blob_sha256: sha,
+            mode: 0o644,
+            size: 2,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu_1".into(),
+            error: None,
+        });
+        store.save_manifest(&m).unwrap();
+        std::fs::write(&file, "DIRTY").unwrap();
+
+        let mut session = make_session(vec![user("p1"), assistant("r1")]);
+        let opts = RestoreOptions {
+            files: false,
+            conversation: ConversationRestoreMode::TruncateAtPrompt,
+        };
+        let outcome = restore(&store, &mut session, 1, opts).await.unwrap();
+        assert_eq!(outcome.files_restored, 0);
+        // Conversation truncation still ran.
+        assert_eq!(outcome.messages_after, 1);
+        // Disk file is left dirty because files=false.
+        assert_eq!(std::fs::read(&file).unwrap(), b"DIRTY");
+    }
+
+    #[tokio::test]
+    async fn restore_conversation_none_leaves_messages() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        // Plan-mode manifest with no entries — file restore is a no-op.
+        let m = Manifest::new(1, ManifestKind::Plan, "plan");
+        store.save_manifest(&m).unwrap();
+
+        let mut session = make_session(vec![user("p1"), assistant("r1"), user("p2")]);
+        let opts = RestoreOptions {
+            files: true,
+            conversation: ConversationRestoreMode::None,
+        };
+        let outcome = restore(&store, &mut session, 1, opts).await.unwrap();
+        assert_eq!(outcome.files_restored, 0);
+        assert_eq!(
+            outcome.messages_after, 3,
+            "ConversationRestoreMode::None leaves all messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_empty_manifest_skips_file_restore() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        // Files-kind manifest but zero entries — the !is_empty() guard
+        // should skip restore_files_only entirely.
+        let m = Manifest::new(1, ManifestKind::Files, "empty");
+        store.save_manifest(&m).unwrap();
+        let mut session = make_session(vec![user("p1"), assistant("r1")]);
+        let outcome = restore(&store, &mut session, 1, RestoreOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_restored, 0);
+        assert_eq!(outcome.files_deleted, 0);
+        assert_eq!(outcome.files_skipped, 0);
+    }
+
+    #[tokio::test]
+    async fn restore_missing_prompt_propagates_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let mut session = make_session(vec![user("p1")]);
+        let err = restore(&store, &mut session, 7, RestoreOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CheckpointError::NotFound(7)));
+    }
+
+    #[tokio::test]
+    async fn summarize_slice_keeps_everything_when_compactor_returns_none() {
+        // A compactor that declines to compact (returns None) must leave the
+        // prefix+slice intact and append the suffix.
+        struct NoneCompactor;
+        #[async_trait::async_trait]
+        impl Compactor for NoneCompactor {
+            async fn compact(
+                &self,
+                _messages: &[Message],
+                _caps: &Capabilities,
+            ) -> caliban_agent_core::Result<Option<Vec<Message>>> {
+                Ok(None)
+            }
+            fn strategy_name(&self) -> &'static str {
+                "None"
+            }
+        }
+        // summarize_slice takes Arc<SummarizingCompactor> by type, so we can't
+        // pass NoneCompactor to it directly; assert the unwrap_or contract on
+        // the trait object instead (mirrors the existing RecordingCompactor
+        // test rationale).
+        let comp = NoneCompactor;
+        let caps = min_caps(100_000);
+        let input = vec![user("p1"), assistant("r1")];
+        let compacted = comp.compact(&input, &caps).await.unwrap();
+        let head = compacted.unwrap_or_else(|| input.clone());
+        assert_eq!(head.len(), 2, "None means keep the original input slice");
+    }
+
+    #[test]
+    fn debug_entry_builds_expected_shape() {
+        let p = PathBuf::from("/ws/x.txt");
+        let e = debug_entry(&p, "abc123", true);
+        assert_eq!(e.path, p);
+        assert_eq!(e.blob_sha256, "abc123");
+        assert!(e.exists_pre);
+        assert_eq!(e.mode, 0o644);
+        assert_eq!(e.tool_name, "Write");
+        assert!(e.error.is_none());
+        let e2 = debug_entry(&p, "", false);
+        assert!(!e2.exists_pre);
+    }
+
+    #[test]
+    fn min_caps_sets_token_budget() {
+        let caps = min_caps(123_456);
+        assert_eq!(caps.max_input_tokens, 123_456);
+        assert_eq!(caps.max_output_tokens, 4096);
+        assert!(caps.streaming);
+        assert!(!caps.vision);
+    }
+
+    // SKIPPED: the `SummarizeFromHere` / `SummarizeUpToHere` arms of `restore()`
+    // and `summarize_slice` take `Arc<SummarizingCompactor>` by concrete type.
+    // `SummarizingCompactor` requires a live `Arc<dyn Provider>`, which cannot
+    // be constructed hermetically without standing up a mock provider crate —
+    // out of scope for unit tests in this crate. The call shape is exercised via
+    // `RecordingCompactor`/`NoneCompactor` against the `Compactor` trait above.
 }

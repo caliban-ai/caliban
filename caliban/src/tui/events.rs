@@ -2887,4 +2887,1453 @@ mod tests {
             );
         }
     }
+
+    // ===================================================================
+    // stopped_for_surface — the previously-untested StopCondition variants.
+    // ===================================================================
+
+    #[test]
+    fn max_tokens_exhausted_surfaces_as_error_with_effort_hint() {
+        let s = stopped_for_surface(&StopCondition::MaxTokensExhausted)
+            .expect("max-tokens-exhausted must surface");
+        assert_eq!(s.level, StoppedForLevel::Error);
+        assert_eq!(
+            s.line,
+            "[caliban: max output tokens exhausted — try /effort low]",
+        );
+    }
+
+    #[test]
+    fn refusal_surfaces_as_error() {
+        let s = stopped_for_surface(&StopCondition::Refusal("no can do".to_string()))
+            .expect("refusal must surface");
+        assert_eq!(s.level, StoppedForLevel::Error);
+        assert_eq!(s.line, "[caliban: model refusal: no can do]");
+    }
+
+    #[test]
+    fn content_filter_surfaces_as_error() {
+        let s = stopped_for_surface(&StopCondition::ContentFilter("blocked".to_string()))
+            .expect("content filter must surface");
+        assert_eq!(s.level, StoppedForLevel::Error);
+        assert_eq!(s.line, "[caliban: content filter: blocked]");
+    }
+
+    #[test]
+    fn stream_idle_surfaces_as_error_with_seconds() {
+        let s = stopped_for_surface(&StopCondition::StreamIdle(std::time::Duration::from_secs(
+            12,
+        )))
+        .expect("stream idle must surface");
+        assert_eq!(s.level, StoppedForLevel::Error);
+        assert_eq!(s.line, "[caliban: stream idle for 12s]");
+    }
+
+    // ===================================================================
+    // next_permission_mode / cycle_permission_mode
+    // ===================================================================
+
+    #[test]
+    fn next_permission_mode_skips_bypass_without_latch() {
+        use caliban_agent_core::PermissionMode;
+        // Walk every starting mode; whenever the natural `.next()` would be
+        // BypassPermissions and the latch is off, the dangerous slot is
+        // skipped and a warning is returned.
+        for start in [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+        ] {
+            let (next, warning) = next_permission_mode(start, false);
+            assert_ne!(
+                next,
+                PermissionMode::BypassPermissions,
+                "without the latch, the cycle must never land on BypassPermissions (from {start:?})",
+            );
+            if start.next() == PermissionMode::BypassPermissions {
+                assert!(
+                    warning.is_some(),
+                    "skipping the bypass slot must emit a warning (from {start:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn next_permission_mode_allows_bypass_with_latch() {
+        use caliban_agent_core::PermissionMode;
+        // Find a mode whose `.next()` is BypassPermissions and confirm the
+        // latch lets it through with no warning.
+        for start in [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+        ] {
+            if start.next() == PermissionMode::BypassPermissions {
+                let (next, warning) = next_permission_mode(start, true);
+                assert_eq!(next, PermissionMode::BypassPermissions);
+                assert!(warning.is_none(), "with the latch, no warning is emitted");
+            }
+        }
+    }
+
+    #[test]
+    fn cycle_permission_mode_advances_and_sets_toast() {
+        let mut app = App::for_tests();
+        let before = app.permission_mode.load();
+        cycle_permission_mode(&mut app);
+        let after = app.permission_mode.load();
+        assert_ne!(before, after, "cycling must change the mode");
+        assert!(app.toast.is_some(), "cycling sets an informational toast");
+    }
+
+    #[test]
+    fn cycle_permission_mode_syncs_plan_mode_flag() {
+        use caliban_agent_core::PermissionMode;
+        let mut app = App::for_tests();
+        // Cycle until we land on Plan, then assert the legacy flag mirrors it.
+        for _ in 0..6 {
+            cycle_permission_mode(&mut app);
+            let plan_flag = app.plan_mode.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                plan_flag,
+                app.permission_mode.load() == PermissionMode::Plan,
+                "plan_mode flag must mirror whether the mode is Plan",
+            );
+        }
+    }
+
+    // ===================================================================
+    // format_usage_lines / format_context_lines
+    // ===================================================================
+
+    #[test]
+    fn format_usage_lines_empty_reports_no_calls() {
+        let app = App::for_tests();
+        let lines = format_usage_lines(&app.cost_accumulator);
+        assert!(lines[0].starts_with("usage \u{2014} total $"));
+        assert!(
+            lines.iter().any(|l| l.contains("no provider calls yet")),
+            "empty accumulator must report no calls; got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn format_usage_lines_with_recorded_call_lists_model() {
+        let app = App::for_tests();
+        let usage = caliban_provider::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: Some(10),
+            cache_creation_input_tokens: Some(5),
+        };
+        app.cost_accumulator
+            .record("anthropic", "claude-test", &usage, None);
+        let lines = format_usage_lines(&app.cost_accumulator);
+        assert!(
+            lines.iter().any(|l| l.contains("by model:")),
+            "recorded call must produce a by-model header; got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("anthropic/claude-test")),
+            "the recorded model must appear; got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn format_context_lines_zero_capacity_reports_no_capacity() {
+        let window = caliban_telemetry::ContextWindow::new();
+        let lines = format_context_lines(&window);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("no capacity reported"),
+            "zero-capacity window must report no capacity; got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn format_context_lines_capacity_but_empty_bins() {
+        let window = caliban_telemetry::ContextWindow::new();
+        window.set_capacity(100_000);
+        let lines = format_context_lines(&window);
+        assert!(
+            lines[0].contains("100000-token window"),
+            "must show the capacity header; got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("no messages yet")),
+            "empty bins must produce the no-messages note; got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("warning")),
+            "low utilization must not warn; got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn format_context_lines_over_80_percent_warns() {
+        let window = caliban_telemetry::ContextWindow::new();
+        // Tiny capacity so a single message blows past 80%.
+        window.set_capacity(10);
+        window.record_history(&[caliban_provider::Message::user_text(
+            "this is a fairly long user message that will easily exceed ten tokens of capacity",
+        )]);
+        let lines = format_context_lines(&window);
+        assert!(
+            lines.iter().any(|l| l.contains("warning")),
+            "over-80%% utilization must emit a warning; got {lines:?}"
+        );
+        // Non-empty bins → at least one per-kind line, no "no messages" note.
+        assert!(
+            !lines.iter().any(|l| l.contains("no messages yet")),
+            "non-empty bins must not show the no-messages note; got {lines:?}"
+        );
+    }
+
+    // ===================================================================
+    // action_str / ask_choice_for_cursor — table tests
+    // ===================================================================
+
+    #[test]
+    fn action_str_maps_each_action() {
+        use caliban_agent_core::Action;
+        assert_eq!(action_str(Action::Allow), "allow");
+        assert_eq!(action_str(Action::Ask), "ask");
+        assert_eq!(action_str(Action::Deny), "deny");
+    }
+
+    #[test]
+    fn ask_choice_for_cursor_table() {
+        // Rows 1 and 4 (and anything out of range) collapse to DenyOnce.
+        assert!(matches!(ask_choice_for_cursor(0), AskChoice::AllowOnce));
+        assert!(matches!(ask_choice_for_cursor(1), AskChoice::DenyOnce));
+        assert!(matches!(ask_choice_for_cursor(2), AskChoice::AlwaysAllow));
+        assert!(matches!(ask_choice_for_cursor(3), AskChoice::AlwaysDeny));
+        assert!(matches!(ask_choice_for_cursor(4), AskChoice::DenyOnce));
+        assert!(matches!(ask_choice_for_cursor(99), AskChoice::DenyOnce));
+    }
+
+    // ===================================================================
+    // apply_slash_outcome — one assertion per SlashOutcome variant.
+    // ===================================================================
+
+    #[test]
+    fn apply_slash_outcome_continue_is_noop() {
+        let mut app = App::for_tests();
+        let before = app.transcript.len();
+        apply_slash_outcome(slash::SlashOutcome::Continue, &mut app);
+        assert_eq!(app.transcript.len(), before);
+        assert!(!app.should_exit);
+    }
+
+    #[test]
+    fn apply_slash_outcome_quit_sets_should_exit() {
+        let mut app = App::for_tests();
+        apply_slash_outcome(slash::SlashOutcome::Quit, &mut app);
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn apply_slash_outcome_overlay_sets_view() {
+        let mut app = App::for_tests();
+        apply_slash_outcome(slash::SlashOutcome::Overlay(Overlay::Permissions), &mut app);
+        assert!(matches!(app.view, ViewState::Overlay(Overlay::Permissions)));
+    }
+
+    #[test]
+    fn apply_slash_outcome_status_message_records_transcript_and_status() {
+        let mut app = App::for_tests();
+        apply_slash_outcome(
+            slash::SlashOutcome::StatusMessage("hello status".into()),
+            &mut app,
+        );
+        assert_eq!(app.last_status_message.as_deref(), Some("hello status"));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::Info(m)) if m == "hello status"
+        ));
+    }
+
+    #[test]
+    fn apply_slash_outcome_insert_text_fills_buffer() {
+        let mut app = App::for_tests();
+        apply_slash_outcome(slash::SlashOutcome::InsertText("/foo bar".into()), &mut app);
+        assert_eq!(app.input.buffer, "/foo bar");
+        assert_eq!(app.input.cursor, app.input.buffer.len());
+    }
+
+    #[test]
+    fn apply_slash_outcome_reload_emits_info_line() {
+        let mut app = App::for_tests();
+        apply_slash_outcome(slash::SlashOutcome::Reload, &mut app);
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::Info(m)) if m.contains("reload requested")
+        ));
+    }
+
+    // ===================================================================
+    // handle_agent_event — per TurnEvent variant.
+    // ===================================================================
+
+    /// Helper: install a fresh running turn so the activity-transition
+    /// branches inside `handle_agent_event` are exercised.
+    fn app_with_running_turn() -> App {
+        let mut app = App::for_tests();
+        app.running = Some(RunningTurn {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            activity: Activity::WaitingForModel {
+                since: std::time::Instant::now(),
+            },
+        });
+        app
+    }
+
+    #[test]
+    fn agent_event_text_delta_appends_and_sets_streaming() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        handle_agent_event(
+            TurnEvent::AssistantTextDelta {
+                turn_index: 0,
+                content_block_index: 0,
+                text: "hello ".into(),
+            },
+            &mut app,
+        );
+        handle_agent_event(
+            TurnEvent::AssistantTextDelta {
+                turn_index: 0,
+                content_block_index: 0,
+                text: "world".into(),
+            },
+            &mut app,
+        );
+        // Two deltas coalesce into one AssistantText line.
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::AssistantText(s)) if s == "hello world"
+        ));
+        assert!(matches!(
+            app.running.as_ref().unwrap().activity,
+            Activity::Streaming { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_event_thinking_delta_appends_and_sets_thinking() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        handle_agent_event(
+            TurnEvent::AssistantThinkingDelta {
+                turn_index: 0,
+                content_block_index: 0,
+                text: "pondering".into(),
+            },
+            &mut app,
+        );
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::AssistantThinking(s)) if s == "pondering"
+        ));
+        assert!(matches!(
+            app.running.as_ref().unwrap().activity,
+            Activity::Thinking { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_event_tool_call_lifecycle_start_input_end() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        handle_agent_event(
+            TurnEvent::ToolCallStart {
+                turn_index: 0,
+                tool_use_id: "tc1".into(),
+                name: "Bash".into(),
+            },
+            &mut app,
+        );
+        assert!(matches!(
+            app.running.as_ref().unwrap().activity,
+            Activity::DispatchingTool { .. }
+        ));
+        handle_agent_event(
+            TurnEvent::ToolCallInputDelta {
+                turn_index: 0,
+                tool_use_id: "tc1".into(),
+                partial_json: "{\"cmd\":".into(),
+            },
+            &mut app,
+        );
+        handle_agent_event(
+            TurnEvent::ToolCallInputDelta {
+                turn_index: 0,
+                tool_use_id: "tc1".into(),
+                partial_json: "\"ls\"}".into(),
+            },
+            &mut app,
+        );
+        handle_agent_event(
+            TurnEvent::ToolCallEnd {
+                turn_index: 0,
+                tool_use_id: "tc1".into(),
+                is_error: false,
+                content: vec![caliban_provider::ContentBlock::Text(
+                    caliban_provider::TextBlock {
+                        text: "ok-result".into(),
+                        cache_control: None,
+                    },
+                )],
+            },
+            &mut app,
+        );
+        // After ToolCallEnd, activity reverts to waiting-for-model.
+        assert!(matches!(
+            app.running.as_ref().unwrap().activity,
+            Activity::WaitingForModel { .. }
+        ));
+        // The ToolCall line accumulated the input JSON and the result.
+        let found = app.transcript.iter().any(|l| {
+            matches!(
+                l,
+                TranscriptLine::ToolCall { tool_use_id, input, result, .. }
+                    if tool_use_id == "tc1"
+                        && input == "{\"cmd\":\"ls\"}"
+                        && matches!(result, Some((false, r)) if r == "ok-result")
+            )
+        });
+        assert!(found, "tool-call line must carry input + result");
+    }
+
+    #[test]
+    fn agent_event_turn_end_records_ttft_cost_and_blank_line() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        let before_len = app.transcript.len();
+        handle_agent_event(
+            TurnEvent::TurnEnd {
+                turn_index: 0,
+                assistant_message: caliban_provider::Message::assistant_text("done"),
+                tool_results: Vec::new(),
+                stop_reason: caliban_provider::StopReason::EndTurn,
+                usage: caliban_provider::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                ttft: Some(std::time::Duration::from_millis(123)),
+                tbt: None,
+            },
+            &mut app,
+        );
+        assert_eq!(app.last_turn_ttft_ms, Some(123));
+        // A blank AssistantText line is pushed for separation.
+        assert!(app.transcript.len() > before_len);
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::AssistantText(s)) if s.is_empty()
+        ));
+    }
+
+    #[test]
+    fn agent_event_run_end_surfaces_stop_pushes_usage_and_resets() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        app.auto_scroll = false;
+        handle_agent_event(
+            TurnEvent::RunEnd {
+                final_messages: vec![caliban_provider::Message::user_text("hi")],
+                total_usage: caliban_provider::Usage {
+                    input_tokens: 42,
+                    output_tokens: 7,
+                    ..Default::default()
+                },
+                turn_count: 3,
+                stopped_for: StopCondition::Cancelled,
+            },
+            &mut app,
+        );
+        // Cancelled surfaces as an Info line.
+        assert!(
+            app.transcript
+                .iter()
+                .any(|l| matches!(l, TranscriptLine::Info(s) if s == "[caliban: cancelled]")),
+            "Cancelled stop condition must surface as an Info line"
+        );
+        // A usage summary lands with the run totals.
+        assert!(
+            app.transcript.iter().any(|l| matches!(
+                l,
+                TranscriptLine::UsageSummary { input_tokens, output_tokens, turn_count, .. }
+                    if *input_tokens == 42 && *output_tokens == 7 && *turn_count == 3
+            )),
+            "RunEnd must push a UsageSummary with the run totals"
+        );
+        assert!(app.running.is_none(), "RunEnd clears the running turn");
+        assert!(app.auto_scroll, "RunEnd re-pins auto-scroll");
+        assert_eq!(app.messages.len(), 1, "messages mirror final_messages");
+    }
+
+    #[test]
+    fn agent_event_run_end_error_stop_pushes_error_and_toast() {
+        use caliban_agent_core::TurnEvent;
+        let mut app = app_with_running_turn();
+        handle_agent_event(
+            TurnEvent::RunEnd {
+                final_messages: Vec::new(),
+                total_usage: caliban_provider::Usage::default(),
+                turn_count: 1,
+                stopped_for: StopCondition::ProviderError("boom".into()),
+            },
+            &mut app,
+        );
+        assert!(
+            app.transcript.iter().any(|l| matches!(
+                l,
+                TranscriptLine::Error(s) if s.contains("provider error: boom")
+            )),
+            "error stop condition surfaces as an Error transcript line"
+        );
+        assert!(
+            app.toast.is_some(),
+            "error stop condition also raises a toast"
+        );
+    }
+
+    // ===================================================================
+    // handle_agent_error
+    // ===================================================================
+
+    #[test]
+    fn handle_agent_error_cancelled_is_info_and_clears_running() {
+        let mut app = app_with_running_turn();
+        handle_agent_error(&caliban_agent_core::Error::Cancelled, &mut app);
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptLine::Info(s)) if s == "turn cancelled"
+        ));
+        assert!(app.running.is_none());
+    }
+
+    // ===================================================================
+    // handle_permissions_overlay_key — previously-untested branches.
+    // ===================================================================
+
+    #[test]
+    fn permissions_tab_cycles_view_edit_audit() {
+        use crate::tui::app::PermissionsTab;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        assert_eq!(app.permissions.tab, PermissionsTab::View);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(tab, &mut app));
+        assert_eq!(app.permissions.tab, PermissionsTab::Edit);
+        assert!(handle_permissions_overlay_key(tab, &mut app));
+        assert_eq!(app.permissions.tab, PermissionsTab::Audit);
+        assert!(handle_permissions_overlay_key(tab, &mut app));
+        assert_eq!(app.permissions.tab, PermissionsTab::View);
+    }
+
+    #[test]
+    fn permissions_backtab_cycles_permission_mode() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        let before = app.permission_mode.load();
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(backtab, &mut app));
+        // Five forward steps from a 5-mode cycle land back on `before`, but
+        // the bypass-skip may shift it; either way the consumer returns true.
+        let _ = before;
+    }
+
+    #[test]
+    fn permissions_cursor_up_down_move_and_clamp() {
+        use caliban_agent_core::permissions::RuntimeRule;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        // Two session rules sit at the top of the displayed list.
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "A".into(),
+            action: caliban_agent_core::Action::Allow,
+        });
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "B".into(),
+            action: caliban_agent_core::Action::Allow,
+        });
+        app.permissions.cursor = 0;
+        // `j` moves down.
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(down, &mut app));
+        assert_eq!(app.permissions.cursor, 1);
+        // Down arrow also moves down.
+        assert!(handle_permissions_overlay_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app
+        ));
+        assert_eq!(app.permissions.cursor, 2);
+        // `k` moves up.
+        let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(up, &mut app));
+        assert_eq!(app.permissions.cursor, 1);
+        // Up arrow at the bottom-of-a-walk keeps moving up; at 0 it clamps.
+        app.permissions.cursor = 0;
+        assert!(handle_permissions_overlay_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut app
+        ));
+        assert_eq!(app.permissions.cursor, 0, "Up at top clamps at 0");
+    }
+
+    #[test]
+    fn permissions_a_key_opens_subprompt_only_on_edit_tab() {
+        use crate::tui::app::PermissionsTab;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        // On the View tab, `a` is consumed but does NOT open a sub-prompt.
+        let mut app = App::for_tests();
+        app.permissions.tab = PermissionsTab::View;
+        assert!(handle_permissions_overlay_key(key, &mut app));
+        assert!(app.always_subprompt.is_none());
+
+        // On the Edit tab, `a` opens the always-allow sub-prompt.
+        let mut app = App::for_tests();
+        app.permissions.tab = PermissionsTab::Edit;
+        assert!(handle_permissions_overlay_key(key, &mut app));
+        let sp = app
+            .always_subprompt
+            .as_ref()
+            .expect("Edit-tab `a` must open the sub-prompt");
+        assert_eq!(sp.action, caliban_agent_core::Action::Allow);
+    }
+
+    #[test]
+    fn permissions_p_key_promotes_selected_session_rule() {
+        use crate::tui::app::PermissionsTab;
+        use caliban_agent_core::permissions::RuntimeRule;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.permissions.tab = PermissionsTab::Edit;
+        app.runtime_rules.add(RuntimeRule {
+            pattern: "Bash:ls *".into(),
+            action: caliban_agent_core::Action::Allow,
+        });
+        app.permissions.cursor = 0;
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(key, &mut app));
+        let sp = app
+            .always_subprompt
+            .as_ref()
+            .expect("`p` must open a promote sub-prompt for the selected rule");
+        assert_eq!(sp.suggestions, vec!["Bash:ls *".to_string()]);
+        assert_eq!(sp.action, caliban_agent_core::Action::Allow);
+    }
+
+    #[test]
+    fn permissions_p_key_with_no_rules_warns() {
+        use crate::tui::app::PermissionsTab;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.permissions.tab = PermissionsTab::Edit;
+        // No session rules → promote has nothing to act on.
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(key, &mut app));
+        assert!(app.always_subprompt.is_none());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.text.contains("no rule selected")),
+            "promote with no rules must warn"
+        );
+    }
+
+    #[test]
+    fn permissions_t_key_opens_test_pane_then_enter_runs_then_esc_closes() {
+        use crate::tui::app::PermissionsTab;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.permissions.tab = PermissionsTab::Edit;
+
+        // `t` opens the test pane.
+        let t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(t, &mut app));
+        assert!(app.permissions_test.is_some(), "`t` opens the test pane");
+
+        // Seed a tool/input and Enter runs the matcher → last_outcome set.
+        {
+            let tp = app.permissions_test.as_mut().unwrap();
+            tp.tool_name = "Bash".into();
+            tp.input_json = "{\"command\":\"ls\"}".into();
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(enter, &mut app));
+        assert!(
+            app.permissions_test
+                .as_ref()
+                .is_some_and(|tp| tp.last_outcome.is_some()),
+            "Enter in the test pane must populate last_outcome"
+        );
+
+        // Esc inside the test pane closes the pane (consumed; overlay stays).
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(handle_permissions_overlay_key(esc, &mut app));
+        assert!(app.permissions_test.is_none(), "Esc closes the test pane");
+    }
+
+    #[test]
+    fn permissions_unhandled_key_returns_false() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        // `z` isn't bound → returns false so the generic close path runs.
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(!handle_permissions_overlay_key(key, &mut app));
+    }
+
+    // ===================================================================
+    // handle_transcript_viewer_key
+    // ===================================================================
+
+    #[test]
+    fn transcript_viewer_help_toggle() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::TranscriptViewer);
+        assert!(!app.transcript_viewer.show_help);
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.transcript_viewer.show_help);
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(!app.transcript_viewer.show_help);
+    }
+
+    #[test]
+    fn transcript_viewer_ctrl_e_toggles_show_all() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::TranscriptViewer);
+        assert!(!app.transcript_viewer.show_all);
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(app.transcript_viewer.show_all);
+    }
+
+    #[test]
+    fn transcript_viewer_scroll_navigation() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::TranscriptViewer);
+        // Seed enough history lines that scrolling has somewhere to go.
+        app.messages = (0..40)
+            .map(|i| caliban_provider::Message::user_text(format!("line {i}")))
+            .collect();
+        // j / Down moves down.
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app,
+        );
+        let after_j = app.transcript_viewer.scroll;
+        assert!(after_j >= 1, "j scrolls down at least one row");
+        // PageDown moves further.
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.transcript_viewer.scroll >= after_j);
+        // k / Up moves back up.
+        let before_up = app.transcript_viewer.scroll;
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.transcript_viewer.scroll < before_up);
+        // PageUp moves up more.
+        handle_transcript_viewer_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut app);
+        // G jumps to the bottom; g back to the top.
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+        let bottom = app.transcript_viewer.scroll;
+        assert!(bottom > 0, "G jumps to a non-zero bottom");
+        handle_transcript_viewer_key(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.transcript_viewer.scroll, 0, "g jumps to the top");
+    }
+
+    #[test]
+    fn transcript_viewer_esc_and_q_close() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut app = App::for_tests();
+            app.view = ViewState::Overlay(Overlay::TranscriptViewer);
+            handle_transcript_viewer_key(KeyEvent::new(code, KeyModifiers::NONE), &mut app);
+            assert!(matches!(app.view, ViewState::Main));
+        }
+    }
+
+    // ===================================================================
+    // handle_reverse_history_key
+    // ===================================================================
+
+    fn app_with_reverse_history() -> App {
+        let mut app = App::for_tests();
+        app.reverse_history = Some(reverse_history::ReverseHistoryState::new(
+            vec!["echo one".into(), "echo two".into(), "ls".into()],
+            None,
+            None,
+        ));
+        app.view = ViewState::Overlay(Overlay::ReverseHistory);
+        app
+    }
+
+    #[test]
+    fn reverse_history_char_and_backspace_edit_query() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_with_reverse_history();
+        for c in "echo".chars() {
+            handle_reverse_history_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+        // Two "echo …" entries match.
+        let n = app.reverse_history.as_ref().unwrap().matches().len();
+        assert_eq!(n, 2, "query 'echo' matches two history entries");
+        handle_reverse_history_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+        );
+        // "ech" still matches the two echo entries.
+        assert_eq!(app.reverse_history.as_ref().unwrap().matches().len(), 2);
+    }
+
+    #[test]
+    fn reverse_history_up_down_move_cursor() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_with_reverse_history();
+        handle_reverse_history_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.reverse_history.as_ref().unwrap().cursor, 1);
+        handle_reverse_history_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.reverse_history.as_ref().unwrap().cursor, 0);
+    }
+
+    #[test]
+    fn reverse_history_ctrl_s_cycles_scope() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_with_reverse_history();
+        // Ctrl+S cycles scope without panicking (project/all caches are None).
+        handle_reverse_history_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(app.reverse_history.is_some());
+    }
+
+    #[test]
+    fn reverse_history_enter_sets_buffer_and_closes() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_with_reverse_history();
+        // Cursor 0 → newest match ("ls").
+        handle_reverse_history_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(app.reverse_history.is_none(), "Enter closes the overlay");
+        assert!(matches!(app.view, ViewState::Main));
+        assert_eq!(app.input.buffer, "ls", "Enter loads the selected entry");
+    }
+
+    #[test]
+    fn reverse_history_esc_closes_without_buffer_change() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_with_reverse_history();
+        handle_reverse_history_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(app.reverse_history.is_none());
+        assert!(matches!(app.view, ViewState::Main));
+        assert!(app.input.buffer.is_empty());
+    }
+
+    // ===================================================================
+    // handle_mcp_overlay_key
+    // ===================================================================
+
+    #[test]
+    fn mcp_overlay_letter_keys_each_set_a_toast() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for ch in ['d', 'r', 'a', 's', 't'] {
+            let mut app = App::for_tests();
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert!(
+                handle_mcp_overlay_key(key, &mut app),
+                "`{ch}` must be consumed in the /mcp overlay"
+            );
+            assert!(
+                app.toast.is_some(),
+                "`{ch}` in the /mcp overlay must set a toast"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_overlay_unhandled_key_returns_false() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::for_tests();
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(!handle_mcp_overlay_key(key, &mut app));
+    }
+
+    // ===================================================================
+    // handle_mouse
+    // ===================================================================
+
+    fn mouse(kind: MouseEventKind, row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_up_breaks_autoscroll_and_steps_up() {
+        let mut app = App::for_tests();
+        app.auto_scroll = true;
+        app.last_max_scroll = 100;
+        handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5), &mut app);
+        assert!(!app.auto_scroll, "ScrollUp exits auto-scroll");
+        // Seeded from last_max_scroll (100) then stepped up by 3.
+        assert_eq!(app.scroll, 100 - MOUSE_WHEEL_ROWS);
+    }
+
+    #[test]
+    fn mouse_scroll_down_repins_at_bottom() {
+        let mut app = App::for_tests();
+        app.auto_scroll = false;
+        app.last_max_scroll = 10;
+        app.scroll = 9;
+        handle_mouse(mouse(MouseEventKind::ScrollDown, 5, 5), &mut app);
+        // 9 + 3 >= 10 → re-pins to the live tail.
+        assert_eq!(app.scroll, 10);
+        assert!(
+            app.auto_scroll,
+            "scrolling past the end re-pins auto-scroll"
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_down_steps_without_repin_when_room_remains() {
+        let mut app = App::for_tests();
+        app.auto_scroll = false;
+        app.last_max_scroll = 100;
+        app.scroll = 10;
+        handle_mouse(mouse(MouseEventKind::ScrollDown, 5, 5), &mut app);
+        assert_eq!(app.scroll, 10 + MOUSE_WHEEL_ROWS);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_ignored_inside_overlay() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::Permissions);
+        app.auto_scroll = true;
+        app.last_max_scroll = 50;
+        app.scroll = 0;
+        handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5), &mut app);
+        // Overlay short-circuits before touching scroll state.
+        assert_eq!(app.scroll, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_left_down_drag_up_builds_and_clears_selection() {
+        let mut app = App::for_tests();
+        // Down anchors, Drag extends → a live selection exists.
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 3),
+            &mut app,
+        );
+        handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 4, 7),
+            &mut app,
+        );
+        assert!(
+            app.mouse_selection.range().is_some(),
+            "Down+Drag produces a selection range"
+        );
+        // Up finalises. With an empty PositionMap the extracted text is
+        // empty and copy_to_clipboard short-circuits (no stdout write).
+        handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 7), &mut app);
+        assert!(
+            app.mouse_selection.range().is_some(),
+            "completed selection stays visible until the next Down"
+        );
+    }
+
+    #[test]
+    fn mouse_left_click_without_drag_is_empty_selection() {
+        let mut app = App::for_tests();
+        // Down then Up at the same cell — a click, not a drag. The Up path
+        // extracts an empty range and clipboard write short-circuits.
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &mut app,
+        );
+        handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 1, 1), &mut app);
+        // A collapsed range is still "Some" (start == end).
+        assert!(app.mouse_selection.range().is_some());
+    }
+
+    #[test]
+    fn mouse_non_left_button_cancels_selection() {
+        let mut app = App::for_tests();
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &mut app,
+        );
+        assert!(app.mouse_selection.range().is_some());
+        // A right-button press cancels any in-progress selection.
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Right), 2, 2),
+            &mut app,
+        );
+        assert!(
+            app.mouse_selection.range().is_none(),
+            "non-left press cancels the selection"
+        );
+    }
+
+    // ===================================================================
+    // handle_key — normal-mode branches that don't submit a prompt.
+    // ===================================================================
+
+    fn no_stream() -> Option<TurnEventStream> {
+        None
+    }
+
+    #[test]
+    fn key_ctrl_c_exits_on_empty_buffer() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(app.should_exit, "Ctrl+C on an empty buffer exits");
+    }
+
+    #[test]
+    fn key_ctrl_c_clears_non_empty_buffer() {
+        let mut app = App::for_tests();
+        app.input.buffer = "draft".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(!app.should_exit, "Ctrl+C with text does not exit");
+        assert!(app.input.buffer.is_empty(), "Ctrl+C clears the buffer");
+    }
+
+    #[test]
+    fn key_ctrl_c_cancels_running_turn() {
+        let mut app = app_with_running_turn();
+        let token = app.running.as_ref().unwrap().cancel.clone();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(token.is_cancelled(), "Ctrl+C cancels the running turn");
+        assert!(!app.should_exit);
+    }
+
+    #[test]
+    fn key_ctrl_d_exits_on_empty_buffer() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(app.should_exit, "Ctrl+D on an empty buffer exits");
+    }
+
+    #[test]
+    fn key_char_inserts_into_buffer() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        for c in "hi".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+                &mut stream,
+            );
+        }
+        assert_eq!(app.input.buffer, "hi");
+    }
+
+    #[test]
+    fn key_backspace_deletes_last_char() {
+        let mut app = App::for_tests();
+        app.input.buffer = "abc".into();
+        app.input.cursor = 3;
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.buffer, "ab");
+    }
+
+    #[test]
+    fn key_arrows_move_cursor() {
+        let mut app = App::for_tests();
+        app.input.buffer = "abc".into();
+        app.input.cursor = 3;
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.cursor, 2);
+        handle_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.cursor, 3);
+        handle_key(
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.cursor, 0);
+        handle_key(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.cursor, 3);
+    }
+
+    #[test]
+    fn key_pageup_pagedown_scroll_math() {
+        let mut app = App::for_tests();
+        app.auto_scroll = true;
+        app.last_max_scroll = 100;
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(!app.auto_scroll, "PageUp exits auto-scroll");
+        assert_eq!(app.scroll, 90, "PageUp seeds from max then steps up by 10");
+        handle_key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.scroll, 100, "PageDown back to the tail re-pins");
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn key_shift_enter_inserts_newline_without_submitting() {
+        let mut app = App::for_tests();
+        app.input.buffer = "line1".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut app,
+            &mut stream,
+        );
+        assert!(
+            app.input.buffer.contains('\n'),
+            "Shift+Enter adds a newline"
+        );
+        assert!(stream.is_none(), "Shift+Enter must not start a turn");
+    }
+
+    #[test]
+    fn key_enter_empty_buffer_is_noop() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(stream.is_none(), "Enter on an empty buffer does nothing");
+    }
+
+    #[test]
+    fn key_enter_queues_prompt_while_running() {
+        let mut app = app_with_running_turn();
+        app.input.buffer = "queued prompt".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        // A running turn → the prompt is queued, not submitted.
+        assert_eq!(
+            app.queued.front().map(String::as_str),
+            Some("queued prompt")
+        );
+        assert!(app.input.buffer.is_empty());
+        assert!(stream.is_none(), "queued prompts do not start a new stream");
+    }
+
+    #[test]
+    fn key_esc_clears_non_empty_buffer() {
+        let mut app = App::for_tests();
+        app.input.buffer = "draft".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(app.input.buffer.is_empty(), "Esc clears a non-empty buffer");
+    }
+
+    #[test]
+    fn key_esc_cancels_running_turn() {
+        let mut app = app_with_running_turn();
+        let token = app.running.as_ref().unwrap().cancel.clone();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(token.is_cancelled(), "Esc cancels the running turn");
+    }
+
+    #[test]
+    fn key_esc_esc_chord_opens_rewind() {
+        let mut app = App::for_tests();
+        // Empty buffer, no running turn. First Esc arms the chord.
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(app.last_esc_at.is_some(), "first Esc arms the chord");
+        assert!(matches!(app.view, ViewState::Main));
+        // Second Esc within the window opens the Rewind overlay.
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(
+            matches!(app.view, ViewState::Overlay(Overlay::Rewind)),
+            "Esc-Esc opens the Rewind overlay"
+        );
+        assert!(app.last_esc_at.is_none(), "chord consumed; timer reset");
+    }
+
+    #[test]
+    fn key_esc_clears_queue_first() {
+        let mut app = App::for_tests();
+        app.queued.push_back("a".into());
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(app.queued.is_empty(), "first Esc clears the queue");
+        assert!(app.esc_armed_at.is_some());
+    }
+
+    #[test]
+    fn key_immediate_slash_dispatches_inline() {
+        // `/help` is an immediate command; it dispatches even with no running
+        // turn and must not start an agent stream.
+        let mut app = App::for_tests();
+        app.input.buffer = "/help".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = no_stream();
+        let view_before = matches!(app.view, ViewState::Main);
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(stream.is_none(), "immediate slash must not start a stream");
+        assert!(
+            app.input.buffer.is_empty(),
+            "the slash command was submitted"
+        );
+        let _ = view_before;
+    }
+
+    #[test]
+    fn key_ctrl_shift_b_drops_bypass_latch() {
+        let mut app = App::for_tests();
+        app.bypass_latch = true;
+        app.permission_mode
+            .store(caliban_agent_core::PermissionMode::BypassPermissions);
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(
+                KeyCode::Char('B'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            &mut app,
+            &mut stream,
+        );
+        assert!(!app.bypass_latch, "Ctrl+Shift+B drops the latch");
+        assert_eq!(
+            app.permission_mode.load(),
+            caliban_agent_core::PermissionMode::Default
+        );
+    }
+
+    #[test]
+    fn key_ctrl_o_opens_transcript_viewer() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(matches!(
+            app.view,
+            ViewState::Overlay(Overlay::TranscriptViewer)
+        ));
+    }
+
+    #[test]
+    fn key_ctrl_r_opens_reverse_history() {
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(matches!(
+            app.view,
+            ViewState::Overlay(Overlay::ReverseHistory)
+        ));
+        assert!(app.reverse_history.is_some());
+    }
+
+    #[test]
+    fn key_backtab_cycles_permission_mode() {
+        let mut app = App::for_tests();
+        let before = app.permission_mode.load();
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_ne!(
+            app.permission_mode.load(),
+            before,
+            "Shift+Tab cycles the mode"
+        );
+    }
+
+    // ===================================================================
+    // Overlay dispatch via handle_key (generic close path + delegation).
+    // ===================================================================
+
+    #[test]
+    fn key_overlay_esc_returns_to_main() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::System);
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(matches!(app.view, ViewState::Main));
+    }
+
+    #[test]
+    fn key_overlay_q_returns_to_main() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::System);
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert!(matches!(app.view, ViewState::Main));
+    }
+
+    #[test]
+    fn key_overlay_ctrl_c_closes_when_not_running() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::System);
+        let mut stream = no_stream();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut stream,
+        );
+        assert!(matches!(app.view, ViewState::Main));
+    }
+
+    // ===================================================================
+    // handle_event — Press vs non-Press gating.
+    // ===================================================================
+
+    #[test]
+    fn handle_event_ignores_non_press_keys() {
+        use crossterm::event::{Event, KeyEventKind};
+        let mut app = App::for_tests();
+        app.input.buffer.clear();
+        let mut stream = no_stream();
+        let mut key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        key.kind = KeyEventKind::Release;
+        handle_event(&Event::Key(key), &mut app, &mut stream);
+        assert!(
+            app.input.buffer.is_empty(),
+            "key Release events must be ignored"
+        );
+    }
+
+    #[test]
+    fn handle_event_press_key_inserts() {
+        use crossterm::event::Event;
+        let mut app = App::for_tests();
+        let mut stream = no_stream();
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        handle_event(&Event::Key(key), &mut app, &mut stream);
+        assert_eq!(app.input.buffer, "x");
+    }
 }

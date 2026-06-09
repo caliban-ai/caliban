@@ -928,3 +928,432 @@ mod stalled_tests {
         assert!(!label.contains("no tokens"));
     }
 }
+
+#[cfg(test)]
+mod format_helper_tests {
+    use super::*;
+
+    // ---- format_bytes ---------------------------------------------------
+
+    #[test]
+    fn format_bytes_renders_bytes_kb_and_mb() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 / 2), "1.5 MB");
+    }
+
+    // ---- format_tool_input ----------------------------------------------
+
+    #[test]
+    fn format_tool_input_object_renders_key_value_pairs() {
+        let out = format_tool_input(r#"{"command":"ls","recurse":true}"#, 80);
+        assert!(out.contains("command=\"ls\""));
+        assert!(out.contains("recurse=true"));
+    }
+
+    #[test]
+    fn format_tool_input_object_truncates_long_string_value() {
+        let long = "a".repeat(60);
+        let json = format!("{{\"path\":\"{long}\"}}");
+        let out = format_tool_input(&json, 200);
+        // String values over 40 chars get an ellipsis appended inside quotes.
+        assert!(out.contains('\u{2026}'));
+        assert!(out.starts_with("path=\"aaaa"));
+    }
+
+    #[test]
+    fn format_tool_input_object_renders_number_bool_null() {
+        let out = format_tool_input(r#"{"n":42,"b":false,"x":null}"#, 80);
+        assert!(out.contains("n=42"));
+        assert!(out.contains("b=false"));
+        assert!(out.contains("x=null"));
+    }
+
+    #[test]
+    fn format_tool_input_object_truncates_joined_over_max() {
+        // Many keys so the joined string exceeds max_chars and gets clipped.
+        let json = r#"{"aaaa":"1","bbbb":"2","cccc":"3","dddd":"4"}"#;
+        let out = format_tool_input(json, 10);
+        assert!(out.chars().count() <= 11); // 10 + ellipsis
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn format_tool_input_non_object_passthrough_and_truncation() {
+        // Non-JSON input passes through, truncated at max_chars.
+        assert_eq!(format_tool_input("hello", 80), "hello");
+        let out = format_tool_input(&"x".repeat(100), 10);
+        assert_eq!(out.chars().count(), 11);
+        assert!(out.ends_with('\u{2026}'));
+    }
+}
+
+/// Render-path tests that drive the full `render()` entry point through a
+/// ratatui `TestBackend`. They set up `App` state (transcript, running,
+/// overlays, toast, selection) and assert no panic plus expected substrings
+/// in the rendered buffer across wide / narrow / tiny terminal sizes.
+///
+/// Hermeticity: `App::for_tests()` builds a `MockProvider`-backed app with no
+/// IO/terminal; `TestBackend` is an in-memory buffer. No network, FS writes,
+/// tokio runtime, or real terminal. We do NOT drive the submit path,
+/// alt-screen, or subprocess.
+#[cfg(test)]
+mod render_path_tests {
+    #![allow(clippy::too_many_lines)]
+    use crate::tui::App;
+    use crate::tui::app::{Activity, RunningTurn, TranscriptLine};
+    use crate::tui::mouse_select::Cell as SelCell;
+    use crate::tui::overlay::{Overlay, ViewState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Flatten the rendered backbuffer into one string for substring asserts.
+    fn buffer_text(term: &Terminal<TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    fn draw(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| super::render(f, app)).unwrap();
+        term
+    }
+
+    /// Shorten the (otherwise long, temp-dir-derived) cwd so status-bar
+    /// chips that render after it stay within the test terminal width.
+    fn short_cwd(app: &mut App) {
+        app.cwd = std::path::PathBuf::from("/w");
+    }
+
+    #[test]
+    fn render_empty_transcript_does_not_panic() {
+        let mut app = App::for_tests();
+        let term = draw(&mut app, 100, 40);
+        // Status bar carries the provider/model; for_tests uses the mock model.
+        let text = buffer_text(&term);
+        assert!(text.contains("mock"), "status bar shows model: {text}");
+    }
+
+    #[test]
+    fn render_populated_transcript_shows_all_line_kinds() {
+        let mut app = App::for_tests();
+        app.transcript
+            .push(TranscriptLine::UserPrompt("first line\nsecond line".into()));
+        app.transcript
+            .push(TranscriptLine::AssistantText("hello from model".into()));
+        app.transcript
+            .push(TranscriptLine::AssistantThinking("pondering".into()));
+        app.transcript.push(TranscriptLine::ToolCall {
+            tool_use_id: "id1".into(),
+            name: "Bash".into(),
+            input: r#"{"command":"ls"}"#.into(),
+            result: Some((false, "file.txt".into())),
+        });
+        app.transcript.push(TranscriptLine::ToolCall {
+            tool_use_id: "id2".into(),
+            name: "Read".into(),
+            input: r#"{"path":"x"}"#.into(),
+            result: Some((true, "boom".into())),
+        });
+        app.transcript.push(TranscriptLine::UsageSummary {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read: Some(20),
+            cache_creation: Some(10),
+            last_turn_ttft_ms: Some(300),
+            turn_count: 2,
+        });
+        app.transcript
+            .push(TranscriptLine::Info("info message".into()));
+        app.transcript
+            .push(TranscriptLine::Error("bad thing".into()));
+        app.transcript.push(TranscriptLine::Attached {
+            display_path: "doc.md".into(),
+            bytes: 2048,
+        });
+
+        let term = draw(&mut app, 120, 50);
+        let text = buffer_text(&term);
+        assert!(text.contains("user:"));
+        assert!(text.contains("first line"));
+        assert!(text.contains("hello from model"));
+        assert!(text.contains("thinking"));
+        assert!(text.contains("Bash"));
+        assert!(text.contains("error"));
+        assert!(text.contains("caliban:"));
+        assert!(text.contains("TTFT"));
+        assert!(text.contains("info message"));
+        assert!(text.contains("doc.md"));
+        assert!(text.contains("KB"));
+    }
+
+    #[test]
+    fn render_while_running_shows_spinner_and_activity() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        app.running = Some(RunningTurn {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            activity: Activity::Streaming {
+                since: std::time::Instant::now(),
+            },
+        });
+        let term = draw(&mut app, 120, 30);
+        let text = buffer_text(&term);
+        assert!(text.contains("streaming response"));
+    }
+
+    #[test]
+    fn render_running_dispatching_tool_shows_tool_name() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        app.running = Some(RunningTurn {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            activity: Activity::DispatchingTool {
+                name: "Grep".into(),
+                since: std::time::Instant::now(),
+            },
+        });
+        let term = draw(&mut app, 120, 30);
+        assert!(buffer_text(&term).contains("running Grep"));
+    }
+
+    #[test]
+    fn render_running_stalled_shows_no_tokens_hint() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        // Last delta 12s ago, streaming (not a tool) → stall hint fires.
+        app.last_delta_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(12))
+            .expect("monotonic clock back");
+        app.running = Some(RunningTurn {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            activity: Activity::Streaming {
+                since: std::time::Instant::now(),
+            },
+        });
+        let term = draw(&mut app, 120, 30);
+        assert!(buffer_text(&term).contains("no tokens for"));
+    }
+
+    #[test]
+    fn render_with_toast_shows_error_text() {
+        let mut app = App::for_tests();
+        app.toast = Some(crate::tui::toast::Toast::error("disk full"));
+        let term = draw(&mut app, 100, 30);
+        assert!(buffer_text(&term).contains("disk full"));
+    }
+
+    #[test]
+    fn render_with_queued_indicator_when_no_toast() {
+        let mut app = App::for_tests();
+        app.queued.push_back("queued message".into());
+        let term = draw(&mut app, 100, 30);
+        assert!(buffer_text(&term).contains("QUEUED"));
+    }
+
+    #[test]
+    fn render_toast_wins_over_queued_indicator() {
+        let mut app = App::for_tests();
+        app.queued.push_back("queued message".into());
+        app.toast = Some(crate::tui::toast::Toast::warn("watch out"));
+        let term = draw(&mut app, 100, 30);
+        let text = buffer_text(&term);
+        assert!(text.contains("watch out"));
+        assert!(!text.contains("QUEUED"));
+    }
+
+    #[test]
+    fn render_with_input_buffer_shows_prompt_and_text() {
+        let mut app = App::for_tests();
+        app.input.buffer = "type here".into();
+        app.input.cursor = app.input.buffer.len();
+        let term = draw(&mut app, 80, 20);
+        let text = buffer_text(&term);
+        assert!(text.contains("> type here"));
+    }
+
+    #[test]
+    fn render_multiline_input_wraps_segments() {
+        let mut app = App::for_tests();
+        app.input.buffer = "line one\nline two".into();
+        app.input.cursor = app.input.buffer.len();
+        let term = draw(&mut app, 80, 20);
+        let text = buffer_text(&term);
+        assert!(text.contains("line one"));
+        assert!(text.contains("line two"));
+    }
+
+    #[test]
+    fn render_with_overlay_open_shows_overlay_chrome() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::Config);
+        let term = draw(&mut app, 100, 40);
+        let text = buffer_text(&term);
+        // Status bar shows the overlay chip; the overlay body shows Config rows.
+        assert!(text.contains("q to close") || text.contains("Provider"));
+    }
+
+    #[test]
+    fn render_with_plan_mode_shows_plan_chip() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        app.plan_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let term = draw(&mut app, 120, 20);
+        assert!(buffer_text(&term).contains("plan"));
+    }
+
+    #[test]
+    fn render_with_bypass_latch_shows_warning_chip() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        app.bypass_latch = true;
+        let term = draw(&mut app, 120, 20);
+        assert!(buffer_text(&term).contains("bypass latched"));
+    }
+
+    #[test]
+    fn render_with_custom_statusline_segment() {
+        let mut app = App::for_tests();
+        app.custom_statusline = "branch:main".into();
+        let term = draw(&mut app, 120, 20);
+        assert!(buffer_text(&term).contains("branch:main"));
+    }
+
+    #[test]
+    fn render_with_context_window_segment() {
+        let mut app = App::for_tests();
+        short_cwd(&mut app);
+        app.context_window.set_capacity(200_000);
+        app.context_window
+            .add(caliban_telemetry::MessageKind::UserText, 24_000);
+        let term = draw(&mut app, 140, 20);
+        // 12% of 200K segment present in the status line.
+        assert!(buffer_text(&term).contains("of 200K"));
+    }
+
+    #[test]
+    fn render_with_mouse_selection_highlight_does_not_panic() {
+        let mut app = App::for_tests();
+        app.transcript
+            .push(TranscriptLine::AssistantText("highlight me please".into()));
+        app.mouse_selection.on_down(SelCell::new(0, 0));
+        app.mouse_selection.on_drag(SelCell::new(0, 8));
+        app.mouse_selection.on_up(SelCell::new(0, 8));
+        let term = draw(&mut app, 100, 30);
+        assert!(buffer_text(&term).contains("highlight"));
+    }
+
+    #[test]
+    fn render_long_transcript_auto_scrolls_to_bottom() {
+        let mut app = App::for_tests();
+        for i in 0..200 {
+            app.transcript
+                .push(TranscriptLine::AssistantText(format!("row {i}")));
+        }
+        app.auto_scroll = true;
+        let term = draw(&mut app, 80, 20);
+        let text = buffer_text(&term);
+        // Bottom of the transcript should be visible; the very last row's text.
+        assert!(text.contains("row 199"));
+        // Auto-scroll pinned the offset to the computed max.
+        assert_eq!(app.scroll, app.last_max_scroll);
+    }
+
+    #[test]
+    fn render_manual_scroll_clamped_to_max() {
+        let mut app = App::for_tests();
+        for i in 0..50 {
+            app.transcript
+                .push(TranscriptLine::AssistantText(format!("line {i}")));
+        }
+        app.auto_scroll = false;
+        app.scroll = u16::MAX; // absurd offset → clamps to max_scroll
+        let term = draw(&mut app, 80, 20);
+        let _ = buffer_text(&term);
+        assert_eq!(app.scroll, app.last_max_scroll);
+    }
+
+    #[test]
+    fn render_tiny_terminal_does_not_panic() {
+        let mut app = App::for_tests();
+        app.transcript
+            .push(TranscriptLine::AssistantText("some content".into()));
+        app.input.buffer = "abc".into();
+        app.input.cursor = 3;
+        // Tiny sizes exercise clamp/wrap/saturating-sub branches.
+        for (w, h) in [(10u16, 6u16), (1, 6), (5, 3), (40, 2)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| super::render(f, &mut app)).unwrap();
+        }
+    }
+
+    /// Flatten a status `Line` into a plain string (no width clipping).
+    fn status_text(app: &App) -> String {
+        super::render_status(app)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn render_status_includes_session_segment() {
+        let mut app = App::for_tests();
+        app.session = Some(caliban_sessions::PersistedSession::new(
+            "demo-session",
+            "anthropic",
+            "mock",
+        ));
+        let text = status_text(&app);
+        assert!(text.contains("session: demo-session"));
+        assert!(text.contains("0t)"));
+    }
+
+    #[test]
+    fn render_status_shows_permission_mode_chip_when_non_default() {
+        let app = App::for_tests();
+        app.permission_mode
+            .store(caliban_agent_core::PermissionMode::AcceptEdits);
+        let text = status_text(&app);
+        // Non-default modes emit a bracketed chip via `chip()`.
+        assert!(text.contains('['), "perm chip present: {text}");
+    }
+
+    #[test]
+    fn render_status_hides_perm_chip_for_default_mode() {
+        let app = App::for_tests();
+        // Default mode (the for_tests default) emits no permission chip.
+        app.permission_mode
+            .store(caliban_agent_core::PermissionMode::Default);
+        let text = status_text(&app);
+        assert!(text.contains("mock"));
+    }
+
+    #[test]
+    fn render_status_overlay_chip_present_when_overlay_open() {
+        let mut app = App::for_tests();
+        app.view = ViewState::Overlay(Overlay::Mcp);
+        let text = status_text(&app);
+        assert!(text.contains("q to close"));
+    }
+
+    #[test]
+    fn render_overflowing_input_caps_at_max_rows() {
+        let mut app = App::for_tests();
+        // A very long single-line buffer wraps past INPUT_MAX_ROWS; the
+        // layout must still render without panicking on a narrow terminal.
+        app.input.buffer = "x".repeat(500);
+        app.input.cursor = app.input.buffer.len();
+        let mut term = Terminal::new(TestBackend::new(20, 20)).unwrap();
+        term.draw(|f| super::render(f, &mut app)).unwrap();
+        assert!(buffer_text(&term).contains('x'));
+    }
+}

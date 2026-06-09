@@ -742,4 +742,344 @@ mod tests {
         let mgr = PluginManager::load(&roots, &settings).unwrap();
         assert!(mgr.loaded().is_empty());
     }
+
+    #[test]
+    fn min_version_satisfied_loads_plugin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(&plug_dir).unwrap();
+        // Partial "0.5" min_version is padded to "0.5.0"; current 1.0 >= 0.5.
+        fs::write(
+            plug_dir.join("plugin.json"),
+            r#"{ "name": "demo", "version": "0.1.0", "caliban": { "min_version": "0.5" } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let settings = PluginSettings {
+            caliban_version: Some("1.0".into()),
+            ..Default::default()
+        };
+        let mgr = PluginManager::load(&roots, &settings).unwrap();
+        assert_eq!(mgr.loaded().len(), 1);
+    }
+
+    #[test]
+    fn name_mismatch_recorded_as_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("wrongdir");
+        fs::create_dir_all(&plug_dir).unwrap();
+        // Manifest name "demo" does not match dir "wrongdir".
+        fs::write(plug_dir.join("plugin.json"), minimal("demo")).unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.loaded().is_empty());
+        assert_eq!(mgr.failures().len(), 1);
+        assert_eq!(mgr.failures()[0].dir_name, "wrongdir");
+        assert_eq!(mgr.failures()[0].source, PluginSource::User);
+    }
+
+    #[test]
+    fn dir_without_manifest_is_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        // Directory with no plugin.json is skipped silently.
+        fs::create_dir_all(user.join("not-a-plugin")).unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.loaded().is_empty());
+        assert!(mgr.failures().is_empty());
+    }
+
+    #[test]
+    fn nonexistent_root_is_skipped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = PluginRoots {
+            project: Some(tmp.path().join("does-not-exist")),
+            user: None,
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.loaded().is_empty());
+    }
+
+    #[test]
+    fn file_entry_in_root_is_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+        // A plain file (not a dir) at the root level is skipped.
+        fs::write(user.join("stray.txt"), "hi").unwrap();
+        make_plugin(&user, "demo", &minimal("demo"));
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert_eq!(mgr.loaded().len(), 1);
+    }
+
+    #[test]
+    fn roots_ordered_priority() {
+        let roots = PluginRoots {
+            project: Some(PathBuf::from("/p")),
+            user: Some(PathBuf::from("/u")),
+            managed: Some(PathBuf::from("/m")),
+        };
+        let ordered = roots.ordered();
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0].1, PluginSource::Project);
+        assert_eq!(ordered[1].1, PluginSource::User);
+        assert_eq!(ordered[2].1, PluginSource::Managed);
+    }
+
+    #[test]
+    fn roots_ordered_skips_none() {
+        let roots = PluginRoots {
+            project: None,
+            user: Some(PathBuf::from("/u")),
+            managed: None,
+        };
+        let ordered = roots.ordered();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].1, PluginSource::User);
+    }
+
+    #[test]
+    fn default_for_populates_project_and_managed() {
+        let ws = PathBuf::from("/workspace");
+        let roots = PluginRoots::default_for(&ws);
+        assert_eq!(roots.project.unwrap(), ws.join(".caliban").join("plugins"));
+        assert!(roots.managed.is_some());
+    }
+
+    #[test]
+    fn default_managed_dir_is_nonempty() {
+        assert!(!default_managed_dir().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn skill_roots_returns_explicit_subdirs_when_set() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(&plug_dir).unwrap();
+        fs::write(
+            plug_dir.join("plugin.json"),
+            r#"{ "name": "demo", "version": "0.1.0", "components": { "skills": ["skills/a", "skills/b"] } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        let sr = mgr.skill_roots();
+        assert_eq!(sr.len(), 2);
+        assert!(sr[0].ends_with("skills/a"));
+        assert!(sr[1].ends_with("skills/b"));
+    }
+
+    #[test]
+    fn agent_and_output_style_roots_default_to_subdirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+        make_plugin(&user, "demo", &minimal("demo"));
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user.clone()),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert_eq!(mgr.agent_roots(), vec![user.join("demo").join("agents")]);
+        assert_eq!(
+            mgr.output_style_roots(),
+            vec![user.join("demo").join("output-styles")]
+        );
+    }
+
+    #[test]
+    fn agent_and_style_roots_use_explicit_paths_when_set() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(&plug_dir).unwrap();
+        fs::write(
+            plug_dir.join("plugin.json"),
+            r#"{ "name": "demo", "version": "0.1.0", "components": { "agents": ["agents/x.md"], "output_styles": ["styles/y.md"] } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.agent_roots()[0].ends_with("agents/x.md"));
+        assert!(mgr.output_style_roots()[0].ends_with("styles/y.md"));
+    }
+
+    #[test]
+    fn hooks_config_skips_missing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+        // Plugin with no hooks/hooks.json => no hooks config entries.
+        make_plugin(&user, "demo", &minimal("demo"));
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.hooks_configs().is_empty());
+    }
+
+    #[test]
+    fn hooks_config_skips_malformed_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(plug_dir.join("hooks")).unwrap();
+        fs::write(plug_dir.join("plugin.json"), minimal("demo")).unwrap();
+        fs::write(plug_dir.join("hooks").join("hooks.json"), "{ not json").unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        // Malformed hooks file is warned-and-skipped, not a hard error.
+        assert!(mgr.hooks_configs().is_empty());
+    }
+
+    #[test]
+    fn mcp_servers_reads_external_mcp_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(plug_dir.join("mcp")).unwrap();
+        fs::write(plug_dir.join("plugin.json"), minimal("demo")).unwrap();
+        fs::write(
+            plug_dir.join("mcp").join(".mcp.json"),
+            r#"{ "mcpServers": { "srv": { "command": "${CALIBAN_PLUGIN_ROOT}/bin/x" } } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        let servers = mgr.mcp_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, "demo:srv");
+        assert!(
+            servers[0].1["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("/bin/x")
+        );
+    }
+
+    #[test]
+    fn mcp_servers_accepts_bare_object_shape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(plug_dir.join("mcp")).unwrap();
+        fs::write(plug_dir.join("plugin.json"), minimal("demo")).unwrap();
+        // Bare object (no "mcpServers" wrapper) is also accepted.
+        fs::write(
+            plug_dir.join("mcp").join(".mcp.json"),
+            r#"{ "alpha": { "command": "/bin/a" }, "beta": { "command": "/bin/b" } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        let mut names: Vec<String> = mgr.mcp_servers().into_iter().map(|(k, _)| k).collect();
+        names.sort();
+        assert_eq!(names, vec!["demo:alpha".to_string(), "demo:beta".into()]);
+    }
+
+    #[test]
+    fn mcp_servers_skips_malformed_external_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(plug_dir.join("mcp")).unwrap();
+        fs::write(plug_dir.join("plugin.json"), minimal("demo")).unwrap();
+        fs::write(plug_dir.join("mcp").join(".mcp.json"), "{ broken").unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        assert!(mgr.mcp_servers().is_empty());
+    }
+
+    #[test]
+    fn mcp_inline_wins_over_external_when_both_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user = tmp.path().join("user");
+        let plug_dir = user.join("demo");
+        fs::create_dir_all(plug_dir.join("mcp")).unwrap();
+        fs::write(
+            plug_dir.join("plugin.json"),
+            r#"{ "name": "demo", "version": "0.1.0", "mcpServers": { "inline": { "command": "/bin/i" } } }"#,
+        )
+        .unwrap();
+        fs::write(
+            plug_dir.join("mcp").join(".mcp.json"),
+            r#"{ "external": { "command": "/bin/e" } }"#,
+        )
+        .unwrap();
+        let roots = PluginRoots {
+            project: None,
+            user: Some(user),
+            managed: None,
+        };
+        let mgr = PluginManager::load(&roots, &PluginSettings::default()).unwrap();
+        let servers = mgr.mcp_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, "demo:inline");
+    }
+
+    #[test]
+    fn pad_version_widens_partial_versions() {
+        assert_eq!(pad_version("1"), "1.0.0");
+        assert_eq!(pad_version("1.2"), "1.2.0");
+        assert_eq!(pad_version("1.2.3"), "1.2.3");
+        assert_eq!(pad_version("1.2.3.4"), "1.2.3.4");
+    }
+
+    #[test]
+    fn settings_from_env_returns_caliban_version() {
+        // from_env reads only compile-time CARGO_PKG_VERSION for the version
+        // field; enabled/strict come from process env which we don't mutate
+        // here (hermetic). Just assert the version is populated.
+        let s = PluginSettings::from_env();
+        assert!(s.caliban_version.is_some());
+    }
 }
