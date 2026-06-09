@@ -347,3 +347,538 @@ mod effort_plumbing {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Test code favors exhaustive `other => panic!` arms (clearer failure
+    // messages than `unreachable!`) and a single broad coverage test, both of
+    // which trip pedantic lints that are not meaningful for tests.
+    #![allow(clippy::match_wildcard_for_single_variants)]
+    #![allow(clippy::too_many_lines)]
+
+    use super::*;
+    use crate::schema::response::NativeUsage;
+    use caliban_provider::{CompletionRequest, RequestMetadata};
+    use serde_json::json;
+
+    /// Build a minimal request with the given messages and tools. Tool-choice
+    /// defaults to Auto; callers override as needed.
+    fn req_with(messages: Vec<Message>, tools: Vec<IrTool>) -> CompletionRequest {
+        CompletionRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages,
+            tools,
+            tool_choice: IrToolChoice::Auto,
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: RequestMetadata::default(),
+        }
+    }
+
+    fn sample_tool() -> IrTool {
+        IrTool {
+            name: "get_weather".into(),
+            description: "Look up the weather".into(),
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+        }
+    }
+
+    // ----- ir_to_native_request: system handling -----
+
+    #[test]
+    fn system_plain_text_joined_when_no_cache_control() {
+        let req = req_with(
+            vec![
+                Message::system_text("a"),
+                Message::system_text("b"),
+                Message::user_text("hi"),
+            ],
+            vec![],
+        );
+        let native = ir_to_native_request(req, false);
+        match native.system {
+            Some(NativeSystem::Text(s)) => assert_eq!(s, "a\n\nb"),
+            other => panic!("expected plain Text system, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_with_cache_control_becomes_blocks() {
+        let system_msg = Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text(IrTextBlock {
+                text: "cached".into(),
+                cache_control: Some(CacheControl::Ephemeral),
+            })],
+        };
+        let req = req_with(vec![system_msg, Message::user_text("hi")], vec![]);
+        let native = ir_to_native_request(req, false);
+        match native.system {
+            Some(NativeSystem::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].text, "cached");
+                assert_eq!(blocks[0].cache_control, Some(NativeCacheControl::Ephemeral));
+            }
+            other => panic!("expected Blocks system, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_system_messages_yields_none() {
+        let req = req_with(vec![Message::user_text("hi")], vec![]);
+        let native = ir_to_native_request(req, false);
+        assert!(native.system.is_none());
+    }
+
+    // ----- ir_to_native_request: tool_choice mapping -----
+
+    #[test]
+    fn tool_choice_none_when_tools_empty_regardless() {
+        let mut req = req_with(vec![Message::user_text("hi")], vec![]);
+        req.tool_choice = IrToolChoice::Any;
+        let native = ir_to_native_request(req, false);
+        assert!(native.tool_choice.is_none());
+    }
+
+    #[test]
+    fn tool_choice_auto_with_tools() {
+        let mut req = req_with(vec![Message::user_text("hi")], vec![sample_tool()]);
+        req.tool_choice = IrToolChoice::Auto;
+        let native = ir_to_native_request(req, false);
+        assert_eq!(native.tool_choice, Some(NativeToolChoice::Auto));
+    }
+
+    #[test]
+    fn tool_choice_any_with_tools() {
+        let mut req = req_with(vec![Message::user_text("hi")], vec![sample_tool()]);
+        req.tool_choice = IrToolChoice::Any;
+        let native = ir_to_native_request(req, false);
+        assert_eq!(native.tool_choice, Some(NativeToolChoice::Any));
+    }
+
+    #[test]
+    fn tool_choice_specific_with_tools() {
+        let mut req = req_with(vec![Message::user_text("hi")], vec![sample_tool()]);
+        req.tool_choice = IrToolChoice::Specific {
+            name: "get_weather".into(),
+        };
+        let native = ir_to_native_request(req, false);
+        assert_eq!(
+            native.tool_choice,
+            Some(NativeToolChoice::Tool {
+                name: "get_weather".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tool_choice_none_variant_yields_none_even_with_tools() {
+        let mut req = req_with(vec![Message::user_text("hi")], vec![sample_tool()]);
+        req.tool_choice = IrToolChoice::None;
+        let native = ir_to_native_request(req, false);
+        assert!(native.tool_choice.is_none());
+    }
+
+    #[test]
+    fn tool_with_cache_control_mapped() {
+        let mut tool = sample_tool();
+        tool.cache_control = Some(CacheControl::Ephemeral);
+        let req = req_with(vec![Message::user_text("hi")], vec![tool]);
+        let native = ir_to_native_request(req, false);
+        assert_eq!(native.tools.len(), 1);
+        assert_eq!(native.tools[0].name, "get_weather");
+        assert_eq!(
+            native.tools[0].cache_control,
+            Some(NativeCacheControl::Ephemeral)
+        );
+    }
+
+    // ----- ir_content_block_to_native (driven via messages) -----
+
+    #[test]
+    fn assistant_message_blocks_converted() {
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text(IrTextBlock {
+                    text: "thought".into(),
+                    cache_control: Some(CacheControl::Ephemeral),
+                }),
+                ContentBlock::Image(IrImageBlock {
+                    source: IrImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+                ContentBlock::ToolUse(IrToolUseBlock {
+                    id: "tu_1".into(),
+                    name: "do_thing".into(),
+                    input: json!({"k": "v"}),
+                }),
+            ],
+        };
+        let req = req_with(vec![assistant], vec![]);
+        let native = ir_to_native_request(req, false);
+        assert_eq!(native.messages.len(), 1);
+        assert_eq!(native.messages[0].role, "assistant");
+        let blocks = match &native.messages[0].content {
+            NativeContent::Blocks(b) => b,
+            other => panic!("expected Blocks, got {other:?}"),
+        };
+        assert_eq!(blocks.len(), 3);
+        match &blocks[0] {
+            NativeContentBlock::Text(t) => {
+                assert_eq!(t.text, "thought");
+                assert_eq!(t.cache_control, Some(NativeCacheControl::Ephemeral));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &blocks[1] {
+            NativeContentBlock::Image(i) => match &i.source {
+                NativeImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/png");
+                    assert_eq!(data, "aGVsbG8=");
+                }
+                other => panic!("expected Base64 source, got {other:?}"),
+            },
+            other => panic!("expected Image, got {other:?}"),
+        }
+        match &blocks[2] {
+            NativeContentBlock::ToolUse(tu) => {
+                assert_eq!(tu.id, "tu_1");
+                assert_eq!(tu.name, "do_thing");
+                assert_eq!(tu.input, json!({"k": "v"}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_tool_result_image_variants_and_thinking() {
+        let user = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult(IrToolResultBlock {
+                    tool_use_id: "tu_1".into(),
+                    content: vec![ContentBlock::Text(IrTextBlock {
+                        text: "nested".into(),
+                        cache_control: None,
+                    })],
+                    is_error: true,
+                }),
+                ContentBlock::Image(IrImageBlock {
+                    source: IrImageSource::Url {
+                        url: "https://example.com/a.png".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+                ContentBlock::Image(IrImageBlock {
+                    source: IrImageSource::BlobRef {
+                        sha256: "deadbeef".into(),
+                        media_type: "image/jpeg".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+                ContentBlock::Thinking(IrThinkingBlock {
+                    thinking: "hmm".into(),
+                    signature: Some("sig".into()),
+                }),
+            ],
+        };
+        let req = req_with(vec![user], vec![]);
+        let native = ir_to_native_request(req, false);
+        assert_eq!(native.messages[0].role, "user");
+        let blocks = match &native.messages[0].content {
+            NativeContent::Blocks(b) => b,
+            other => panic!("expected Blocks, got {other:?}"),
+        };
+        assert_eq!(blocks.len(), 4);
+
+        match &blocks[0] {
+            NativeContentBlock::ToolResult(tr) => {
+                assert_eq!(tr.tool_use_id, "tu_1");
+                assert!(tr.is_error);
+                match &tr.content {
+                    NativeContent::Blocks(inner) => {
+                        assert_eq!(inner.len(), 1);
+                        match &inner[0] {
+                            NativeContentBlock::Text(t) => assert_eq!(t.text, "nested"),
+                            other => panic!("expected nested Text, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected nested Blocks, got {other:?}"),
+                }
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        match &blocks[1] {
+            NativeContentBlock::Image(i) => match &i.source {
+                NativeImageSource::Url { url } => {
+                    assert_eq!(url, "https://example.com/a.png");
+                }
+                other => panic!("expected Url source, got {other:?}"),
+            },
+            other => panic!("expected Image, got {other:?}"),
+        }
+        // BlobRef best-effort converts to empty-data Base64.
+        match &blocks[2] {
+            NativeContentBlock::Image(i) => match &i.source {
+                NativeImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/jpeg");
+                    assert_eq!(data, "");
+                }
+                other => panic!("expected Base64 source from BlobRef, got {other:?}"),
+            },
+            other => panic!("expected Image, got {other:?}"),
+        }
+        match &blocks[3] {
+            NativeContentBlock::Thinking(t) => {
+                assert_eq!(t.thinking, "hmm");
+                assert_eq!(t.signature, Some("sig".into()));
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    // ----- native_response_to_ir -----
+
+    fn base_response(
+        content: Vec<NativeContentBlock>,
+        stop_reason: NativeStopReason,
+        usage: NativeUsage,
+    ) -> NativeResponse {
+        NativeResponse {
+            id: "msg_1".into(),
+            model: "claude-sonnet-4-6".into(),
+            role: "assistant".into(),
+            kind: "message".into(),
+            content,
+            stop_reason,
+            stop_sequence: None,
+            usage,
+        }
+    }
+
+    fn simple_usage() -> NativeUsage {
+        NativeUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+
+    #[test]
+    fn response_stop_reason_mapping() {
+        let cases = [
+            (NativeStopReason::MaxTokens, StopReason::MaxTokens),
+            (NativeStopReason::StopSequence, StopReason::StopSequence),
+            (NativeStopReason::ToolUse, StopReason::ToolUse),
+            (NativeStopReason::Refusal, StopReason::Refusal),
+            (NativeStopReason::EndTurn, StopReason::EndTurn),
+            (NativeStopReason::PauseTurn, StopReason::EndTurn),
+        ];
+        for (native_sr, expected) in cases {
+            let resp = base_response(
+                vec![NativeContentBlock::Text(NativeTextBlock {
+                    text: "ok".into(),
+                    cache_control: None,
+                })],
+                native_sr,
+                simple_usage(),
+            );
+            let ir = native_response_to_ir(resp).expect("convert");
+            assert_eq!(ir.stop_reason, expected, "for {native_sr:?}");
+        }
+    }
+
+    #[test]
+    fn response_usage_sums_cache_fields() {
+        let resp = base_response(
+            vec![NativeContentBlock::Text(NativeTextBlock {
+                text: "ok".into(),
+                cache_control: None,
+            })],
+            NativeStopReason::EndTurn,
+            NativeUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_creation_input_tokens: Some(30),
+                cache_read_input_tokens: Some(7),
+            },
+        );
+        let ir = native_response_to_ir(resp).expect("convert");
+        assert_eq!(ir.usage.input_tokens, 137);
+        assert_eq!(ir.usage.output_tokens, 20);
+        assert_eq!(ir.usage.cache_creation_input_tokens, Some(30));
+        assert_eq!(ir.usage.cache_read_input_tokens, Some(7));
+    }
+
+    #[test]
+    fn response_usage_with_no_cache_fields() {
+        let resp = base_response(
+            vec![NativeContentBlock::Text(NativeTextBlock {
+                text: "ok".into(),
+                cache_control: None,
+            })],
+            NativeStopReason::EndTurn,
+            simple_usage(),
+        );
+        let ir = native_response_to_ir(resp).expect("convert");
+        assert_eq!(ir.usage.input_tokens, 10);
+        assert_eq!(ir.usage.cache_creation_input_tokens, None);
+        assert_eq!(ir.usage.cache_read_input_tokens, None);
+    }
+
+    #[test]
+    fn response_metadata_preserved() {
+        let resp = base_response(vec![], NativeStopReason::EndTurn, simple_usage());
+        let ir = native_response_to_ir(resp).expect("convert");
+        assert_eq!(ir.id, "msg_1");
+        assert_eq!(ir.model, "claude-sonnet-4-6");
+        assert_eq!(ir.message.role, Role::Assistant);
+    }
+
+    // ----- native_block_to_ir (via native_response_to_ir) -----
+
+    #[test]
+    fn native_block_to_ir_all_variants() {
+        let content = vec![
+            NativeContentBlock::Text(NativeTextBlock {
+                text: "txt".into(),
+                cache_control: Some(NativeCacheControl::Ephemeral),
+            }),
+            NativeContentBlock::Image(NativeImageBlock {
+                source: NativeImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "ZGF0YQ==".into(),
+                },
+                cache_control: None,
+            }),
+            NativeContentBlock::Image(NativeImageBlock {
+                source: NativeImageSource::Url {
+                    url: "https://example.com/i.png".into(),
+                },
+                cache_control: None,
+            }),
+            NativeContentBlock::ToolUse(NativeToolUseBlock {
+                id: "tu_9".into(),
+                name: "calc".into(),
+                input: json!({"x": 1}),
+            }),
+            // ToolResult with NativeContent::Text variant.
+            NativeContentBlock::ToolResult(NativeToolResultBlock {
+                tool_use_id: "tu_text".into(),
+                content: NativeContent::Text("plain result".into()),
+                is_error: false,
+            }),
+            // ToolResult with NativeContent::Blocks variant (recursion).
+            NativeContentBlock::ToolResult(NativeToolResultBlock {
+                tool_use_id: "tu_blocks".into(),
+                content: NativeContent::Blocks(vec![NativeContentBlock::Text(NativeTextBlock {
+                    text: "block result".into(),
+                    cache_control: None,
+                })]),
+                is_error: true,
+            }),
+            NativeContentBlock::Thinking(NativeThinkingBlock {
+                thinking: "reasoning".into(),
+                signature: Some("sig9".into()),
+            }),
+            NativeContentBlock::RedactedThinking {
+                data: "redacted-blob".into(),
+            },
+        ];
+        let resp = base_response(content, NativeStopReason::EndTurn, simple_usage());
+        let ir = native_response_to_ir(resp).expect("convert");
+        let blocks = &ir.message.content;
+        assert_eq!(blocks.len(), 8);
+
+        match &blocks[0] {
+            ContentBlock::Text(t) => {
+                assert_eq!(t.text, "txt");
+                assert_eq!(t.cache_control, Some(CacheControl::Ephemeral));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::Image(i) => {
+                assert!(matches!(
+                    &i.source,
+                    IrImageSource::Base64 { media_type, data }
+                        if media_type == "image/png" && data == "ZGF0YQ=="
+                ));
+                assert_eq!(i.sha256, None);
+                assert_eq!(i.dims, None);
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+        match &blocks[2] {
+            ContentBlock::Image(i) => assert!(matches!(
+                &i.source,
+                IrImageSource::Url { url } if url == "https://example.com/i.png"
+            )),
+            other => panic!("expected Image, got {other:?}"),
+        }
+        match &blocks[3] {
+            ContentBlock::ToolUse(tu) => {
+                assert_eq!(tu.id, "tu_9");
+                assert_eq!(tu.name, "calc");
+                assert_eq!(tu.input, json!({"x": 1}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        match &blocks[4] {
+            ContentBlock::ToolResult(tr) => {
+                assert_eq!(tr.tool_use_id, "tu_text");
+                assert!(!tr.is_error);
+                assert_eq!(tr.content.len(), 1);
+                match &tr.content[0] {
+                    ContentBlock::Text(t) => assert_eq!(t.text, "plain result"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        match &blocks[5] {
+            ContentBlock::ToolResult(tr) => {
+                assert_eq!(tr.tool_use_id, "tu_blocks");
+                assert!(tr.is_error);
+                assert_eq!(tr.content.len(), 1);
+                match &tr.content[0] {
+                    ContentBlock::Text(t) => assert_eq!(t.text, "block result"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        match &blocks[6] {
+            ContentBlock::Thinking(t) => {
+                assert_eq!(t.thinking, "reasoning");
+                assert_eq!(t.signature, Some("sig9".into()));
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+        // RedactedThinking -> Thinking { thinking: "", signature: Some(data) }.
+        match &blocks[7] {
+            ContentBlock::Thinking(t) => {
+                assert_eq!(t.thinking, "");
+                assert_eq!(t.signature, Some("redacted-blob".into()));
+            }
+            other => panic!("expected Thinking from RedactedThinking, got {other:?}"),
+        }
+    }
+}

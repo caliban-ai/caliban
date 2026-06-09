@@ -473,6 +473,507 @@ mod tests {
 }
 
 #[cfg(test)]
+mod request_conversion {
+    use super::*;
+    use caliban_provider::{
+        CompletionRequest, ImageBlock, RequestMetadata, ToolResultBlock, ToolUseBlock,
+    };
+
+    fn minimal_request(model: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: model.into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text(IrTextBlock {
+                    text: "hi".into(),
+                    cache_control: None,
+                })],
+            }],
+            tools: vec![],
+            tool_choice: IrToolChoice::default(),
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: RequestMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn leading_system_message_uses_system_role() {
+        let mut req = minimal_request("gpt-4o");
+        req.messages.insert(0, Message::system_text("be brief"));
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert_eq!(native.messages[0].role, "system");
+        assert_eq!(
+            native.messages[0].content,
+            Some(NativeContent::Text("be brief".into()))
+        );
+    }
+
+    #[test]
+    fn leading_system_message_honors_developer_role() {
+        let mut req = minimal_request("o1");
+        req.messages.insert(0, Message::system_text("be brief"));
+        let native = ir_to_native_request(req, false, "developer").expect("ir_to_native");
+        assert_eq!(native.messages[0].role, "developer");
+    }
+
+    #[test]
+    fn non_leading_system_message_appended() {
+        let req = CompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![
+                Message::user_text("hello"),
+                Message::system_text("mid-stream system"),
+            ],
+            tools: vec![],
+            tool_choice: IrToolChoice::default(),
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            effort: None,
+            metadata: RequestMetadata::default(),
+        };
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        // First message is the user; second is the appended system message.
+        assert_eq!(native.messages[0].role, "user");
+        assert_eq!(native.messages[1].role, "system");
+        assert_eq!(
+            native.messages[1].content,
+            Some(NativeContent::Text("mid-stream system".into()))
+        );
+    }
+
+    #[test]
+    fn user_tool_result_becomes_tool_message() {
+        let mut req = minimal_request("gpt-4o");
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResultBlock {
+                tool_use_id: "call_1".into(),
+                content: vec![
+                    ContentBlock::Text(IrTextBlock {
+                        text: "first".into(),
+                        cache_control: None,
+                    }),
+                    ContentBlock::Text(IrTextBlock {
+                        text: "second".into(),
+                        cache_control: None,
+                    }),
+                    ContentBlock::Image(ImageBlock {
+                        source: IrImageSource::Url {
+                            url: "https://x/y.png".into(),
+                        },
+                        cache_control: None,
+                        sha256: None,
+                        dims: None,
+                    }),
+                ],
+                is_error: false,
+            })],
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert_eq!(native.messages.len(), 1);
+        let m = &native.messages[0];
+        assert_eq!(m.role, "tool");
+        assert_eq!(m.tool_call_id, Some("call_1".into()));
+        // Text content concatenated with newline; image dropped.
+        assert_eq!(m.content, Some(NativeContent::Text("first\nsecond".into())));
+    }
+
+    #[test]
+    fn user_images_become_image_urls() {
+        let mut req = minimal_request("gpt-4o");
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Image(ImageBlock {
+                    source: IrImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "abc".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+                ContentBlock::Image(ImageBlock {
+                    source: IrImageSource::Url {
+                        url: "https://x/y.png".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+                ContentBlock::Image(ImageBlock {
+                    source: IrImageSource::BlobRef {
+                        sha256: "deadbeef".into(),
+                        media_type: "image/png".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+            ],
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let parts = match &native.messages[0].content {
+            Some(NativeContent::Parts(p)) => p,
+            other => panic!("expected Parts, got {other:?}"),
+        };
+        let urls: Vec<&str> = parts
+            .iter()
+            .map(|p| match p {
+                NativeContentPart::ImageUrl { image_url } => image_url.url.as_str(),
+                NativeContentPart::Text { .. } => panic!("unexpected text part"),
+            })
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "data:image/png;base64,abc",
+                "https://x/y.png",
+                "data:image/png;base64,",
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_part_user_content_uses_parts() {
+        let mut req = minimal_request("gpt-4o");
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text(IrTextBlock {
+                    text: "look".into(),
+                    cache_control: None,
+                }),
+                ContentBlock::Image(ImageBlock {
+                    source: IrImageSource::Url {
+                        url: "https://x/y.png".into(),
+                    },
+                    cache_control: None,
+                    sha256: None,
+                    dims: None,
+                }),
+            ],
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert!(matches!(
+            native.messages[0].content,
+            Some(NativeContent::Parts(_))
+        ));
+    }
+
+    #[test]
+    fn single_text_user_content_collapses_to_text() {
+        // minimal_request already has a single text User block.
+        let native =
+            ir_to_native_request(minimal_request("gpt-4o"), false, "system").expect("ir_to_native");
+        assert_eq!(
+            native.messages[0].content,
+            Some(NativeContent::Text("hi".into()))
+        );
+    }
+
+    #[test]
+    fn assistant_tool_use_becomes_tool_call() {
+        let input = serde_json::json!({"q": "weather"});
+        let mut req = minimal_request("gpt-4o");
+        req.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text(IrTextBlock {
+                    text: "calling".into(),
+                    cache_control: None,
+                }),
+                ContentBlock::ToolUse(ToolUseBlock {
+                    id: "call_9".into(),
+                    name: "search".into(),
+                    input: input.clone(),
+                }),
+            ],
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let m = &native.messages[0];
+        assert_eq!(m.tool_calls.len(), 1);
+        let tc = &m.tool_calls[0];
+        assert_eq!(tc.id, "call_9");
+        assert_eq!(tc.kind, "function");
+        assert_eq!(tc.function.name, "search");
+        assert_eq!(
+            tc.function.arguments,
+            serde_json::to_string(&input).unwrap()
+        );
+        assert_eq!(m.content, Some(NativeContent::Text("calling".into())));
+    }
+
+    #[test]
+    fn assistant_tool_use_only_has_no_content() {
+        let mut req = minimal_request("gpt-4o");
+        req.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse(ToolUseBlock {
+                id: "call_9".into(),
+                name: "search".into(),
+                input: serde_json::json!({}),
+            })],
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert_eq!(native.messages[0].content, None);
+        assert_eq!(native.messages[0].tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn tool_choice_variants_map() {
+        let mut auto = minimal_request("gpt-4o");
+        auto.tool_choice = IrToolChoice::Auto;
+        assert_eq!(
+            ir_to_native_request(auto, false, "system")
+                .unwrap()
+                .tool_choice,
+            Some(NativeToolChoice::Auto("auto".into()))
+        );
+
+        let mut any = minimal_request("gpt-4o");
+        any.tool_choice = IrToolChoice::Any;
+        assert_eq!(
+            ir_to_native_request(any, false, "system")
+                .unwrap()
+                .tool_choice,
+            Some(NativeToolChoice::Auto("required".into()))
+        );
+
+        let mut specific = minimal_request("gpt-4o");
+        specific.tool_choice = IrToolChoice::Specific {
+            name: "search".into(),
+        };
+        assert_eq!(
+            ir_to_native_request(specific, false, "system")
+                .unwrap()
+                .tool_choice,
+            Some(NativeToolChoice::Specific {
+                kind: "function".into(),
+                function: NativeToolFunctionName {
+                    name: "search".into()
+                },
+            })
+        );
+
+        let mut none = minimal_request("gpt-4o");
+        none.tool_choice = IrToolChoice::None;
+        assert_eq!(
+            ir_to_native_request(none, false, "system")
+                .unwrap()
+                .tool_choice,
+            None
+        );
+    }
+
+    #[test]
+    fn tools_map_to_native_functions() {
+        let mut req = minimal_request("gpt-4o");
+        req.tools = vec![IrTool {
+            name: "search".into(),
+            description: "search the web".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            cache_control: None,
+        }];
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert_eq!(native.tools.len(), 1);
+        let t = &native.tools[0];
+        assert_eq!(t.kind, "function");
+        assert_eq!(t.function.name, "search");
+        assert_eq!(t.function.description, "search the web");
+        assert_eq!(t.function.parameters, serde_json::json!({"type": "object"}));
+    }
+
+    #[test]
+    fn metadata_user_id_maps_to_native_user() {
+        let mut req = minimal_request("gpt-4o");
+        req.metadata.user_id = Some("u".into());
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert_eq!(native.user, Some("u".into()));
+    }
+}
+
+#[cfg(test)]
+mod response_conversion {
+    use super::*;
+    use crate::schema::response::{
+        NativeChoice, NativePromptTokensDetails, NativeResponse, NativeResponseMessage, NativeUsage,
+    };
+
+    fn response_with(message: NativeResponseMessage, finish: NativeFinishReason) -> NativeResponse {
+        NativeResponse {
+            id: "resp_1".into(),
+            model: "gpt-4o".into(),
+            choices: vec![NativeChoice {
+                index: 0,
+                message,
+                finish_reason: finish,
+            }],
+            usage: NativeUsage::default(),
+        }
+    }
+
+    fn message(content: Option<&str>) -> NativeResponseMessage {
+        NativeResponseMessage {
+            role: "assistant".into(),
+            content: content.map(Into::into),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            refusal: None,
+        }
+    }
+
+    #[test]
+    fn no_choices_is_error() {
+        let r = NativeResponse {
+            id: "resp_1".into(),
+            model: "gpt-4o".into(),
+            choices: vec![],
+            usage: NativeUsage::default(),
+        };
+        assert!(native_response_to_ir(r).is_err());
+    }
+
+    #[test]
+    fn refusal_path_yields_refusal_stop_reason() {
+        let mut msg = message(Some("ignored body"));
+        msg.refusal = Some("no".into());
+        msg.tool_calls = vec![NativeToolCall {
+            id: "call_x".into(),
+            kind: "function".into(),
+            function: NativeFunctionCall {
+                name: "search".into(),
+                arguments: "{}".into(),
+            },
+        }];
+        let resp = native_response_to_ir(response_with(msg, NativeFinishReason::Stop))
+            .expect("conversion");
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+        // One Text block with refusal text; tool_calls NOT processed.
+        assert_eq!(resp.message.content.len(), 1);
+        match &resp.message.content[0] {
+            ContentBlock::Text(t) => assert_eq!(t.text, "no"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_reason_maps_to_stop_reason() {
+        let cases = [
+            (NativeFinishReason::Stop, StopReason::EndTurn),
+            (NativeFinishReason::Length, StopReason::MaxTokens),
+            (NativeFinishReason::ToolCalls, StopReason::ToolUse),
+            (NativeFinishReason::FunctionCall, StopReason::ToolUse),
+            (NativeFinishReason::ContentFilter, StopReason::ContentFilter),
+        ];
+        for (native, expected) in cases {
+            let resp =
+                native_response_to_ir(response_with(message(Some("hi")), native)).expect("convert");
+            assert_eq!(resp.stop_reason, expected, "finish={native:?}");
+        }
+    }
+
+    #[test]
+    fn non_empty_content_yields_text_block() {
+        let resp = native_response_to_ir(response_with(
+            message(Some("hello")),
+            NativeFinishReason::Stop,
+        ))
+        .expect("convert");
+        assert_eq!(resp.message.content.len(), 1);
+        match &resp.message.content[0] {
+            ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_content_yields_no_text_block() {
+        let resp =
+            native_response_to_ir(response_with(message(Some("")), NativeFinishReason::Stop))
+                .expect("convert");
+        assert!(resp.message.content.is_empty());
+    }
+
+    #[test]
+    fn tool_calls_become_tool_use_blocks() {
+        let mut msg = message(None);
+        msg.tool_calls = vec![NativeToolCall {
+            id: "call_7".into(),
+            kind: "function".into(),
+            function: NativeFunctionCall {
+                name: "search".into(),
+                arguments: r#"{"q":"x"}"#.into(),
+            },
+        }];
+        let resp = native_response_to_ir(response_with(msg, NativeFinishReason::ToolCalls))
+            .expect("convert");
+        assert_eq!(resp.message.content.len(), 1);
+        match &resp.message.content[0] {
+            ContentBlock::ToolUse(tu) => {
+                assert_eq!(tu.id, "call_7");
+                assert_eq!(tu.name, "search");
+                assert_eq!(tu.input, serde_json::json!({"q": "x"}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_tool_call_arguments_is_error() {
+        let mut msg = message(None);
+        msg.tool_calls = vec![NativeToolCall {
+            id: "call_7".into(),
+            kind: "function".into(),
+            function: NativeFunctionCall {
+                name: "search".into(),
+                arguments: "not json".into(),
+            },
+        }];
+        let r = native_response_to_ir(response_with(msg, NativeFinishReason::ToolCalls));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn cache_read_tokens_mapped_when_present() {
+        let mut resp = response_with(message(Some("hi")), NativeFinishReason::Stop);
+        resp.usage = NativeUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: Some(NativePromptTokensDetails { cached_tokens: 4 }),
+        };
+        let ir = native_response_to_ir(resp).expect("convert");
+        assert_eq!(ir.usage.cache_read_input_tokens, Some(4));
+        assert_eq!(ir.usage.input_tokens, 10);
+        assert_eq!(ir.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn cache_read_zero_tokens_maps_to_none() {
+        let mut resp = response_with(message(Some("hi")), NativeFinishReason::Stop);
+        resp.usage = NativeUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: Some(NativePromptTokensDetails { cached_tokens: 0 }),
+        };
+        let ir = native_response_to_ir(resp).expect("convert");
+        assert_eq!(ir.usage.cache_read_input_tokens, None);
+    }
+}
+
+#[cfg(test)]
 mod effort_plumbing {
     use super::*;
     use caliban_provider::{CompletionRequest, Effort, RequestMetadata};

@@ -438,4 +438,174 @@ mod tests {
         let err = rec.capture(&outside, "Write", "tu_1").await.unwrap_err();
         assert!(matches!(err, CheckpointError::Skipped { .. }));
     }
+
+    #[tokio::test]
+    async fn capture_without_open_prompt_is_skipped() {
+        let (tmp, rec) = fixture();
+        let path = tmp.path().join("workspace").join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+        // No open_prompt() call → capture must skip with a clear reason.
+        let err = rec.capture(&path, "Write", "tu_1").await.unwrap_err();
+        match err {
+            CheckpointError::Skipped { reason } => {
+                assert!(reason.contains("no open prompt"), "reason was: {reason}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_oversized_file_records_error_and_marks_partial() {
+        let (tmp, rec) = fixture();
+        let path = tmp.path().join("workspace").join("big.bin");
+        // Write a file strictly larger than the default 16 MiB cap so the
+        // `size > max_file_bytes()` branch fires. We avoid mutating the env
+        // override (the crate forbids `unsafe`, and env is process-global) by
+        // exceeding the real default instead.
+        let big = vec![0u8; usize::try_from(DEFAULT_MAX_FILE_BYTES + 1).unwrap()];
+        std::fs::write(&path, &big).unwrap();
+        rec.open_prompt(1, ManifestKind::Files, "first")
+            .await
+            .unwrap();
+        rec.capture(&path, "Write", "tu_big").await.unwrap();
+        let m = rec.snapshot_manifest().await.unwrap();
+        assert_eq!(m.entries.len(), 1);
+        let e = &m.entries[0];
+        assert!(e.exists_pre, "oversized file still existed pre-prompt");
+        assert!(e.blob_sha256.is_empty(), "no blob is written for oversize");
+        assert_eq!(e.size, DEFAULT_MAX_FILE_BYTES + 1);
+        let msg = e.error.as_deref().unwrap_or_default();
+        assert!(msg.contains("exceeds"), "error text was: {msg}");
+        assert!(m.partial, "oversized capture marks the manifest partial");
+        // No blob should have been written.
+        let blobs_dir = rec.store.blobs_dir(1);
+        let count = std::fs::read_dir(&blobs_dir).map_or(0, std::iter::Iterator::count);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn record_last_message_id_sets_field() {
+        let (_tmp, rec) = fixture();
+        rec.open_prompt(1, ManifestKind::Files, "first")
+            .await
+            .unwrap();
+        rec.record_last_message_id("msg_abc").await;
+        let m = rec.snapshot_manifest().await.unwrap();
+        assert_eq!(m.last_message_id.as_deref(), Some("msg_abc"));
+    }
+
+    #[tokio::test]
+    async fn record_last_message_id_without_open_prompt_is_noop() {
+        let (_tmp, rec) = fixture();
+        // No open prompt; must not panic and snapshot stays None.
+        rec.record_last_message_id("msg_x").await;
+        assert!(rec.snapshot_manifest().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_partial_sets_flag() {
+        let (_tmp, rec) = fixture();
+        rec.open_prompt(1, ManifestKind::Files, "first")
+            .await
+            .unwrap();
+        assert!(!rec.snapshot_manifest().await.unwrap().partial);
+        rec.mark_partial().await;
+        assert!(rec.snapshot_manifest().await.unwrap().partial);
+    }
+
+    #[tokio::test]
+    async fn mark_partial_without_open_prompt_is_noop() {
+        let (_tmp, rec) = fixture();
+        rec.mark_partial().await;
+        assert!(rec.snapshot_manifest().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_prompt_without_open_prompt_is_noop() {
+        let (_tmp, rec) = fixture();
+        // Nothing open — close must succeed and write nothing.
+        rec.close_prompt().await.unwrap();
+        // Loading a manifest that was never saved is NotFound.
+        let err = rec.store.load_manifest(1).unwrap_err();
+        assert!(matches!(err, CheckpointError::NotFound(1)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_manifest_none_when_closed() {
+        let (_tmp, rec) = fixture();
+        assert!(rec.snapshot_manifest().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn store_accessor_returns_same_session_dir() {
+        let (_tmp, rec) = fixture();
+        let dir = rec.store().session_dir().to_path_buf();
+        assert!(dir.exists());
+        // Two calls return a handle to the same on-disk session dir.
+        assert_eq!(rec.store().session_dir(), dir);
+    }
+
+    #[tokio::test]
+    async fn open_prompt_resets_previous_state() {
+        let (tmp, rec) = fixture();
+        let path = tmp.path().join("workspace").join("a.txt");
+        std::fs::write(&path, "v1").unwrap();
+        rec.open_prompt(1, ManifestKind::Files, "first")
+            .await
+            .unwrap();
+        rec.capture(&path, "Write", "tu_1").await.unwrap();
+        assert_eq!(rec.snapshot_manifest().await.unwrap().entries.len(), 1);
+        // Re-opening replaces the in-memory manifest with a fresh empty one.
+        rec.open_prompt(2, ManifestKind::Plan, "second")
+            .await
+            .unwrap();
+        let m = rec.snapshot_manifest().await.unwrap();
+        assert_eq!(m.prompt_index, 2);
+        assert!(m.entries.is_empty());
+        assert_eq!(m.kind, ManifestKind::Plan);
+    }
+
+    #[test]
+    fn sha256_hex_is_64_hex_chars() {
+        let h = sha256_hex(b"hello");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        // Known sha256("hello").
+        assert_eq!(
+            h,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        // Empty input has the well-known empty digest.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    // SKIPPED: a focused test of `max_file_bytes()`'s env-override branch would
+    // require mutating `CALIBAN_CHECKPOINT_MAX_FILE_BYTES`. The crate is
+    // compiled with `-D unsafe-code`, so `std::env::set_var` (unsafe since Rust
+    // 2024) is unavailable, and process-global env mutation would race the
+    // parallel test runner regardless. The default path is exercised
+    // indirectly by `capture_oversized_file_records_error_and_marks_partial`.
+
+    #[test]
+    fn canonicalize_existing_ancestor_appends_nonexistent_tail() {
+        let tmp = TempDir::new().unwrap();
+        let real = std::fs::canonicalize(tmp.path()).unwrap();
+        // The leaf doesn't exist; the ancestor does — function should
+        // canonicalise the ancestor and re-append the missing tail.
+        let target = tmp.path().join("missing-dir").join("leaf.txt");
+        let got = canonicalize_existing_ancestor(&target);
+        assert_eq!(got, real.join("missing-dir").join("leaf.txt"));
+    }
+
+    #[test]
+    fn canonicalize_existing_ancestor_resolves_full_existing_path() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("present.txt");
+        std::fs::write(&file, "x").unwrap();
+        let got = canonicalize_existing_ancestor(&file);
+        assert_eq!(got, std::fs::canonicalize(&file).unwrap());
+    }
 }
