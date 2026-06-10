@@ -29,11 +29,9 @@ pub struct Supervisor {
     /// Per-agent runtime-dir (where per-agent sockets are created).
     agent_runtime_dir: PathBuf,
     /// Strategy for launching worker processes.
-    #[allow(dead_code)] // read in Task 3 (Spawn wiring)
     launcher: Arc<dyn WorkerLauncher>,
     /// Live worker pids, keyed by agent id. Inserted on launch, read by
     /// `Kill`, removed by the per-child monitor task on exit.
-    #[allow(dead_code)] // read in Task 3 (Spawn wiring)
     procs: Arc<Mutex<HashMap<crate::proto::AgentId, u32>>>,
 }
 
@@ -176,6 +174,47 @@ impl Supervisor {
         }
     }
 
+    /// Launch a worker for `rec`, record its pid, flip the registry to
+    /// `Running`, and spawn a monitor task that writes the terminal
+    /// status when the child exits. On launch failure the agent is
+    /// marked `Failed`.
+    async fn launch_and_monitor(&self, rec: crate::proto::AgentRecord) {
+        let id = rec.id.clone();
+        match self.launcher.launch(&rec) {
+            Ok(handle) => {
+                let pid = handle.pid;
+                let mut child = handle.child;
+                self.procs.lock().await.insert(id.clone(), pid);
+                self.registry
+                    .lock()
+                    .await
+                    .set_status_if_running(&id, crate::proto::AgentStatus::Running);
+                let registry = Arc::clone(&self.registry);
+                let procs = Arc::clone(&self.procs);
+                tokio::spawn(async move {
+                    let terminal = match child.wait().await {
+                        Ok(s) if s.success() => crate::proto::AgentStatus::Done,
+                        Ok(_) => crate::proto::AgentStatus::Failed,
+                        Err(e) => {
+                            tracing::warn!(error = %e, agent = %id, "worker wait failed");
+                            crate::proto::AgentStatus::Failed
+                        }
+                    };
+                    registry.lock().await.set_status_if_running(&id, terminal);
+                    procs.lock().await.remove(&id);
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent = %id, "worker launch failed");
+                self.registry
+                    .lock()
+                    .await
+                    .set_status(&id, crate::proto::AgentStatus::Failed)
+                    .ok();
+            }
+        }
+    }
+
     async fn dispatch(&self, req: CtlRequest) -> CtlReply {
         match req {
             CtlRequest::List => {
@@ -183,15 +222,19 @@ impl Supervisor {
                 CtlReply::Listed { agents: r.list() }
             }
             CtlRequest::Spawn { spec } => {
-                let mut r = self.registry.lock().await;
-                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                let socket_path = self.agent_runtime_dir.join(socket_name);
-                let rec = r.register(spec, socket_path.clone());
-                CtlReply::Spawned {
-                    id: rec.id,
-                    socket_path,
-                }
+                let rec = {
+                    let mut r = self.registry.lock().await;
+                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
+                    let socket_path = self.agent_runtime_dir.join(socket_name);
+                    r.register(spec, socket_path)
+                };
+                let reply = CtlReply::Spawned {
+                    id: rec.id.clone(),
+                    socket_path: rec.socket_path.clone(),
+                };
+                self.launch_and_monitor(rec).await;
+                reply
             }
             CtlRequest::Attach { id } => {
                 let r = self.registry.lock().await;

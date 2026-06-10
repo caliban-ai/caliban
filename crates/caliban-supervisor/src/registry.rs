@@ -95,6 +95,25 @@ impl Registry {
         Ok(cloned)
     }
 
+    /// Set status to `to` ONLY if the agent is currently `Running` or
+    /// `Spawning`. Used by the worker monitor task so a late child exit
+    /// can't clobber a terminal state already set by `Kill`/`Rm`.
+    /// Returns `true` if the transition was applied.
+    pub fn set_status_if_running(&mut self, id: &str, to: AgentStatus) -> bool {
+        let Some(rec) = self.by_id.get_mut(id) else {
+            return false;
+        };
+        if !matches!(rec.status, AgentStatus::Running | AgentStatus::Spawning) {
+            return false;
+        }
+        rec.status = to;
+        let cloned = rec.clone();
+        if let Err(e) = self.store.write_manifest(&cloned) {
+            tracing::warn!(error = %e, "manifest write failed during set_status_if_running");
+        }
+        true
+    }
+
     /// Remove an agent from the registry. Refuses removal of running
     /// agents unless `force` is set. Always best-effort deletes the
     /// on-disk session dir.
@@ -229,6 +248,20 @@ mod tests {
         r.set_status(&rec.id, AgentStatus::Done).unwrap();
         r.remove(&rec.id, false).unwrap();
         assert!(r.get(&rec.id).is_none());
+    }
+
+    #[test]
+    fn set_status_if_running_guards_terminal_states() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        // Spawning -> Running allowed.
+        assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
+        // Move to a terminal state directly.
+        r.set_status(&rec.id, AgentStatus::Killed).unwrap();
+        // Guard refuses to move a Killed agent.
+        assert!(!r.set_status_if_running(&rec.id, AgentStatus::Done));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Killed);
     }
 
     #[test]
