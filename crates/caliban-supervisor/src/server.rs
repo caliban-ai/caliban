@@ -264,22 +264,30 @@ impl Supervisor {
                 }
             }
             CtlRequest::Respawn { id } => {
-                let mut r = self.registry.lock().await;
-                let Some(old) = r.get(&id).cloned() else {
-                    return CtlReply::Error {
-                        error: SupervisorError::NotFound { id },
+                // Drop any stale pid for the old id before re-registering.
+                self.procs.lock().await.remove(&id);
+                let new_rec = {
+                    let mut r = self.registry.lock().await;
+                    let Some(old) = r.get(&id).cloned() else {
+                        return CtlReply::Error {
+                            error: SupervisorError::NotFound { id },
+                        };
                     };
+                    // Drop old (force=true so it can be running) and
+                    // re-register with the same spec.
+                    if let Err(e) = r.remove(&id, true) {
+                        return CtlReply::Error { error: e };
+                    }
+                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
+                    let socket_path = self.agent_runtime_dir.join(socket_name);
+                    r.register(old.spec, socket_path)
                 };
-                // Drop old (force=true so it can be running) and
-                // re-register with the same spec.
-                if let Err(e) = r.remove(&id, true) {
-                    return CtlReply::Error { error: e };
-                }
-                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                let socket_path = self.agent_runtime_dir.join(socket_name);
-                let rec = r.register(old.spec, socket_path);
-                CtlReply::Respawned { id: rec.id }
+                let reply = CtlReply::Respawned {
+                    id: new_rec.id.clone(),
+                };
+                self.launch_and_monitor(new_rec).await;
+                reply
             }
             CtlRequest::Rm { id, force } => {
                 let mut r = self.registry.lock().await;

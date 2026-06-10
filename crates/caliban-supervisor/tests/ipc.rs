@@ -182,6 +182,40 @@ async fn respawn_drops_old_and_creates_new_id() {
 }
 
 #[tokio::test]
+async fn respawn_launches_a_fresh_worker() {
+    // Quick-exit worker → Done. Respawn must produce a NEW id whose
+    // worker also runs to Done.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; exit 0".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
+    let (id, _) = client.spawn(spec()).await.unwrap();
+    let new_id = client.respawn(&id).await.unwrap();
+    assert_ne!(new_id, id, "respawn must assign a new id");
+    // New agent reaches Done.
+    let mut done = false;
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == new_id && a.status == AgentStatus::Done)
+        {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(done, "respawned agent never reached Done");
+    // Old id is gone from the registry.
+    let agents = client.list().await.unwrap();
+    assert!(
+        !agents.iter().any(|a| a.id == id),
+        "old id should be removed after respawn"
+    );
+    sup.cancel_token().cancel();
+}
+
+#[tokio::test]
 async fn rm_requires_stopped_state_without_force() {
     // Use a long-running fake launcher so the agent stays Running
     // (not Failed) by the time we issue rm.
