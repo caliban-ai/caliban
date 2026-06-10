@@ -6,13 +6,53 @@
 //! status (0 = Done, non-zero = Failed).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use caliban_supervisor::proto::AgentRecord;
 use clap::Parser as _;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
+
+/// Fan-out hub for a worker's `TurnEvent` NDJSON stream. Holds the full
+/// history of serialized event lines plus a broadcast channel for live
+/// delivery. The lock makes "append + broadcast" and "snapshot + subscribe"
+/// atomic with respect to each other, so a client that attaches mid-run
+/// receives every event exactly once (no gap between the historical
+/// snapshot and the live tail).
+struct EventHub {
+    history: Mutex<Vec<Arc<str>>>,
+    tx: broadcast::Sender<Arc<str>>,
+}
+
+impl EventHub {
+    fn new() -> Arc<Self> {
+        let (tx, _rx) = broadcast::channel(1024);
+        Arc::new(Self {
+            history: Mutex::new(Vec::new()),
+            tx,
+        })
+    }
+
+    /// Append a serialized event line (NO trailing newline) to history and
+    /// broadcast it to live subscribers, atomically.
+    fn publish(&self, line: Arc<str>) {
+        let mut hist = self.history.lock().expect("event hub lock");
+        hist.push(Arc::clone(&line));
+        // Err just means there are no live subscribers right now — fine.
+        let _ = self.tx.send(line);
+    }
+
+    /// Atomically snapshot the history and subscribe for live events. The
+    /// returned receiver yields only events published AFTER this call;
+    /// combined with the snapshot, the caller sees each event exactly once.
+    fn subscribe(&self) -> (Vec<Arc<str>>, broadcast::Receiver<Arc<str>>) {
+        let hist = self.history.lock().expect("event hub lock");
+        let rx = self.tx.subscribe();
+        (hist.clone(), rx)
+    }
+}
 
 /// Load the `AgentRecord` the supervisor wrote for this worker.
 pub(crate) fn load_record(manifest: &Path) -> std::io::Result<AgentRecord> {
@@ -34,7 +74,11 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
         }
     };
 
-    // --- Bind the per-agent Unix socket (Plan A: accept-and-close drain).
+    // --- Create the event hub before binding the socket so the accept task
+    // can clone it immediately.
+    let hub = EventHub::new();
+
+    // --- Bind the per-agent Unix socket.
     // The socket file's existence signals to `caliband` and `caliban agents
     // attach` that this worker is alive.
     if let Some(parent) = socket.parent() {
@@ -51,11 +95,12 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
             return 74; // EX_IOERR
         }
     };
-    // Keep the socket live for the worker's lifetime. Plan B replaces this
-    // accept-and-close drain with the real attach protocol.
+    // Accept loop: replay history then forward live events to each client.
+    let accept_hub = Arc::clone(&hub);
     tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let _ = stream.shutdown().await;
+        while let Ok((stream, _)) = listener.accept().await {
+            let conn_hub = Arc::clone(&accept_hub);
+            tokio::spawn(serve_attach_client(stream, conn_hub));
         }
     });
 
@@ -158,9 +203,14 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
                 // Write the full event as one NDJSON line. TurnEvent
                 // derives Serialize with an internal `"type"` tag (#78), so
                 // the `agents attach` client can read these back verbatim.
-                if let Ok(mut line) = serde_json::to_vec(&ev) {
+                if let Ok(json) = serde_json::to_string(&ev) {
+                    // Persist to stdout.ndjson (newline-delimited).
+                    let mut line = json.clone().into_bytes();
                     line.push(b'\n');
                     let _ = ndjson.write_all(&line).await;
+                    // Fan out to any attached clients (no trailing newline;
+                    // the client writer adds it).
+                    hub.publish(Arc::from(json.as_str()));
                 }
             }
             Err(e) => {
@@ -170,8 +220,47 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
         }
     }
     let _ = ndjson.flush().await;
+    // Best-effort: let attached clients drain the last events before the
+    // process exits. (#79; a graceful connection-join is a future refinement.)
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     crate::startup::stop_condition_exit_code(&stop)
+}
+
+/// Serve one attached client: replay the event history, then forward live
+/// events until the agent finishes (`Closed`) or the client disconnects.
+async fn serve_attach_client(mut stream: tokio::net::UnixStream, hub: Arc<EventHub>) {
+    let (history, mut rx) = hub.subscribe();
+    for line in &history {
+        if write_line(&mut stream, line).await.is_err() {
+            return;
+        }
+    }
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                if write_line(&mut stream, &line).await.is_err() {
+                    break;
+                }
+            }
+            // A slow client fell behind the 1024-event buffer; keep going
+            // with subsequent events rather than dropping the connection.
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+
+            // All senders dropped: the agent run finished and the hub was
+            // released. (On the normal path the process exits right after
+            // the run, so clients usually EOF via socket teardown before
+            // this fires — but handle it cleanly if the hub drops first.)
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    let _ = stream.shutdown().await;
+}
+
+/// Write one NDJSON line (event + trailing newline) to the client.
+async fn write_line(stream: &mut tokio::net::UnixStream, line: &str) -> std::io::Result<()> {
+    stream.write_all(line.as_bytes()).await?;
+    stream.write_all(b"\n").await
 }
 
 #[cfg(test)]
@@ -203,5 +292,50 @@ mod tests {
         let loaded = load_record(&store.session_dir("w1").join("manifest.json")).unwrap();
         assert_eq!(loaded.id, "w1");
         assert_eq!(loaded.spec.initial_prompt, "hi");
+    }
+
+    #[test]
+    fn event_hub_subscribe_after_publish_replays_history() {
+        let hub = EventHub::new();
+        hub.publish(Arc::from("a"));
+        hub.publish(Arc::from("b"));
+        hub.publish(Arc::from("c"));
+        let (history, _rx) = hub.subscribe();
+        assert_eq!(history.len(), 3);
+        assert_eq!(&*history[0], "a");
+        assert_eq!(&*history[1], "b");
+        assert_eq!(&*history[2], "c");
+    }
+
+    #[tokio::test]
+    async fn event_hub_no_gap_between_history_and_live() {
+        let hub = EventHub::new();
+        hub.publish(Arc::from("a"));
+        hub.publish(Arc::from("b"));
+
+        // Subscribe: snapshot should include "a" and "b".
+        let (history, mut rx) = hub.subscribe();
+        assert_eq!(history.len(), 2);
+        assert_eq!(&*history[0], "a");
+        assert_eq!(&*history[1], "b");
+
+        // Publish after subscribe: receiver should get "c" and "d" only.
+        hub.publish(Arc::from("c"));
+        hub.publish(Arc::from("d"));
+
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        assert_eq!(&*first, "c");
+        assert_eq!(&*second, "d");
+    }
+
+    #[test]
+    fn event_hub_publish_without_subscribers_is_ok() {
+        let hub = EventHub::new();
+        // No subscribers — send returns Err but must not panic.
+        hub.publish(Arc::from("x"));
+        hub.publish(Arc::from("y"));
+        let (history, _rx) = hub.subscribe();
+        assert_eq!(history.len(), 2);
     }
 }

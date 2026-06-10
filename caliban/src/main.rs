@@ -5,6 +5,7 @@
 
 mod agents_cli;
 mod args;
+mod attach;
 mod diagnostics;
 mod effective_model;
 mod headless;
