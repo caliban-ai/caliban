@@ -32,6 +32,7 @@ use caliban_provider::{
 };
 use futures::StreamExt as _;
 use futures::stream::{FuturesUnordered, Stream};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -56,7 +57,12 @@ use turn::{ActiveBlock, MessageAccumulator, TurnTiming};
 /// A high-level event emitted by [`Agent::stream_until_done`].
 ///
 /// Consumers can forward these directly to a TUI/CLI renderer.
-#[derive(Debug, Clone)]
+///
+/// Serialized with an internal `"type"` tag so each NDJSON record is flat
+/// and self-describing (the worker writes these to `stdout.ndjson`, and the
+/// `agents attach` client reads them back). See #78.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum TurnEvent {
     /// A new provider turn has started.
     TurnStart {
@@ -175,7 +181,7 @@ pub struct RunOutcome {
 }
 
 /// The reason a multi-turn run stopped.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StopCondition {
     /// The model reached a natural end-of-turn (`stop_reason: EndTurn`).
     EndOfTurn,
@@ -233,6 +239,87 @@ mod stop_condition_tests {
         assert!(StopCondition::Refusal("x".into()).is_failure());
         assert!(StopCondition::ContentFilter("x".into()).is_failure());
         assert!(StopCondition::StreamIdle(Duration::from_secs(90)).is_failure());
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+    use caliban_provider::{Message, StopReason, Usage};
+    use std::time::Duration;
+
+    /// Round-trip a `TurnEvent` through JSON: serialize → deserialize →
+    /// re-serialize, asserting the JSON is stable. Proves the #78 derives
+    /// are correct (the per-event stream the worker writes to
+    /// `stdout.ndjson` must survive a read back by the `agents attach`
+    /// client). `TurnEvent` isn't `PartialEq`, so we compare JSON values.
+    fn round_trips(ev: &TurnEvent) -> serde_json::Value {
+        let json = serde_json::to_value(ev).expect("serialize TurnEvent");
+        let back: TurnEvent = serde_json::from_value(json.clone()).expect("deserialize TurnEvent");
+        let again = serde_json::to_value(&back).expect("re-serialize TurnEvent");
+        assert_eq!(json, again, "round-trip JSON mismatch");
+        json
+    }
+
+    #[test]
+    fn text_delta_round_trips_with_type_tag() {
+        let ev = TurnEvent::AssistantTextDelta {
+            turn_index: 1,
+            content_block_index: 0,
+            text: "hello".into(),
+        };
+        let json = round_trips(&ev);
+        // `#[serde(tag = "type")]` flattens the discriminant into the object.
+        assert_eq!(json["type"], "AssistantTextDelta");
+        assert_eq!(json["text"], "hello");
+        assert_eq!(json["turn_index"], 1);
+    }
+
+    #[test]
+    fn run_end_round_trips_carrying_a_stop_condition() {
+        let ev = TurnEvent::RunEnd {
+            final_messages: vec![],
+            total_usage: Usage::default(),
+            turn_count: 3,
+            stopped_for: StopCondition::MaxTurnsReached(3),
+        };
+        let json = round_trips(&ev);
+        assert_eq!(json["type"], "RunEnd");
+        assert_eq!(json["turn_count"], 3);
+        // StopCondition has tuple/unit variants, so it stays externally
+        // tagged: MaxTurnsReached(3) → {"MaxTurnsReached": 3}.
+        assert_eq!(json["stopped_for"]["MaxTurnsReached"], 3);
+    }
+
+    #[test]
+    fn turn_end_round_trips_with_message_and_duration_shape() {
+        // Pins down the `Option<Duration>` wire shape the #79 attach client
+        // must handle: serde encodes `Duration` as `{secs, nanos}`, and
+        // `None` as JSON null. Also exercises a nested provider `Message`.
+        let ev = TurnEvent::TurnEnd {
+            turn_index: 0,
+            assistant_message: Message::assistant_text("done"),
+            tool_results: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            ttft: Some(Duration::from_millis(123)),
+            tbt: None,
+        };
+        let json = round_trips(&ev);
+        assert_eq!(json["type"], "TurnEnd");
+        assert_eq!(json["stop_reason"], "end_turn");
+        // Duration → {"secs":0,"nanos":123000000}; None → null.
+        assert_eq!(json["ttft"]["secs"], 0);
+        assert_eq!(json["ttft"]["nanos"], 123_000_000);
+        assert!(json["tbt"].is_null());
+    }
+
+    #[test]
+    fn unit_stop_condition_serializes_as_bare_string() {
+        let json = serde_json::to_value(StopCondition::EndOfTurn).unwrap();
+        assert_eq!(json, serde_json::json!("EndOfTurn"));
+        let back: StopCondition = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, StopCondition::EndOfTurn));
     }
 }
 
