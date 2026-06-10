@@ -191,6 +191,9 @@ impl Supervisor {
                     .set_status_if_running(&id, crate::proto::AgentStatus::Running);
                 let registry = Arc::clone(&self.registry);
                 let procs = Arc::clone(&self.procs);
+                // Once the worker exits, its per-agent socket is stale —
+                // unlink it (the worker can't reliably clean up on exit; #77).
+                let socket_path = rec.socket_path.clone();
                 tokio::spawn(async move {
                     let terminal = match child.wait().await {
                         Ok(s) if s.success() => crate::proto::AgentStatus::Done,
@@ -202,6 +205,7 @@ impl Supervisor {
                     };
                     registry.lock().await.set_status_if_running(&id, terminal);
                     procs.lock().await.remove(&id);
+                    let _ = tokio::fs::remove_file(&socket_path).await;
                 });
             }
             Err(e) => {
@@ -290,9 +294,27 @@ impl Supervisor {
                 reply
             }
             CtlRequest::Rm { id, force } => {
+                // Force-removing a still-running agent must not orphan its
+                // worker: signal the owned child first, mirroring `Kill`
+                // (#76). Only when `force` is set — a non-force rm of a
+                // running agent is refused by `remove` below, so we must
+                // not signal in that case.
+                if force {
+                    let pid = self.procs.lock().await.get(&id).copied();
+                    if let Some(pid) = pid {
+                        let delivered = crate::proc::signal_term(pid);
+                        tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker during rm --force");
+                    }
+                }
                 let mut r = self.registry.lock().await;
                 match r.remove(&id, force) {
-                    Ok(()) => CtlReply::Removed,
+                    Ok(()) => {
+                        drop(r);
+                        // Entry is gone; drop the pid proactively (the
+                        // monitor task also removes it on the child's exit).
+                        self.procs.lock().await.remove(&id);
+                        CtlReply::Removed
+                    }
                     Err(e) => CtlReply::Error { error: e },
                 }
             }
