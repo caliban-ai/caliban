@@ -155,12 +155,10 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
                 {
                     stop = stopped_for.clone();
                 }
-                // TurnEvent does not derive Serialize, so we serialize a
-                // reduced JSON object capturing the discriminant + key fields.
-                // Full-event serialization is Plan B and requires upstream
-                // `derive(Serialize)` on TurnEvent.
-                let json_val = turn_event_to_json(&ev);
-                if let Ok(mut line) = serde_json::to_vec(&json_val) {
+                // Write the full event as one NDJSON line. TurnEvent
+                // derives Serialize with an internal `"type"` tag (#78), so
+                // the `agents attach` client can read these back verbatim.
+                if let Ok(mut line) = serde_json::to_vec(&ev) {
                     line.push(b'\n');
                     let _ = ndjson.write_all(&line).await;
                 }
@@ -174,103 +172,6 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
     let _ = ndjson.flush().await;
 
     crate::startup::stop_condition_exit_code(&stop)
-}
-
-/// Convert a [`caliban_agent_core::TurnEvent`] to a reduced `serde_json::Value`
-/// suitable for NDJSON output.
-///
-/// `TurnEvent` does not derive `Serialize` (Plan B will add it upstream).
-/// We capture the discriminant and key text/usage fields so the record is
-/// human-readable and machine-parseable for basic inspection.
-fn turn_event_to_json(ev: &caliban_agent_core::TurnEvent) -> serde_json::Value {
-    use caliban_agent_core::TurnEvent;
-    match ev {
-        TurnEvent::TurnStart {
-            turn_index,
-            message_id,
-            model,
-        } => serde_json::json!({
-            "type": "TurnStart",
-            "turn_index": turn_index,
-            "message_id": message_id,
-            "model": model,
-        }),
-        TurnEvent::AssistantTextDelta {
-            turn_index,
-            content_block_index,
-            text,
-        } => serde_json::json!({
-            "type": "AssistantTextDelta",
-            "turn_index": turn_index,
-            "content_block_index": content_block_index,
-            "text": text,
-        }),
-        TurnEvent::AssistantThinkingDelta {
-            turn_index,
-            content_block_index,
-            text,
-        } => serde_json::json!({
-            "type": "AssistantThinkingDelta",
-            "turn_index": turn_index,
-            "content_block_index": content_block_index,
-            "text": text,
-        }),
-        TurnEvent::ToolCallStart {
-            turn_index,
-            tool_use_id,
-            name,
-        } => serde_json::json!({
-            "type": "ToolCallStart",
-            "turn_index": turn_index,
-            "tool_use_id": tool_use_id,
-            "name": name,
-        }),
-        TurnEvent::ToolCallInputDelta {
-            turn_index,
-            tool_use_id,
-            partial_json,
-        } => serde_json::json!({
-            "type": "ToolCallInputDelta",
-            "turn_index": turn_index,
-            "tool_use_id": tool_use_id,
-            "partial_json": partial_json,
-        }),
-        TurnEvent::ToolCallEnd {
-            turn_index,
-            tool_use_id,
-            is_error,
-            ..
-        } => serde_json::json!({
-            "type": "ToolCallEnd",
-            "turn_index": turn_index,
-            "tool_use_id": tool_use_id,
-            "is_error": is_error,
-        }),
-        TurnEvent::TurnEnd {
-            turn_index,
-            stop_reason,
-            usage,
-            ..
-        } => serde_json::json!({
-            "type": "TurnEnd",
-            "turn_index": turn_index,
-            "stop_reason": format!("{stop_reason:?}"),
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-        }),
-        TurnEvent::RunEnd {
-            turn_count,
-            total_usage,
-            stopped_for,
-            ..
-        } => serde_json::json!({
-            "type": "RunEnd",
-            "turn_count": turn_count,
-            "input_tokens": total_usage.input_tokens,
-            "output_tokens": total_usage.output_tokens,
-            "stopped_for": format!("{stopped_for:?}"),
-        }),
-    }
 }
 
 #[cfg(test)]
