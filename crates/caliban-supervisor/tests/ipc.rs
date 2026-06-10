@@ -336,6 +336,37 @@ async fn spawn_launches_worker_and_reaches_done() {
 }
 
 #[tokio::test]
+async fn kill_signals_the_worker_child() {
+    // Worker binds the socket then sleeps; Kill must terminate it and
+    // mark the agent Killed. Uses sleep 30 so the child is genuinely
+    // alive when SIGTERM is delivered.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; sleep 30".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
+    let (id, _) = client.spawn(spec()).await.unwrap();
+    // Poll until the agent reaches Running.
+    let mut running = false;
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running, "worker never reached Running");
+    client.kill(&id).await.unwrap();
+    let agents = client.list().await.unwrap();
+    let a = agents.iter().find(|a| a.id == id).unwrap();
+    assert_eq!(a.status, AgentStatus::Killed);
+    sup.cancel_token().cancel();
+}
+
+#[tokio::test]
 async fn socket_path_auto_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path: PathBuf = dir.path().join("nested").join("deep").join("d.sock");

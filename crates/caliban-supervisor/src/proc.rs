@@ -79,6 +79,25 @@ impl WorkerLauncher for ExecWorkerLauncher {
     }
 }
 
+/// Best-effort `SIGTERM` to `pid`. No-op on non-unix. Returns whether
+/// the signal was delivered (false if the process was already gone).
+#[cfg(unix)]
+#[must_use]
+pub fn signal_term(pid: u32) -> bool {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    #[allow(clippy::cast_possible_wrap)] // pids fit in i32 on all supported unix platforms
+    let raw = pid as i32;
+    kill(Pid::from_raw(raw), Signal::SIGTERM).is_ok()
+}
+
+/// Non-unix stub: signal delivery is unsupported.
+#[cfg(not(unix))]
+#[must_use]
+pub fn signal_term(_pid: u32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

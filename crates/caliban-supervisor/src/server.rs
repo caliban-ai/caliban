@@ -248,12 +248,16 @@ impl Supervisor {
                 }
             }
             CtlRequest::Kill { id } => {
+                // Signal the owned child if we have its pid; then record
+                // the state transition. The monitor task will observe the
+                // real exit but won't clobber `Killed` (guarded by
+                // `set_status_if_running`).
+                let pid = self.procs.lock().await.get(&id).copied();
+                if let Some(pid) = pid {
+                    let delivered = crate::proc::signal_term(pid);
+                    tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
+                }
                 let mut r = self.registry.lock().await;
-                // We don't actually own a child process today (sub-agent
-                // worker spawning is wired separately), so `kill` just
-                // updates the registry state. Real signal delivery
-                // hangs off the worker task and is covered by the
-                // foreground-handoff integration tests.
                 match r.set_status(&id, crate::proto::AgentStatus::Killed) {
                     Ok(_) => CtlReply::Killed,
                     Err(e) => CtlReply::Error { error: e },
