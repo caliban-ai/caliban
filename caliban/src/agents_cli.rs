@@ -154,14 +154,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
-            Ok(socket_path) => {
-                println!(
-                    "attach: per-agent socket at {} (no live attach loop in this build; \
-                     stream via `caliban logs {id}`)",
-                    socket_path.display(),
-                );
-                0
-            }
+            Ok(socket_path) => run_attach(&socket_path, id).await,
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
@@ -277,6 +270,37 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
             }
             Err(e) => map_client_error(e),
         },
+    }
+}
+
+/// Connect to a worker's per-agent socket and stream its transcript to
+/// stdout until the agent finishes (EOF) or the user detaches with Ctrl+C.
+async fn run_attach(socket_path: &Path, id: &str) -> i32 {
+    use tokio::net::UnixStream;
+    let stream = match UnixStream::connect(socket_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "caliban: cannot attach to {id} at {} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`",
+                socket_path.display()
+            );
+            return 74; // EX_IOERR
+        }
+    };
+    eprintln!("caliban: attached to {id} (Ctrl+C to detach)");
+    let mut out = std::io::stdout();
+    tokio::select! {
+        r = crate::attach::stream_attach(stream, &mut out) => match r {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("caliban: attach stream error: {e}");
+                1
+            }
+        },
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\ncaliban: detached from {id}");
+            0
+        }
     }
 }
 
