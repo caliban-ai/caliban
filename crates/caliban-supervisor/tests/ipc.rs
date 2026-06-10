@@ -336,15 +336,21 @@ async fn spawn_launches_worker_and_reaches_done() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn kill_signals_the_worker_child() {
-    // Worker binds the socket then sleeps; Kill must terminate it and
-    // mark the agent Killed. Uses sleep 30 so the child is genuinely
-    // alive when SIGTERM is delivered.
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    // The script records sh's own PID to ${SOCK}.pid, then uses `exec` to
+    // replace sh with `sleep 30`.  After exec the OS pid is unchanged but
+    // now belongs to the `sleep` process, so the pid file records the exact
+    // pid the supervisor will SIGTERM.  Touching $SOCK signals Running.
     let launcher = Arc::new(ShLauncher {
-        script: "touch \"$SOCK\"; sleep 30".into(),
+        script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; exec sleep 30"#.into(),
     });
     let (_d, sup, _h, client) = boot_with(launcher).await;
-    let (id, _) = client.spawn(spec()).await.unwrap();
+    let (id, sock) = client.spawn(spec()).await.unwrap();
+
     // Poll until the agent reaches Running.
     let mut running = false;
     for _ in 0..200 {
@@ -359,10 +365,61 @@ async fn kill_signals_the_worker_child() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(running, "worker never reached Running");
+
+    // Read the worker's pid from the file the script wrote.  The file is
+    // written by the shell process before it exec's into sleep, so we
+    // must poll: the Running status is set the moment cmd.spawn() returns
+    // (before sh has executed any instructions).
+    let pid_file = {
+        let mut p = sock.clone().into_os_string();
+        p.push(".pid");
+        std::path::PathBuf::from(p)
+    };
+    let mut pid_str_opt: Option<String> = None;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&pid_file)
+            && !s.trim().is_empty()
+        {
+            pid_str_opt = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pid_str = pid_str_opt.unwrap_or_else(|| panic!("pid file never appeared at {pid_file:?}"));
+    #[allow(clippy::cast_possible_wrap)] // pids fit in i32 on all supported unix platforms
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("pid file did not contain an integer: {e}"));
+
+    // Confirm the process is alive before we kill it.
+    assert!(
+        kill(Pid::from_raw(pid), None).is_ok(),
+        "worker process {pid} should be alive before kill"
+    );
+
     client.kill(&id).await.unwrap();
+
+    // Assert the registry status is Killed.
     let agents = client.list().await.unwrap();
     let a = agents.iter().find(|a| a.id == id).unwrap();
     assert_eq!(a.status, AgentStatus::Killed);
+
+    // Assert the OS process is actually gone (signal 0 = existence probe;
+    // Err(ESRCH) means the process no longer exists).
+    let mut process_gone = false;
+    for _ in 0..200 {
+        if kill(Pid::from_raw(pid), None).is_err() {
+            process_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        process_gone,
+        "worker process {pid} was not terminated by SIGTERM within the poll window"
+    );
+
     sup.cancel_token().cancel();
 }
 
