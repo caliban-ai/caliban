@@ -87,7 +87,8 @@ pub(crate) async fn run_supervisor_command(cmd: &CalibanCommand) -> Option<i32> 
         | CalibanCommand::Config { .. }
         | CalibanCommand::Plugin { .. }
         | CalibanCommand::Perms { .. }
-        | CalibanCommand::Settings { .. } => None,
+        | CalibanCommand::Settings { .. }
+        | CalibanCommand::AgentWorker { .. } => None,
     }
 }
 

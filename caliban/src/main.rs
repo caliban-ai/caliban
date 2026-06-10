@@ -17,6 +17,7 @@ mod startup;
 mod subcommands;
 mod system_prompt;
 mod tui;
+mod worker;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,13 @@ async fn main() -> Result<()> {
     if let Err(e) = crate::args::validate_stream_json_input(&args) {
         eprintln!("[caliban] {e}");
         std::process::exit(64);
+    }
+
+    // Internal worker entry (ADR 0037, #71). Dispatched first: it builds
+    // its own agent and must not run the normal startup path.
+    if let Some(CalibanCommand::AgentWorker { manifest, socket }) = &args.command {
+        let code = worker::run(manifest, socket).await;
+        std::process::exit(code);
     }
 
     // `caliban plugin <verb> ...` — plugin manager (ADR 0030). The clap
