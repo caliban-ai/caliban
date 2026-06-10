@@ -474,6 +474,17 @@ pub(crate) enum CalibanCommand {
         #[command(subcommand)]
         cmd: SettingsCommand,
     },
+    /// Internal: run a single background sub-agent worker. Hidden from
+    /// `--help`; invoked only by the `caliband` supervisor (ADR 0037, #71).
+    #[command(name = "__agent-worker", hide = true)]
+    AgentWorker {
+        /// Path to the agent's `manifest.json` (carries the `SpawnSpec`).
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Per-agent Unix socket the worker must bind.
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 /// `caliban perms <verb>` verbs.

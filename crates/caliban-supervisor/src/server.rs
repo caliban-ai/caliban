@@ -4,6 +4,7 @@
 //! socket, accepts connections, reads newline-delimited JSON requests,
 //! and dispatches them against the [`crate::Registry`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::proc::WorkerLauncher;
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
@@ -26,15 +28,36 @@ pub struct Supervisor {
     cancel: CancellationToken,
     /// Per-agent runtime-dir (where per-agent sockets are created).
     agent_runtime_dir: PathBuf,
+    /// Strategy for launching worker processes.
+    launcher: Arc<dyn WorkerLauncher>,
+    /// Live worker pids, keyed by agent id. Inserted on launch, read by
+    /// `Kill`, removed by the per-child monitor task on exit.
+    procs: Arc<Mutex<HashMap<crate::proto::AgentId, u32>>>,
 }
 
 impl Supervisor {
-    /// Construct a supervisor that will listen on `socket_path` and
-    /// place per-agent sockets under `agent_runtime_dir`.
+    /// Construct a supervisor that launches real `caliban __agent-worker`
+    /// children.
     pub fn new(
         socket_path: impl Into<PathBuf>,
         store: AgentStore,
         agent_runtime_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self::with_launcher(
+            socket_path,
+            store,
+            agent_runtime_dir,
+            Arc::new(crate::proc::ExecWorkerLauncher::sibling_of_current_exe()),
+        )
+    }
+
+    /// Construct a supervisor with an explicit worker launcher (tests
+    /// inject a fake here so the daemon lifecycle runs without an LLM).
+    pub fn with_launcher(
+        socket_path: impl Into<PathBuf>,
+        store: AgentStore,
+        agent_runtime_dir: impl Into<PathBuf>,
+        launcher: Arc<dyn WorkerLauncher>,
     ) -> Self {
         let socket_path = socket_path.into();
         let agent_runtime_dir = agent_runtime_dir.into();
@@ -45,6 +68,8 @@ impl Supervisor {
             registry,
             cancel: CancellationToken::new(),
             agent_runtime_dir,
+            launcher,
+            procs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -149,6 +174,47 @@ impl Supervisor {
         }
     }
 
+    /// Launch a worker for `rec`, record its pid, flip the registry to
+    /// `Running`, and spawn a monitor task that writes the terminal
+    /// status when the child exits. On launch failure the agent is
+    /// marked `Failed`.
+    async fn launch_and_monitor(&self, rec: crate::proto::AgentRecord) {
+        let id = rec.id.clone();
+        match self.launcher.launch(&rec) {
+            Ok(handle) => {
+                let pid = handle.pid;
+                let mut child = handle.child;
+                self.procs.lock().await.insert(id.clone(), pid);
+                self.registry
+                    .lock()
+                    .await
+                    .set_status_if_running(&id, crate::proto::AgentStatus::Running);
+                let registry = Arc::clone(&self.registry);
+                let procs = Arc::clone(&self.procs);
+                tokio::spawn(async move {
+                    let terminal = match child.wait().await {
+                        Ok(s) if s.success() => crate::proto::AgentStatus::Done,
+                        Ok(_) => crate::proto::AgentStatus::Failed,
+                        Err(e) => {
+                            tracing::warn!(error = %e, agent = %id, "worker wait failed");
+                            crate::proto::AgentStatus::Failed
+                        }
+                    };
+                    registry.lock().await.set_status_if_running(&id, terminal);
+                    procs.lock().await.remove(&id);
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent = %id, "worker launch failed");
+                self.registry
+                    .lock()
+                    .await
+                    .set_status(&id, crate::proto::AgentStatus::Failed)
+                    .ok();
+            }
+        }
+    }
+
     async fn dispatch(&self, req: CtlRequest) -> CtlReply {
         match req {
             CtlRequest::List => {
@@ -156,15 +222,19 @@ impl Supervisor {
                 CtlReply::Listed { agents: r.list() }
             }
             CtlRequest::Spawn { spec } => {
-                let mut r = self.registry.lock().await;
-                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                let socket_path = self.agent_runtime_dir.join(socket_name);
-                let rec = r.register(spec, socket_path.clone());
-                CtlReply::Spawned {
-                    id: rec.id,
-                    socket_path,
-                }
+                let rec = {
+                    let mut r = self.registry.lock().await;
+                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
+                    let socket_path = self.agent_runtime_dir.join(socket_name);
+                    r.register(spec, socket_path)
+                };
+                let reply = CtlReply::Spawned {
+                    id: rec.id.clone(),
+                    socket_path: rec.socket_path.clone(),
+                };
+                self.launch_and_monitor(rec).await;
+                reply
             }
             CtlRequest::Attach { id } => {
                 let r = self.registry.lock().await;
@@ -178,34 +248,46 @@ impl Supervisor {
                 }
             }
             CtlRequest::Kill { id } => {
+                // Signal the owned child if we have its pid; then record
+                // the state transition. The monitor task will observe the
+                // real exit but won't clobber `Killed` (guarded by
+                // `set_status_if_running`).
+                let pid = self.procs.lock().await.get(&id).copied();
+                if let Some(pid) = pid {
+                    let delivered = crate::proc::signal_term(pid);
+                    tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
+                }
                 let mut r = self.registry.lock().await;
-                // We don't actually own a child process today (sub-agent
-                // worker spawning is wired separately), so `kill` just
-                // updates the registry state. Real signal delivery
-                // hangs off the worker task and is covered by the
-                // foreground-handoff integration tests.
                 match r.set_status(&id, crate::proto::AgentStatus::Killed) {
                     Ok(_) => CtlReply::Killed,
                     Err(e) => CtlReply::Error { error: e },
                 }
             }
             CtlRequest::Respawn { id } => {
-                let mut r = self.registry.lock().await;
-                let Some(old) = r.get(&id).cloned() else {
-                    return CtlReply::Error {
-                        error: SupervisorError::NotFound { id },
+                // Drop any stale pid for the old id before re-registering.
+                self.procs.lock().await.remove(&id);
+                let new_rec = {
+                    let mut r = self.registry.lock().await;
+                    let Some(old) = r.get(&id).cloned() else {
+                        return CtlReply::Error {
+                            error: SupervisorError::NotFound { id },
+                        };
                     };
+                    // Drop old (force=true so it can be running) and
+                    // re-register with the same spec.
+                    if let Err(e) = r.remove(&id, true) {
+                        return CtlReply::Error { error: e };
+                    }
+                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
+                    let socket_path = self.agent_runtime_dir.join(socket_name);
+                    r.register(old.spec, socket_path)
                 };
-                // Drop old (force=true so it can be running) and
-                // re-register with the same spec.
-                if let Err(e) = r.remove(&id, true) {
-                    return CtlReply::Error { error: e };
-                }
-                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                let socket_path = self.agent_runtime_dir.join(socket_name);
-                let rec = r.register(old.spec, socket_path);
-                CtlReply::Respawned { id: rec.id }
+                let reply = CtlReply::Respawned {
+                    id: new_rec.id.clone(),
+                };
+                self.launch_and_monitor(new_rec).await;
+                reply
             }
             CtlRequest::Rm { id, force } => {
                 let mut r = self.registry.lock().await;

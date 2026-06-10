@@ -16,6 +16,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod client;
+pub mod proc;
 pub mod proto;
 pub mod registry;
 pub mod runtime;
@@ -23,6 +24,7 @@ pub mod server;
 pub mod store;
 
 pub use client::{ClientError, SupervisorClient};
+pub use proc::{ExecWorkerLauncher, WorkerHandle, WorkerLauncher};
 pub use proto::{
     AgentId, AgentRecord, AgentStatus, CtlReply, CtlRequest, DaemonStatus, SpawnSpec,
     SupervisorError,
