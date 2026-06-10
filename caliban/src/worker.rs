@@ -247,7 +247,10 @@ async fn serve_attach_client(mut stream: tokio::net::UnixStream, hub: Arc<EventH
             // with subsequent events rather than dropping the connection.
             Err(broadcast::error::RecvError::Lagged(_)) => {}
 
-            // Sender dropped: the agent run finished. Clean EOF.
+            // All senders dropped: the agent run finished and the hub was
+            // released. (On the normal path the process exits right after
+            // the run, so clients usually EOF via socket teardown before
+            // this fires — but handle it cleanly if the hub drops first.)
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
