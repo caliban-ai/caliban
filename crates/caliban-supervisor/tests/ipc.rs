@@ -315,8 +315,11 @@ async fn spawn_launches_worker_and_reaches_done() {
     let ctl = tmp.path().join("ctl.sock");
     let agents_dir = tmp.path().join("agents");
     let store = AgentStore::new(tmp.path().join("store"));
+    // Stay alive ~1s so the per-agent socket is observably present before
+    // exit — the monitor now unlinks it on worker exit (#77), so a
+    // fast-exit worker would race the socket-created assertion below.
     let launcher = Arc::new(ShLauncher {
-        script: "touch \"$SOCK\"; exit 0".into(),
+        script: "touch \"$SOCK\"; sleep 1".into(),
     });
     let sup = Arc::new(Supervisor::with_launcher(
         ctl.clone(),
@@ -474,4 +477,130 @@ async fn socket_path_auto_creates_parent_dirs() {
     }
     assert!(socket_path.exists(), "expected auto-created parent dirs");
     supervisor.cancel_token().cancel();
+}
+
+#[tokio::test]
+async fn rm_force_signals_running_worker() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    // Same pid-recording trick as the kill test: `exec sleep` so the
+    // recorded pid is the one the supervisor signals (#76).
+    let launcher = Arc::new(ShLauncher {
+        script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; exec sleep 30"#.into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
+    let (id, sock) = client.spawn(spec()).await.unwrap();
+
+    // Wait for Running.
+    let mut running = false;
+    for _ in 0..200 {
+        if client
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running, "worker never reached Running");
+
+    // Read the worker pid from the file the script wrote.
+    let pid_file = {
+        let mut p = sock.into_os_string();
+        p.push(".pid");
+        PathBuf::from(p)
+    };
+    let mut pid_str: Option<String> = None;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&pid_file)
+            && !s.trim().is_empty()
+        {
+            pid_str = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    #[allow(clippy::cast_possible_wrap)] // pids fit in i32 on all supported unix platforms
+    let pid: i32 = pid_str
+        .expect("pid file never appeared")
+        .trim()
+        .parse()
+        .expect("pid file did not contain an integer");
+    assert!(
+        kill(Pid::from_raw(pid), None).is_ok(),
+        "worker {pid} should be alive before rm"
+    );
+
+    // rm --force on a Running agent must signal the worker AND remove it.
+    client.rm(&id, true).await.unwrap();
+
+    // Registry entry is gone.
+    assert!(
+        !client.list().await.unwrap().iter().any(|a| a.id == id),
+        "agent should be removed after rm --force"
+    );
+
+    // Worker process is actually terminated (not orphaned).
+    let mut gone = false;
+    for _ in 0..200 {
+        if kill(Pid::from_raw(pid), None).is_err() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gone, "rm --force did not terminate worker {pid}");
+
+    sup.cancel_token().cancel();
+}
+
+#[tokio::test]
+async fn socket_file_removed_after_worker_exits() {
+    // Worker creates the socket file then exits 0 → Done. The monitor task
+    // must unlink the now-stale socket after the worker exits (#77).
+    let launcher = Arc::new(ShLauncher {
+        script: r#"touch "$SOCK"; exit 0"#.into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
+    let (id, sock) = client.spawn(spec()).await.unwrap();
+
+    // Wait until the agent reaches Done.
+    let mut done = false;
+    for _ in 0..200 {
+        if client
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Done)
+        {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(done, "worker never reached Done");
+
+    // The per-agent socket file must be cleaned up. The monitor sets the
+    // terminal status then unlinks, so absence may lag the Done status.
+    let mut socket_gone = false;
+    for _ in 0..200 {
+        if !sock.exists() {
+            socket_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        socket_gone,
+        "per-agent socket {} was not cleaned up after exit",
+        sock.display()
+    );
+
+    sup.cancel_token().cancel();
 }
