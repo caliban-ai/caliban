@@ -40,7 +40,11 @@ fn spec() -> SpawnSpec {
     }
 }
 
-async fn boot() -> (
+/// Start a supervisor with a caller-supplied launcher and return the
+/// temp dir (keep alive), supervisor handle, serve join-handle, and client.
+async fn boot_with(
+    launcher: Arc<dyn WorkerLauncher>,
+) -> (
     tempfile::TempDir,
     Arc<Supervisor>,
     tokio::task::JoinHandle<std::io::Result<()>>,
@@ -50,7 +54,12 @@ async fn boot() -> (
     let socket_path = dir.path().join("caliband.sock");
     let agent_dir = dir.path().join("agents-rt");
     let store = AgentStore::new(dir.path().join("data"));
-    let supervisor = Arc::new(Supervisor::new(socket_path.clone(), store, agent_dir));
+    let supervisor = Arc::new(Supervisor::with_launcher(
+        socket_path.clone(),
+        store,
+        agent_dir,
+        launcher,
+    ));
     let server = Arc::clone(&supervisor);
     let handle = tokio::spawn(async move { Arc::clone(&server).serve().await });
     // Poll for socket existence (the supervisor binds in `serve`).
@@ -63,6 +72,20 @@ async fn boot() -> (
     assert!(socket_path.exists(), "supervisor should have bound socket");
     let client = SupervisorClient::new(socket_path);
     (dir, supervisor, handle, client)
+}
+
+/// Convenience wrapper: start with a quick-exit fake launcher.
+/// Tests that do not spawn (or don't care about worker lifecycle) use this.
+async fn boot() -> (
+    tempfile::TempDir,
+    Arc<Supervisor>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    SupervisorClient,
+) {
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; exit 0".into(),
+    });
+    boot_with(launcher).await
 }
 
 #[tokio::test]
@@ -84,7 +107,12 @@ async fn status_returns_pid_and_zero_agents() {
 
 #[tokio::test]
 async fn spawn_registers_and_returns_socket() {
-    let (_d, sup, _h, client) = boot().await;
+    // Use a long-running fake so the worker is still alive when we poll,
+    // giving us a deterministic Running status to assert.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; sleep 5".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
     let (id, sock) = client.spawn(spec()).await.unwrap();
     assert!(!id.is_empty());
     assert!(
@@ -94,17 +122,43 @@ async fn spawn_registers_and_returns_socket() {
     let list = client.list().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, id);
-    // Status depends on whether the launcher succeeded; just assert
-    // the agent is tracked (not checking exact status here since the
-    // real launcher may fail quickly in the test environment).
-    assert!(!list[0].id.is_empty());
+    // Poll until the agent reaches Running (the fake worker touches $SOCK
+    // then sleeps, so it will be alive for the duration of this poll).
+    let mut reached_running = false;
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            reached_running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(reached_running, "agent never reached Running status");
     sup.cancel_token().cancel();
 }
 
 #[tokio::test]
 async fn kill_marks_agent_killed() {
-    let (_d, sup, _h, client) = boot().await;
+    // Worker must be alive when we issue kill, so use a long-running fake.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; sleep 5".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
     let (id, _) = client.spawn(spec()).await.unwrap();
+    // Poll until Running before killing, so kill acts on a live worker.
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     client.kill(&id).await.unwrap();
     let list = client.list().await.unwrap();
     assert_eq!(list[0].status, AgentStatus::Killed);
@@ -113,7 +167,11 @@ async fn kill_marks_agent_killed() {
 
 #[tokio::test]
 async fn respawn_drops_old_and_creates_new_id() {
-    let (_d, sup, _h, client) = boot().await;
+    // Quick-exit fake is fine; respawn only needs the agent to exist.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; exit 0".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
     let (old_id, _) = client.spawn(spec()).await.unwrap();
     let new_id = client.respawn(&old_id).await.unwrap();
     assert_ne!(old_id, new_id);
@@ -158,7 +216,11 @@ async fn rm_requires_stopped_state_without_force() {
 
 #[tokio::test]
 async fn rm_with_force_succeeds() {
-    let (_d, sup, _h, client) = boot().await;
+    // Quick-exit fake: agent will be Done or at least tracked, force-rm works regardless.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; exit 0".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
     let (id, _) = client.spawn(spec()).await.unwrap();
     client.rm(&id, true).await.unwrap();
     assert!(client.list().await.unwrap().is_empty());
@@ -167,8 +229,23 @@ async fn rm_with_force_succeeds() {
 
 #[tokio::test]
 async fn rm_after_kill_succeeds_without_force() {
-    let (_d, sup, _h, client) = boot().await;
+    // Worker must be alive when killed; use a long-running fake.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; sleep 5".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
     let (id, _) = client.spawn(spec()).await.unwrap();
+    // Wait for Running before issuing kill.
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     client.kill(&id).await.unwrap();
     client.rm(&id, false).await.unwrap();
     sup.cancel_token().cancel();
