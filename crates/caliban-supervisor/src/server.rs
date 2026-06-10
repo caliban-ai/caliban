@@ -4,6 +4,7 @@
 //! socket, accepts connections, reads newline-delimited JSON requests,
 //! and dispatches them against the [`crate::Registry`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::proc::WorkerLauncher;
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
@@ -26,15 +28,38 @@ pub struct Supervisor {
     cancel: CancellationToken,
     /// Per-agent runtime-dir (where per-agent sockets are created).
     agent_runtime_dir: PathBuf,
+    /// Strategy for launching worker processes.
+    #[allow(dead_code)] // read in Task 3 (Spawn wiring)
+    launcher: Arc<dyn WorkerLauncher>,
+    /// Live worker pids, keyed by agent id. Inserted on launch, read by
+    /// `Kill`, removed by the per-child monitor task on exit.
+    #[allow(dead_code)] // read in Task 3 (Spawn wiring)
+    procs: Arc<Mutex<HashMap<crate::proto::AgentId, u32>>>,
 }
 
 impl Supervisor {
-    /// Construct a supervisor that will listen on `socket_path` and
-    /// place per-agent sockets under `agent_runtime_dir`.
+    /// Construct a supervisor that launches real `caliban __agent-worker`
+    /// children.
     pub fn new(
         socket_path: impl Into<PathBuf>,
         store: AgentStore,
         agent_runtime_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self::with_launcher(
+            socket_path,
+            store,
+            agent_runtime_dir,
+            Arc::new(crate::proc::ExecWorkerLauncher::sibling_of_current_exe()),
+        )
+    }
+
+    /// Construct a supervisor with an explicit worker launcher (tests
+    /// inject a fake here so the daemon lifecycle runs without an LLM).
+    pub fn with_launcher(
+        socket_path: impl Into<PathBuf>,
+        store: AgentStore,
+        agent_runtime_dir: impl Into<PathBuf>,
+        launcher: Arc<dyn WorkerLauncher>,
     ) -> Self {
         let socket_path = socket_path.into();
         let agent_runtime_dir = agent_runtime_dir.into();
@@ -45,6 +70,8 @@ impl Supervisor {
             registry,
             cancel: CancellationToken::new(),
             agent_runtime_dir,
+            launcher,
+            procs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
