@@ -216,6 +216,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
+                interactive: false,
             };
             match client.spawn(spec).await {
                 Ok((id, sock)) => {
@@ -321,6 +322,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: true,
+        interactive: false,
     };
     match client.spawn(spec).await {
         Ok((id, sock)) => {

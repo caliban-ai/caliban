@@ -1207,6 +1207,7 @@ pub(crate) fn handoff_to_supervisor(app: &mut App) {
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: false,
+        interactive: false,
     };
 
     // We're inside synchronous key handling; block on a one-shot async

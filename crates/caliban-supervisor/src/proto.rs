@@ -90,6 +90,11 @@ pub struct SpawnSpec {
     /// Whether to inherit parent hooks (config-serializable portion only).
     #[serde(default = "true_default")]
     pub inherit_hooks: bool,
+    /// When true, the worker runs in interactive mode: at each end-of-run
+    /// boundary it awaits inbound operator messages over the per-agent
+    /// socket instead of finishing (ADR 0047 / #81).
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 fn true_default() -> bool {

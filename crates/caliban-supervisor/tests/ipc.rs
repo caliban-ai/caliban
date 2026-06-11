@@ -37,6 +37,7 @@ fn spec() -> SpawnSpec {
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: true,
+        interactive: false,
     }
 }
 
@@ -344,6 +345,7 @@ async fn spawn_launches_worker_and_reaches_done() {
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: true,
+        interactive: false,
     };
     let (id, socket_path) = client.spawn(spec).await.unwrap();
     let mut socket_created = false;

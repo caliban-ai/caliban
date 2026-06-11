@@ -120,6 +120,7 @@ mod tests {
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
+                interactive: false,
             },
         }
     }
