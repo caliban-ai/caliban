@@ -51,7 +51,7 @@ decision with context, the decision itself, and consequences.
 | [0034](0034-bedrock-and-vertex-providers.md) | Bedrock + Vertex providers | accepted |
 | [0035](0035-auto-memory.md) | Auto-memory (model-written notes per project) | accepted |
 | [0036](0036-claudemd-ancestry-and-imports.md) | CLAUDE.md ancestor walk + `@`-imports | accepted |
-| [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted |
+| [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by [0047](0047-interactive-background-subagents.md)) |
 | [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted |
 | [0039](0039-image-and-vision-input.md) | Image / vision input | accepted |
 | [0040](0040-slash-command-registry.md) | Slash command registry (extensible `SlashCommand` trait) | accepted |
@@ -61,6 +61,7 @@ decision with context, the decision itself, and consequences.
 | [0044](0044-rmcp-version-pin.md) | `rmcp` 1.7 version pin (dedicated-PR bumps) | accepted |
 | [0045](0045-permissions-v2-and-toml-primary-config.md) | Permissions v2 — TOML-primary config + richer rule schema | accepted |
 | [0046](0046-two-stage-tool-surface.md) | Two-stage tool surface — lazy MCP schema loading + ToolSearch | accepted |
+| [0047](0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
 
 ## Adding a new ADR
 

@@ -51,6 +51,11 @@ isolation mode.
   detached, a background sub-agent runs to completion (or is killed). The
   parent reads its final summary via `caliban agents attach` or the
   `/agents` overlay.
+  > **Revised by ADR 0047 (#81):** the "runs to completion" clause is
+  > narrowed — a *human operator* at `caliban agents attach` may send
+  > messages to a running agent (which resumes via an `InputProvider`,
+  > entering `Idle` while awaiting). Automated re-attachment into the
+  > *parent's* context remains a non-goal.
 
 ## Architecture
 
