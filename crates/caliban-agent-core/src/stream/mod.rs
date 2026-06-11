@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use async_trait::async_trait;
 use caliban_provider::{
     CompletionRequest, ContentBlock, Message, RequestMetadata, Role, StopReason, StreamEvent,
     StreamingContentType, StreamingDelta, TextBlock, ToolResultBlock, Usage,
@@ -326,6 +327,25 @@ mod serde_tests {
 /// Boxed, pinned stream of `TurnEvent` results.
 pub type TurnEventStream = Pin<Box<dyn Stream<Item = Result<TurnEvent>> + Send + 'static>>;
 
+/// Supplies additional user input to a run that would otherwise end naturally
+/// (ADR 0047 / #81).
+///
+/// When a run has an `InputProvider`, the loop awaits it at the end-of-run
+/// boundary instead of terminating: `Some` resumes with the returned messages
+/// (uncapped — a human drives it), `None` ends the run. Foreground/headless
+/// runs pass no provider and are unaffected.
+#[async_trait]
+pub trait InputProvider: Send + Sync {
+    /// Await the next user messages to inject, or `None` to end the run.
+    ///
+    /// Implementations should select on `cancel` and return promptly when
+    /// it fires.
+    async fn next_input(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Option<Vec<caliban_provider::Message>>;
+}
+
 /// Optional per-run identity that drives [`crate::hooks::Hooks::before_run`]
 /// / [`crate::hooks::Hooks::after_run`] (ADR 0028).
 ///
@@ -333,7 +353,7 @@ pub type TurnEventStream = Pin<Box<dyn Stream<Item = Result<TurnEvent>> + Send +
 /// [`Agent::stream_until_done_with_settings`]. The legacy [`Agent::stream_until_done`]
 /// passes [`RunSettings::default()`], which fires the lifecycle events with
 /// an empty `session_id` and the cwd as the workspace root.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunSettings {
     /// Opaque session identifier; surfaced in `RunCtx.session_id`.
     pub session_id: String,
@@ -341,6 +361,28 @@ pub struct RunSettings {
     pub workspace_root: std::path::PathBuf,
     /// Monotonic prompt index within the parent session; defaults to 0.
     pub prompt_index: u32,
+    /// Optional interactive input source (ADR 0047 / #81). When `Some`, the
+    /// loop awaits it at the natural end-of-run boundary instead of ending.
+    /// `None` (default) preserves run-to-completion behavior exactly.
+    pub input_source: Option<std::sync::Arc<dyn InputProvider>>,
+}
+
+impl std::fmt::Debug for RunSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunSettings")
+            .field("session_id", &self.session_id)
+            .field("workspace_root", &self.workspace_root)
+            .field("prompt_index", &self.prompt_index)
+            .field(
+                "input_source",
+                if self.input_source.is_some() {
+                    &"<set>"
+                } else {
+                    &"<unset>"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for RunSettings {
@@ -349,6 +391,7 @@ impl Default for RunSettings {
             session_id: String::new(),
             workspace_root: std::path::PathBuf::from("."),
             prompt_index: 0,
+            input_source: None,
         }
     }
 }
@@ -1408,7 +1451,36 @@ impl Agent {
                         break 'outer;
                     }
                     _ => {
-                        // EndTurn or StopSequence — natural completion.
+                        // EndTurn or StopSequence — natural completion. If an
+                        // interactive input source is configured, await the
+                        // next operator message instead of ending the run
+                        // (ADR 0047 / #81). Human-driven, so NOT subject to
+                        // MAX_FORCED_CONTINUATIONS.
+                        //
+                        // Note: injected messages land in `history` and therefore
+                        // in `RunEnd.final_messages`. Live per-event display of
+                        // injected user messages is deferred to the worker/attach
+                        // tickets (2/3).
+                        if let Some(provider) = settings.input_source.clone() {
+                            let next = provider.next_input(&cancel).await;
+                            if cancel.is_cancelled() {
+                                stopped_for = StopCondition::Cancelled;
+                                break 'outer;
+                            }
+                            match next {
+                                Some(msgs) if !msgs.is_empty() => {
+                                    history.extend(msgs);
+                                    stage_a_attempted_this_turn = false;
+                                    override_max_tokens_for_request = None;
+                                    break 'inner; // take another turn
+                                }
+                                _ => {
+                                    // None / empty → end of input.
+                                    stopped_for = StopCondition::EndOfTurn;
+                                    break 'outer;
+                                }
+                            }
+                        }
                         stopped_for = StopCondition::EndOfTurn;
                         break 'outer;
                     }
