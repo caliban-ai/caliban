@@ -677,6 +677,10 @@ pub(crate) enum AgentsCommand {
         /// Optional human-readable label.
         #[arg(long)]
         label: Option<String>,
+        /// Run the agent interactively: it awaits operator messages over
+        /// `agents attach` instead of finishing (ADR 0047 / #81).
+        #[arg(long)]
+        interactive: bool,
     },
 }
 

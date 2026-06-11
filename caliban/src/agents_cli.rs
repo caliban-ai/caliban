@@ -207,7 +207,11 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             }
             Err(e) => map_client_error(e),
         },
-        crate::AgentsCommand::Spawn { prompt, label } => {
+        crate::AgentsCommand::Spawn {
+            prompt,
+            label,
+            interactive,
+        } => {
             let spec = SpawnSpec {
                 label: label.clone(),
                 frontmatter_path: None,
@@ -216,7 +220,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
-                interactive: false,
+                interactive: *interactive,
             };
             match client.spawn(spec).await {
                 Ok((id, sock)) => {
@@ -276,6 +280,8 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
 
 /// Connect to a worker's per-agent socket and stream its transcript to
 /// stdout until the agent finishes (EOF) or the user detaches with Ctrl+C.
+/// Also pumps operator stdin as `AttachInbound` NDJSON frames to the write
+/// half of the socket (bidirectional attach for interactive agents, ADR 0047 / #81).
 async fn run_attach(socket_path: &Path, id: &str) -> i32 {
     use tokio::net::UnixStream;
     let stream = match UnixStream::connect(socket_path).await {
@@ -285,13 +291,25 @@ async fn run_attach(socket_path: &Path, id: &str) -> i32 {
                 "caliban: cannot attach to {id} at {} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`",
                 socket_path.display()
             );
-            return 74; // EX_IOERR
+            return 74;
         }
     };
-    eprintln!("caliban: attached to {id} (Ctrl+C to detach)");
+    eprintln!(
+        "caliban: attached to {id} (type to send \u{00b7} Ctrl+D end-of-input \u{00b7} Ctrl+C detach)"
+    );
+    let (read_half, write_half) = stream.into_split();
+
+    // Pump operator stdin → inbound frames on a background task. Harmless
+    // for non-interactive agents (the worker drops its read half; our
+    // writes simply stop on error). Aborted when we detach / the agent ends.
+    let send = tokio::spawn(crate::attach::stdin_to_frames(
+        tokio::io::stdin(),
+        write_half,
+    ));
+
     let mut out = std::io::stdout();
-    tokio::select! {
-        r = crate::attach::stream_attach(stream, &mut out) => match r {
+    let code = tokio::select! {
+        r = crate::attach::stream_attach(read_half, &mut out) => match r {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("caliban: attach stream error: {e}");
@@ -302,7 +320,9 @@ async fn run_attach(socket_path: &Path, id: &str) -> i32 {
             eprintln!("\ncaliban: detached from {id}");
             0
         }
-    }
+    };
+    send.abort();
+    code
 }
 
 /// Handle the top-level `--bg "<task>"` shortcut.
