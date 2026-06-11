@@ -12,7 +12,7 @@ use std::io::Write;
 
 use caliban_agent_core::TurnEvent;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 
 /// A frame an attached operator sends INBOUND to a running worker over the
 /// per-agent socket (ADR 0047 / #81). Outbound is `TurnEvent` NDJSON (#79);
@@ -50,6 +50,37 @@ pub(crate) fn render_event(ev: &TurnEvent) -> String {
         // rendered in the attach transcript (kept concise).
         _ => String::new(),
     }
+}
+
+/// Read operator input lines from `reader` and write them to `writer` as
+/// `AttachInbound::UserMessage` NDJSON frames (one per non-empty line). On
+/// EOF (operator Ctrl+D), write a final `AttachInbound::EndInput` frame so
+/// the agent finishes. Used by `agents attach` to drive an interactive
+/// sub-agent (ADR 0047 / #81). Returns on EOF or write error.
+pub(crate) async fn stdin_to_frames<R, W>(reader: R, mut writer: W) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue; // skip blank lines — don't send empty user messages
+        }
+        write_frame(&mut writer, &AttachInbound::UserMessage { text: line }).await?;
+    }
+    // EOF → tell the agent to finish.
+    write_frame(&mut writer, &AttachInbound::EndInput).await
+}
+
+async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &AttachInbound,
+) -> std::io::Result<()> {
+    let mut buf = serde_json::to_vec(frame).map_err(std::io::Error::other)?;
+    buf.push(b'\n');
+    writer.write_all(&buf).await?;
+    writer.flush().await
 }
 
 /// Drive an attach stream: read NDJSON `TurnEvent` lines from `reader`,
@@ -113,6 +144,73 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("ok"), "got: {s:?}");
         assert!(s.contains("unparsable"), "got: {s:?}");
+    }
+
+    // --- stdin_to_frames ---
+
+    #[tokio::test]
+    async fn stdin_to_frames_sends_usermessages_then_endinput() {
+        let input = b"hello\nworld\n";
+        let mut out: Vec<u8> = Vec::new();
+        stdin_to_frames(std::io::Cursor::new(input), &mut out)
+            .await
+            .unwrap();
+        let frames: Vec<AttachInbound> = out
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("valid NDJSON"))
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                AttachInbound::UserMessage {
+                    text: "hello".into()
+                },
+                AttachInbound::UserMessage {
+                    text: "world".into()
+                },
+                AttachInbound::EndInput,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_to_frames_skips_blank_lines() {
+        let input = b"a\n\n  \nb\n";
+        let mut out: Vec<u8> = Vec::new();
+        stdin_to_frames(std::io::Cursor::new(input), &mut out)
+            .await
+            .unwrap();
+        let frames: Vec<AttachInbound> = out
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("valid NDJSON"))
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                AttachInbound::UserMessage { text: "a".into() },
+                AttachInbound::UserMessage { text: "b".into() },
+                AttachInbound::EndInput,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_to_frames_empty_input_sends_only_endinput() {
+        // Immediate EOF (operator attaches and Ctrl+D's without typing):
+        // exactly one EndInput, no UserMessage. Pins the EndInput write
+        // OUTSIDE the read loop.
+        let mut out: Vec<u8> = Vec::new();
+        stdin_to_frames(std::io::Cursor::new(b"" as &[u8]), &mut out)
+            .await
+            .unwrap();
+        let frames: Vec<AttachInbound> = out
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("valid NDJSON"))
+            .collect();
+        assert_eq!(frames, vec![AttachInbound::EndInput]);
     }
 
     // --- AttachInbound serde ---
