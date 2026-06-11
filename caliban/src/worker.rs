@@ -111,21 +111,23 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
     // Construct minimal Args with the spec's model override.
     // Args does not impl Default, so we parse a minimal invocation.
     //
-    // Plan A posture (see #71): the worker runs with `--no-permissions`
-    // (no permission gate) and the default tool set (Bash/Write/Edit/Web),
-    // and currently honors only `spec.model` + `spec.initial_prompt`. The
-    // remaining SpawnSpec fields — `tool_allowlist`, `inherit_hooks`,
-    // `isolation_worktree`, `frontmatter_path` — are intentionally NOT yet
-    // applied. Plan B wires those, most importantly `tool_allowlist` + a
-    // permission policy, so background sub-agents stop running unguarded.
-    let mut args =
-        match crate::args::Args::try_parse_from(["caliban", "--no-permissions", "--bare"]) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("[caliban __agent-worker] args construction failed: {e}");
-                return 70;
-            }
-        };
+    // Permission posture (#75): the worker runs with `--bare` (no TUI/MCP)
+    // and a real permission gate. `spec.tool_allowlist` filters the registry
+    // AND seeds Allow rules that precede the `default_rules()` tail, so only
+    // the tools the spawner explicitly granted are accessible; anything else
+    // falls through to the defaults (read-only Allow; Bash/Write/Edit Ask →
+    // denied non-interactively because `auto_allow: false`).
+    //
+    // Full `inherit_hooks` (parent-config inheritance) is deferred to #84 and
+    // requires SpawnSpec proto changes; regardless of `spec.inherit_hooks`, the
+    // worker uses this binary-default gate for now.
+    let mut args = match crate::args::Args::try_parse_from(["caliban", "--bare"]) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[caliban __agent-worker] args construction failed: {e}");
+            return 70;
+        }
+    };
     if let Some(model) = record.spec.model.clone() {
         args.model = Some(model);
     }
@@ -156,6 +158,17 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
         Arc::clone(&plan_mode),
         &[],
     );
+    let registry = filter_registry(registry, record.spec.tool_allowlist.as_deref());
+
+    let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
+    let ask: Arc<dyn caliban_agent_core::AskHandler> =
+        Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
+    let permissions: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+        Arc::new(caliban_agent_core::PermissionsHook::new(
+            rules,
+            ask,
+            Arc::new(caliban_agent_core::NoopHooks),
+        ));
 
     let agent = Arc::new(
         caliban_agent_core::Agent::builder()
@@ -165,6 +178,7 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
                 model: model.clone(),
                 ..caliban_agent_core::AgentConfig::default()
             })
+            .hooks(permissions)
             .build()
             .expect("worker agent builder"),
     );
@@ -227,6 +241,47 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
     crate::startup::stop_condition_exit_code(&stop)
 }
 
+/// Filter `registry` down to the tools named in `allowlist`. `None` keeps
+/// the full registry. Mirrors the sub-agent allowlist pattern in
+/// `startup::install_sub_agent`.
+fn filter_registry(
+    registry: caliban_agent_core::ToolRegistry,
+    allowlist: Option<&[String]>,
+) -> caliban_agent_core::ToolRegistry {
+    let Some(names) = allowlist else {
+        return registry;
+    };
+    let mut filtered = caliban_agent_core::ToolRegistry::new();
+    for name in names {
+        if let Some(t) = registry.get(name) {
+            filtered.register(std::sync::Arc::clone(t));
+        }
+    }
+    filtered
+}
+
+/// Build the worker's permission rule list (#75): each tool the spawner
+/// granted via `tool_allowlist` is allowed; the binary `default_rules()`
+/// tail governs everything else (read-only allowed; Bash/Write/Edit/Web
+/// fall to Ask → denied non-interactively). First match wins, so the
+/// allowlist grants must precede the default tail.
+fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::Rule> {
+    let mut rules: Vec<caliban_agent_core::Rule> = Vec::new();
+    if let Some(names) = allowlist {
+        for tool in names {
+            rules.push(caliban_agent_core::Rule {
+                tool: tool.clone(),
+                action: caliban_agent_core::Action::Allow,
+                comment: Some("granted via SpawnSpec tool_allowlist (#75)".into()),
+                reason: None,
+                expires_at: None,
+            });
+        }
+    }
+    rules.extend(caliban_agent_core::default_rules());
+    rules
+}
+
 /// Serve one attached client: replay the event history, then forward live
 /// events until the agent finishes (`Closed`) or the client disconnects.
 async fn serve_attach_client(mut stream: tokio::net::UnixStream, hub: Arc<EventHub>) {
@@ -266,6 +321,61 @@ async fn write_line(stream: &mut tokio::net::UnixStream, line: &str) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caliban_agent_core::{Action, default_rules};
+
+    // --- build_worker_rules ---
+
+    #[test]
+    fn worker_rules_grant_allowlisted_tools_first() {
+        let rules = build_worker_rules(Some(&["Bash".to_string(), "Edit".to_string()]));
+        let defaults = default_rules();
+        // Total length: 2 allowlist grants + all defaults.
+        assert_eq!(
+            rules.len(),
+            2 + defaults.len(),
+            "expected 2 allowlist rules + default tail, got {}",
+            rules.len()
+        );
+        // First two rules are the allowlist grants in order.
+        assert_eq!(rules[0].tool, "Bash");
+        assert!(
+            matches!(rules[0].action, Action::Allow),
+            "expected Allow for Bash, got {:?}",
+            rules[0].action
+        );
+        assert_eq!(rules[1].tool, "Edit");
+        assert!(
+            matches!(rules[1].action, Action::Allow),
+            "expected Allow for Edit, got {:?}",
+            rules[1].action
+        );
+        // Remainder equals default_rules() verbatim.
+        for (i, (got, want)) in rules[2..].iter().zip(defaults.iter()).enumerate() {
+            assert_eq!(
+                got.tool, want.tool,
+                "default rule [{i}] tool mismatch: {} vs {}",
+                got.tool, want.tool
+            );
+            assert_eq!(
+                got.action, want.action,
+                "default rule [{i}] action mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_rules_without_allowlist_are_just_defaults() {
+        let rules = build_worker_rules(None);
+        let defaults = default_rules();
+        assert_eq!(rules.len(), defaults.len());
+        // Spot-check: Read should be Allow.
+        let read_rule = rules.iter().find(|r| r.tool == "Read");
+        assert!(read_rule.is_some(), "expected a Read rule in defaults");
+        assert!(
+            matches!(read_rule.unwrap().action, Action::Allow),
+            "Read default should be Allow"
+        );
+    }
 
     #[test]
     fn load_record_reads_a_manifest() {
