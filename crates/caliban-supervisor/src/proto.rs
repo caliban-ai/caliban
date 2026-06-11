@@ -142,6 +142,13 @@ pub enum CtlRequest {
     /// Ask the daemon to mark itself for shutdown after the current
     /// in-flight requests complete.
     Shutdown,
+    /// A worker reports a lifecycle transition (Running <-> Idle) for itself.
+    ReportStatus {
+        /// Reporting agent.
+        id: AgentId,
+        /// New status (only Running/Idle are honored; see registry guard).
+        status: AgentStatus,
+    },
 }
 
 /// Control-plane replies.
@@ -179,6 +186,8 @@ pub enum CtlReply {
     Status(DaemonStatus),
     /// Daemon will shut down once it's drained.
     ShutdownAck,
+    /// Acknowledged a status report.
+    StatusReported,
     /// An error occurred.
     Error {
         /// Structured error variant.

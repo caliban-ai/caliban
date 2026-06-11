@@ -484,6 +484,9 @@ pub(crate) enum CalibanCommand {
         /// Per-agent Unix socket the worker must bind.
         #[arg(long)]
         socket: PathBuf,
+        /// Daemon control socket the worker reports Idle/Running to (#81).
+        #[arg(long)]
+        control_socket: Option<PathBuf>,
     },
 }
 

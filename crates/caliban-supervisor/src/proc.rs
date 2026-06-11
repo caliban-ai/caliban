@@ -34,6 +34,9 @@ pub trait WorkerLauncher: Send + Sync {
 pub struct ExecWorkerLauncher {
     /// Absolute path to the `caliban` binary to exec.
     caliban_exe: PathBuf,
+    /// Optional daemon control-socket path passed to the worker so it can
+    /// report Idle/Running transitions (#81).
+    control_socket: Option<PathBuf>,
 }
 
 impl ExecWorkerLauncher {
@@ -41,6 +44,7 @@ impl ExecWorkerLauncher {
     pub fn new(caliban_exe: impl Into<PathBuf>) -> Self {
         Self {
             caliban_exe: caliban_exe.into(),
+            control_socket: None,
         }
     }
 
@@ -57,6 +61,13 @@ impl ExecWorkerLauncher {
         }
         Self::new(caliban)
     }
+
+    /// Set the daemon control-socket path the worker reports status to (#81).
+    #[must_use]
+    pub fn with_control_socket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.control_socket = Some(path.into());
+        self
+    }
 }
 
 impl WorkerLauncher for ExecWorkerLauncher {
@@ -67,8 +78,11 @@ impl WorkerLauncher for ExecWorkerLauncher {
             .arg("--manifest")
             .arg(&manifest_path)
             .arg("--socket")
-            .arg(&record.socket_path)
-            .stdin(std::process::Stdio::null())
+            .arg(&record.socket_path);
+        if let Some(ref ctl) = self.control_socket {
+            cmd.arg("--control-socket").arg(ctl);
+        }
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let child = cmd.spawn()?;

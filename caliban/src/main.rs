@@ -56,8 +56,13 @@ async fn main() -> Result<()> {
 
     // Internal worker entry (ADR 0037, #71). Dispatched first: it builds
     // its own agent and must not run the normal startup path.
-    if let Some(CalibanCommand::AgentWorker { manifest, socket }) = &args.command {
-        let code = worker::run(manifest, socket).await;
+    if let Some(CalibanCommand::AgentWorker {
+        manifest,
+        socket,
+        control_socket,
+    }) = &args.command
+    {
+        let code = worker::run(manifest, socket, control_socket.as_deref()).await;
         std::process::exit(code);
     }
 

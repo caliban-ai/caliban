@@ -43,12 +43,12 @@ impl Supervisor {
         store: AgentStore,
         agent_runtime_dir: impl Into<PathBuf>,
     ) -> Self {
-        Self::with_launcher(
-            socket_path,
-            store,
-            agent_runtime_dir,
-            Arc::new(crate::proc::ExecWorkerLauncher::sibling_of_current_exe()),
-        )
+        let socket_path: PathBuf = socket_path.into();
+        let launcher = Arc::new(
+            crate::proc::ExecWorkerLauncher::sibling_of_current_exe()
+                .with_control_socket(socket_path.clone()),
+        );
+        Self::with_launcher(socket_path, store, agent_runtime_dir, launcher)
     }
 
     /// Construct a supervisor with an explicit worker launcher (tests
@@ -219,6 +219,7 @@ impl Supervisor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn dispatch(&self, req: CtlRequest) -> CtlReply {
         match req {
             CtlRequest::List => {
@@ -331,6 +332,11 @@ impl Supervisor {
                 })
             }
             CtlRequest::Shutdown => CtlReply::ShutdownAck,
+            CtlRequest::ReportStatus { id, status } => {
+                let mut r = self.registry.lock().await;
+                r.report_status(&id, status);
+                CtlReply::StatusReported
+            }
         }
     }
 }

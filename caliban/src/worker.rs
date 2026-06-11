@@ -57,6 +57,27 @@ impl EventHub {
     }
 }
 
+/// Abstraction for reporting Idle/Running transitions to the daemon.
+/// Best-effort: errors are swallowed so a control-socket hiccup never
+/// fails the run. (#81)
+#[async_trait::async_trait]
+trait StatusSink: Send + Sync {
+    async fn set(&self, status: caliban_supervisor::proto::AgentStatus);
+}
+
+/// Reports Idle/Running to the daemon control socket (best-effort).
+struct ControlSocketStatus {
+    client: caliban_supervisor::SupervisorClient,
+    id: String,
+}
+
+#[async_trait::async_trait]
+impl StatusSink for ControlSocketStatus {
+    async fn set(&self, status: caliban_supervisor::proto::AgentStatus) {
+        let _ = self.client.report_status(&self.id, status).await; // best-effort
+    }
+}
+
 /// `InputProvider` backed by the per-agent socket's inbound frames.
 ///
 /// All attach connections feed one shared mpsc (`inbox`); the run awaits here
@@ -64,6 +85,8 @@ impl EventHub {
 /// channel ends the run. (#81 ticket 2; idle-timeout is ticket 5.)
 struct SocketInputProvider {
     inbox: AsyncMutex<mpsc::Receiver<AttachInbound>>,
+    /// Optional status reporter — reports Idle before awaiting, Running on resume.
+    status: Option<Arc<dyn StatusSink>>,
 }
 
 #[async_trait::async_trait]
@@ -72,8 +95,11 @@ impl InputProvider for SocketInputProvider {
         &self,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Option<Vec<caliban_provider::Message>> {
+        if let Some(s) = &self.status {
+            s.set(caliban_supervisor::proto::AgentStatus::Idle).await;
+        }
         let mut rx = self.inbox.lock().await;
-        tokio::select! {
+        let out = tokio::select! {
             () = cancel.cancelled() => None,
             frame = rx.recv() => match frame {
                 Some(AttachInbound::UserMessage { text }) => {
@@ -81,7 +107,13 @@ impl InputProvider for SocketInputProvider {
                 }
                 Some(AttachInbound::EndInput) | None => None,
             }
+        };
+        if out.is_some()
+            && let Some(s) = &self.status
+        {
+            s.set(caliban_supervisor::proto::AgentStatus::Running).await;
         }
+        out
     }
 }
 
@@ -114,7 +146,7 @@ pub(crate) fn load_record(manifest: &Path) -> std::io::Result<AgentRecord> {
 
 /// Entry point body. Returns the process exit code.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
+pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&Path>) -> i32 {
     let record = match load_record(manifest) {
         Ok(r) => r,
         Err(e) => {
@@ -158,8 +190,17 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
         Option<Arc<dyn InputProvider>>,
     ) = if record.spec.interactive {
         let (tx, rx) = mpsc::channel::<AttachInbound>(64);
+        // Build a status sink if a control socket was provided.
+        let status_sink: Option<Arc<dyn StatusSink>> =
+            control_socket.map(|ctl| -> Arc<dyn StatusSink> {
+                Arc::new(ControlSocketStatus {
+                    client: caliban_supervisor::SupervisorClient::new(ctl),
+                    id: record.id.clone(),
+                })
+            });
         let provider: Arc<dyn InputProvider> = Arc::new(SocketInputProvider {
             inbox: AsyncMutex::new(rx),
+            status: status_sink,
         });
         (Some(tx), Some(provider))
     } else {
@@ -601,6 +642,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<AttachInbound>(16);
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
+            status: None,
         };
         let cancel = CancellationToken::new();
 
@@ -635,6 +677,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<AttachInbound>(16);
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
+            status: None,
         };
         let cancel = CancellationToken::new();
 
@@ -642,5 +685,71 @@ mod tests {
         drop(tx);
         let result = provider.next_input(&cancel).await;
         assert!(result.is_none(), "closed channel should yield None");
+    }
+
+    // --- StatusSink integration ---
+
+    /// A recording sink that captures every status set during a test.
+    struct RecordingSink(std::sync::Mutex<Vec<caliban_supervisor::proto::AgentStatus>>);
+
+    #[async_trait::async_trait]
+    impl StatusSink for RecordingSink {
+        async fn set(&self, status: caliban_supervisor::proto::AgentStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_input_provider_reports_idle_then_running_on_resume() {
+        use caliban_supervisor::proto::AgentStatus;
+        use tokio_util::sync::CancellationToken;
+
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: Some(Arc::clone(&sink) as Arc<dyn StatusSink>),
+        };
+        let cancel = CancellationToken::new();
+
+        // Pre-send a UserMessage so next_input can resolve without blocking.
+        tx.send(AttachInbound::UserMessage { text: "go".into() })
+            .await
+            .unwrap();
+        let result = provider.next_input(&cancel).await;
+        assert!(result.is_some(), "should resume with Some");
+
+        let recorded = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![AgentStatus::Idle, AgentStatus::Running],
+            "expected [Idle, Running] on resume; got {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn socket_input_provider_reports_only_idle_on_end() {
+        use caliban_supervisor::proto::AgentStatus;
+        use tokio_util::sync::CancellationToken;
+
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: Some(Arc::clone(&sink) as Arc<dyn StatusSink>),
+        };
+        let cancel = CancellationToken::new();
+
+        // Pre-send EndInput so next_input returns None.
+        tx.send(AttachInbound::EndInput).await.unwrap();
+        let result = provider.next_input(&cancel).await;
+        assert!(result.is_none(), "EndInput should yield None");
+
+        let recorded = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![AgentStatus::Idle],
+            "expected only [Idle] on end; got {recorded:?}"
+        );
     }
 }
