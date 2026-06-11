@@ -68,7 +68,9 @@ pub use post_process::{AssistantPostProcessor, NoopPostProcessor};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
-pub use stream::{RunOutcome, RunSettings, StopCondition, TurnEvent, TurnEventStream, TurnOutcome};
+pub use stream::{
+    InputProvider, RunOutcome, RunSettings, StopCondition, TurnEvent, TurnEventStream, TurnOutcome,
+};
 pub use todos::{SharedTodos, Todo, TodoStatus, new_shared_todos};
 pub use tool::{Tool, ToolContext, ToolError};
 
