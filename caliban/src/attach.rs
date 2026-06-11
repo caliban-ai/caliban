@@ -1,13 +1,30 @@
 //! Client-side rendering for `caliban agents attach <id>` (#79).
 //!
 //! Reads the worker's per-agent socket — newline-delimited `TurnEvent`
-//! JSON (see #78) — and renders a readable transcript. Read-only:
-//! inbound user messages are out of scope (#81).
+//! JSON (see #78) — and renders a readable transcript.
+//!
+//! Also defines [`AttachInbound`], the inbound frame type sent by an attached
+//! operator *to* the worker over the same per-agent socket (ADR 0047 / #81).
+//! Outbound is `TurnEvent` NDJSON; inbound is `AttachInbound` NDJSON.
+//! The two never share a direction.
 
 use std::io::Write;
 
 use caliban_agent_core::TurnEvent;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
+
+/// A frame an attached operator sends INBOUND to a running worker over the
+/// per-agent socket (ADR 0047 / #81). Outbound is `TurnEvent` NDJSON (#79);
+/// inbound is `AttachInbound` NDJSON. The two never share a direction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub(crate) enum AttachInbound {
+    /// Operator sends a user message to inject into the run.
+    UserMessage { text: String },
+    /// Operator signals end-of-input: the run should finish after this.
+    EndInput,
+}
 
 /// Render a single `TurnEvent` to `out` as a readable transcript fragment.
 /// Returns the bytes to write. Kept pure (no I/O) so it is unit-testable.
@@ -96,5 +113,30 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("ok"), "got: {s:?}");
         assert!(s.contains("unparsable"), "got: {s:?}");
+    }
+
+    // --- AttachInbound serde ---
+
+    #[test]
+    fn attach_inbound_round_trips() {
+        // UserMessage variant
+        let msg = AttachInbound::UserMessage {
+            text: "hello agent".into(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize UserMessage");
+        let back: AttachInbound = serde_json::from_str(&json).expect("deserialize UserMessage");
+        assert_eq!(msg, back);
+        // Internal "type" tag must be present.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "UserMessage");
+        assert_eq!(v["text"], "hello agent");
+
+        // EndInput variant
+        let end = AttachInbound::EndInput;
+        let json2 = serde_json::to_string(&end).expect("serialize EndInput");
+        let back2: AttachInbound = serde_json::from_str(&json2).expect("deserialize EndInput");
+        assert_eq!(end, back2);
+        let v2: serde_json::Value = serde_json::from_str(&json2).unwrap();
+        assert_eq!(v2["type"], "EndInput");
     }
 }

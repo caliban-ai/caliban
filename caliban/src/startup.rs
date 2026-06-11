@@ -1309,6 +1309,7 @@ pub(crate) fn install_sub_agent(
                     caliban_tools_builtin::IsolationMode::Worktree
                 ),
                 inherit_hooks: input.inherit_hooks,
+                interactive: false,
             };
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;

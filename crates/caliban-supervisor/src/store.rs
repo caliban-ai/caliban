@@ -148,6 +148,7 @@ mod tests {
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
+                interactive: false,
             },
         }
     }
@@ -199,6 +200,7 @@ mod tests {
             tool_allowlist: Some(vec!["read".into(), "write".into()]),
             isolation_worktree: true,
             inherit_hooks: false,
+            interactive: false,
         };
         store.write_manifest(&rec).unwrap();
 

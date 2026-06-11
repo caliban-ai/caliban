@@ -8,12 +8,15 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use caliban_agent_core::{InputProvider, RunSettings};
 use caliban_supervisor::proto::AgentRecord;
 use clap::Parser as _;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::UnixListener;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
+
+use crate::attach::AttachInbound;
 
 /// Fan-out hub for a worker's `TurnEvent` NDJSON stream. Holds the full
 /// history of serialized event lines plus a broadcast channel for live
@@ -51,6 +54,55 @@ impl EventHub {
         let hist = self.history.lock().expect("event hub lock");
         let rx = self.tx.subscribe();
         (hist.clone(), rx)
+    }
+}
+
+/// `InputProvider` backed by the per-agent socket's inbound frames.
+///
+/// All attach connections feed one shared mpsc (`inbox`); the run awaits here
+/// at each end-of-run boundary. `UserMessage` resumes; `EndInput` or a closed
+/// channel ends the run. (#81 ticket 2; idle-timeout is ticket 5.)
+struct SocketInputProvider {
+    inbox: AsyncMutex<mpsc::Receiver<AttachInbound>>,
+}
+
+#[async_trait::async_trait]
+impl InputProvider for SocketInputProvider {
+    async fn next_input(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<Vec<caliban_provider::Message>> {
+        let mut rx = self.inbox.lock().await;
+        tokio::select! {
+            () = cancel.cancelled() => None,
+            frame = rx.recv() => match frame {
+                Some(AttachInbound::UserMessage { text }) => {
+                    Some(vec![caliban_provider::Message::user_text(text)])
+                }
+                Some(AttachInbound::EndInput) | None => None,
+            }
+        }
+    }
+}
+
+/// Read inbound `AttachInbound` NDJSON frames from `reader` and forward them
+/// to `inbox`. Malformed lines are skipped. Returns on EOF or inbox closed.
+async fn read_inbound_frames<R>(reader: R, inbox: mpsc::Sender<AttachInbound>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(frame) = serde_json::from_str::<AttachInbound>(&line)
+            && inbox.send(frame).await.is_err()
+        {
+            break;
+        }
+        // Malformed lines are silently skipped.
     }
 }
 
@@ -95,14 +147,39 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
             return 74; // EX_IOERR
         }
     };
+    // --- Set up the optional inbound inbox for interactive mode. ---
+    // When interactive, every attach connection feeds inbound AttachInbound
+    // frames into a shared mpsc; the SocketInputProvider awaits it at the
+    // end-of-run boundary instead of finishing. `inbox_keepalive` is kept
+    // alive in run() so the channel stays open while no clients are attached.
+    // TODO(#81 ticket 5): bound idle via timeout.
+    let (inbox_keepalive, input_source): (
+        Option<mpsc::Sender<AttachInbound>>,
+        Option<Arc<dyn InputProvider>>,
+    ) = if record.spec.interactive {
+        let (tx, rx) = mpsc::channel::<AttachInbound>(64);
+        let provider: Arc<dyn InputProvider> = Arc::new(SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+        });
+        (Some(tx), Some(provider))
+    } else {
+        (None, None)
+    };
+
     // Accept loop: replay history then forward live events to each client.
+    // When interactive, also spawn a read-half task per connection that
+    // forwards inbound AttachInbound frames to the shared inbox.
     let accept_hub = Arc::clone(&hub);
+    let accept_inbox_tx = inbox_keepalive.clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let conn_hub = Arc::clone(&accept_hub);
-            tokio::spawn(serve_attach_client(stream, conn_hub));
+            let conn_inbox = accept_inbox_tx.clone();
+            tokio::spawn(serve_attach_client(stream, conn_hub, conn_inbox));
         }
     });
+    // Keep the sender alive so the channel doesn't close between connections.
+    let _ = &inbox_keepalive;
 
     // --- Build the agent. ---
     let _ = tokio::fs::create_dir_all(&record.session_dir).await;
@@ -188,7 +265,20 @@ pub(crate) async fn run(manifest: &Path, socket: &Path) -> i32 {
         record.spec.initial_prompt.clone(),
     )];
     let cancel = tokio_util::sync::CancellationToken::new();
-    let mut stream = agent.stream_until_done(messages, cancel);
+    let mut stream = if let Some(provider) = input_source {
+        // Interactive mode: await inbound messages at each end-of-run boundary.
+        agent.stream_until_done_with_settings(
+            messages,
+            cancel,
+            RunSettings {
+                input_source: Some(provider),
+                ..RunSettings::default()
+            },
+        )
+    } else {
+        // Non-interactive (default): run to completion exactly as before.
+        agent.stream_until_done(messages, cancel)
+    };
 
     let mut ndjson = match tokio::fs::OpenOptions::new()
         .create(true)
@@ -284,17 +374,35 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
 
 /// Serve one attached client: replay the event history, then forward live
 /// events until the agent finishes (`Closed`) or the client disconnects.
-async fn serve_attach_client(mut stream: tokio::net::UnixStream, hub: Arc<EventHub>) {
+///
+/// When `inbox` is `Some`, the socket is full-duplex: inbound
+/// `AttachInbound` NDJSON frames from the client are parsed by a background
+/// task and forwarded to the shared inbox (ADR 0047 / #81). When `None`
+/// (non-interactive agent), the read half is dropped and ignored — the
+/// client can't send.
+async fn serve_attach_client(
+    stream: tokio::net::UnixStream,
+    hub: Arc<EventHub>,
+    inbox: Option<mpsc::Sender<AttachInbound>>,
+) {
+    let (read_half, mut write_half) = stream.into_split();
+
+    // Spawn the inbound read task when in interactive mode.
+    if let Some(tx) = inbox {
+        tokio::spawn(read_inbound_frames(read_half, tx));
+    }
+    // (Non-interactive: read_half is dropped here — the client can't send.)
+
     let (history, mut rx) = hub.subscribe();
     for line in &history {
-        if write_line(&mut stream, line).await.is_err() {
+        if write_line(&mut write_half, line).await.is_err() {
             return;
         }
     }
     loop {
         match rx.recv().await {
             Ok(line) => {
-                if write_line(&mut stream, &line).await.is_err() {
+                if write_line(&mut write_half, &line).await.is_err() {
                     break;
                 }
             }
@@ -309,11 +417,14 @@ async fn serve_attach_client(mut stream: tokio::net::UnixStream, hub: Arc<EventH
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
-    let _ = stream.shutdown().await;
+    let _ = write_half.shutdown().await;
 }
 
 /// Write one NDJSON line (event + trailing newline) to the client.
-async fn write_line(stream: &mut tokio::net::UnixStream, line: &str) -> std::io::Result<()> {
+async fn write_line(
+    stream: &mut tokio::net::unix::OwnedWriteHalf,
+    line: &str,
+) -> std::io::Result<()> {
     stream.write_all(line.as_bytes()).await?;
     stream.write_all(b"\n").await
 }
@@ -396,6 +507,7 @@ mod tests {
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
+                interactive: false,
             },
         };
         store.write_manifest(&rec).unwrap();
@@ -447,5 +559,88 @@ mod tests {
         hub.publish(Arc::from("y"));
         let (history, _rx) = hub.subscribe();
         assert_eq!(history.len(), 2);
+    }
+
+    // --- read_inbound_frames ---
+
+    #[tokio::test]
+    async fn read_inbound_frames_forwards_and_skips_malformed() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+
+        let (tx, mut rx) = mpsc::channel::<AttachInbound>(16);
+        let task = tokio::spawn(read_inbound_frames(reader, tx));
+
+        writer
+            .write_all(b"{\"type\":\"UserMessage\",\"text\":\"hi\"}\n")
+            .await
+            .unwrap();
+        writer.write_all(b"not valid json at all\n").await.unwrap();
+        writer
+            .write_all(b"{\"type\":\"EndInput\"}\n")
+            .await
+            .unwrap();
+        drop(writer); // EOF → read_inbound_frames returns
+
+        task.await.unwrap();
+
+        let first = rx.recv().await.expect("first frame");
+        assert_eq!(first, AttachInbound::UserMessage { text: "hi".into() });
+        let second = rx.recv().await.expect("second frame");
+        assert_eq!(second, AttachInbound::EndInput);
+        // Channel should be closed (no more frames).
+        assert!(rx.recv().await.is_none());
+    }
+
+    // --- SocketInputProvider ---
+
+    #[tokio::test]
+    async fn socket_input_provider_resumes_then_ends() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+        };
+        let cancel = CancellationToken::new();
+
+        // Send a UserMessage → next_input returns Some([user "go"]).
+        tx.send(AttachInbound::UserMessage { text: "go".into() })
+            .await
+            .unwrap();
+        let result = provider.next_input(&cancel).await;
+        let msgs = result.expect("should resume with Some");
+        assert_eq!(msgs.len(), 1);
+        // The message should be a user message with "go" text.
+        assert_eq!(msgs[0].role, caliban_provider::Role::User);
+        let text = msgs[0].content.iter().find_map(|b| {
+            if let caliban_provider::ContentBlock::Text(t) = b {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(text.as_deref(), Some("go"));
+
+        // Send EndInput → next_input returns None.
+        tx.send(AttachInbound::EndInput).await.unwrap();
+        let result2 = provider.next_input(&cancel).await;
+        assert!(result2.is_none(), "EndInput should yield None");
+    }
+
+    #[tokio::test]
+    async fn socket_input_provider_ends_on_closed_channel() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+        };
+        let cancel = CancellationToken::new();
+
+        // Drop the sender — channel closes → next_input returns None.
+        drop(tx);
+        let result = provider.next_input(&cancel).await;
+        assert!(result.is_none(), "closed channel should yield None");
     }
 }
