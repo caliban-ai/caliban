@@ -149,6 +149,25 @@ impl SupervisorClient {
         }
     }
 
+    /// Convenience: report a Running<->Idle transition for an agent.
+    pub async fn report_status(
+        &self,
+        id: impl Into<String>,
+        status: crate::proto::AgentStatus,
+    ) -> Result<(), ClientError> {
+        match self
+            .request(&CtlRequest::ReportStatus {
+                id: id.into(),
+                status,
+            })
+            .await?
+        {
+            CtlReply::StatusReported => Ok(()),
+            CtlReply::Error { error } => Err(error.into()),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
     /// Path the client targets.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path

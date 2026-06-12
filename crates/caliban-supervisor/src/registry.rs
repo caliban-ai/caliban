@@ -95,21 +95,47 @@ impl Registry {
         Ok(cloned)
     }
 
-    /// Set status to `to` ONLY if the agent is currently `Running` or
-    /// `Spawning`. Used by the worker monitor task so a late child exit
-    /// can't clobber a terminal state already set by `Kill`/`Rm`.
+    /// Set status to `to` ONLY if the agent is currently `Running`,
+    /// `Spawning`, or `Idle`. Used by the worker monitor task so a late
+    /// child exit can't clobber a terminal state already set by `Kill`/`Rm`.
+    /// Also accepts `Idle` so an idle interactive worker that exits is
+    /// correctly finalized rather than stuck in `Idle` forever (#81).
     /// Returns `true` if the transition was applied.
     pub fn set_status_if_running(&mut self, id: &str, to: AgentStatus) -> bool {
         let Some(rec) = self.by_id.get_mut(id) else {
             return false;
         };
-        if !matches!(rec.status, AgentStatus::Running | AgentStatus::Spawning) {
+        if !matches!(
+            rec.status,
+            AgentStatus::Running | AgentStatus::Spawning | AgentStatus::Idle
+        ) {
             return false;
         }
         rec.status = to;
         let cloned = rec.clone();
         if let Err(e) = self.store.write_manifest(&cloned) {
             tracing::warn!(error = %e, "manifest write failed during set_status_if_running");
+        }
+        true
+    }
+
+    /// Apply a worker-reported Running<->Idle transition. Only honors
+    /// transitions where both the current and target status are in
+    /// {Running, Idle} — never overrides a terminal state (a late report
+    /// after Kill/exit is ignored). Persists. Returns whether applied. (#81)
+    pub fn report_status(&mut self, id: &str, status: AgentStatus) -> bool {
+        let Some(rec) = self.by_id.get_mut(id) else {
+            return false;
+        };
+        let cur_ok = matches!(rec.status, AgentStatus::Running | AgentStatus::Idle);
+        let to_ok = matches!(status, AgentStatus::Running | AgentStatus::Idle);
+        if !cur_ok || !to_ok {
+            return false;
+        }
+        rec.status = status;
+        let cloned = rec.clone();
+        if let Err(e) = self.store.write_manifest(&cloned) {
+            tracing::warn!(error = %e, "manifest write failed during report_status");
         }
         true
     }
@@ -273,5 +299,63 @@ mod tests {
         let swept = r.sweep_crashed();
         assert_eq!(swept, vec![rec.id.clone()]);
         assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Crashed);
+    }
+
+    #[test]
+    fn report_status_running_to_idle_and_back() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        // Put agent in Running state.
+        assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Running);
+        // Running → Idle.
+        assert!(r.report_status(&rec.id, AgentStatus::Idle));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Idle);
+        // Idle → Running.
+        assert!(r.report_status(&rec.id, AgentStatus::Running));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn report_status_refuses_terminal() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        r.set_status(&rec.id, AgentStatus::Killed).unwrap();
+        // report_status must refuse to change a terminal state.
+        assert!(!r.report_status(&rec.id, AgentStatus::Idle));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Killed);
+    }
+
+    #[test]
+    fn report_status_running_never_resurrects_killed() {
+        // The key safety property: a worker that was Idle, then Killed by
+        // the operator, then resumes and reports Running, must NOT be
+        // resurrected — terminal states are sticky (#81 ticket 4).
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
+        assert!(r.report_status(&rec.id, AgentStatus::Idle));
+        // Operator kills the idle agent.
+        r.set_status(&rec.id, AgentStatus::Killed).unwrap();
+        // A racing Running report from the resuming worker is refused.
+        assert!(!r.report_status(&rec.id, AgentStatus::Running));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Killed);
+    }
+
+    #[test]
+    fn set_status_if_running_finalizes_idle() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        // Advance to Running then to Idle.
+        assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
+        assert!(r.report_status(&rec.id, AgentStatus::Idle));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Idle);
+        // Monitor's set_status_if_running must finalize Idle → Done.
+        assert!(r.set_status_if_running(&rec.id, AgentStatus::Done));
+        assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Done);
     }
 }

@@ -562,6 +562,53 @@ async fn rm_force_signals_running_worker() {
 }
 
 #[tokio::test]
+async fn report_status_transitions_idle_running() {
+    // Use a long-running fake worker so the agent stays Running (not Done)
+    // while we drive status transitions from the client side.
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; sleep 30".into(),
+    });
+    let (_d, sup, _h, client) = boot_with(launcher).await;
+    let (id, _) = client.spawn(spec()).await.unwrap();
+
+    // Poll until agent reaches Running.
+    let mut reached_running = false;
+    for _ in 0..200 {
+        let agents = client.list().await.unwrap();
+        if agents
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            reached_running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(reached_running, "agent never reached Running");
+
+    // Worker reports Idle → list shows Idle.
+    client.report_status(&id, AgentStatus::Idle).await.unwrap();
+    let agents = client.list().await.unwrap();
+    let a = agents.iter().find(|a| a.id == id).unwrap();
+    assert_eq!(a.status, AgentStatus::Idle, "expected Idle after report");
+
+    // Worker reports Running → list shows Running again.
+    client
+        .report_status(&id, AgentStatus::Running)
+        .await
+        .unwrap();
+    let agents = client.list().await.unwrap();
+    let a = agents.iter().find(|a| a.id == id).unwrap();
+    assert_eq!(
+        a.status,
+        AgentStatus::Running,
+        "expected Running after second report"
+    );
+
+    sup.cancel_token().cancel();
+}
+
+#[tokio::test]
 async fn socket_file_removed_after_worker_exits() {
     // Worker creates the socket file then exits 0 → Done. The monitor task
     // must unlink the now-stale socket after the worker exits (#77).
