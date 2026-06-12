@@ -6,6 +6,7 @@
 //! status (0 = Done, non-zero = Failed).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use caliban_agent_core::{InputProvider, RunSettings};
@@ -78,15 +79,35 @@ impl StatusSink for ControlSocketStatus {
     }
 }
 
+/// Increments the attached-client count for its lifetime (#81 ticket 5).
+struct ClientCountGuard(Arc<AtomicUsize>);
+impl ClientCountGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+impl Drop for ClientCountGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// `InputProvider` backed by the per-agent socket's inbound frames.
 ///
 /// All attach connections feed one shared mpsc (`inbox`); the run awaits here
 /// at each end-of-run boundary. `UserMessage` resumes; `EndInput` or a closed
-/// channel ends the run. (#81 ticket 2; idle-timeout is ticket 5.)
+/// channel ends the run. (#81 ticket 2; idle-timeout with client tracking is
+/// ticket 5.)
 struct SocketInputProvider {
     inbox: AsyncMutex<mpsc::Receiver<AttachInbound>>,
     /// Optional status reporter — reports Idle before awaiting, Running on resume.
     status: Option<Arc<dyn StatusSink>>,
+    /// Idle timeout when no client is attached. `None` = idle indefinitely.
+    /// (#81 ticket 5)
+    idle_timeout: Option<std::time::Duration>,
+    /// Shared count of currently attached clients. (#81 ticket 5)
+    has_clients: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -99,13 +120,38 @@ impl InputProvider for SocketInputProvider {
             s.set(caliban_supervisor::proto::AgentStatus::Idle).await;
         }
         let mut rx = self.inbox.lock().await;
-        let out = tokio::select! {
-            () = cancel.cancelled() => None,
-            frame = rx.recv() => match frame {
-                Some(AttachInbound::UserMessage { text }) => {
-                    Some(vec![caliban_provider::Message::user_text(text)])
+        // Poll on a tick (<= the timeout) so a client attaching mid-idle resets
+        // the accumulated idle time before it can trip the timeout.
+        let tick = self
+            .idle_timeout
+            .map_or(std::time::Duration::from_secs(5), |d| {
+                d.min(std::time::Duration::from_secs(5))
+            });
+        let mut idle_elapsed = std::time::Duration::ZERO;
+        let out = loop {
+            tokio::select! {
+                () = cancel.cancelled() => break None,
+                frame = rx.recv() => break match frame {
+                    Some(AttachInbound::UserMessage { text }) =>
+                        Some(vec![caliban_provider::Message::user_text(text)]),
+                    Some(AttachInbound::EndInput) | None => None,
+                },
+                () = tokio::time::sleep(tick) => {
+                    if self.has_clients.load(Ordering::Relaxed) > 0 {
+                        idle_elapsed = std::time::Duration::ZERO; // operator present — reset
+                        continue;
+                    }
+                    if let Some(limit) = self.idle_timeout {
+                        idle_elapsed += tick;
+                        if idle_elapsed >= limit {
+                            tracing::info!(
+                                "interactive agent idle timeout with no clients — ending"
+                            );
+                            break None;
+                        }
+                    }
+                    // None: no timeout configured — keep waiting
                 }
-                Some(AttachInbound::EndInput) | None => None,
             }
         };
         if out.is_some()
@@ -136,6 +182,31 @@ where
         }
         // Malformed lines are silently skipped.
     }
+}
+
+/// Parse an idle-timeout from an optional env-var string value (pure, testable).
+///
+/// `None` (var absent) → 5 min (300 s) default.
+/// `"0"` → `None` (disabled, idle forever).
+/// `"<N>"` (positive integer) → `Some(N seconds)`.
+/// Anything else (malformed) → 5 min default.
+fn parse_idle_timeout(val: Option<&str>) -> Option<std::time::Duration> {
+    match val {
+        None => Some(std::time::Duration::from_mins(5)),
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => Some(std::time::Duration::from_mins(5)),
+        },
+    }
+}
+
+/// Idle timeout for an interactive worker awaiting operator input with no
+/// client attached (#81 ticket 5). Default 300s; `CALIBAN_AGENT_IDLE_TIMEOUT_SECS`
+/// overrides; `0` disables the timeout (idle forever — bounded only by Kill).
+fn worker_idle_timeout() -> Option<std::time::Duration> {
+    let val = std::env::var("CALIBAN_AGENT_IDLE_TIMEOUT_SECS").ok();
+    parse_idle_timeout(val.as_deref())
 }
 
 /// Load the `AgentRecord` the supervisor wrote for this worker.
@@ -179,12 +250,19 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
             return 74; // EX_IOERR
         }
     };
+    // --- Shared attached-client counter for idle-timeout tracking (#81 ticket 5).
+    // Every accept connection increments this via ClientCountGuard and
+    // decrements on drop, so SocketInputProvider can reset its idle timer
+    // while at least one operator is watching.
+    let has_clients = Arc::new(AtomicUsize::new(0));
+
     // --- Set up the optional inbound inbox for interactive mode. ---
     // When interactive, every attach connection feeds inbound AttachInbound
     // frames into a shared mpsc; the SocketInputProvider awaits it at the
     // end-of-run boundary instead of finishing. `inbox_keepalive` is kept
     // alive in run() so the channel stays open while no clients are attached.
-    // TODO(#81 ticket 5): bound idle via timeout.
+    // An idle timeout (#81 ticket 5) ends the run after no client is attached
+    // for `worker_idle_timeout()` seconds.
     let (inbox_keepalive, input_source): (
         Option<mpsc::Sender<AttachInbound>>,
         Option<Arc<dyn InputProvider>>,
@@ -201,6 +279,8 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
         let provider: Arc<dyn InputProvider> = Arc::new(SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: status_sink,
+            idle_timeout: worker_idle_timeout(),
+            has_clients: Arc::clone(&has_clients),
         });
         (Some(tx), Some(provider))
     } else {
@@ -212,11 +292,18 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     // forwards inbound AttachInbound frames to the shared inbox.
     let accept_hub = Arc::clone(&hub);
     let accept_inbox_tx = inbox_keepalive.clone();
+    let accept_has_clients = Arc::clone(&has_clients);
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let conn_hub = Arc::clone(&accept_hub);
             let conn_inbox = accept_inbox_tx.clone();
-            tokio::spawn(serve_attach_client(stream, conn_hub, conn_inbox));
+            let conn_clients = Arc::clone(&accept_has_clients);
+            tokio::spawn(serve_attach_client(
+                stream,
+                conn_hub,
+                conn_inbox,
+                conn_clients,
+            ));
         }
     });
     // Keep the sender alive so the channel doesn't close between connections.
@@ -421,11 +508,20 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
 /// task and forwarded to the shared inbox (ADR 0047 / #81). When `None`
 /// (non-interactive agent), the read half is dropped and ignored — the
 /// client can't send.
+///
+/// `clients` is incremented for the duration of this call via `ClientCountGuard`
+/// so the `SocketInputProvider` knows at least one operator is watching and
+/// resets its idle timer (#81 ticket 5).
 async fn serve_attach_client(
     stream: tokio::net::UnixStream,
     hub: Arc<EventHub>,
     inbox: Option<mpsc::Sender<AttachInbound>>,
+    clients: Arc<AtomicUsize>,
 ) {
+    // Hold the guard for the entire lifetime of this connection — even early
+    // returns (e.g. write errors in history replay) are covered by Drop.
+    let _client_guard = ClientCountGuard::new(clients);
+
     let (read_half, mut write_half) = stream.into_split();
 
     // Spawn the inbound read task when in interactive mode.
@@ -643,6 +739,8 @@ mod tests {
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: None,
+            idle_timeout: None,
+            has_clients: Arc::new(AtomicUsize::new(0)),
         };
         let cancel = CancellationToken::new();
 
@@ -678,6 +776,8 @@ mod tests {
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: None,
+            idle_timeout: None,
+            has_clients: Arc::new(AtomicUsize::new(0)),
         };
         let cancel = CancellationToken::new();
 
@@ -709,6 +809,8 @@ mod tests {
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: Some(Arc::clone(&sink) as Arc<dyn StatusSink>),
+            idle_timeout: None,
+            has_clients: Arc::new(AtomicUsize::new(0)),
         };
         let cancel = CancellationToken::new();
 
@@ -737,6 +839,8 @@ mod tests {
         let provider = SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: Some(Arc::clone(&sink) as Arc<dyn StatusSink>),
+            idle_timeout: None,
+            has_clients: Arc::new(AtomicUsize::new(0)),
         };
         let cancel = CancellationToken::new();
 
@@ -751,5 +855,217 @@ mod tests {
             vec![AgentStatus::Idle],
             "expected only [Idle] on end; got {recorded:?}"
         );
+    }
+
+    // --- Idle-timeout tests (#81 ticket 5) ---
+
+    /// With no clients attached and an 80ms timeout, `next_input` must return
+    /// `None` before the 1s deadline. The inbox sender is kept alive so that a
+    /// closed-channel `None` cannot race with the timeout `None`.
+    #[tokio::test]
+    async fn idle_timeout_ends_run_when_no_clients() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: None,
+            idle_timeout: Some(std::time::Duration::from_millis(80)),
+            has_clients: Arc::new(AtomicUsize::new(0)),
+        };
+        let cancel = CancellationToken::new();
+
+        // Keep tx alive so the channel stays open — the TIMEOUT, not
+        // channel-close, must be what returns None.
+        let _tx_keepalive = tx;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            provider.next_input(&cancel),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "next_input did not resolve within 1 s — idle timeout did not fire"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "idle timeout must resolve to None"
+        );
+    }
+
+    /// With one client attached (`has_clients = 1`) the idle timer must keep
+    /// resetting, so `next_input` stays pending for the full 400ms window.
+    /// Cancellation then drives it to `None`.
+    #[tokio::test]
+    async fn idle_timeout_does_not_fire_while_client_attached() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let has_clients = Arc::new(AtomicUsize::new(1)); // one client present
+        let provider = Arc::new(SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: None,
+            idle_timeout: Some(std::time::Duration::from_millis(80)),
+            has_clients: Arc::clone(&has_clients),
+        });
+        let cancel = CancellationToken::new();
+
+        // Keep tx alive so channel-close cannot race with the timeout check.
+        let _tx_keepalive = tx;
+
+        let cancel_clone = cancel.clone();
+        let provider_clone = Arc::clone(&provider);
+        let fut = tokio::spawn(async move { provider_clone.next_input(&cancel_clone).await });
+
+        // Let the task run for 400ms; with a client attached the 80ms ticks
+        // must keep resetting and the future must stay pending.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            !fut.is_finished(),
+            "next_input should still be pending while client is attached"
+        );
+
+        // Trigger cancellation and confirm it resolves to None.
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), fut)
+            .await
+            .expect("should resolve after cancel")
+            .expect("task should not panic");
+        assert!(result.is_none(), "cancelled next_input must return None");
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_resets_when_client_attaches_mid_idle() {
+        use std::sync::atomic::Ordering;
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        // Start with NO client — the idle timer is armed.
+        let has_clients = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: None,
+            idle_timeout: Some(std::time::Duration::from_millis(100)),
+            has_clients: Arc::clone(&has_clients),
+        });
+        let cancel = CancellationToken::new();
+        let _tx_keepalive = tx;
+
+        let cancel_clone = cancel.clone();
+        let provider_clone = Arc::clone(&provider);
+        let fut = tokio::spawn(async move { provider_clone.next_input(&cancel_clone).await });
+
+        // A client attaches mid-idle, before the first 100ms tick can end the
+        // run. The polling design must observe this and reset the timer.
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        has_clients.store(1, Ordering::Relaxed);
+
+        // Well past several 100ms ticks: had the mid-idle attach NOT reset the
+        // timer, the run would have ended at ~100ms. It must still be awaiting.
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert!(
+            !fut.is_finished(),
+            "a client attaching mid-idle must reset the timeout and keep the run alive"
+        );
+
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), fut)
+            .await
+            .expect("should resolve after cancel")
+            .expect("task should not panic");
+        assert!(result.is_none());
+    }
+
+    /// When `idle_timeout` is `None`, the timer loop never auto-ends, so
+    /// sending a `UserMessage` still resumes the run normally.
+    #[tokio::test]
+    async fn idle_timeout_none_idles_until_input() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = Arc::new(SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: None,
+            idle_timeout: None,
+            has_clients: Arc::new(AtomicUsize::new(0)),
+        });
+        let cancel = CancellationToken::new();
+
+        let cancel_clone = cancel.clone();
+        let provider_clone = Arc::clone(&provider);
+        let fut = tokio::spawn(async move { provider_clone.next_input(&cancel_clone).await });
+
+        // Brief pause then send a message — the timeout must NOT have fired.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(AttachInbound::UserMessage { text: "hi".into() })
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), fut)
+            .await
+            .expect("should resolve")
+            .expect("task should not panic");
+
+        let msgs = result.expect("None timeout: idle_timeout=None should not auto-end");
+        assert_eq!(msgs.len(), 1);
+        let text = msgs[0].content.iter().find_map(|b| {
+            if let caliban_provider::ContentBlock::Text(t) = b {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(text.as_deref(), Some("hi"));
+    }
+
+    // --- parse_idle_timeout unit tests ---
+
+    #[test]
+    fn parse_idle_timeout_absent_gives_300s() {
+        assert_eq!(
+            parse_idle_timeout(None),
+            Some(std::time::Duration::from_mins(5))
+        );
+    }
+
+    #[test]
+    fn parse_idle_timeout_zero_disables() {
+        assert_eq!(parse_idle_timeout(Some("0")), None);
+    }
+
+    #[test]
+    fn parse_idle_timeout_numeric_gives_that_duration() {
+        assert_eq!(
+            parse_idle_timeout(Some("120")),
+            Some(std::time::Duration::from_mins(2))
+        );
+    }
+
+    #[test]
+    fn parse_idle_timeout_garbage_gives_300s() {
+        assert_eq!(
+            parse_idle_timeout(Some("notanumber")),
+            Some(std::time::Duration::from_mins(5))
+        );
+    }
+
+    // --- ClientCountGuard ---
+
+    #[test]
+    fn client_count_guard_increments_and_decrements() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        {
+            let _g = ClientCountGuard::new(Arc::clone(&counter));
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            {
+                let _g2 = ClientCountGuard::new(Arc::clone(&counter));
+                assert_eq!(counter.load(Ordering::Relaxed), 2);
+            }
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
