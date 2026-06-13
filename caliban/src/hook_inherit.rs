@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 /// The config-expressible slice of a parent's permission chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)] // wired in #84 tasks 2-3
 pub(crate) struct InheritableHookConfig {
     /// Resolved permission rules (CLI + settings + defaults + MCP), in
     /// evaluation order (first match wins).
@@ -23,7 +22,6 @@ pub(crate) struct InheritableHookConfig {
     pub audit: bool,
 }
 
-#[allow(dead_code)] // wired in #84 tasks 2-3
 impl InheritableHookConfig {
     /// Serialize to the opaque JSON carried in `SpawnSpec`.
     pub(crate) fn to_json(&self) -> Option<String> {
@@ -32,6 +30,8 @@ impl InheritableHookConfig {
 
     /// Parse the opaque JSON from `SpawnSpec`. Returns `None` on malformed
     /// input (the worker then falls back to its default gate).
+    /// Used by the worker in #84 task 3.
+    #[allow(dead_code)]
     pub(crate) fn from_json(s: &str) -> Option<Self> {
         serde_json::from_str(s).ok()
     }
