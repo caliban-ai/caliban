@@ -1216,7 +1216,7 @@ pub(crate) fn install_tool_search(
 /// currently use `NoopHooks`. The background-handoff spawner asks the
 /// per-repo supervisor daemon (auto-spawned if needed) to register a new
 /// agent and return its socket (ADR 0037).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn install_sub_agent(
     args: &Args,
     registry: &mut ToolRegistry,
@@ -1296,6 +1296,9 @@ pub(crate) fn install_sub_agent(
     // Clone once outside the Fn closure so the closure can call .as_ref()
     // on each invocation without consuming the captured value (#84).
     let inheritable_config_for_bg = inheritable_config;
+    // Compute the parent's provider name once so background sub-agents
+    // inherit the same provider by default (#93).
+    let parent_provider = crate::provider_name(crate::resolved_provider(args)).to_string();
     let bg_spawner: caliban_tools_builtin::BackgroundSpawner = {
         let repo = repo_for_bg.clone();
         Arc::new(move |input: &AgentToolInput| {
@@ -1307,6 +1310,7 @@ pub(crate) fn install_sub_agent(
                 frontmatter_path: None,
                 initial_prompt: input.prompt.clone(),
                 model: input.model.clone(),
+                provider: Some(parent_provider.clone()),
                 tool_allowlist: input.tool_allowlist.clone(),
                 isolation_worktree: matches!(
                     input.isolation,

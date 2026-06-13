@@ -131,6 +131,7 @@ mod tests {
                 frontmatter_path: None,
                 initial_prompt: "hi".into(),
                 model: None,
+                provider: None,
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,

@@ -209,6 +209,13 @@ fn worker_idle_timeout() -> Option<std::time::Duration> {
     parse_idle_timeout(val.as_deref())
 }
 
+/// Parse a `SpawnSpec.provider` string into a `ProviderKind` (case-
+/// insensitive). Returns `None` for an unknown/empty provider. (#93)
+fn parse_provider(s: &str) -> Option<crate::args::ProviderKind> {
+    use clap::ValueEnum as _;
+    crate::args::ProviderKind::from_str(s, true).ok()
+}
+
 /// Load the `AgentRecord` the supervisor wrote for this worker.
 pub(crate) fn load_record(manifest: &Path) -> std::io::Result<AgentRecord> {
     let body = std::fs::read(manifest)?;
@@ -331,6 +338,16 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
             return 70;
         }
     };
+    // Select the provider from the spawn spec (#93). Must precede provider
+    // construction and model defaulting (default_model_for keys off it).
+    if let Some(p) = record.spec.provider.as_deref() {
+        if let Some(pk) = parse_provider(p) {
+            args.provider = Some(pk);
+        } else {
+            eprintln!("[caliban __agent-worker] unknown provider {p:?}");
+            return 64; // EX_USAGE
+        }
+    }
     if let Some(model) = record.spec.model.clone() {
         args.model = Some(model);
     }
@@ -632,6 +649,50 @@ mod tests {
     use super::*;
     use caliban_agent_core::{Action, default_rules};
 
+    // --- parse_provider (#93) ---
+
+    #[test]
+    fn parse_provider_recognizes_lowercase() {
+        assert_eq!(
+            parse_provider("ollama"),
+            Some(crate::args::ProviderKind::Ollama)
+        );
+        assert_eq!(
+            parse_provider("anthropic"),
+            Some(crate::args::ProviderKind::Anthropic)
+        );
+        assert_eq!(
+            parse_provider("openai"),
+            Some(crate::args::ProviderKind::Openai)
+        );
+        assert_eq!(
+            parse_provider("google"),
+            Some(crate::args::ProviderKind::Google)
+        );
+    }
+
+    #[test]
+    fn parse_provider_is_case_insensitive() {
+        assert_eq!(
+            parse_provider("OLLAMA"),
+            Some(crate::args::ProviderKind::Ollama)
+        );
+        assert_eq!(
+            parse_provider("Anthropic"),
+            Some(crate::args::ProviderKind::Anthropic)
+        );
+    }
+
+    #[test]
+    fn parse_provider_returns_none_for_unknown() {
+        assert_eq!(parse_provider("bogus"), None);
+    }
+
+    #[test]
+    fn parse_provider_returns_none_for_empty() {
+        assert_eq!(parse_provider(""), None);
+    }
+
     // --- build_worker_rules ---
 
     #[test]
@@ -702,6 +763,7 @@ mod tests {
                 frontmatter_path: None,
                 initial_prompt: "hi".into(),
                 model: None,
+                provider: None,
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,

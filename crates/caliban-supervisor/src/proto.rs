@@ -81,6 +81,11 @@ pub struct SpawnSpec {
     /// Optional model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional provider override (e.g. "anthropic", "ollama", "openai",
+    /// "google"). The worker parses this to select the provider; without
+    /// it the worker uses caliban's default (anthropic). (#93)
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Optional tool allowlist.
     #[serde(default)]
     pub tool_allowlist: Option<Vec<String>>,
