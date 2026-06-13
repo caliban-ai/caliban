@@ -5,7 +5,7 @@
 - **Author:** john.ford2002@gmail.com
 - **Spec:** `docs/superpowers/specs/2026-05-24-os-sandbox-design.md`
 - **Depends on:** existing `caliban-tools-builtin::BashTool`
-  (`crates/caliban-tools-builtin/src/bash.rs`).
+  (`crates/caliban-tools-builtin/src/shell/bash.rs`).
 
 ## Context
 
