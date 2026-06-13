@@ -93,13 +93,12 @@ EOF
     }
 }
 
-// FLAKY: observed to fail intermittently on CI (Linux runner) with
-// `unexpected: Allow`, where the assertion expected
-// `HookDecision::UpdatedInput`. Hypothesis: the child's stdout pipe
-// isn't fully drained by `wait_with_output()` under runner load, so
-// `parse_decision_blob` sees empty stdout and falls back to `Allow`.
-// `gh run rerun --failed <run-id>` is the short-term unblock. Root
-// cause investigation tracked under caliban-ai/caliban#41.
+// Previously flaky on loaded Linux CI runners with `unexpected: Allow`:
+// `Command::spawn()` intermittently failed with a transient EAGAIN (fork
+// hit a temporary resource limit) or ETXTBSY (the just-written script was
+// still being closed), and the dispatch path swallowed that as `Allow`.
+// Fixed by `spawn_with_retry` in `hooks_router.rs`, which retries transient
+// spawn failures with backoff (caliban-ai/caliban#41).
 #[tokio::test]
 async fn stdout_json_updated_input_parses() {
     let dir = TempDir::new().unwrap();

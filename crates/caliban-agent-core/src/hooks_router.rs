@@ -117,7 +117,7 @@ impl ShellCommandHook {
             cmd.env(k, v);
         }
 
-        let mut child = match cmd.spawn() {
+        let mut child = match spawn_with_retry(&mut cmd, &self.command).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(command = %self.command, error = %e, "shell hook: spawn failed");
@@ -184,6 +184,51 @@ impl ShellCommandHook {
             }
         }
     }
+}
+
+/// Spawn `cmd`, retrying a few times on *transient* failures.
+///
+/// On loaded CI runners `fork`/`exec` can intermittently fail with EAGAIN
+/// (temporary resource exhaustion) or ETXTBSY (a freshly-written hook script
+/// not yet fully closed). Without a retry these surfaced as a misleading
+/// `Allow` and an intermittently-failing test (caliban-ai/caliban#41).
+/// Non-transient errors (missing binary, permission denied) return
+/// immediately — retrying them only burns the timeout budget.
+async fn spawn_with_retry(
+    cmd: &mut tokio::process::Command,
+    command: &str,
+) -> std::io::Result<tokio::process::Child> {
+    const MAX_ATTEMPTS: u32 = 4;
+    let mut attempt = 1;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if attempt < MAX_ATTEMPTS && is_transient_spawn_error(&e) => {
+                // Exponential-ish backoff: 5ms, 10ms, 20ms.
+                let backoff = Duration::from_millis(5 * (1 << (attempt - 1)));
+                tracing::debug!(
+                    command = %command,
+                    error = %e,
+                    attempt,
+                    backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                    "shell hook: transient spawn failure; retrying",
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// True for `spawn()` errors that are transient under load and worth a brief
+/// retry: EAGAIN (decodes to [`std::io::ErrorKind::WouldBlock`]) and ETXTBSY
+/// ([`std::io::ErrorKind::ExecutableFileBusy`]).
+fn is_transient_spawn_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ExecutableFileBusy
+    )
 }
 
 fn truncate_kb(s: &str, kib: usize) -> String {
@@ -504,5 +549,34 @@ mod tests {
     #[test]
     fn truncate_kb_short_string_untouched() {
         assert_eq!(truncate_kb("hi", 8), "hi");
+    }
+
+    #[test]
+    fn transient_spawn_error_flags_eagain() {
+        // EAGAIN from fork (resource temporarily unavailable) decodes to
+        // ErrorKind::WouldBlock — the classic loaded-CI fork failure.
+        let e = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_transient_spawn_error(&e));
+    }
+
+    #[test]
+    fn transient_spawn_error_flags_etxtbsy() {
+        // ETXTBSY: the just-written hook script is still being closed.
+        let e = std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy);
+        assert!(is_transient_spawn_error(&e));
+    }
+
+    #[test]
+    fn transient_spawn_error_rejects_not_found() {
+        // A genuinely missing binary must NOT be retried — it will never
+        // succeed and retrying just wastes the timeout budget.
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(!is_transient_spawn_error(&e));
+    }
+
+    #[test]
+    fn transient_spawn_error_rejects_permission_denied() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_transient_spawn_error(&e));
     }
 }

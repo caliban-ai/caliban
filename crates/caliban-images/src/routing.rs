@@ -21,9 +21,22 @@ use caliban_provider::RequestMetadata;
 /// `false` / `0` / `no` disables strictness.
 #[must_use]
 pub fn strict_routing_enabled() -> bool {
-    std::env::var("CALIBAN_STRICT_ROUTING").map_or(true, |v| {
-        !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no")
-    })
+    strict_routing_from_env(std::env::var("CALIBAN_STRICT_ROUTING").ok().as_deref())
+}
+
+/// Pure policy: maps the raw `CALIBAN_STRICT_ROUTING` value to a strictness
+/// flag. Split out from [`strict_routing_enabled`] so the policy can be
+/// tested without mutating process-global env (the source of the historical
+/// parallel-test flake — caliban-ai/caliban#69 / #88).
+///
+/// `None` (unset), empty, or any unrecognized value is **strict**; only
+/// `false` / `0` / `no` (case- and whitespace-insensitive) disable it.
+#[must_use]
+fn strict_routing_from_env(val: Option<&str>) -> bool {
+    match val {
+        None => true,
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no"),
+    }
 }
 
 /// Walk every `ContentBlock::Image` in `req` and replace it with a
@@ -126,26 +139,39 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    // These exercise the pure parser directly so they never touch the
+    // process-global `CALIBAN_STRICT_ROUTING` var. Mutating that env from
+    // multiple parallel test threads in one process was the root cause of
+    // the historical flake (caliban-ai/caliban#69 / #88).
+
     #[test]
-    #[allow(
-        unsafe_code,
-        reason = "test mutates process env around CALIBAN_STRICT_ROUTING"
-    )]
-    fn strict_routing_default_is_strict() {
-        // SAFETY: tests run sequentially within a process; clean up after.
-        unsafe { std::env::remove_var("CALIBAN_STRICT_ROUTING") };
-        assert!(strict_routing_enabled());
+    fn strict_routing_default_is_strict_when_unset() {
+        assert!(strict_routing_from_env(None));
     }
 
     #[test]
-    #[allow(
-        unsafe_code,
-        reason = "test mutates process env around CALIBAN_STRICT_ROUTING"
-    )]
+    fn strict_routing_empty_value_is_strict() {
+        assert!(strict_routing_from_env(Some("")));
+    }
+
+    #[test]
     fn strict_routing_can_be_disabled() {
-        // SAFETY: see above; we restore the prior state immediately after.
-        unsafe { std::env::set_var("CALIBAN_STRICT_ROUTING", "false") };
-        assert!(!strict_routing_enabled());
-        unsafe { std::env::remove_var("CALIBAN_STRICT_ROUTING") };
+        assert!(!strict_routing_from_env(Some("false")));
+        assert!(!strict_routing_from_env(Some("0")));
+        assert!(!strict_routing_from_env(Some("no")));
+    }
+
+    #[test]
+    fn strict_routing_disable_values_are_case_and_whitespace_insensitive() {
+        assert!(!strict_routing_from_env(Some("  FALSE  ")));
+        assert!(!strict_routing_from_env(Some("No")));
+    }
+
+    #[test]
+    fn strict_routing_unrecognized_value_stays_strict() {
+        assert!(strict_routing_from_env(Some("true")));
+        assert!(strict_routing_from_env(Some("1")));
+        assert!(strict_routing_from_env(Some("yes")));
+        assert!(strict_routing_from_env(Some("maybe")));
     }
 }
