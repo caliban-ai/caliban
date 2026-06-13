@@ -684,6 +684,9 @@ pub(crate) enum AgentsCommand {
         /// `agents attach` instead of finishing (ADR 0047 / #81).
         #[arg(long)]
         interactive: bool,
+        /// Provider for the new agent (defaults to caliban's default).
+        #[arg(long, value_enum)]
+        provider: Option<ProviderKind>,
     },
 }
 

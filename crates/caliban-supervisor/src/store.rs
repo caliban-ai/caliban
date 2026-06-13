@@ -145,6 +145,7 @@ mod tests {
                 frontmatter_path: None,
                 initial_prompt: "hi".into(),
                 model: None,
+                provider: None,
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
@@ -198,6 +199,7 @@ mod tests {
             frontmatter_path: Some(PathBuf::from("/fm/agent.md")),
             initial_prompt: "do the thing".into(),
             model: Some("opus".into()),
+            provider: None,
             tool_allowlist: Some(vec!["read".into(), "write".into()]),
             isolation_worktree: true,
             inherit_hooks: false,
@@ -376,5 +378,42 @@ mod tests {
         assert!(!out.contains(' '));
         assert!(!out.contains('/'));
         assert!(!out.contains('!'));
+    }
+
+    // --- SpawnSpec.provider serde (#93) ---
+
+    #[test]
+    fn provider_field_roundtrips_through_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let mut rec = fake_record("prov");
+        rec.spec.provider = Some("ollama".into());
+        store.write_manifest(&rec).unwrap();
+        let loaded = store.load_manifest("prov").unwrap().unwrap();
+        assert_eq!(loaded.spec.provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn provider_absent_in_old_manifest_deserializes_to_none() {
+        // Simulate a manifest written before #93 (no "provider" key).
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let sdir = store.ensure_dir("old").unwrap();
+        // Write a valid AgentRecord JSON without a "provider" field in spec.
+        let json = r#"{
+            "id": "old",
+            "name": "old",
+            "status": "spawning",
+            "started_at": "2026-01-01T00:00:00Z",
+            "session_dir": "/tmp/old",
+            "socket_path": "/tmp/old.sock",
+            "spec": {
+                "initial_prompt": "hi",
+                "inherit_hooks": true
+            }
+        }"#;
+        fs::write(sdir.join("manifest.json"), json.as_bytes()).unwrap();
+        let loaded = store.load_manifest("old").unwrap().unwrap();
+        assert_eq!(loaded.spec.provider, None);
     }
 }

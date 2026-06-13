@@ -1204,6 +1204,7 @@ pub(crate) fn handoff_to_supervisor(app: &mut App) {
         frontmatter_path: None,
         initial_prompt: "(snapshot)".into(),
         model: None,
+        provider: None,
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: false,

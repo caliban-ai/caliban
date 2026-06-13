@@ -211,12 +211,14 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             prompt,
             label,
             interactive,
+            provider,
         } => {
             let spec = SpawnSpec {
                 label: label.clone(),
                 frontmatter_path: None,
                 initial_prompt: prompt.clone(),
                 model: None,
+                provider: (*provider).map(|p| crate::provider_name(p).to_string()),
                 tool_allowlist: None,
                 isolation_worktree: false,
                 inherit_hooks: true,
@@ -340,6 +342,11 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         frontmatter_path: None,
         initial_prompt: task.to_string(),
         model: None,
+        // `run_bg` is the bare `--bg` shortcut with no ambient parent
+        // session/Args to inherit from, so it uses caliban's default
+        // provider (anthropic). Provider selection for the fleet flows
+        // through `agents spawn --provider` / the parent `bg_spawner` (#93).
+        provider: None,
         tool_allowlist: None,
         isolation_worktree: false,
         inherit_hooks: true,
