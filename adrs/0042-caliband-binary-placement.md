@@ -74,6 +74,7 @@ ADR 0005's rule by adding that nuance.
 - ADR 0005 (workspace layout — sets the "binaries at root" convention
   this ADR refines).
 - ADR 0037 (subagent isolation + fleet — introduces `caliband`).
-- 2026-05-25 ADR conformance audit, Finding 7.
+- Backfills a decision flagged as previously unrecorded by a 2026-05-25
+  ADR conformance review (Finding 7).
 - Source: `crates/caliban-supervisor/src/bin/caliband.rs`.
 - Declaration: `crates/caliban-supervisor/Cargo.toml` (`[[bin]]`).

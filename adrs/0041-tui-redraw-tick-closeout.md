@@ -66,8 +66,8 @@ ADR with the updated reasoning.
 ## References
 
 - ADR 0014 (original tick decision; §"Stall fix").
-- 2026-05-25 ADR conformance audit, Finding 4
-  (`docs/2026-05-25-adr-conformance-audit.md#finding-4-tui-tick-papers-over-a-root-cause`).
+- Prompted by a 2026-05-25 ADR conformance review (Finding 4), which
+  flagged ADR 0014's long-open root-cause question as still unresolved.
 - TUI event loop: `caliban/src/tui.rs:180` (interval declaration),
   `caliban/src/tui.rs:241` (tick arm of the select).
 - TurnEventStream construction:

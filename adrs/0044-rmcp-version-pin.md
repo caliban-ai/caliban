@@ -74,4 +74,5 @@ and do not require a dedicated PR.
 - ADR 0017 (MCP stdio v1) and ADR 0023 (MCP v2 — transports, OAuth,
   elicitation, resources) — the surfaces that consume rmcp.
 - Workspace pin: root `Cargo.toml` (`rmcp = { version = "1.7", ... }`).
-- 2026-05-25 ADR conformance audit, Finding 7.
+- Backfills a decision flagged as previously unrecorded by a 2026-05-25
+  ADR conformance review (Finding 7).

@@ -85,4 +85,5 @@ need to await across the lock.
   - `crates/caliban-agent-core/src/permission_mode.rs:124-140`
   - `crates/caliban-model-router/src/breaker.rs:68-79`
   - `crates/caliban-settings/src/lib.rs:70-83`
-- 2026-05-25 ADR conformance audit, Finding 7.
+- Backfills a decision flagged as previously unrecorded by a 2026-05-25
+  ADR conformance review (Finding 7).
