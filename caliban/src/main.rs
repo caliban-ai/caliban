@@ -9,6 +9,7 @@ mod attach;
 mod diagnostics;
 mod effective_model;
 mod headless;
+mod hook_inherit;
 mod perms_cli;
 mod plugin_cli;
 mod refreshing_provider;

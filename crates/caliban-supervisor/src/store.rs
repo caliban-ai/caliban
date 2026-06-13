@@ -149,6 +149,7 @@ mod tests {
                 isolation_worktree: false,
                 inherit_hooks: true,
                 interactive: false,
+                inherited_hooks_config: None,
             },
         }
     }
@@ -201,6 +202,7 @@ mod tests {
             isolation_worktree: true,
             inherit_hooks: false,
             interactive: false,
+            inherited_hooks_config: None,
         };
         store.write_manifest(&rec).unwrap();
 

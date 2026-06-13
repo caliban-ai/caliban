@@ -1310,6 +1310,7 @@ pub(crate) fn install_sub_agent(
                 ),
                 inherit_hooks: input.inherit_hooks,
                 interactive: false,
+                inherited_hooks_config: None,
             };
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;
