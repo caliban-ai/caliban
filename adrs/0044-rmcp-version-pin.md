@@ -14,8 +14,8 @@ rmcp = { version = "1.7", features = [...] }
 
 This is a tighter pin than the typical Rust convention of "compatible
 with the listed version" (`^1.7` allows any 1.x.y where x ≥ 7). The
-choice was made when adopting `rmcp` and never recorded. The
-2026-05-25 ADR conformance audit (Finding 7) flagged the gap.
+choice was made when adopting `rmcp` and never recorded as an ADR
+until now.
 
 ## Decision
 
@@ -74,5 +74,3 @@ and do not require a dedicated PR.
 - ADR 0017 (MCP stdio v1) and ADR 0023 (MCP v2 — transports, OAuth,
   elicitation, resources) — the surfaces that consume rmcp.
 - Workspace pin: root `Cargo.toml` (`rmcp = { version = "1.7", ... }`).
-- Backfills a decision flagged as previously unrecorded by a 2026-05-25
-  ADR conformance review (Finding 7).

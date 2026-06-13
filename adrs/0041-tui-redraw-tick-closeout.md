@@ -14,8 +14,7 @@ streaming completions. The same ADR explicitly acknowledged the tick
 at a probable missing-waker bug in `async_stream::try_stream!` as the
 likely culprit.
 
-Two years on, no follow-up ADR closed the question. The 2026-05-25 ADR
-conformance audit (Finding 4) flagged the unresolved status.
+Two years on, no follow-up ADR had closed the question — this ADR does.
 
 ## Decision
 
@@ -66,8 +65,6 @@ ADR with the updated reasoning.
 ## References
 
 - ADR 0014 (original tick decision; §"Stall fix").
-- Prompted by a 2026-05-25 ADR conformance review (Finding 4), which
-  flagged ADR 0014's long-open root-cause question as still unresolved.
 - TUI event loop: `caliban/src/tui.rs:180` (interval declaration),
   `caliban/src/tui.rs:241` (tick arm of the select).
 - TurnEventStream construction:
