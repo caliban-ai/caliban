@@ -30,8 +30,6 @@ impl InheritableHookConfig {
 
     /// Parse the opaque JSON from `SpawnSpec`. Returns `None` on malformed
     /// input (the worker then falls back to its default gate).
-    /// Used by the worker in #84 task 3.
-    #[allow(dead_code)]
     pub(crate) fn from_json(s: &str) -> Option<Self> {
         serde_json::from_str(s).ok()
     }

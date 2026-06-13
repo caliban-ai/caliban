@@ -1527,7 +1527,7 @@ pub(crate) fn build_permissions(
 
 /// Optionally wrap `inner` with a [`caliban_agent_core::decision_log::DecisionRecorder`]
 /// when `audit_enabled` is true and the log path is resolvable.
-fn wrap_with_audit(
+pub(crate) fn wrap_with_audit(
     inner: Arc<dyn caliban_agent_core::Hooks + Send + Sync>,
     audit_enabled: bool,
     session_id: String,
