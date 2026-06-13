@@ -1226,6 +1226,7 @@ pub(crate) fn install_sub_agent(
     parent_mcp_eager: Arc<std::collections::HashSet<String>>,
     parent_max_active_schemas: usize,
     parent_lazy_mcp: bool,
+    inheritable_config: Option<crate::hook_inherit::InheritableHookConfig>,
 ) {
     if args.no_sub_agent || args.no_tools {
         return;
@@ -1292,6 +1293,9 @@ pub(crate) fn install_sub_agent(
     // can't cross processes; see ADR 0037 ("Hook inheritance").
     let cwd_for_bg = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let repo_for_bg = agents_cli::discover_repo_root(&cwd_for_bg);
+    // Clone once outside the Fn closure so the closure can call .as_ref()
+    // on each invocation without consuming the captured value (#84).
+    let inheritable_config_for_bg = inheritable_config;
     let bg_spawner: caliban_tools_builtin::BackgroundSpawner = {
         let repo = repo_for_bg.clone();
         Arc::new(move |input: &AgentToolInput| {
@@ -1310,6 +1314,13 @@ pub(crate) fn install_sub_agent(
                 ),
                 inherit_hooks: input.inherit_hooks,
                 interactive: false,
+                inherited_hooks_config: if input.inherit_hooks {
+                    inheritable_config_for_bg
+                        .as_ref()
+                        .and_then(crate::hook_inherit::InheritableHookConfig::to_json)
+                } else {
+                    None
+                },
             };
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;
@@ -1365,6 +1376,10 @@ pub(crate) struct PermissionsSetup {
     /// without a restart (#55). Always present, even when the gate is
     /// disabled — the TUI still needs a store for the modal/overlay.
     pub runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
+    /// The config-expressible permission policy (rules + mode + audit) that
+    /// a background sub-agent inherits when `inherit_hooks=true` (#84).
+    /// `None` when permissions are disabled (`--no-permissions`).
+    pub inheritable_config: Option<crate::hook_inherit::InheritableHookConfig>,
 }
 
 /// Build the permissions chain (rules → `ModeFilter` → `PermissionsHook`).
@@ -1397,6 +1412,7 @@ pub(crate) fn build_permissions(
             tui_ask_rx: None,
             auto_mode_classifier: None,
             runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
+            inheritable_config: None,
         };
     }
     let mut cli_rules: Vec<Rule> = Vec::new();
@@ -1440,6 +1456,9 @@ pub(crate) fn build_permissions(
     // global rule list at the documented priority slot
     // (global deny → server deny/ask/allow → global ask/allow → default).
     let rules = caliban_mcp_client::merge_with_global(global_rules, mcp_server_cfg);
+    // Clone the resolved rule list before it is consumed by PermissionsHook::new
+    // so background sub-agents can inherit it via InheritableHookConfig (#84).
+    let inheritable_rules = rules.clone();
     // In interactive (TUI) mode, route Ask through the modal bridge. In
     // headless/single-prompt mode, fall back to the non-interactive handler.
     let (ask, ask_rx): (Arc<dyn caliban_agent_core::AskHandler>, _) = if tui_mode_active {
@@ -1498,12 +1517,17 @@ pub(crate) fn build_permissions(
         tui_ask_rx: ask_rx,
         auto_mode_classifier: Some(classifier),
         runtime_rules,
+        inheritable_config: Some(crate::hook_inherit::InheritableHookConfig {
+            rules: inheritable_rules,
+            mode: permission_mode.load(),
+            audit: audit_enabled,
+        }),
     }
 }
 
 /// Optionally wrap `inner` with a [`caliban_agent_core::decision_log::DecisionRecorder`]
 /// when `audit_enabled` is true and the log path is resolvable.
-fn wrap_with_audit(
+pub(crate) fn wrap_with_audit(
     inner: Arc<dyn caliban_agent_core::Hooks + Send + Sync>,
     audit_enabled: bool,
     session_id: String,

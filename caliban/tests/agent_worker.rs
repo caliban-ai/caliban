@@ -23,6 +23,7 @@ async fn worker_runs_and_writes_ndjson() {
             isolation_worktree: false,
             inherit_hooks: true,
             interactive: false,
+            inherited_hooks_config: None,
         },
     };
     store.write_manifest(&rec).unwrap();

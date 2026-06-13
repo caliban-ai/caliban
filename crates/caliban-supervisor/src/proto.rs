@@ -95,6 +95,11 @@ pub struct SpawnSpec {
     /// socket instead of finishing (ADR 0047 / #81).
     #[serde(default)]
     pub interactive: bool,
+    /// Opaque JSON-serialized parent permission config, inherited by the
+    /// worker when `inherit_hooks` is true (#84). The supervisor shuttles
+    /// this verbatim; only the `caliban` worker interprets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_hooks_config: Option<String>,
 }
 
 fn true_default() -> bool {

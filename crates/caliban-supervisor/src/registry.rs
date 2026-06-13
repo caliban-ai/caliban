@@ -226,6 +226,7 @@ mod tests {
             isolation_worktree: false,
             inherit_hooks: true,
             interactive: false,
+            inherited_hooks_config: None,
         }
     }
 

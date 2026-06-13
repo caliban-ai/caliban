@@ -316,16 +316,14 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     // Construct minimal Args with the spec's model override.
     // Args does not impl Default, so we parse a minimal invocation.
     //
-    // Permission posture (#75): the worker runs with `--bare` (no TUI/MCP)
-    // and a real permission gate. `spec.tool_allowlist` filters the registry
-    // AND seeds Allow rules that precede the `default_rules()` tail, so only
-    // the tools the spawner explicitly granted are accessible; anything else
-    // falls through to the defaults (read-only Allow; Bash/Write/Edit Ask →
-    // denied non-interactively because `auto_allow: false`).
-    //
-    // Full `inherit_hooks` (parent-config inheritance) is deferred to #84 and
-    // requires SpawnSpec proto changes; regardless of `spec.inherit_hooks`, the
-    // worker uses this binary-default gate for now.
+    // Permission posture (#75 / #84): the worker runs with `--bare` (no TUI/MCP)
+    // and a real permission gate. When `spec.inherit_hooks` is true AND
+    // `spec.inherited_hooks_config` carries a valid `InheritableHookConfig`,
+    // the gate is rebuilt from the parent's rules+mode+audit (#84). Otherwise
+    // the binary-default gate (#75) is used: `spec.tool_allowlist` seeds Allow
+    // rules that precede the `default_rules()` tail (read-only Allow;
+    // Bash/Write/Edit Ask → denied non-interactively because `auto_allow: false`).
+    // `tool_allowlist` registry filtering applies in both paths.
     let mut args = match crate::args::Args::try_parse_from(["caliban", "--bare"]) {
         Ok(a) => a,
         Err(e) => {
@@ -365,15 +363,31 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     );
     let registry = filter_registry(registry, record.spec.tool_allowlist.as_deref());
 
-    let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
-    let ask: Arc<dyn caliban_agent_core::AskHandler> =
-        Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
-    let permissions: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+    // Permission gate: inherit the parent's policy when asked + available
+    // (#84), else the binary-default gate (#75).
+    let inherited = if record.spec.inherit_hooks {
+        record
+            .spec
+            .inherited_hooks_config
+            .as_deref()
+            .and_then(crate::hook_inherit::InheritableHookConfig::from_json)
+    } else {
+        None
+    };
+    let permissions: Arc<dyn caliban_agent_core::Hooks + Send + Sync> = if let Some(cfg) = inherited
+    {
+        build_inherited_hooks(cfg, &provider, &model, record.id.clone())
+    } else {
+        // #75 default gate (unchanged).
+        let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
+        let ask: Arc<dyn caliban_agent_core::AskHandler> =
+            Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
         Arc::new(caliban_agent_core::PermissionsHook::new(
             rules,
             ask,
             Arc::new(caliban_agent_core::NoopHooks),
-        ));
+        ))
+    };
 
     let agent = Arc::new(
         caliban_agent_core::Agent::builder()
@@ -457,6 +471,53 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     crate::startup::stop_condition_exit_code(&stop)
+}
+
+/// Build the permission hook chain from a parent's inherited config (#84):
+/// `PermissionsHook(inherited rules)` → `ModeFilter(inherited mode)` → audit.
+///
+/// The ask handler stays non-interactive deny-on-Ask — a background worker
+/// has no human attending. The auto-mode classifier is only constructed when
+/// the inherited mode is `Auto` (it needs the worker's own provider + model).
+fn build_inherited_hooks(
+    cfg: crate::hook_inherit::InheritableHookConfig,
+    provider: &Arc<dyn caliban_provider::Provider + Send + Sync>,
+    model: &str,
+    session_id: String,
+) -> Arc<dyn caliban_agent_core::Hooks + Send + Sync> {
+    use caliban_agent_core::{
+        AutoModeClassifier, AutoModeConfig, DEFAULTS_TOKEN, ModeFilter, NonInteractiveAskHandler,
+        NoopHooks, PermissionMode, PermissionsHook, SharedPermissionMode,
+    };
+    let ask: Arc<dyn caliban_agent_core::AskHandler> =
+        Arc::new(NonInteractiveAskHandler { auto_allow: false });
+    let inner: Arc<dyn caliban_agent_core::Hooks> =
+        Arc::new(PermissionsHook::new(cfg.rules, ask, Arc::new(NoopHooks)));
+
+    let mode = SharedPermissionMode::new(cfg.mode);
+    // Auto mode needs the LLM classifier; other modes pass `None` which makes
+    // auto soft-deny everything via `DisabledFallback` semantics — but that
+    // branch is never reached when mode != Auto.
+    let classifier = if cfg.mode == PermissionMode::Auto {
+        let auto_cfg = AutoModeConfig {
+            environment: vec![DEFAULTS_TOKEN.into()],
+            allow: vec![DEFAULTS_TOKEN.into()],
+            soft_deny: vec![DEFAULTS_TOKEN.into()],
+            hard_deny: vec![DEFAULTS_TOKEN.into()],
+            disabled: false,
+        };
+        Some(Arc::new(AutoModeClassifier::new(
+            Arc::clone(provider),
+            model,
+            auto_cfg,
+        )))
+    } else {
+        None
+    };
+    let filter: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+        Arc::new(ModeFilter::new(mode, inner, classifier, false));
+
+    crate::startup::wrap_with_audit(filter, cfg.audit, session_id)
 }
 
 /// Filter `registry` down to the tools named in `allowlist`. `None` keeps
@@ -645,6 +706,7 @@ mod tests {
                 isolation_worktree: false,
                 inherit_hooks: true,
                 interactive: false,
+                inherited_hooks_config: None,
             },
         };
         store.write_manifest(&rec).unwrap();
@@ -1067,5 +1129,78 @@ mod tests {
             assert_eq!(counter.load(Ordering::Relaxed), 1);
         }
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    // --- Inherited hook config (#84) ---
+
+    /// Round-trip through JSON exactly as the parent stamps and the worker
+    /// reads. A `Deny "Bash"` rule in `Default` mode with audit off must
+    /// survive the journey intact.
+    #[test]
+    fn inherited_hooks_selected_when_present() {
+        use crate::hook_inherit::InheritableHookConfig;
+        use caliban_agent_core::{Action, PermissionMode, Rule};
+
+        let cfg = InheritableHookConfig {
+            rules: vec![Rule {
+                tool: "Bash".into(),
+                action: Action::Deny,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            }],
+            mode: PermissionMode::Default,
+            audit: false,
+        };
+        let json = cfg.to_json().expect("to_json should succeed");
+
+        // Simulate the worker path: from_json returns Some when the JSON is valid.
+        let parsed =
+            InheritableHookConfig::from_json(&json).expect("from_json should parse valid JSON");
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(parsed.rules[0].tool, "Bash");
+        assert!(matches!(parsed.rules[0].action, Action::Deny));
+        assert_eq!(parsed.mode, PermissionMode::Default);
+        assert!(!parsed.audit);
+
+        // Malformed input falls back to None (worker uses #75 default gate).
+        assert!(InheritableHookConfig::from_json("not json at all").is_none());
+    }
+
+    /// Call `build_inherited_hooks` with a small non-Auto config and a real
+    /// provider, asserting it builds without panicking. The chain components
+    /// (`PermissionsHook`, `ModeFilter`, `wrap_with_audit`) are individually
+    /// tested in caliban-agent-core; this verifies the wiring compiles and runs.
+    #[test]
+    fn build_inherited_hooks_default_mode_builds() {
+        use crate::hook_inherit::InheritableHookConfig;
+        use caliban_agent_core::{Action, PermissionMode, Rule};
+
+        // Build a minimal provider for the factory.  We use the same path that
+        // the worker uses: parse minimal args and call build_provider.
+        let args = crate::args::Args::try_parse_from(["caliban", "--bare"])
+            .expect("minimal args should parse");
+        let pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+        // build_provider may fail when no API key is present in the test env.
+        // If so, skip rather than fail — the interesting logic is the chain
+        // construction, not the provider itself.
+        let Ok(provider) = crate::startup::build_provider(&args, &pool) else {
+            return; // no key in CI env — skip
+        };
+
+        let cfg = InheritableHookConfig {
+            rules: vec![Rule {
+                tool: "Read".into(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            }],
+            mode: PermissionMode::Default,
+            audit: false,
+        };
+
+        // Must not panic.
+        let _chain = build_inherited_hooks(cfg, &provider, "claude-3-haiku", "test-session".into());
     }
 }

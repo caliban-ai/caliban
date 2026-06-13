@@ -9,6 +9,7 @@ mod attach;
 mod diagnostics;
 mod effective_model;
 mod headless;
+mod hook_inherit;
 mod perms_cli;
 mod plugin_cli;
 mod refreshing_provider;
@@ -320,25 +321,6 @@ async fn main() -> Result<()> {
     // OpenAI / Anthropic / Google / Ollama.
     startup::preflight_model_check(&args, &model).await?;
 
-    // Wire AgentTool (sub-agent primitive) — closes over a snapshot of
-    // the registry so sub-agents cannot recurse. Background-handoff
-    // spawner asks the per-repo supervisor daemon to register new agents
-    // (ADR 0037).
-    startup::install_sub_agent(
-        &args,
-        &mut registry,
-        &provider,
-        &model,
-        Arc::clone(&mcp_active),
-        Arc::clone(&mcp_eager_servers),
-        max_active_schemas,
-        settings_snapshot
-            .tools
-            .as_ref()
-            .and_then(|t| t.lazy_mcp)
-            .unwrap_or(false),
-    );
-
     // Project hooks config out of the layered Settings snapshot (ADR 0026).
     // The in-process PermissionsHook still runs even when --no-hooks /
     // --bare are set; the legacy `hooks.toml` loader is reachable through
@@ -368,6 +350,7 @@ async fn main() -> Result<()> {
         tui_ask_rx,
         auto_mode_classifier,
         runtime_rules,
+        inheritable_config,
     } = startup::build_permissions(
         &args,
         &settings_snapshot,
@@ -376,6 +359,27 @@ async fn main() -> Result<()> {
         &model,
         &permission_mode,
         tui_mode_active,
+    );
+
+    // Wire AgentTool (sub-agent primitive) — closes over a snapshot of
+    // the registry so sub-agents cannot recurse. Background-handoff
+    // spawner asks the per-repo supervisor daemon to register new agents
+    // (ADR 0037). The resolved permission config is threaded in so the
+    // bg_spawner can stamp it into SpawnSpec when `inherit_hooks=true` (#84).
+    startup::install_sub_agent(
+        &args,
+        &mut registry,
+        &provider,
+        &model,
+        Arc::clone(&mcp_active),
+        Arc::clone(&mcp_eager_servers),
+        max_active_schemas,
+        settings_snapshot
+            .tools
+            .as_ref()
+            .and_then(|t| t.lazy_mcp)
+            .unwrap_or(false),
+        inheritable_config,
     );
 
     // When `--include-hook-events` is set, allocate a buffer so the
