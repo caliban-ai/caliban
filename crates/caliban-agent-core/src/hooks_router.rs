@@ -99,10 +99,8 @@ struct SessionStartNested {
 /// (`{"hookSpecificOutput": {"additionalContext": ...}}`) shapes. Returns
 /// `None` for empty / non-JSON / absent input.
 ///
-/// Reusable surface for #121 (config-hook execution): config-defined hooks are
-/// not yet wired into the runtime `Hooks` chain, so this is exercised by unit
-/// tests here and called once that bridge lands.
-#[allow(dead_code)] // invoked by the config-hook execution bridge (#121)
+/// Invoked by the router handlers' `session_start` (and the config-hook bridge,
+/// #121) to extract context from a handler's stdout / response body.
 pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -135,14 +133,23 @@ pub struct ShellCommandHook {
     pub event_name: String,
 }
 
+/// Raw capture from a shell hook invocation.
+struct CaptureOutput {
+    stdout: String,
+    /// stderr, truncated to 8 KiB.
+    stderr: String,
+    exit_code: i32,
+}
+
 impl ShellCommandHook {
-    /// Spawn the child, send the envelope, return the decision.
-    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+    /// Spawn the child, send the envelope, capture stdout/stderr + exit code.
+    /// `None` on spawn / wait / timeout failure (callers treat as Allow / no-op).
+    async fn run_capture(&self, envelope: serde_json::Value) -> Option<CaptureOutput> {
         let payload = match serde_json::to_string(&envelope) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "shell hook: failed to serialize envelope");
-                return HookDecision::Allow;
+                return None;
             }
         };
 
@@ -159,7 +166,7 @@ impl ShellCommandHook {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(command = %self.command, error = %e, "shell hook: spawn failed");
-                return HookDecision::Allow;
+                return None;
             }
         };
 
@@ -174,7 +181,7 @@ impl ShellCommandHook {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "shell hook: wait failed");
-                return HookDecision::Allow;
+                return None;
             }
             Err(_) => {
                 tracing::warn!(
@@ -182,35 +189,45 @@ impl ShellCommandHook {
                     timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
                     "shell hook: timeout exceeded; treating as Allow"
                 );
-                return HookDecision::Allow;
+                return None;
             }
         };
 
-        let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr_text = String::from_utf8_lossy(&output.stderr).into_owned();
-        let truncated_stderr = truncate_kb(&stderr_text, 8);
-        if !truncated_stderr.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = truncate_kb(&String::from_utf8_lossy(&output.stderr), 8);
+        if !stderr.is_empty() {
             tracing::debug!(
                 command = %self.command,
-                hook_stderr = %truncated_stderr,
+                hook_stderr = %stderr,
                 "shell hook: stderr captured",
             );
         }
+        Some(CaptureOutput {
+            stdout,
+            stderr,
+            exit_code: output.status.code().unwrap_or(0),
+        })
+    }
+
+    /// Spawn the child, send the envelope, return the decision.
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        let Some(out) = self.run_capture(envelope).await else {
+            return HookDecision::Allow;
+        };
 
         // Prefer JSON on stdout when present.
-        let from_json = parse_decision_blob(&stdout_text);
-        if !matches!(from_json, HookDecision::Allow) || stdout_text.trim().starts_with('{') {
+        let from_json = parse_decision_blob(&out.stdout);
+        if !matches!(from_json, HookDecision::Allow) || out.stdout.trim().starts_with('{') {
             return from_json;
         }
 
         // Fall back to exit-code semantics.
-        let code = output.status.code().unwrap_or(0);
-        match code {
+        match out.exit_code {
             0 => HookDecision::Allow,
-            2 => HookDecision::Deny(if truncated_stderr.is_empty() {
+            2 => HookDecision::Deny(if out.stderr.is_empty() {
                 format!("hook `{}` exited 2", self.command)
             } else {
-                truncated_stderr
+                out.stderr
             }),
             other => {
                 tracing::warn!(
@@ -331,6 +348,31 @@ impl Hooks for ShellCommandHook {
         let _ = self.dispatch(envelope).await; // Observer-only on PostToolUse.
         Ok(())
     }
+
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
+        if self.event_name != "SessionStart" {
+            return Ok(crate::hooks::SessionStartOutcome::default());
+        }
+        let envelope = crate::hooks::build_envelope(
+            "SessionStart",
+            serde_json::json!({
+                "session_id": ctx.session_id,
+                "cwd": ctx.cwd.display().to_string(),
+                "provider": ctx.provider,
+                "model": ctx.model,
+            }),
+        );
+        let additional_context: Vec<String> = self
+            .run_capture(envelope)
+            .await
+            .and_then(|o| parse_session_start_context(&o.stdout))
+            .into_iter()
+            .collect();
+        Ok(crate::hooks::SessionStartOutcome { additional_context })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,28 +405,29 @@ impl HttpHook {
             .any(|g| crate::permissions::matches_glob(g, &self.url))
     }
 
-    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+    /// POST the envelope, returning the response body on a 2xx. `None` when the
+    /// URL is disallowed / the request fails / non-2xx / body read fails.
+    async fn fetch_body(&self, envelope: serde_json::Value) -> Option<String> {
         if !self.is_url_allowed() {
             tracing::warn!(
                 url = %self.url,
                 "http hook: URL not in allowed_http_hook_urls; skipping (Allow)"
             );
-            return HookDecision::Allow;
+            return None;
         }
         let mut req = self.client.post(&self.url).json(&envelope);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let send = tokio::time::timeout(self.timeout, req.send()).await;
-        let resp = match send {
+        let resp = match tokio::time::timeout(self.timeout, req.send()).await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::warn!(url = %self.url, error = %e, "http hook: request failed");
-                return HookDecision::Allow;
+                return None;
             }
             Err(_) => {
                 tracing::warn!(url = %self.url, "http hook: timeout exceeded; Allow");
-                return HookDecision::Allow;
+                return None;
             }
         };
         if !resp.status().is_success() {
@@ -393,21 +436,26 @@ impl HttpHook {
                 status = resp.status().as_u16(),
                 "http hook: non-2xx; Allow"
             );
-            return HookDecision::Allow;
+            return None;
         }
-        let body_result = tokio::time::timeout(self.timeout, resp.text()).await;
-        let body = match body_result {
-            Ok(Ok(b)) => b,
+        match tokio::time::timeout(self.timeout, resp.text()).await {
+            Ok(Ok(b)) => Some(b),
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "http hook: body read failed; Allow");
-                return HookDecision::Allow;
+                None
             }
             Err(_) => {
                 tracing::warn!("http hook: body read timeout; Allow");
-                return HookDecision::Allow;
+                None
             }
-        };
-        parse_decision_blob(&body)
+        }
+    }
+
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        match self.fetch_body(envelope).await {
+            Some(body) => parse_decision_blob(&body),
+            None => HookDecision::Allow,
+        }
     }
 }
 
@@ -433,6 +481,31 @@ impl Hooks for HttpHook {
             }),
         );
         Ok(self.dispatch(envelope).await)
+    }
+
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
+        if self.event_name != "SessionStart" {
+            return Ok(crate::hooks::SessionStartOutcome::default());
+        }
+        let envelope = crate::hooks::build_envelope(
+            "SessionStart",
+            serde_json::json!({
+                "session_id": ctx.session_id,
+                "cwd": ctx.cwd.display().to_string(),
+                "provider": ctx.provider,
+                "model": ctx.model,
+            }),
+        );
+        let additional_context: Vec<String> = self
+            .fetch_body(envelope)
+            .await
+            .and_then(|b| parse_session_start_context(&b))
+            .into_iter()
+            .collect();
+        Ok(crate::hooks::SessionStartOutcome { additional_context })
     }
 }
 
