@@ -133,7 +133,7 @@ impl SlashCommand for StatusCommand {
             description: "show provider/auth/subscription status",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -157,7 +157,7 @@ impl SlashCommand for LoginCommand {
             description: "run the active provider's auth flow",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -178,7 +178,7 @@ impl SlashCommand for LogoutCommand {
             description: "clear cached credentials for the active provider",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -199,7 +199,7 @@ impl SlashCommand for SetupTokenCommand {
             description: "generate a long-lived Anthropic OAuth token for CI",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
