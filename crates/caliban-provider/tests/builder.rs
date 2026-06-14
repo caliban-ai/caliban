@@ -47,7 +47,7 @@ fn rejects_system_after_user() {
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: RequestMetadata::default(),
     };
@@ -81,7 +81,7 @@ fn rejects_image_in_system() {
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: RequestMetadata::default(),
     };
@@ -101,7 +101,7 @@ fn rejects_no_user_or_assistant() {
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: RequestMetadata::default(),
     };

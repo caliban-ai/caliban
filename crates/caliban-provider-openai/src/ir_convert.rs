@@ -14,6 +14,11 @@ use crate::schema::request::{
 };
 use crate::schema::response::{NativeFinishReason, NativeResponse};
 
+/// Reasoning effort used when extended thinking is forced `On` but no `Effort`
+/// hint is present to derive a level from (#100). `OpenAI` reasoning has no
+/// token budget, so a mid-tier level is the sensible "on" floor.
+const DEFAULT_ON_OPENAI_EFFORT: &str = "medium";
+
 /// Convert a caliban IR `CompletionRequest` to an `OpenAI` `NativeRequest`.
 ///
 /// `system_role` controls the `"role"` string used for system messages.  Pass
@@ -258,15 +263,25 @@ pub fn ir_to_native_request(
         None
     };
 
-    // Map the IR Effort hint to OpenAI's `reasoning.effort` field. Auto
-    // (and a fully-absent field) both omit the block entirely; Low/Med/
-    // High pass through verbatim and Max clamps to "high".
-    let reasoning = req
-        .effort
-        .and_then(caliban_provider::Effort::as_openai)
-        .map(|level| NativeReasoning {
+    // Map the IR Effort hint + extended-thinking control (#100) to OpenAI's
+    // `reasoning.effort` field. OpenAI reasoning has no separate token budget,
+    // so `ThinkingSetting` acts as an on/off override of the effort-derived
+    // block:
+    //   - `Off`     → omit reasoning entirely, even at high effort.
+    //   - `On(_)`   → force reasoning on, using the effort level if present
+    //                 or `DEFAULT_ON_OPENAI_EFFORT` otherwise.
+    //   - `Auto`    → legacy behavior: Auto/unset omit; Low/Med/High pass
+    //                 through verbatim; Max clamps to "high".
+    let effort_level = req.effort.and_then(caliban_provider::Effort::as_openai);
+    let reasoning = match req.thinking {
+        caliban_provider::ThinkingSetting::Off => None,
+        caliban_provider::ThinkingSetting::On(_) => Some(NativeReasoning {
+            effort: effort_level.unwrap_or(DEFAULT_ON_OPENAI_EFFORT).to_string(),
+        }),
+        caliban_provider::ThinkingSetting::Auto => effort_level.map(|level| NativeReasoning {
             effort: level.to_string(),
-        });
+        }),
+    };
 
     Ok(NativeRequest {
         model: req.model,
@@ -394,7 +409,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }
@@ -496,7 +511,7 @@ mod request_conversion {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }
@@ -537,7 +552,7 @@ mod request_conversion {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         };
@@ -995,7 +1010,7 @@ mod effort_plumbing {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }
@@ -1035,5 +1050,41 @@ mod effort_plumbing {
         let req = build_test_request();
         let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
         assert!(native.reasoning.is_none(), "reasoning omitted when unset");
+    }
+
+    #[test]
+    fn thinking_off_omits_reasoning_even_at_high_effort() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::Off;
+        req.effort = Some(Effort::High);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        assert!(
+            native.reasoning.is_none(),
+            "Off must suppress reasoning regardless of effort"
+        );
+    }
+
+    #[test]
+    fn thinking_on_forces_reasoning_when_effort_unset() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::On(None);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let reasoning = native
+            .reasoning
+            .expect("On forces a reasoning block even without an effort hint");
+        assert_eq!(reasoning.effort, "medium", "On defaults to medium effort");
+    }
+
+    #[test]
+    fn thinking_on_uses_effort_level_when_present() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::On(None);
+        req.effort = Some(Effort::Low);
+        let native = ir_to_native_request(req, false, "system").expect("ir_to_native");
+        let reasoning = native.reasoning.expect("reasoning block emitted");
+        assert_eq!(
+            reasoning.effort, "low",
+            "On honors the effort level when set"
+        );
     }
 }

@@ -31,7 +31,7 @@ pub use response::{CompletionResponse, StopReason, Usage};
 pub use stream::{
     MessageStream, StreamEvent, StreamingContentType, StreamingDelta, collect_message,
 };
-pub use thinking::{ThinkingBlock, ThinkingConfig};
+pub use thinking::{ThinkingBlock, ThinkingConfig, ThinkingSetting};
 pub use tool::{Tool, ToolChoice, ToolResultBlock, ToolUseBlock};
 pub use transport::{TransportErrorClass, classify_reqwest_error, render_source_chain};
 

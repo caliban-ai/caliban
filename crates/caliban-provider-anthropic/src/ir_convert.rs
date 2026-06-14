@@ -92,29 +92,37 @@ pub fn ir_to_native_request(
     }
 }
 
+/// Fallback thinking budget for an explicit `On` with no budget and no effort
+/// signal to derive one from. Matches `Effort::Medium`'s Anthropic budget.
+const DEFAULT_ON_BUDGET_TOKENS: u32 = 8_192;
+
 /// Derive the Anthropic `thinking` block from the per-request
-/// `ThinkingConfig` (legacy explicit budget) plus the new `Effort` hint.
+/// [`caliban_provider::ThinkingSetting`] plus the `Effort` hint (ticket #100).
 ///
-/// Precedence: an explicit `ThinkingConfig` wins (keeps callers that
-/// already set a budget working as-is); otherwise we look at `Effort`
-/// and map Low/Medium/High/Max to a budget. `Effort::Auto` / `None`
-/// omits the field entirely so the model picks its own default.
+/// - `Off` — omit the block entirely, even at high effort.
+/// - `On(Some(b))` — enable with the explicit budget `b`.
+/// - `On(None)` — enable with the effort-derived budget, or
+///   [`DEFAULT_ON_BUDGET_TOKENS`] when effort gives no signal.
+/// - `Auto` — legacy behavior: derive purely from `effort` (omit on
+///   `Effort::Auto`/`None`).
 fn thinking_from_request(
-    explicit: Option<caliban_provider::ThinkingConfig>,
+    setting: caliban_provider::ThinkingSetting,
     effort: Option<caliban_provider::Effort>,
 ) -> Option<NativeThinking> {
-    if let Some(t) = explicit {
-        return Some(NativeThinking {
-            kind: "enabled".into(),
-            budget_tokens: t.budget_tokens,
-        });
+    use caliban_provider::ThinkingSetting;
+    let enabled = |budget_tokens| NativeThinking {
+        kind: "enabled".into(),
+        budget_tokens,
+    };
+    let from_effort = || effort.and_then(caliban_provider::Effort::as_anthropic_budget);
+    match setting {
+        ThinkingSetting::Off => None,
+        ThinkingSetting::On(Some(budget_tokens)) => Some(enabled(budget_tokens)),
+        ThinkingSetting::On(None) => {
+            Some(enabled(from_effort().unwrap_or(DEFAULT_ON_BUDGET_TOKENS)))
+        }
+        ThinkingSetting::Auto => from_effort().map(enabled),
     }
-    effort
-        .and_then(caliban_provider::Effort::as_anthropic_budget)
-        .map(|budget_tokens| NativeThinking {
-            kind: "enabled".into(),
-            budget_tokens,
-        })
 }
 
 fn ir_content_block_to_native(b: ContentBlock) -> NativeContentBlock {
@@ -299,7 +307,7 @@ mod effort_plumbing {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }
@@ -333,17 +341,53 @@ mod effort_plumbing {
     }
 
     #[test]
-    fn explicit_thinking_config_wins_over_effort() {
+    fn explicit_on_budget_wins_over_effort() {
         let mut req = build_test_request();
-        req.thinking = Some(caliban_provider::ThinkingConfig {
-            budget_tokens: 1234,
-        });
+        req.thinking = caliban_provider::ThinkingSetting::On(Some(1234));
         req.effort = Some(Effort::High);
         let native = ir_to_native_request(req, false);
         let thinking = native.thinking.expect("thinking block emitted");
         assert_eq!(
             thinking.budget_tokens, 1234,
-            "explicit config takes precedence"
+            "explicit On(budget) takes precedence over effort"
+        );
+    }
+
+    #[test]
+    fn off_suppresses_thinking_even_at_high_effort() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::Off;
+        req.effort = Some(Effort::High);
+        let native = ir_to_native_request(req, false);
+        assert!(
+            native.thinking.is_none(),
+            "Off must omit the thinking block regardless of effort"
+        );
+    }
+
+    #[test]
+    fn on_without_budget_uses_effort_budget() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::On(None);
+        req.effort = Some(Effort::High);
+        let native = ir_to_native_request(req, false);
+        let thinking = native.thinking.expect("thinking block emitted");
+        assert_eq!(
+            thinking.budget_tokens, 24_576,
+            "On(None) falls back to the effort-derived budget"
+        );
+    }
+
+    #[test]
+    fn on_without_budget_or_effort_uses_default() {
+        let mut req = build_test_request();
+        req.thinking = caliban_provider::ThinkingSetting::On(None);
+        req.effort = Some(Effort::Auto);
+        let native = ir_to_native_request(req, false);
+        let thinking = native.thinking.expect("thinking block emitted");
+        assert_eq!(
+            thinking.budget_tokens, DEFAULT_ON_BUDGET_TOKENS,
+            "On(None) with no effort signal falls back to a sane default budget"
         );
     }
 }
@@ -374,7 +418,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }

@@ -29,7 +29,9 @@ impl DerivedNeeds {
                 .any(|b| matches!(b, ContentBlock::Image(_)))
         });
         let tool_use = !req.tools.is_empty();
-        let thinking = req.thinking.is_some();
+        // "Needs thinking" means the user explicitly forced it on; `Auto`
+        // (effort-derived) and `Off` don't require a thinking-capable route.
+        let thinking = matches!(req.thinking, caliban_provider::ThinkingSetting::On(_));
         Self {
             vision,
             tool_use,
@@ -150,7 +152,7 @@ impl CandidateAnnotation {
 mod tests {
     use super::*;
     use caliban_provider::{
-        CompletionRequest, ImageBlock, ImageSource, Message, Role, ThinkingConfig, Tool,
+        CompletionRequest, ImageBlock, ImageSource, Message, Role, ThinkingSetting, Tool,
     };
     use serde_json::json;
 
@@ -165,7 +167,7 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: Default::default(),
         }
@@ -204,11 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn derived_needs_marks_thinking_when_config_set() {
+    fn derived_needs_marks_thinking_when_forced_on() {
         let mut req = req_text();
-        req.thinking = Some(ThinkingConfig {
-            budget_tokens: 1024,
-        });
+        req.thinking = ThinkingSetting::On(Some(1024));
         let n = DerivedNeeds::from_request(&req);
         assert!(n.thinking);
     }

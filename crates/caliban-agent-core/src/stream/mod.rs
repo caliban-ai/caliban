@@ -660,6 +660,10 @@ impl Agent {
                 // so the in-flight request sees a single coherent value even
                 // if `/effort` lands between turns.
                 let effort_snapshot = self.config.effort.load_full();
+                // #100: likewise snapshot the swappable extended-thinking
+                // control so a `/think` change between turns applies as one
+                // coherent value to the in-flight request.
+                let thinking_snapshot = self.config.thinking.load_full();
                 // Plan C: likewise for the model id — a `/model` swap that
                 // lands between request build and provider call must not
                 // split model + capabilities + effort across two ids.
@@ -674,7 +678,7 @@ impl Agent {
                     top_p: self.config.top_p,
                     top_k: None,
                     stop_sequences: self.config.stop_sequences.clone(),
-                    thinking: self.config.thinking,
+                    thinking: *thinking_snapshot,
                     effort: Some(*effort_snapshot),
                     metadata: RequestMetadata {
                         user_id: self.config.user_id.clone(),
