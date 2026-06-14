@@ -981,6 +981,10 @@ pub(crate) async fn run_headless(
             provider: provider_name(resolved_provider(args)),
             model: &model,
         };
+        // Event-emission only: context injection already happened at the
+        // main.rs SessionStart fire (threaded into the system prompt via
+        // `resolve_system_prompt`). We discard the outcome here to avoid
+        // double-injecting (#106).
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
             tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
         }
@@ -1617,9 +1621,15 @@ mod enforce_tests {
     }
 }
 
-/// Fire the `session_start` (or `session_end`) hook with the standard
-/// session context. Errors are logged-and-swallowed (best-effort).
-pub(crate) async fn fire_session_start(args: &Args, agent: &Arc<Agent>, model: &str) {
+/// Fire the `session_start` hook with the standard session context. Errors are
+/// logged-and-swallowed (best-effort). Returns any `additional_context` blocks
+/// the `SessionStart` hooks supplied, for splicing into the system prompt before
+/// turn 1 (#106).
+pub(crate) async fn fire_session_start(
+    args: &Args,
+    agent: &Arc<Agent>,
+    model: &str,
+) -> Vec<String> {
     let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let session_id = args.session.clone().unwrap_or_else(|| "ephemeral".into());
     let session_ctx = caliban_agent_core::SessionCtx {
@@ -1628,8 +1638,12 @@ pub(crate) async fn fire_session_start(args: &Args, agent: &Arc<Agent>, model: &
         provider: provider_name(resolved_provider(args)),
         model,
     };
-    if let Err(e) = agent.hooks().session_start(&session_ctx).await {
-        tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
+    match agent.hooks().session_start(&session_ctx).await {
+        Ok(outcome) => outcome.additional_context,
+        Err(e) => {
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
+            Vec::new()
+        }
     }
 }
 
@@ -1940,6 +1954,7 @@ pub(crate) async fn resolve_system_prompt(
     agent: &Arc<Agent>,
     cwd_for_prompt: &std::path::Path,
     settings_snapshot: &caliban_settings::Settings,
+    session_context: &[String],
 ) -> Result<Option<String>> {
     let tool_names: Vec<&str> = agent.tools().names().collect();
     let default_prompt_in_effect =
@@ -1970,9 +1985,10 @@ pub(crate) async fn resolve_system_prompt(
     let skill_names = proactive_skill_names(agent, settings_snapshot);
 
     if !default_prompt_in_effect {
-        return Ok(Some(system_prompt::append_skills_block(
-            &body,
-            &skill_names,
+        let with_skills = system_prompt::append_skills_block(&body, &skill_names);
+        return Ok(Some(system_prompt::append_session_context_block(
+            &with_skills,
+            session_context,
         )));
     }
 
@@ -2026,9 +2042,10 @@ pub(crate) async fn resolve_system_prompt(
             }
         }
     };
-    Ok(Some(system_prompt::append_skills_block(
-        &final_prompt,
-        &skill_names,
+    let with_skills = system_prompt::append_skills_block(&final_prompt, &skill_names);
+    Ok(Some(system_prompt::append_session_context_block(
+        &with_skills,
+        session_context,
     )))
 }
 
