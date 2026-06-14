@@ -1,7 +1,7 @@
 //! Per-project auto-memory: topic file enumerator, reader, and writer.
 //!
 //! See `docs/superpowers/specs/2026-05-24-auto-memory-design.md` and
-//! `adrs/0035-auto-memory.md`.
+//! `docs/adr/0035-auto-memory.md`.
 
 use std::path::{Path, PathBuf};
 

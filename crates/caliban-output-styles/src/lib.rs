@@ -6,7 +6,7 @@
 //! markers, etc.) without touching tools, permissions, or hooks.
 //!
 //! See `docs/superpowers/specs/2026-05-24-output-styles-design.md` and
-//! `adrs/0031-output-styles.md`.
+//! `docs/adr/0031-output-styles.md`.
 
 #![allow(clippy::multiple_crate_versions)]
 

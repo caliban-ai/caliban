@@ -27,12 +27,12 @@ crates/caliban-core/src/lib.rs            # Task 2
 caliban/Cargo.toml                        # Task 3
 caliban/src/main.rs                       # Task 3
 caliban/tests/cli.rs                      # Task 3
-adrs/README.md                            # Task 4
-adrs/0001-async-runtime.md                # Task 4
-adrs/0002-error-model.md                  # Task 4
-adrs/0003-license-agpl-3.0.md             # Task 4
-adrs/0004-naming-conventions.md           # Task 4
-adrs/0005-workspace-layout.md             # Task 4
+docs/adr/README.md                            # Task 4
+docs/adr/0001-async-runtime.md                # Task 4
+docs/adr/0002-error-model.md                  # Task 4
+docs/adr/0003-license-agpl-3.0.md             # Task 4
+docs/adr/0004-naming-conventions.md           # Task 4
+docs/adr/0005-workspace-layout.md             # Task 4
 README.md                                 # Task 5
 .github/workflows/ci.yml                  # Task 6
 ```
@@ -41,7 +41,7 @@ README.md                                 # Task 5
 - Workspace root (`Cargo.toml`, `rust-toolchain.toml`, `rustfmt.toml`) — shared config that every member inherits.
 - `crates/caliban-core/` — library crate; placeholder for the future provider trait surface, present so the workspace has ≥1 lib member from day one.
 - `caliban/` — binary crate, the user-facing entrypoint. Owns CLI argument parsing and `main`. Will grow into the orchestrator-driver later.
-- `adrs/` — durable architectural decisions. One file per decision, plus an index.
+- `docs/adr/` — durable architectural decisions. One file per decision, plus an index.
 - `.github/workflows/ci.yml` — pre-merge gate. Single job, no matrix yet.
 - `LICENSE`, `README.md`, `.gitignore` — repo hygiene.
 
@@ -517,16 +517,16 @@ EOF
 ## Task 4: ADRs
 
 **Files:**
-- Create: `adrs/README.md`
-- Create: `adrs/0001-async-runtime.md`
-- Create: `adrs/0002-error-model.md`
-- Create: `adrs/0003-license-agpl-3.0.md`
-- Create: `adrs/0004-naming-conventions.md`
-- Create: `adrs/0005-workspace-layout.md`
+- Create: `docs/adr/README.md`
+- Create: `docs/adr/0001-async-runtime.md`
+- Create: `docs/adr/0002-error-model.md`
+- Create: `docs/adr/0003-license-agpl-3.0.md`
+- Create: `docs/adr/0004-naming-conventions.md`
+- Create: `docs/adr/0005-workspace-layout.md`
 
 No tests — these are documentation. But there's still a verification step.
 
-- [ ] **Step 1: Create `adrs/README.md` (the index)**
+- [ ] **Step 1: Create `docs/adr/README.md` (the index)**
 
 ```markdown
 # Architecture Decision Records
@@ -560,7 +560,7 @@ decision with context, the decision itself, and consequences.
 4. Add an entry to the table above.
 ```
 
-- [ ] **Step 2: Create `adrs/0001-async-runtime.md`**
+- [ ] **Step 2: Create `docs/adr/0001-async-runtime.md`**
 
 ```markdown
 # ADR 0001 · Async runtime → `tokio`
@@ -600,7 +600,7 @@ No nested runtimes. Each binary creates a single `tokio::runtime::Runtime`
   environment, or if a critical dependency requires a different runtime.
 ```
 
-- [ ] **Step 3: Create `adrs/0002-error-model.md`**
+- [ ] **Step 3: Create `docs/adr/0002-error-model.md`**
 
 ```markdown
 # ADR 0002 · Error model → `thiserror` for libraries, `anyhow` for binary
@@ -648,7 +648,7 @@ command handlers. `?` propagates errors with context using
   identically).
 ```
 
-- [ ] **Step 4: Create `adrs/0003-license-agpl-3.0.md`**
+- [ ] **Step 4: Create `docs/adr/0003-license-agpl-3.0.md`**
 
 ```markdown
 # ADR 0003 · License → `AGPL-3.0-only`
@@ -694,7 +694,7 @@ explains the implications for service operators and forks.
   exceptions or dual-license specific crates.
 ```
 
-- [ ] **Step 5: Create `adrs/0004-naming-conventions.md`**
+- [ ] **Step 5: Create `docs/adr/0004-naming-conventions.md`**
 
 ```markdown
 # ADR 0004 · Naming → `caliban-*` libraries, `caliban` binary
@@ -737,7 +737,7 @@ lint all interact with crate names.
   warrants its own prefix.
 ```
 
-- [ ] **Step 6: Create `adrs/0005-workspace-layout.md`**
+- [ ] **Step 6: Create `docs/adr/0005-workspace-layout.md`**
 
 ```markdown
 # ADR 0005 · Workspace layout → `crates/` for libraries, binaries at root
@@ -784,7 +784,7 @@ explicitly in root `Cargo.toml`, no globs.
 
 - [ ] **Step 7: Verify the ADRs render correctly**
 
-Run: `ls adrs/`
+Run: `ls docs/adr/`
 Expected output:
 
 ```
@@ -796,10 +796,10 @@ Expected output:
 README.md
 ```
 
-Open `adrs/README.md` in any markdown previewer (or just read it) and confirm all 5 links in the index point to existing files. Run:
+Open `docs/adr/README.md` in any markdown previewer (or just read it) and confirm all 5 links in the index point to existing files. Run:
 
 ```bash
-for f in adrs/000*.md; do test -f "$f" && echo "OK: $f" || echo "MISSING: $f"; done
+for f in docs/adr/000*.md; do test -f "$f" && echo "OK: $f" || echo "MISSING: $f"; done
 ```
 
 Expected: 5 lines of `OK: ...`.
@@ -807,7 +807,7 @@ Expected: 5 lines of `OK: ...`.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add adrs/
+git add docs/adr/
 git commit -m "$(cat <<'EOF'
 docs: add five Layer-0 ADRs
 
@@ -859,7 +859,7 @@ the operator in control of model routing, memory, skills, and prompt context.
 caliban is licensed under [AGPL-3.0-only](LICENSE). In short: if you
 modify caliban and either distribute the binary or run it as a network
 service, you must release your changes under AGPL-3.0. Personal use is
-unaffected. Read the [license ADR](adrs/0003-license-agpl-3.0.md) for
+unaffected. Read the [license ADR](docs/adr/0003-license-agpl-3.0.md) for
 the reasoning.
 
 ## Building
@@ -880,7 +880,7 @@ cargo run   --bin caliban -- --version    # smoke-test the binary
 caliban/             # the user-facing binary
 crates/              # libraries
   caliban-core/      # foundational types (Layer 1 seed)
-adrs/                # architecture decision records
+docs/adr/                # architecture decision records
 docs/superpowers/    # design specs and implementation plans
 .github/workflows/   # CI
 ```
@@ -906,12 +906,12 @@ boilerplate.
 
 ## Architecture decisions
 
-See [`adrs/`](adrs/). Notable Layer-0 decisions:
-- [Async runtime: tokio](adrs/0001-async-runtime.md)
-- [Error model: thiserror libs, anyhow binary](adrs/0002-error-model.md)
-- [License: AGPL-3.0](adrs/0003-license-agpl-3.0.md)
-- [Naming conventions](adrs/0004-naming-conventions.md)
-- [Workspace layout](adrs/0005-workspace-layout.md)
+See [`docs/adr/`](docs/adr/). Notable Layer-0 decisions:
+- [Async runtime: tokio](docs/adr/0001-async-runtime.md)
+- [Error model: thiserror libs, anyhow binary](docs/adr/0002-error-model.md)
+- [License: AGPL-3.0](docs/adr/0003-license-agpl-3.0.md)
+- [Naming conventions](docs/adr/0004-naming-conventions.md)
+- [Workspace layout](docs/adr/0005-workspace-layout.md)
 
 ## Design specs
 
@@ -1101,7 +1101,7 @@ Then **revert** the addition: `git checkout Cargo.toml && rm -rf crates/caliban-
 - [ ] **Step 4: Verify ADR file completeness**
 
 ```bash
-ls adrs/
+ls docs/adr/
 ```
 
 Expected output includes:
@@ -1115,7 +1115,7 @@ Expected output includes:
 For each ADR, confirm it contains the strings `**Status:** accepted` and `**Date:** 2026-05-22`:
 
 ```bash
-for f in adrs/000*.md; do
+for f in docs/adr/000*.md; do
   grep -q '\*\*Status:\*\* accepted' "$f" || echo "MISSING status in: $f"
   grep -q '\*\*Date:\*\* 2026-05-22' "$f"  || echo "MISSING date in: $f"
 done

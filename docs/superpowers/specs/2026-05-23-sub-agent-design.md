@@ -6,7 +6,7 @@
 **Sub-project of:** caliban Rust agent harness
 **Depends on:** `caliban-agent-core` (`Agent`, `Hooks`, stream loop),
 `caliban-tools-builtin`
-**Related ADR:** [0021 — Sub-agent primitive](../../../adrs/0021-sub-agent-primitive.md)
+**Related ADR:** [0021 — Sub-agent primitive](../../../docs/adr/0021-sub-agent-primitive.md)
 
 ## Goal
 

@@ -6,7 +6,7 @@
 **Sub-project of:** caliban Rust agent harness
 **Depends on:** `caliban-agent-core` (`Hooks` trait), `caliban-tui`,
 `caliban-cli`
-**Related ADR:** [0020 — Permission rules](../../../adrs/0020-permission-rules.md)
+**Related ADR:** [0020 — Permission rules](../../../docs/adr/0020-permission-rules.md)
 
 ## Goal
 

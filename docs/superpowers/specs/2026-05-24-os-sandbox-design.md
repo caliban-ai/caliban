@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0032-os-sandbox.md`
+**ADR:** `docs/adr/0032-os-sandbox.md`
 **Depends on:** `caliban-tools-builtin::BashTool` (the shim wraps its
 child-process plumbing), `caliban-core` (settings hierarchy — the
 sandbox config lives under the broader settings work).

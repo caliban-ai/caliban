@@ -12,7 +12,7 @@
 //! - Effort-level resolution ([`effort`]).
 //!
 //! See `docs/superpowers/specs/2026-05-24-model-router-v2-design.md` and
-//! `adrs/0038-model-router-v2.md`.
+//! `docs/adr/0038-model-router-v2.md`.
 
 #![allow(clippy::multiple_crate_versions)]
 // Internal dispatcher helpers + tests intentionally exceed pedantic line /

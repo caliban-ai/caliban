@@ -6,7 +6,7 @@
 **Author:** John Ford
 **Sub-project of:** caliban Rust agent harness
 **Depends on:** `caliban-provider` (trait + `Capabilities` + `RequestMetadata`)
-**Companion ADR:** `adrs/0022-model-routing-architecture.md`
+**Companion ADR:** `docs/adr/0022-model-routing-architecture.md`
 
 ## Goal
 

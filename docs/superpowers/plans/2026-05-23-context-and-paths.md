@@ -441,8 +441,8 @@ EOF
 ## Task W.5: ADR 0015 + README
 
 **Files:**
-- Create: `adrs/0015-context-and-path-fixes.md`
-- Modify: `adrs/README.md`
+- Create: `docs/adr/0015-context-and-path-fixes.md`
+- Modify: `docs/adr/README.md`
 - Modify: `README.md`
 
 - [ ] **Step 1: ADR 0015**
@@ -502,7 +502,7 @@ Real-use testing surfaced four issues bundled into one fix:
   ephemeral case using a synthetic in-memory session.
 ```
 
-- [ ] **Step 2: Update `adrs/README.md`**
+- [ ] **Step 2: Update `docs/adr/README.md`**
 
 Append after ADR 0014's row:
 
@@ -533,7 +533,7 @@ cargo fmt --all -- --check
 cargo build  --workspace
 cargo test   --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-git add adrs/ README.md
+git add docs/adr/ README.md
 git commit -m "$(cat <<'EOF'
 docs: ADR 0015 + README update for context + path fixes
 

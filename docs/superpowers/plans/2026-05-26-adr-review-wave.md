@@ -6,7 +6,7 @@
 
 **Architecture:** Atomic commits per workstream (10 expected). Doc-only commits for Sections 1-3, 7 and the ADR amendments in 4-6. Real code in Sections 4 (memory cap), 5 (parallel_conflict_key), and possibly 6 (TUI tick fix or close-out ADR).
 
-**Tech Stack:** Rust workspace (Cargo); `caliban-memory`, `caliban-agent-core`, `caliban-tools-builtin`, `caliban-settings`; ratatui (Section 6); markdown ADRs under `adrs/`; spec at `docs/superpowers/specs/2026-05-26-adr-review-wave-design.md`.
+**Tech Stack:** Rust workspace (Cargo); `caliban-memory`, `caliban-agent-core`, `caliban-tools-builtin`, `caliban-settings`; ratatui (Section 6); markdown ADRs under `docs/adr/`; spec at `docs/superpowers/specs/2026-05-26-adr-review-wave-design.md`.
 
 **Spec reference:** [`docs/superpowers/specs/2026-05-26-adr-review-wave-design.md`](../specs/2026-05-26-adr-review-wave-design.md)
 
@@ -38,11 +38,11 @@ Expected: identify where the `[memory]` section schema lives (likely `schema.rs`
 
 ### Task 0.2: Verify next free ADR number
 
-**Files:** read-only — `adrs/`
+**Files:** read-only — `docs/adr/`
 
 - [ ] **Step 1: List ADR files**
 
-Run: `ls adrs/ | grep -E '^[0-9]{4}-' | sort | tail -5`
+Run: `ls docs/adr/ | grep -E '^[0-9]{4}-' | sort | tail -5`
 
 Expected: highest is `0040-*`. Next free is `0041`. If concurrent PR has landed `0041`, shift sequence accordingly.
 
@@ -52,19 +52,19 @@ Expected: highest is `0040-*`. Next free is `0041`. If concurrent PR has landed 
 
 - [ ] **Step 1: Check ADR 0025 body Status**
 
-Run: `grep -m1 '^Status:' adrs/0025-*.md`
+Run: `grep -m1 '^Status:' docs/adr/0025-*.md`
 
 Expected: `accepted` (per audit's first cluster).
 
 - [ ] **Step 2: Check ADR 0025 status in README**
 
-Run: `grep '0025' adrs/README.md`
+Run: `grep '0025' docs/adr/README.md`
 
 Expected: status column shows `proposed`. Confirms drift.
 
 - [ ] **Step 3: Check ADR 0019 body Status**
 
-Run: `grep -m1 '^Status:' adrs/0019-*.md`
+Run: `grep -m1 '^Status:' docs/adr/0019-*.md`
 
 Expected: `proposed` (per audit's second cluster — body matches index, but parity shows shipped).
 
@@ -76,7 +76,7 @@ Expected: row marked ✅.
 
 - [ ] **Step 5: Check ADR 0033 body Status**
 
-Run: `grep -m1 '^Status:' adrs/0033-*.md`
+Run: `grep -m1 '^Status:' docs/adr/0033-*.md`
 
 Expected: `proposed` (random pick from cluster 2).
 
@@ -163,14 +163,14 @@ Expected: commit lands with both files. `git status` shows working tree clean (m
 
 - [ ] **Step 1: Read the ADR index table**
 
-Run: `grep -A 2 -B 1 '^|.*0025' adrs/README.md`
+Run: `grep -A 2 -B 1 '^|.*0025' docs/adr/README.md`
 
 Note the column structure (likely `| # | Title | Status |` or similar). Establish exact text format for the status cell so edits match style.
 
 ### Task 2.2: Update README status for cluster 1 (body already accepted)
 
 **Files:**
-- Modify: `adrs/README.md`
+- Modify: `docs/adr/README.md`
 
 Cluster 1 ADRs: `0025, 0026, 0027, 0029, 0030, 0035, 0036, 0037, 0038, 0040`. For each, change the status cell from `proposed` to `accepted`.
 
@@ -181,8 +181,8 @@ Use targeted edits per row to avoid replacing unrelated `proposed` strings.
 ### Task 2.3: Update README + body Status for cluster 2 (parity shipped)
 
 **Files:**
-- Modify: `adrs/README.md`
-- Modify: `adrs/0019-*.md` through `adrs/0039-*.md` (11 files)
+- Modify: `docs/adr/README.md`
+- Modify: `docs/adr/0019-*.md` through `docs/adr/0039-*.md` (11 files)
 
 Cluster 2 ADRs: `0019, 0020, 0021, 0023, 0024, 0028, 0031, 0032, 0033, 0034, 0039`.
 
@@ -198,13 +198,13 @@ For each file, find `Status: proposed` near the top and replace with `Status: ac
 
 - [ ] **Step 1: Confirm all body Status lines are non-`proposed` for ADRs claimed accepted**
 
-Run: `for f in adrs/00*.md; do printf '%s: ' "$f"; grep -m1 '^Status:' "$f"; done | grep -E 'proposed' | head -20`
+Run: `for f in docs/adr/00*.md; do printf '%s: ' "$f"; grep -m1 '^Status:' "$f"; done | grep -E 'proposed' | head -20`
 
 Expected: only the genuinely-still-proposed ADRs remain (audit didn't claim everyone is accepted — some ADRs may legitimately be proposed). The 11 from cluster 2 should NOT appear in this output.
 
 - [ ] **Step 2: Confirm README has no `proposed` rows for cluster 1 or 2 ADRs**
 
-Run: `grep -E '^\|.*(0019|0020|0021|0023|0024|0025|0026|0027|0028|0029|0030|0031|0032|0033|0034|0035|0036|0037|0038|0039|0040).*proposed' adrs/README.md`
+Run: `grep -E '^\|.*(0019|0020|0021|0023|0024|0025|0026|0027|0028|0029|0030|0031|0032|0033|0034|0035|0036|0037|0038|0039|0040).*proposed' docs/adr/README.md`
 
 Expected: no output.
 
@@ -213,11 +213,11 @@ Expected: no output.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add adrs/README.md adrs/00*.md
+git add docs/adr/README.md docs/adr/00*.md
 git commit -m "$(cat <<'EOF'
 docs(adrs): reconcile README status column with bodies and parity matrix
 
-Updates the status column in adrs/README.md for 21 ADRs where the
+Updates the status column in docs/adr/README.md for 21 ADRs where the
 index disagreed with reality:
 
 - 10 ADRs already marked accepted in their body had stale README
@@ -244,14 +244,14 @@ EOF
 
 - [ ] **Step 1: Inspect file**
 
-Run: `cat adrs/0027-*.md | tail -30`
+Run: `cat docs/adr/0027-*.md | tail -30`
 
 Note the existing tail structure — likely "References" or "Consequences" is the last section. The "Revised" section is appended after the last existing section.
 
 ### Task 3.2: Append Revised section to ADR 0027
 
 **Files:**
-- Modify: `adrs/0027-*.md`
+- Modify: `docs/adr/0027-*.md`
 
 - [ ] **Step 1: Append the Revised section**
 
@@ -282,7 +282,7 @@ grows past ~500.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add adrs/0027-*.md
+git add docs/adr/0027-*.md
 git commit -m "$(cat <<'EOF'
 docs(adr-0027): note Ask modal consolidation in caliban binary
 
@@ -301,7 +301,7 @@ EOF
 ### Task 3.4: Append Revised section to ADR 0029
 
 **Files:**
-- Modify: `adrs/0029-*.md`
+- Modify: `docs/adr/0029-*.md`
 
 - [ ] **Step 1: Append the Revised section**
 
@@ -334,7 +334,7 @@ compile-time burden on `caliban-agent-core`.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add adrs/0029-*.md
+git add docs/adr/0029-*.md
 git commit -m "$(cat <<'EOF'
 docs(adr-0029): note auto-mode consolidation in caliban-agent-core
 
@@ -622,7 +622,7 @@ Expected: PASS.
 ### Task 4.11: Append Revised section to ADR 0018
 
 **Files:**
-- Modify: `adrs/0018-*.md`
+- Modify: `docs/adr/0018-*.md`
 
 - [ ] **Step 1: Append**
 
@@ -674,7 +674,7 @@ Expected: clean.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add crates/caliban-memory/ crates/caliban-settings/ adrs/0018-*.md docs/parity-gap-matrix.md
+git add crates/caliban-memory/ crates/caliban-settings/ docs/adr/0018-*.md docs/parity-gap-matrix.md
 git commit -m "$(cat <<'EOF'
 feat(memory): raise default cap to 32 KiB + add per-scope cap_tokens
 
@@ -1046,7 +1046,7 @@ Expected: PASS (different key namespaces).
 ### Task 5.13: Append Revised section to ADR 0016
 
 **Files:**
-- Modify: `adrs/0016-*.md`
+- Modify: `docs/adr/0016-*.md`
 
 - [ ] **Step 1: Append**
 
@@ -1094,7 +1094,7 @@ Expected: clean.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add crates/caliban-tools-builtin/ crates/caliban-agent-core/ adrs/0016-*.md
+git add crates/caliban-tools-builtin/ crates/caliban-agent-core/ docs/adr/0016-*.md
 git commit -m "$(cat <<'EOF'
 feat(tools): per-target parallel_conflict_key gates same-file write collisions
 
@@ -1176,7 +1176,7 @@ Only if Task 6.3 found NO stalls.
 
 **Files:**
 - Modify: file from Task 6.1 (restore the tick — `git checkout -- <file>`)
-- Create: `adrs/<NNNN>-tui-redraw-tick-closeout.md` (number from Task 0.2)
+- Create: `docs/adr/<NNNN>-tui-redraw-tick-closeout.md` (number from Task 0.2)
 
 - [ ] **Step 1: Restore tick**
 
@@ -1184,7 +1184,7 @@ Run: `git checkout -- caliban/src/tui*` (or whichever file was modified in Task 
 
 - [ ] **Step 2: Write close-out ADR**
 
-Create `adrs/0041-tui-redraw-tick-closeout.md` (adjust number):
+Create `docs/adr/0041-tui-redraw-tick-closeout.md` (adjust number):
 
 ```markdown
 # 0041 — TUI redraw tick close-out
@@ -1236,7 +1236,7 @@ regression for marginal cleanup gain.
 - [ ] **Step 3: Commit close-out**
 
 ```bash
-git add adrs/0041-tui-redraw-tick-closeout.md
+git add docs/adr/0041-tui-redraw-tick-closeout.md
 git commit -m "$(cat <<'EOF'
 docs(adr-0041): close out 50 ms TUI redraw tick
 
@@ -1304,7 +1304,7 @@ See commit <SHA> for the fix.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/caliban-agent-core/ caliban/src/tui* adrs/0014-*.md
+git add crates/caliban-agent-core/ caliban/src/tui* docs/adr/0014-*.md
 git commit -m "$(cat <<'EOF'
 fix(tui): <one-line root cause> — remove 50 ms redraw tick
 
@@ -1327,14 +1327,14 @@ EOF
 
 - [ ] **Step 1: List ADRs again**
 
-Run: `ls adrs/ | grep -E '^[0-9]{4}-' | sort | tail -3`
+Run: `ls docs/adr/ | grep -E '^[0-9]{4}-' | sort | tail -3`
 
 If Section 6 added 0041, the next free is 0042. Otherwise 0041.
 
 ### Task 7.2: Write ADR for caliband sibling-binary placement
 
 **Files:**
-- Create: `adrs/<NNNN>-caliband-binary-placement.md`
+- Create: `docs/adr/<NNNN>-caliband-binary-placement.md`
 
 - [ ] **Step 1: Write the ADR**
 
@@ -1380,14 +1380,14 @@ binary.
 - 2026-05-25 ADR conformance audit, Finding 7.
 ```
 
-- [ ] **Step 2: Update `adrs/README.md` index**
+- [ ] **Step 2: Update `docs/adr/README.md` index**
 
 Add the new ADR's row to the index table.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add adrs/<NNNN>-caliband-binary-placement.md adrs/README.md
+git add docs/adr/<NNNN>-caliband-binary-placement.md docs/adr/README.md
 git commit -m "$(cat <<'EOF'
 docs(adr-<NNNN>): caliband sibling-binary placement
 
@@ -1407,7 +1407,7 @@ EOF
 ### Task 7.3: Write ADR for arc-swap
 
 **Files:**
-- Create: `adrs/<NNNN>-arc-swap-shared-state.md`
+- Create: `docs/adr/<NNNN>-arc-swap-shared-state.md`
 
 - [ ] **Step 1: Identify call sites**
 
@@ -1465,12 +1465,12 @@ or where writer fairness matters.
 - 2026-05-25 ADR conformance audit, Finding 7.
 ```
 
-- [ ] **Step 3: Update `adrs/README.md` index**
+- [ ] **Step 3: Update `docs/adr/README.md` index**
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add adrs/<NNNN>-arc-swap-shared-state.md adrs/README.md
+git add docs/adr/<NNNN>-arc-swap-shared-state.md docs/adr/README.md
 git commit -m "$(cat <<'EOF'
 docs(adr-<NNNN>): arc-swap as shared-state primitive
 
@@ -1490,7 +1490,7 @@ EOF
 ### Task 7.4: Write ADR for rmcp 1.7 pin
 
 **Files:**
-- Create: `adrs/<NNNN>-rmcp-version-pin.md`
+- Create: `docs/adr/<NNNN>-rmcp-version-pin.md`
 
 - [ ] **Step 1: Confirm current pin**
 
@@ -1538,12 +1538,12 @@ MCP transport, OAuth, elicitation, or resource surface.
 - 2026-05-25 ADR conformance audit, Finding 7.
 ```
 
-- [ ] **Step 3: Update `adrs/README.md` index**
+- [ ] **Step 3: Update `docs/adr/README.md` index**
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add adrs/<NNNN>-rmcp-version-pin.md adrs/README.md
+git add docs/adr/<NNNN>-rmcp-version-pin.md docs/adr/README.md
 git commit -m "$(cat <<'EOF'
 docs(adr-<NNNN>): rmcp 1.7 version pin
 

@@ -2,7 +2,12 @@
 
 This directory contains durable architectural decisions for caliban, in
 [MADR-lite](https://adr.github.io/madr/) format: each file states a single
-decision with context, the decision itself, and consequences.
+decision with context, the decision itself, and consequences. This is the same
+convention used by the sibling repos
+[gonzalo](https://github.com/caliban-ai/gonzalo) and
+[prospero](https://github.com/caliban-ai/prospero); see
+[ADR 0000](0000-architecture-decision-records.md) for the practice and its
+conventions.
 
 ## Status legend
 
@@ -15,6 +20,7 @@ decision with context, the decision itself, and consequences.
 
 | # | Title | Status |
 |---|---|---|
+| [0000](0000-architecture-decision-records.md) | Record architecture decisions (MADR-lite under `docs/adr/`) | accepted |
 | [0001](0001-async-runtime.md) | Async runtime → `tokio` | accepted |
 | [0002](0002-error-model.md) | Error model → `thiserror` for libs, `anyhow` for binary | accepted |
 | [0003](0003-license-agpl-3.0.md) | License → `AGPL-3.0-only` | accepted |
@@ -66,6 +72,6 @@ decision with context, the decision itself, and consequences.
 ## Adding a new ADR
 
 1. Pick the next available number.
-2. Copy an existing ADR as a template.
+2. Copy [`template.md`](template.md) (or an existing ADR) as a starting point.
 3. Set status to `proposed` while open for discussion; flip to `accepted` once decided.
 4. Add an entry to the table above.

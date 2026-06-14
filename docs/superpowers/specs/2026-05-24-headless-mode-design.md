@@ -3,7 +3,7 @@
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0025-headless-output-protocol.md`
+**ADR:** `docs/adr/0025-headless-output-protocol.md`
 
 ## Goal
 

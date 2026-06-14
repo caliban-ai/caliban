@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**Companion ADR:** `adrs/0039-image-and-vision-input.md`
+**Companion ADR:** `docs/adr/0039-image-and-vision-input.md`
 **Depends on:** TUI input ergonomics spec
 (`docs/superpowers/specs/2026-05-23-tui-input-ergonomics-design.md` — file
 mention autocomplete + clipboard plumbing), model-router v2 spec

@@ -16,7 +16,7 @@ cross-cutting findings, all non-blocking.
 This spec consolidates the audit + its follow-ups into a **single PR** that:
 
 1. Commits the audit docs.
-2. Reconciles the 21 ADR-status mismatches in `adrs/README.md`.
+2. Reconciles the 21 ADR-status mismatches in `docs/adr/README.md`.
 3. Amends two ADRs whose committed crate boundary was collapsed into an
    existing crate (0027, 0029).
 4. Raises the memory cap default and adds a per-scope `cap_tokens` knob.
@@ -104,7 +104,7 @@ Two small edits to the existing untracked files before `git add`:
 
 ## Section 2 — Finding 1: README status reconciliation
 
-Pure docs change in `adrs/README.md`.
+Pure docs change in `docs/adr/README.md`.
 
 ### Scope
 - For each of the 10 ADRs in the audit's first cluster (`0025, 0026, 0027,
@@ -131,7 +131,7 @@ Append a `## Revised 2026-05-26` section to ADRs 0027 and 0029. Additive
 only — the original "Decision" section stays put so git history of the
 original choice remains intact.
 
-### 3.1 `adrs/0027-tui-ergonomics.md` revision body
+### 3.1 `docs/adr/0027-tui-ergonomics.md` revision body
 
 > ### Revised 2026-05-26
 >
@@ -150,7 +150,7 @@ original choice remains intact.
 > standalone `caliban-tui` library separated from the binary), or LOC
 > grows past ~500.
 
-### 3.2 `adrs/0029-permission-modes.md` revision body
+### 3.2 `docs/adr/0029-permission-modes.md` revision body
 
 > ### Revised 2026-05-26
 >
@@ -478,7 +478,7 @@ Whole-workspace `cargo test --workspace` runs green before each commit.
 
 1. **Where is the 8 KiB constant defined?** Verify before writing the
    `MemoryBudget` struct vs bare constant decision.
-2. **Next free ADR number?** Verify against `adrs/` directory before
+2. **Next free ADR number?** Verify against `docs/adr/` directory before
    writing the new ones. Expect 0041 unless a concurrent PR has landed
    one.
 3. **Finding 4 outcome.** Determined at investigation time. Both commit

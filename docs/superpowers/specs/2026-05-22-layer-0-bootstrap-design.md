@@ -53,7 +53,7 @@ caliban/
 
 - **`crates/caliban-core/`** — workspace requires ≥1 member to compile; `caliban-core` will become the trait-crate seed where shared types and the `Provider` trait eventually land (B). Layer 0 ships it empty except for a smoke test.
 - **`caliban/` at root, not under `crates/`** — binaries live at the workspace root; libraries under `crates/`. Future binaries (`caliban-tui`, `caliban-orchestrator`) each become their own subdirectory at the workspace root (siblings of `caliban/`), not nested inside it.
-- **`adrs/` at root, not `docs/adrs/`** — ADRs are first-class Layer 0 deliverables; top-level placement makes them impossible to miss.
+- **`adrs/` at root, not `docs/adrs/`** — ADRs are first-class Layer 0 deliverables; top-level placement makes them impossible to miss. *(Superseded: ADRs were later relocated to `docs/adr/` to match sibling repos prospero and gonzalo — see [ADR 0000](../../adr/0000-architecture-decision-records.md). The tree and acceptance criteria below are kept as the historical 2026-05-22 snapshot.)*
 - **`docs/superpowers/specs/`** — follows the superpowers brainstorming convention. Specs design what we'll build; ADRs record what we decided. Different artifact, different home.
 - **No `tests/` at root** — integration tests live alongside their crate (`crates/<name>/tests/`). Workspace-level integration tests deferred until cross-crate behavior exists.
 - **No `examples/`** — no library APIs to demo yet.

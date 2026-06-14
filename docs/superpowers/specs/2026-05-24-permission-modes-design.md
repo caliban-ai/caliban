@@ -3,7 +3,7 @@ title: Permission modes + auto-mode classifier
 date: 2026-05-24
 status: Proposed
 author: john.ford2002@gmail.com
-adr: adrs/0029-permission-modes-and-auto-mode.md
+adr: docs/adr/0029-permission-modes-and-auto-mode.md
 ---
 
 # Permission modes + auto-mode classifier — Design
@@ -11,7 +11,7 @@ adr: adrs/0029-permission-modes-and-auto-mode.md
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0029-permission-modes-and-auto-mode.md`
+**ADR:** `docs/adr/0029-permission-modes-and-auto-mode.md`
 
 ## Goal
 

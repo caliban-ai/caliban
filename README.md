@@ -39,7 +39,7 @@ routing, memory, skills, and prompt context.
 caliban is licensed under [AGPL-3.0-only](LICENSE). In short: if you
 modify caliban and either distribute the binary or run it as a network
 service, you must release your changes under AGPL-3.0. Personal use is
-unaffected. See the [license ADR](adrs/0003-license-agpl-3.0.md) for
+unaffected. See the [license ADR](docs/adr/0003-license-agpl-3.0.md) for
 the reasoning.
 
 ## Building
@@ -233,26 +233,26 @@ synthetic request.
 
 | Area | Status | Where |
 |---|---|---|
-| Provider abstraction + IR | ✅ | [ADR 0006](adrs/0006-message-schema-ir.md), [ADR 0007](adrs/0007-transport-trait-pattern.md) |
-| Agent loop (stream-as-primitive, parallel tool dispatch) | ✅ | [ADR 0009](adrs/0009-agent-core-design.md), [ADR 0016](adrs/0016-parallel-tool-dispatch.md) |
+| Provider abstraction + IR | ✅ | [ADR 0006](docs/adr/0006-message-schema-ir.md), [ADR 0007](docs/adr/0007-transport-trait-pattern.md) |
+| Agent loop (stream-as-primitive, parallel tool dispatch) | ✅ | [ADR 0009](docs/adr/0009-agent-core-design.md), [ADR 0016](docs/adr/0016-parallel-tool-dispatch.md) |
 | Built-in tools (Read/Write/Edit/MultiEdit/NotebookEdit/Bash/BashBg/Glob/Grep/WebFetch/WebSearch/AgentTool/TodoWrite/Plan/Memory) | ✅ | `crates/caliban-tools-builtin/` |
-| Persistent sessions + REPL + TUI | ✅ | [ADR 0011](adrs/0011-sessions-and-repl.md), [ADR 0012](adrs/0012-tui-via-ratatui.md), [ADR 0027](adrs/0027-tui-ergonomics.md) |
-| Headless mode (`-p`, `stream-json` I/O) | ✅ | [ADR 0025](adrs/0025-headless-output-protocol.md) |
-| Sub-agents (parallel + background, isolated worktrees) | ✅ | [ADR 0021](adrs/0021-sub-agent-primitive.md), [ADR 0037](adrs/0037-subagent-isolation-and-background-fleet.md) |
-| MCP client (stdio + HTTP transports, OAuth, elicitation) | ✅ | [ADR 0017](adrs/0017-mcp-client-architecture.md), [ADR 0023](adrs/0023-mcp-v2-transports-and-oauth.md) |
-| Memory tiers + auto-memory + CLAUDE.md ancestry + @-imports | ✅ | [ADR 0018](adrs/0018-memory-tier-model.md), [ADR 0035](adrs/0035-auto-memory.md), [ADR 0036](adrs/0036-claudemd-ancestry-and-imports.md) |
-| Skills loading | ✅ | [ADR 0019](adrs/0019-skills-loading.md) |
-| Permission modes (Default/AcceptEdits/Plan/Auto/DontAsk/Bypass) + rules | ✅ | [ADR 0020](adrs/0020-permission-rules.md), [ADR 0029](adrs/0029-permission-modes-and-auto-mode.md) |
-| Hooks (extensible event taxonomy) | ✅ | [ADR 0024](adrs/0024-hook-event-taxonomy.md) |
-| Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ | [ADR 0026](adrs/0026-settings-layering.md) |
-| Checkpoint store + `/rewind` | ✅ | [ADR 0028](adrs/0028-checkpointing-rewind.md) |
-| Plugin packaging | ✅ | [ADR 0030](adrs/0030-plugin-packaging.md) |
-| Output styles | ✅ | [ADR 0031](adrs/0031-output-styles.md) |
-| OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ | [ADR 0032](adrs/0032-os-sandbox.md), `crates/caliban-sandbox/README.md` |
-| OpenTelemetry + per-request cost ledger | ✅ | [ADR 0033](adrs/0033-opentelemetry-and-cost.md) |
-| Image / vision input | ✅ | [ADR 0039](adrs/0039-image-and-vision-input.md) |
-| Slash command registry | ✅ | [ADR 0040](adrs/0040-slash-command-registry.md) |
-| Model router v2 (declarative routes, capability filters) | ✅ | [ADR 0038](adrs/0038-model-router-v2.md) |
+| Persistent sessions + REPL + TUI | ✅ | [ADR 0011](docs/adr/0011-sessions-and-repl.md), [ADR 0012](docs/adr/0012-tui-via-ratatui.md), [ADR 0027](docs/adr/0027-tui-ergonomics.md) |
+| Headless mode (`-p`, `stream-json` I/O) | ✅ | [ADR 0025](docs/adr/0025-headless-output-protocol.md) |
+| Sub-agents (parallel + background, isolated worktrees) | ✅ | [ADR 0021](docs/adr/0021-sub-agent-primitive.md), [ADR 0037](docs/adr/0037-subagent-isolation-and-background-fleet.md) |
+| MCP client (stdio + HTTP transports, OAuth, elicitation) | ✅ | [ADR 0017](docs/adr/0017-mcp-client-architecture.md), [ADR 0023](docs/adr/0023-mcp-v2-transports-and-oauth.md) |
+| Memory tiers + auto-memory + CLAUDE.md ancestry + @-imports | ✅ | [ADR 0018](docs/adr/0018-memory-tier-model.md), [ADR 0035](docs/adr/0035-auto-memory.md), [ADR 0036](docs/adr/0036-claudemd-ancestry-and-imports.md) |
+| Skills loading | ✅ | [ADR 0019](docs/adr/0019-skills-loading.md) |
+| Permission modes (Default/AcceptEdits/Plan/Auto/DontAsk/Bypass) + rules | ✅ | [ADR 0020](docs/adr/0020-permission-rules.md), [ADR 0029](docs/adr/0029-permission-modes-and-auto-mode.md) |
+| Hooks (extensible event taxonomy) | ✅ | [ADR 0024](docs/adr/0024-hook-event-taxonomy.md) |
+| Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ | [ADR 0026](docs/adr/0026-settings-layering.md) |
+| Checkpoint store + `/rewind` | ✅ | [ADR 0028](docs/adr/0028-checkpointing-rewind.md) |
+| Plugin packaging | ✅ | [ADR 0030](docs/adr/0030-plugin-packaging.md) |
+| Output styles | ✅ | [ADR 0031](docs/adr/0031-output-styles.md) |
+| OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ | [ADR 0032](docs/adr/0032-os-sandbox.md), `crates/caliban-sandbox/README.md` |
+| OpenTelemetry + per-request cost ledger | ✅ | [ADR 0033](docs/adr/0033-opentelemetry-and-cost.md) |
+| Image / vision input | ✅ | [ADR 0039](docs/adr/0039-image-and-vision-input.md) |
+| Slash command registry | ✅ | [ADR 0040](docs/adr/0040-slash-command-registry.md) |
+| Model router v2 (declarative routes, capability filters) | ✅ | [ADR 0038](docs/adr/0038-model-router-v2.md) |
 | Health-check `caliban doctor` / `/doctor` | ✅ | `caliban/src/diagnostics.rs` |
 | Cost surfacing in TUI / `/cost` slash | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
 | Stream-idle watchdog, MaxTokens recovery, reactive compaction | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
@@ -406,7 +406,7 @@ when the latch is on. Press **ctrl+shift+b** to drop the latch
 (restart required to re-arm). `permissions.enforce = true` in any
 scope refuses the flag at startup.
 
-See [ADR 0045](adrs/0045-permissions-v2-and-toml-primary-config.md)
+See [ADR 0045](docs/adr/0045-permissions-v2-and-toml-primary-config.md)
 for the full design rationale and
 [`docs/superpowers/specs/2026-05-31-permissions-v2-design.md`](docs/superpowers/specs/2026-05-31-permissions-v2-design.md)
 for the detailed spec.
@@ -417,7 +417,7 @@ caliban reads `settings.json` (or `.toml`) at four scopes — **Managed >
 User > Project > Local** — with deep-merge semantics for nested
 objects and array-concat for permission arrays. Live reload via
 `notify` picks up edits without restarting. See
-[ADR 0026](adrs/0026-settings-layering.md) for the layering rules and
+[ADR 0026](docs/adr/0026-settings-layering.md) for the layering rules and
 [`docs/examples/permissions.example.toml`](docs/examples/permissions.example.toml)
 and [`docs/examples/hooks.example.toml`](docs/examples/hooks.example.toml)
 for example fragments. Legacy per-feature TOMLs (`mcp.toml`,
@@ -509,8 +509,8 @@ limitation and recommend an engine switch instead.
 ```
 caliban/             # the user-facing binary
 crates/              # 24 library crates, grouped below
-adrs/                # architecture decision records (0001–0044)
 docs/                # design specs, parity matrix, capability inventory
+docs/adr/            # architecture decision records (0000–0047)
 docs/superpowers/    # active design specs + implementation plans
 docs/examples/       # sample settings / permission / hook fragments
 .github/workflows/   # CI
@@ -591,7 +591,7 @@ specific enough to act on) live in [caliban-ai Kanban board](https://github.com/
 
 ## Architecture decisions
 
-Browse [`adrs/`](adrs/) for all 44 ADRs (0001–0044). Highlights by layer:
+Browse [`docs/adr/`](docs/adr/) for all 48 ADRs (0000–0047). Highlights by layer:
 
 - **Foundation (0001–0008):** tokio runtime, error model
   (thiserror libs / anyhow binary), AGPL-3.0, naming, workspace

@@ -126,7 +126,7 @@ crates/caliban-provider-google/
     ├── vertex_fixture.rs       cfg(feature = "vertex")
     └── live.rs
 
-adrs/
+docs/adr/
 ├── 0006-message-schema-ir.md
 ├── 0007-transport-trait-pattern.md
 └── 0008-system-role-positional.md
@@ -3426,10 +3426,10 @@ Commit: `feat(provider-openai): AzureTransport (feature 'azure')`
 ## Task 12: ADRs + README + CI
 
 **Files:**
-- Create: `adrs/0006-message-schema-ir.md`
-- Create: `adrs/0007-transport-trait-pattern.md`
-- Create: `adrs/0008-system-role-positional.md`
-- Modify: `adrs/README.md` (index)
+- Create: `docs/adr/0006-message-schema-ir.md`
+- Create: `docs/adr/0007-transport-trait-pattern.md`
+- Create: `docs/adr/0008-system-role-positional.md`
+- Modify: `docs/adr/README.md` (index)
 - Modify: `README.md` (update Layer-1 status, repo layout, add example usage)
 - Modify: `.github/workflows/ci.yml` (add cloud-feature job)
 
@@ -3502,7 +3502,7 @@ The IR has three roles: `User`, `Assistant`, `System`. System messages must appe
 - **Revisit if:** A provider semantically requires non-leading system messages, or a credible agent design needs mid-conversation system injection.
 ```
 
-- [ ] **Step 4: Update `adrs/README.md`**
+- [ ] **Step 4: Update `docs/adr/README.md`**
 
 Add three rows to the index table after row 0005:
 
@@ -3602,7 +3602,7 @@ All must exit 0.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add adrs/ README.md .github/workflows/ci.yml
+git add docs/adr/ README.md .github/workflows/ci.yml
 git commit -m "$(cat <<'EOF'
 docs(layer-1): three ADRs + README + CI matrix update
 

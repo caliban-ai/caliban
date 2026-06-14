@@ -1,7 +1,7 @@
 //! Skill loader + `SkillTool` for the caliban agent harness.
 //!
 //! See `docs/superpowers/specs/2026-05-23-skills-design.md` and
-//! `adrs/0019-skills-loading.md`.
+//! `docs/adr/0019-skills-loading.md`.
 
 #![allow(clippy::multiple_crate_versions)]
 

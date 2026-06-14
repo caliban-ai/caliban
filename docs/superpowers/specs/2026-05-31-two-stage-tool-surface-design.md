@@ -3,7 +3,7 @@ title: Two-stage tool surface — lazy MCP schema loading + ToolSearch
 date: 2026-05-31
 status: Proposed
 author: john.ford2002@gmail.com
-adr: adrs/0046-two-stage-tool-surface.md
+adr: docs/adr/0046-two-stage-tool-surface.md
 ---
 
 # Two-stage tool surface — Design
@@ -11,13 +11,13 @@ adr: adrs/0046-two-stage-tool-surface.md
 **Date:** 2026-05-31
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**Related ADRs:** [0017 — MCP client architecture](../../../adrs/0017-mcp-client-architecture.md),
-[0021 — Sub-agent primitive](../../../adrs/0021-sub-agent-primitive.md),
-[0023 — MCP v2 transports + OAuth](../../../adrs/0023-mcp-v2-transports-and-oauth.md),
-[0026 — Settings layering](../../../adrs/0026-settings-layering.md),
-[0037 — Sub-agent isolation + background fleet](../../../adrs/0037-subagent-isolation-and-background-fleet.md),
-[0043 — `arc-swap` read-mostly shared state](../../../adrs/0043-arc-swap-shared-state.md),
-[0045 — Permissions v2 + TOML primary config](../../../adrs/0045-permissions-v2-and-toml-primary-config.md)
+**Related ADRs:** [0017 — MCP client architecture](../../../docs/adr/0017-mcp-client-architecture.md),
+[0021 — Sub-agent primitive](../../../docs/adr/0021-sub-agent-primitive.md),
+[0023 — MCP v2 transports + OAuth](../../../docs/adr/0023-mcp-v2-transports-and-oauth.md),
+[0026 — Settings layering](../../../docs/adr/0026-settings-layering.md),
+[0037 — Sub-agent isolation + background fleet](../../../docs/adr/0037-subagent-isolation-and-background-fleet.md),
+[0043 — `arc-swap` read-mostly shared state](../../../docs/adr/0043-arc-swap-shared-state.md),
+[0045 — Permissions v2 + TOML primary config](../../../docs/adr/0045-permissions-v2-and-toml-primary-config.md)
 
 ## Goal
 

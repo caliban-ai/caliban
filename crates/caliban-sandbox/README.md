@@ -1,7 +1,7 @@
 # caliban-sandbox
 
 OS-level sandbox layer for caliban's subprocess tools. Implements
-[ADR 0032](../../adrs/0032-os-sandbox.md) /
+[ADR 0032](../../docs/adr/0032-os-sandbox.md) /
 [design](../../docs/superpowers/specs/2026-05-24-os-sandbox-design.md).
 
 ## Backends

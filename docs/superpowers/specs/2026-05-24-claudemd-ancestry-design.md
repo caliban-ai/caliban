@@ -4,7 +4,7 @@
 **Author:** john.ford2002@gmail.com
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0036-claudemd-ancestry-and-imports.md`
+**ADR:** `docs/adr/0036-claudemd-ancestry-and-imports.md`
 
 ## Goal
 

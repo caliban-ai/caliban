@@ -3,7 +3,7 @@ title: Checkpointing + /rewind
 date: 2026-05-24
 status: Proposed
 author: john.ford2002@gmail.com
-adr: adrs/0028-checkpointing-rewind.md
+adr: docs/adr/0028-checkpointing-rewind.md
 ---
 
 # Checkpointing + `/rewind` — Design
@@ -11,7 +11,7 @@ adr: adrs/0028-checkpointing-rewind.md
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0028-checkpointing-rewind.md`
+**ADR:** `docs/adr/0028-checkpointing-rewind.md`
 
 ## Goal
 

@@ -593,8 +593,8 @@ EOF
 ## Task U.5: ADR 0013 + README
 
 **Files:**
-- Create: `adrs/0013-tui-overlays.md`
-- Modify: `adrs/README.md`
+- Create: `docs/adr/0013-tui-overlays.md`
+- Modify: `docs/adr/README.md`
 - Modify: `README.md`
 
 - [ ] **Step 1: ADR 0013**
@@ -647,7 +647,7 @@ became a cluttered place to render reference information.
   bools, changing model mid-session) requiring stateful focus tracking.
 ```
 
-- [ ] **Step 2: Append to `adrs/README.md`**
+- [ ] **Step 2: Append to `docs/adr/README.md`**
 
 ```
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
@@ -678,7 +678,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - [ ] **Step 5: Commit**
 
 ```bash
-git add adrs/ README.md
+git add docs/adr/ README.md
 git commit -m "$(cat <<'EOF'
 docs: ADR 0013 + README for TUI overlays + layout v2
 

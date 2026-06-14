@@ -1,7 +1,7 @@
 //! Permission rules — Hook-layered tool gating with TOML rule files.
 //!
 //! See `docs/superpowers/specs/2026-05-23-permissions-design.md` and
-//! `adrs/0020-permission-rules.md`.
+//! `docs/adr/0020-permission-rules.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

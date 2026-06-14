@@ -4,7 +4,7 @@
 **Status:** Approved
 **Target branch:** `jf/docs/roadmap-post-webfetch`
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0017-mcp-client-architecture.md`
+**ADR:** `docs/adr/0017-mcp-client-architecture.md`
 **Depends on:** `caliban-agent-core`, `caliban-provider`
 
 ## Goal
