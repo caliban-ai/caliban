@@ -2148,11 +2148,16 @@ mod tests {
         let settings = caliban_settings::Settings::default();
         let cwd = std::env::current_dir().unwrap();
 
-        let with_ctx =
-            resolve_system_prompt(&args, &agent, &cwd, &settings, &["INJECTED-MARKER".to_string()])
-                .await
-                .unwrap()
-                .expect("default prompt in effect");
+        let with_ctx = resolve_system_prompt(
+            &args,
+            &agent,
+            &cwd,
+            &settings,
+            &["INJECTED-MARKER".to_string()],
+        )
+        .await
+        .unwrap()
+        .expect("default prompt in effect");
         assert!(
             with_ctx.contains("<session-context>"),
             "session-context block should be present when context is supplied"

@@ -75,6 +75,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Subagent lifecycle events (`SubagentStart`/`Stop`, `TaskCreated`/`Completed`) | ✅ | ADR-0024 |
 | `PermissionRequest` / `PermissionDenied` | ✅ | ADR-0024 |
 | Hook decision protocol (JSON stdout / exit codes) | ✅ | ADR-0024 |
+| `SessionStart` context injection (`additionalContext` → system prompt) | 🟡 | #106: surface shipped — `session_start` returns `SessionStartOutcome`, trait-impl hooks inject into the prompt; `additionalContext` parser ready. End-to-end for *config* hooks needs the config→runtime execution bridge (#121) |
 | Handler types: `command` / `http` / `mcp` / `prompt` / `agent` | ✅ | `command`+`http` fully wired; `mcp`/`prompt`/`agent` are v1 stubs that wire in ADRs 0023 / 0037 |
 | Hook inheritance for subagents | 🟡 | `SubagentStart`/`Stop` fire from parent; per-subagent inheritance lands with ADR 0037 |
 | Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | ✅ | ADR-0030; `caliban-plugins` orchestrator parses `plugin.json`, expands `${CALIBAN_PLUGIN_ROOT}` (+ `${CLAUDE_PLUGIN_ROOT}` alias), namespaces items, and feeds existing loaders. Marketplace install + trust gating + `caliban plugin {install,list,enable,disable,remove,info,update}`. settings.json keys land with ADR 0026 (env-only for now). |
