@@ -4,9 +4,9 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**Companion ADR:** `adrs/0038-model-router-v2.md`
+**Companion ADR:** `docs/adr/0038-model-router-v2.md`
 **Supersedes scope of:** v1 deferred follow-ups in
-`adrs/0022-model-routing-architecture.md` and
+`docs/adr/0022-model-routing-architecture.md` and
 `docs/superpowers/specs/2026-05-23-model-router-design.md`.
 
 ## Goal

@@ -3,7 +3,7 @@
 **Date:** 2026-06-10
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
-**Companion ADR:** `adrs/0047-interactive-background-subagents.md`
+**Companion ADR:** `docs/adr/0047-interactive-background-subagents.md`
 **Amends:** ADR 0037 (background fleet) — the "runs to completion" non-goal.
 **Issue:** caliban-ai/caliban#81
 

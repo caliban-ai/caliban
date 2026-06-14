@@ -475,8 +475,8 @@ EOF
 
 ## Task V.5: ADR 0014 + README
 
-- Create `adrs/0014-system-prompt-and-tui-fixes.md` capturing the system-prompt-at-creation-time persistence rule + the tick-based redraw fix + the debug-log behind env-var.
-- Append to `adrs/README.md`.
+- Create `docs/adr/0014-system-prompt-and-tui-fixes.md` capturing the system-prompt-at-creation-time persistence rule + the tick-based redraw fix + the debug-log behind env-var.
+- Append to `docs/adr/README.md`.
 - Update root `README.md`:
   - In the "Interactive TUI" section, note the new flags: `--system`, `--system-file`, `--no-system`, `--debug`.
   - Add `/system` to the slash-command list.

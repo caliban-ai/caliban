@@ -25,7 +25,7 @@
 - `name()` returns `"router"`.
 
 **Spec:** `docs/superpowers/specs/2026-05-23-model-router-design.md`
-**ADR:** `adrs/0022-model-routing-architecture.md`
+**ADR:** `docs/adr/0022-model-routing-architecture.md`
 
 **Deferred:**
 

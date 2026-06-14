@@ -3,8 +3,8 @@
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0023-mcp-v2-transports-and-oauth.md`
-**Supersedes scope of:** v1 (`adrs/0017-mcp-client-architecture.md`) — v1
+**ADR:** `docs/adr/0023-mcp-v2-transports-and-oauth.md`
+**Supersedes scope of:** v1 (`docs/adr/0017-mcp-client-architecture.md`) — v1
 shipped the config schema + manager scaffold; v2 makes it actually work
 and broadens transport coverage.
 
@@ -291,7 +291,7 @@ The user-visible v2 ships in three sub-PRs to keep CI tight and reviews focused.
 - In-tree integration test server (`crates/caliban-mcp-client/tests/fixtures/test_server.rs`) advertises `echo`, `fail`, `slow`, `hang_init` tools.
 - 18 tests: 8 config (carried over from v1), 10 integration.
 - `/mcp` overlay renders connected/failed/disabled (stdio only).
-- **Closes:** the "rmcp wiring" deferred follow-up from `adrs/0017`.
+- **Closes:** the "rmcp wiring" deferred follow-up from `docs/adr/0017`.
 
 ### Phase B — HTTP + SSE transports (PR/B)
 

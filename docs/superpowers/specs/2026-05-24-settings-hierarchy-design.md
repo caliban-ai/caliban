@@ -3,7 +3,7 @@
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0026-settings-layering.md`
+**ADR:** `docs/adr/0026-settings-layering.md`
 
 ## Goal
 

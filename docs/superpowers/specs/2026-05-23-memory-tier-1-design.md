@@ -5,7 +5,7 @@
 **Target branch:** `jf/docs/roadmap-post-webfetch` (design only; impl branch TBD)
 **Sub-project of:** caliban Rust agent harness
 **Depends on:** `caliban-core` (WorkspaceRoot), `caliban` binary (system prompt assembly), ADR 0018
-**ADR:** [0018-memory-tier-model.md](../../../adrs/0018-memory-tier-model.md)
+**ADR:** [0018-memory-tier-model.md](../../../docs/adr/0018-memory-tier-model.md)
 
 ## Goal
 

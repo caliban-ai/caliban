@@ -23,7 +23,7 @@ ready to wire actual spawn/tool registration once the rmcp dependency lands.
 - parses_minimal_server, parses_full_server, valid_name_rule, project_overrides_user_wholesale, disabled_field_round_trip.
 
 **Spec:** `docs/superpowers/specs/2026-05-23-mcp-client-design.md`
-**ADR:** `adrs/0017-mcp-client-architecture.md`
+**ADR:** `docs/adr/0017-mcp-client-architecture.md`
 
 **Deferred to follow-up PR (call it v1.1):**
 - `rmcp` 1.7 dependency.

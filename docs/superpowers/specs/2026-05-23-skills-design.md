@@ -5,7 +5,7 @@
 **Target branch:** `jf/docs/roadmap-post-webfetch`
 **Sub-project of:** caliban Rust agent harness
 **Depends on:** `caliban-agent-core` (Tool trait), `caliban-provider` (ContentBlock)
-**Related ADR:** [`0019-skills-loading`](../../../adrs/0019-skills-loading.md)
+**Related ADR:** [`0019-skills-loading`](../../../docs/adr/0019-skills-loading.md)
 
 ## Goal
 

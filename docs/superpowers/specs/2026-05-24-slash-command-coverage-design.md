@@ -3,7 +3,7 @@
 **Date:** 2026-05-24
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0040-slash-command-registry.md`
+**ADR:** `docs/adr/0040-slash-command-registry.md`
 **Depends on:** several other 2026-05-24 specs for the commands whose
 underlying machinery they introduce (settings, hooks, MCP v2, plugins,
 checkpointing, OTel/cost, permission modes, output styles, sub-agents,

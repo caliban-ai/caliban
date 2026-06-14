@@ -1,7 +1,7 @@
 //! Built-in tools for reading and writing per-project auto-memory.
 //!
 //! See `docs/superpowers/specs/2026-05-24-auto-memory-design.md` and
-//! `adrs/0035-auto-memory.md`. Both tools are sandboxed to the
+//! `docs/adr/0035-auto-memory.md`. Both tools are sandboxed to the
 //! `auto_memory_dir` resolved at construction time — they never touch paths
 //! outside it.
 

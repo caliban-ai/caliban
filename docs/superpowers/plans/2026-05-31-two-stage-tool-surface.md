@@ -9,7 +9,7 @@
 **Tech stack:** Rust workspace, async-trait + tokio, `arc-swap` 1.7, serde, JSON schema (draft-07) at WARN-only validation.
 
 **Spec:** `docs/superpowers/specs/2026-05-31-two-stage-tool-surface-design.md`
-**ADR:** `adrs/0046-two-stage-tool-surface.md`
+**ADR:** `docs/adr/0046-two-stage-tool-surface.md`
 **Branch:** `strategic/two-stage-tool-surface`
 
 ---
@@ -1656,7 +1656,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 **Files:**
 - Modify: `docs/TODO.md` (move Performance & scaling entry to closed)
 - Modify: `docs/parity-gap-matrix.md` (F.ToolSearch + F.WaitForMcpServers → 🟡; refresh date line)
-- Modify: `adrs/0046-two-stage-tool-surface.md` (status: proposed → accepted)
+- Modify: `docs/adr/0046-two-stage-tool-surface.md` (status: proposed → accepted)
 
 - [ ] **Step 1: TODO update**
 
@@ -1691,12 +1691,12 @@ Update the **Last refreshed** line at the top to add a new note about ADR-0046.
 
 - [ ] **Step 3: ADR status flip**
 
-In `adrs/0046-two-stage-tool-surface.md` change `**Status:** proposed` → `**Status:** accepted`. Update the ADR index in `adrs/README.md` so row 0046 says `accepted` instead of `proposed`.
+In `docs/adr/0046-two-stage-tool-surface.md` change `**Status:** proposed` → `**Status:** accepted`. Update the ADR index in `docs/adr/README.md` so row 0046 says `accepted` instead of `proposed`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/TODO.md docs/parity-gap-matrix.md adrs/0046-two-stage-tool-surface.md adrs/README.md
+git add docs/TODO.md docs/parity-gap-matrix.md docs/adr/0046-two-stage-tool-surface.md docs/adr/README.md
 git commit -m "docs: close two-stage tool surface TODO; matrix F.ToolSearch \U0001f534→\U0001f7e1; ADR-0046 accepted
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"

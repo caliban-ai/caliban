@@ -35,10 +35,10 @@ crates/caliban-agent-core/
     ├── compactors.rs                Task 4
     ├── integration.rs               Task 8 (most tests)
     └── streaming.rs                 Task 8 (stream event coverage)
-adrs/
+docs/adr/
 └── 0009-agent-core-design.md        Task 9
 README.md                            Task 9 (modified)
-adrs/README.md                       Task 9 (modified — index)
+docs/adr/README.md                       Task 9 (modified — index)
 Cargo.toml                           Task 1 (modified — workspace member)
 ```
 
@@ -1706,8 +1706,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ## Task 9: ADR 0009 + README update
 
 **Files:**
-- Create: `adrs/0009-agent-core-design.md`
-- Modify: `adrs/README.md` (index)
+- Create: `docs/adr/0009-agent-core-design.md`
+- Modify: `docs/adr/README.md` (index)
 - Modify: `README.md`
 
 - [ ] **Step 1: ADR 0009**
@@ -1757,7 +1757,7 @@ the default compaction strategy is.
   consistently mis-estimated (integrate a tokenizer crate).
 ```
 
-- [ ] **Step 2: Update `adrs/README.md`**
+- [ ] **Step 2: Update `docs/adr/README.md`**
 
 Append a row to the index table:
 
@@ -1821,7 +1821,7 @@ cargo test   --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-git add adrs/ README.md
+git add docs/adr/ README.md
 git commit -m "docs(layer-1): ADR 0009 + README update for caliban-agent-core
 
 Adds ADR 0009 capturing the three big agent-core design decisions:

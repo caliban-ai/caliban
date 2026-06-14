@@ -482,11 +482,11 @@ Layer 1 / B is done when **all** of the following hold:
 - Cloud transports (`bedrock`, `vertex-anthropic`, `vertex-gemini`, `azure`) have live tests gated on `bedrock,vertex,azure` features AND credentials being present.
 
 **Documentation**
-- New ADRs under `adrs/`:
+- New ADRs under `docs/adr/`:
   - `0006-message-schema-ir.md` — provider-neutral IR choice (final iteration of the message-schema decision deferred from Layer 0).
   - `0007-transport-trait-pattern.md` — schema/transport factoring decision.
   - `0008-system-role-positional.md` — `Role::System` leading-only constraint.
-- `adrs/README.md` index updated to list the three new ADRs.
+- `docs/adr/README.md` index updated to list the three new ADRs.
 - Each schema-family crate has a top-level rustdoc on `lib.rs` describing supported transports, models, and known quirks.
 - README updated to describe B's deliverables (replace the "no real agent runtime yet" caveat with a brief description of the provider crates).
 

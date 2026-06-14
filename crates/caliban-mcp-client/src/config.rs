@@ -2,7 +2,7 @@
 //!
 //! Phase B extends the v1 stdio-only schema with HTTP and SSE transports plus
 //! per-server permission blocks. See `docs/superpowers/specs/2026-05-24-mcp-v2-design.md`
-//! and `adrs/0023-mcp-v2-transports-and-oauth.md`.
+//! and `docs/adr/0023-mcp-v2-transports-and-oauth.md`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

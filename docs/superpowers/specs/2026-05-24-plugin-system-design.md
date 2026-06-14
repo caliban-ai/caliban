@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0030-plugin-packaging.md`
+**ADR:** `docs/adr/0030-plugin-packaging.md`
 **Depends on:** `docs/superpowers/specs/2026-05-24-hooks-expansion-design.md`
 (the unified hooks taxonomy must land first so plugin-bundled hooks have a
 config schema to plug into).

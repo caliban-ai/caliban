@@ -521,7 +521,7 @@ C is done when **all** of the following hold:
 - `Box<dyn Tool + Send + Sync>` compiles. `Box<dyn Hooks + Send + Sync>` compiles. `Box<dyn Compactor + Send + Sync>` compiles. (Object safety verified.)
 
 **Documentation**
-- One new ADR at `adrs/0009-agent-core-design.md` capturing: stream-as-primitive, retry-only-on-provider-call, sequential tool execution, NoopCompactor default.
+- One new ADR at `docs/adr/0009-agent-core-design.md` capturing: stream-as-primitive, retry-only-on-provider-call, sequential tool execution, NoopCompactor default.
 - README updated with a runnable example using `caliban-agent-core` + `MockProvider`.
 
 **Cross-crate**

@@ -4,7 +4,7 @@
 **Author:** john.ford2002@gmail.com
 **Status:** Implemented
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0035-auto-memory.md`
+**ADR:** `docs/adr/0035-auto-memory.md`
 
 ## Goal
 

@@ -4,7 +4,7 @@
 **Author:** john.ford2002@gmail.com
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0034-bedrock-and-vertex-providers.md`
+**ADR:** `docs/adr/0034-bedrock-and-vertex-providers.md`
 
 ## Goal
 

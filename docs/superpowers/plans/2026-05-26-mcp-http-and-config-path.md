@@ -4,7 +4,7 @@
 
 **Goal:** Make HTTP / SSE / OAuth MCP servers configured in `mcp.toml` actually load in production, and make every user-facing reference to the user-scope `mcp.toml` path agree with the discovery rules on each OS.
 
-**Spec / ADR:** [`docs/superpowers/specs/2026-05-24-mcp-v2-design.md`](../specs/2026-05-24-mcp-v2-design.md), [`adrs/0023-mcp-v2-transports-and-oauth.md`](../../../adrs/0023-mcp-v2-transports-and-oauth.md).
+**Spec / ADR:** [`docs/superpowers/specs/2026-05-24-mcp-v2-design.md`](../specs/2026-05-24-mcp-v2-design.md), [`docs/adr/0023-mcp-v2-transports-and-oauth.md`](../../../docs/adr/0023-mcp-v2-transports-and-oauth.md).
 
 ---
 

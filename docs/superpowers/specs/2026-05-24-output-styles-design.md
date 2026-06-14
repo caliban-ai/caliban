@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0031-output-styles.md`
+**ADR:** `docs/adr/0031-output-styles.md`
 **Depends on:** `caliban-memory::MemoryPrefix::splice_into` (the splice
 pattern is reused), `caliban-skills` (frontmatter parser reused via
 `serde_yaml`), `docs/superpowers/specs/2026-05-24-plugin-system-design.md`

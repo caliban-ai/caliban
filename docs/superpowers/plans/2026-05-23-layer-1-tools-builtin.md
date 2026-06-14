@@ -26,10 +26,10 @@ crates/caliban-tools-builtin/
     ├── bash.rs               Task 5
     ├── glob_.rs              Task 6
     └── grep.rs               Task 7
-adrs/
+docs/adr/
 └── 0010-workspace-root.md    Task 8
 README.md                     Task 8 (modified)
-adrs/README.md                Task 8 (modified — index)
+docs/adr/README.md                Task 8 (modified — index)
 Cargo.toml                    Task 1 (modified — workspace member + deps)
 ```
 
@@ -670,7 +670,7 @@ ADR 0010 — workspace-root path resolution + restricted mode.
 README: mention the tool set in the project status.
 
 ```bash
-git add adrs/ README.md
+git add docs/adr/ README.md
 git commit -m "docs: ADR 0010 + README update for caliban-tools-builtin"
 ```
 

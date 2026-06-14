@@ -3352,7 +3352,7 @@ git commit -m "docs(readme): rewrite Permissions section for v2 (TOML, modal wri
 ### Task 8.3: ADR 0034
 
 **Files:**
-- Create: `adrs/0034-permissions-v2-and-toml-primary-config.md`
+- Create: `docs/adr/0034-permissions-v2-and-toml-primary-config.md`
 
 - [ ] **Step 1: Write the ADR**
 
@@ -3429,7 +3429,7 @@ ports between machines; (4) there was no full management surface
 - [ ] **Step 2: Commit**
 
 ```bash
-git add adrs/0034-permissions-v2-and-toml-primary-config.md
+git add docs/adr/0034-permissions-v2-and-toml-primary-config.md
 git commit -m "adr(0034): permissions v2 — TOML-primary, ordered rules, modal writeback, hardening"
 ```
 
@@ -3506,7 +3506,7 @@ gh pr create --title "feat(perms): v2 — TOML-primary, schema v2, modal writeba
 - Adds `/permissions` editor surface + `caliban perms` CLI (list/test/explain/add/remove/import/export/audit/lint).
 - Hardening: `permissions.enforce` lockdown, JSONL decision log with rotation, always-visible bypass-latch chip + `Ctrl+Shift+B` drop.
 - Spec: `docs/superpowers/specs/2026-05-31-permissions-v2-design.md`
-- ADR: `adrs/0034-permissions-v2-and-toml-primary-config.md`
+- ADR: `docs/adr/0034-permissions-v2-and-toml-primary-config.md`
 
 ## Test plan
 - [x] `cargo test --workspace` green

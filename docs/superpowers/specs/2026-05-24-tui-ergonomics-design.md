@@ -3,7 +3,7 @@ title: TUI ergonomics pack
 date: 2026-05-24
 status: Implemented
 author: john.ford2002@gmail.com
-adr: adrs/0027-tui-ergonomics.md
+adr: docs/adr/0027-tui-ergonomics.md
 ---
 
 # TUI ergonomics pack — Design
@@ -11,7 +11,7 @@ adr: adrs/0027-tui-ergonomics.md
 **Date:** 2026-05-24
 **Status:** Implemented
 **Sub-project of:** caliban Rust agent harness
-**ADR:** `adrs/0027-tui-ergonomics.md`
+**ADR:** `docs/adr/0027-tui-ergonomics.md`
 
 ## Goal
 

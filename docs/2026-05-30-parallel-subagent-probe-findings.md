@@ -98,7 +98,7 @@ downstream tool can't distinguish "caliban serialised the calls" from
 looking at stream-json alone. Frames also carry no timestamps.
 
 **Suggested fix:** document the deferred-emission semantic in
-`adrs/0025-headless-output-protocol.md` (the headless output protocol
+`docs/adr/0025-headless-output-protocol.md` (the headless output protocol
 ADR), so consumers know not to use frame ordering as a timing signal.
 Optional follow-up: an opt-in `--include-tool-dispatch-events` (or a
 millisecond-precision `t_ms` field on `tool_use`/`tool_result` frames)

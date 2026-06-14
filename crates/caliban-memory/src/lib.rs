@@ -1,11 +1,11 @@
 //! File-backed memory tiers spliced into the caliban system prompt.
 //!
 //! See `docs/superpowers/specs/2026-05-23-memory-tier-1-design.md` and
-//! `adrs/0018-memory-tier-model.md`; auto-memory extensions live in
+//! `docs/adr/0018-memory-tier-model.md`; auto-memory extensions live in
 //! `docs/superpowers/specs/2026-05-24-auto-memory-design.md` /
-//! `adrs/0035-auto-memory.md`; ancestor walk + `@`-imports in
+//! `docs/adr/0035-auto-memory.md`; ancestor walk + `@`-imports in
 //! `docs/superpowers/specs/2026-05-24-claudemd-ancestry-design.md` /
-//! `adrs/0036-claudemd-ancestry-and-imports.md`.
+//! `docs/adr/0036-claudemd-ancestry-and-imports.md`.
 
 #![allow(clippy::multiple_crate_versions)]
 

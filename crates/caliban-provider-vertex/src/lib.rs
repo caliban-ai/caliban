@@ -12,7 +12,7 @@
 //! - `name() -> "vertex"` so the model router and telemetry attribute it
 //!   correctly.
 //!
-//! See `adrs/0034-bedrock-and-vertex-providers.md` and
+//! See `docs/adr/0034-bedrock-and-vertex-providers.md` and
 //! `docs/superpowers/specs/2026-05-24-bedrock-vertex-providers-design.md`.
 
 #![allow(clippy::missing_errors_doc)]

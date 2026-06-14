@@ -1,7 +1,7 @@
 //! MCP client — Phase C (OAuth + elicitation + resources).
 //!
 //! See `docs/superpowers/specs/2026-05-24-mcp-v2-design.md` and
-//! `adrs/0023-mcp-v2-transports-and-oauth.md`. Phase A's stdio wiring and
+//! `docs/adr/0023-mcp-v2-transports-and-oauth.md`. Phase A's stdio wiring and
 //! Phase B's HTTP/SSE transports carry over unchanged; Phase C adds:
 //!
 //! * [`oauth`] — PKCE + loopback callback, RFC 8414 discovery, manual config,

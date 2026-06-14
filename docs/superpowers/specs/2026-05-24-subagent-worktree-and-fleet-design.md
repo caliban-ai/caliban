@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Author:** john.ford2002@gmail.com
 **Sub-project of:** caliban Rust agent harness
-**Companion ADR:** `adrs/0037-subagent-isolation-and-background-fleet.md`
+**Companion ADR:** `docs/adr/0037-subagent-isolation-and-background-fleet.md`
 **Builds on:** ADR 0021 (sub-agent primitive), ADR 0024 (hook taxonomy — hook
 inheritance finish), the unified-settings spec (daemon socket path).
 

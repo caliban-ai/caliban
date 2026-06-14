@@ -963,8 +963,8 @@ EOF
 
 ## Task 4: ADR 0011 + README update
 
-- Create `adrs/0011-sessions-and-repl.md` capturing: session-as-file (vs sqlite), name-validation regex, REPL-as-additive-feature, slash-command syntax.
-- Append `0011` row to `adrs/README.md` index.
+- Create `docs/adr/0011-sessions-and-repl.md` capturing: session-as-file (vs sqlite), name-validation regex, REPL-as-additive-feature, slash-command syntax.
+- Append `0011` row to `docs/adr/README.md` index.
 - Update root README:
   - Note Sessions + REPL in the "Project status" callout.
   - Add `caliban-sessions/` to repo layout.

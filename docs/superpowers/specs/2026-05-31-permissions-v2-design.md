@@ -4,7 +4,7 @@ date: 2026-05-31
 status: Proposed
 author: john.ford2002@gmail.com
 supersedes_partial: 2026-05-23-permissions-design.md, 2026-05-24-settings-hierarchy-design.md
-adr: adrs/0034-permissions-v2-and-toml-primary-config.md (to be drafted)
+adr: docs/adr/0034-permissions-v2-and-toml-primary-config.md (to be drafted)
 ---
 
 # Permissions v2 — Design
@@ -12,9 +12,9 @@ adr: adrs/0034-permissions-v2-and-toml-primary-config.md (to be drafted)
 **Date:** 2026-05-31
 **Status:** Proposed
 **Sub-project of:** caliban Rust agent harness
-**Related ADRs:** [0020 — Permission rules](../../../adrs/0020-permission-rules.md),
-[0026 — Settings layering](../../../adrs/0026-settings-layering.md) (refined here),
-[0029 — Permission modes + auto-mode](../../../adrs/0029-permission-modes-and-auto-mode.md)
+**Related ADRs:** [0020 — Permission rules](../../../docs/adr/0020-permission-rules.md),
+[0026 — Settings layering](../../../docs/adr/0026-settings-layering.md) (refined here),
+[0029 — Permission modes + auto-mode](../../../docs/adr/0029-permission-modes-and-auto-mode.md)
 
 ## Goal
 
@@ -1038,7 +1038,7 @@ the existing `caliban-tui` test harness.
   schema, modal writeback, the CLI, `enforce`, the audit log, and
   the bypass-chip behavior. Old `permissions.toml` example file at
   `docs/examples/permissions.example.toml` updated to v2 form.
-- A new ADR (`adrs/0034-permissions-v2-and-toml-primary-config.md`)
+- A new ADR (`docs/adr/0034-permissions-v2-and-toml-primary-config.md`)
   in `accepted` status alongside this implementation; refines ADR
   0026 explicitly under its "Status" header.
 
