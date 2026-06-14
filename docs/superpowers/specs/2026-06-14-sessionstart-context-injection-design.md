@@ -64,14 +64,25 @@ pub struct SessionStartOutcome {
 - Rejected alternative: reuse `HookDecision`. Its allow/deny/rewrite semantics do not
   fit additive context, and `session_start` has no notion of denial.
 
-### 2. External (config) hooks
+### 2. External (config) hooks — parse support only (scope boundary)
 
-`hooks_router.rs` handlers (`ShellCommandHook`, `HttpHook`, `PromptHook`, `AgentHook`,
-`McpHook`) spawn the handler, send the event envelope as JSON on stdin, and parse stdout.
-For SessionStart, extend the parse path to read `additionalContext` from the handler's
-stdout JSON and surface it via `SessionStartOutcome::additional_context`.
+**Scope note (discovered during planning):** config-defined hooks are *not currently
+executed at runtime at all*. `load_hooks_config` loads `HooksConfig`, but the result is
+used only for the summary count + `disable_all_hooks` flag (`caliban/src/main.rs:332-334`);
+the agent `Hooks` chain (`caliban/src/startup.rs:1863`) is composed solely of
+`HeadlessHookSink` + `PermissionsHook`. The router handlers (`ShellCommandHook`, `HttpHook`)
+only implement `before_tool`/`after_tool` and are never constructed from config. So no
+`[[hooks.SessionStart]]` handler fires today, for any event.
 
-Accepted JSON shapes (Claude Code-compatible):
+Wiring config handlers into the runtime is a general capability, not SessionStart-specific,
+and is tracked separately as **#121** (depends on this surface). **#106 is scoped to the
+injection surface**: the typed return, the system-prompt splice, gating, and a reusable
+`additionalContext` parser so that when #121 lands, external SessionStart hooks inject for
+free.
+
+Concretely, in #106 we add a parser (`hooks_router::parse_session_start_context`) that
+reads `additionalContext` from a handler's stdout JSON, unit-tested in isolation. Accepted
+JSON shapes (Claude Code-compatible):
 
 ```json
 { "additionalContext": "text..." }
@@ -83,8 +94,8 @@ and the nested form:
 { "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": "text..." } }
 ```
 
-Non-JSON or absent `additionalContext` → no context contributed (empty), preserving
-current best-effort behavior.
+Non-JSON or absent `additionalContext` → empty (no context). The parser exists and is
+tested here; *invoking* it from a wired config handler is #121's job.
 
 ### 3. Placement — system-prompt block
 
@@ -145,7 +156,15 @@ the `hooks_router.rs` handlers, `PermissionsHook`, and test doubles (e.g. the
 
 ## Acceptance criteria (from #106)
 
-- [x] A configured SessionStart hook can inject context that reaches the model on turn 1.
+- [x] A SessionStart hook (trait impl) can inject context that reaches the model on turn 1.
+      *(For external **config** hooks this completes once #121 wires config-handler
+      execution; the `additionalContext` parser ships here, tested.)*
 - [x] Injection respects `disable_all_hooks` / managed-hooks gating.
 - [x] Existing #56 built-in nudge still works when no hook supplies guidance.
-- [x] Unit/integration coverage for the inject-and-splice path.
+- [x] Unit/integration coverage for the inject-and-splice path (trait-impl hook end-to-end;
+      parser unit-tested).
+
+## Follow-up
+
+- **#121** — execute config-defined `[[hooks.*]]` handlers at runtime; unblocks
+  external SessionStart hooks injecting via this surface end-to-end.
