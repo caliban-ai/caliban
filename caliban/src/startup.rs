@@ -2122,6 +2122,53 @@ mod tests {
         Args::try_parse_from(argv).expect("clap parse")
     }
 
+    #[tokio::test]
+    async fn session_context_is_spliced_into_prompt() {
+        use super::resolve_system_prompt;
+        use caliban_agent_core::{Agent, ToolRegistry};
+        use caliban_provider::{MockProvider, Provider};
+        use std::sync::Arc;
+
+        // Minimal offline agent (no network) with an empty tool registry, so
+        // the default coding-assistant prompt is in effect and no skills block
+        // is emitted.
+        let provider: Arc<dyn Provider + Send + Sync> = Arc::new(MockProvider::new());
+        let agent = Arc::new(
+            Agent::builder()
+                .provider(provider)
+                .tools(ToolRegistry::new())
+                .model("mock")
+                .max_tokens(64)
+                .max_turns(1)
+                .build()
+                .expect("agent builder"),
+        );
+        // `--bare` skips memory load so the test is hermetic.
+        let args = parse_args(&["--bare"]);
+        let settings = caliban_settings::Settings::default();
+        let cwd = std::env::current_dir().unwrap();
+
+        let with_ctx =
+            resolve_system_prompt(&args, &agent, &cwd, &settings, &["INJECTED-MARKER".to_string()])
+                .await
+                .unwrap()
+                .expect("default prompt in effect");
+        assert!(
+            with_ctx.contains("<session-context>"),
+            "session-context block should be present when context is supplied"
+        );
+        assert!(with_ctx.contains("INJECTED-MARKER"));
+
+        let without_ctx = resolve_system_prompt(&args, &agent, &cwd, &settings, &[])
+            .await
+            .unwrap()
+            .expect("default prompt in effect");
+        assert!(
+            !without_ctx.contains("<session-context>"),
+            "no session-context block when no context is supplied"
+        );
+    }
+
     #[test]
     fn debug_disabled_without_any_flag() {
         // Guard on the ambient env var so a dev with CALIBAN_DEBUG exported
