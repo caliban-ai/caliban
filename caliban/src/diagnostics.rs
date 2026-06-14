@@ -180,7 +180,7 @@ fn check_session_store() -> DiagCheck {
 
 fn check_skills(workspace: &Path) -> DiagCheck {
     let roots = caliban_skills::default_roots(workspace);
-    let skills = caliban_skills::load_skills(&roots);
+    let report = caliban_skills::load_skills_report(&roots);
     let roots_present: Vec<_> = roots
         .iter()
         .filter(|p| p.exists())
@@ -198,10 +198,32 @@ fn check_skills(workspace: &Path) -> DiagCheck {
     } else {
         format!(" (scanned: {})", roots_present.join(", "))
     };
-    DiagCheck {
-        name: "skills",
-        status: CheckStatus::Pass,
-        hint: format!("{} skill(s) loaded{suffix}", skills.len()),
+
+    // Discovered-but-rejected skills (name/dir mismatch, bad frontmatter) are a
+    // footgun: they look loaded but silently vanish. Surface them as a Warn row
+    // naming each file and reason — see issue #107.
+    if report.skips.is_empty() {
+        DiagCheck {
+            name: "skills",
+            status: CheckStatus::Pass,
+            hint: format!("{} skill(s) loaded{suffix}", report.skills.len()),
+        }
+    } else {
+        let detail = report
+            .skips
+            .iter()
+            .map(|s| format!("{} ({})", s.path.display(), s.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        DiagCheck {
+            name: "skills",
+            status: CheckStatus::Warn,
+            hint: format!(
+                "{} skill(s) loaded, {} skipped{suffix} — skipped: {detail}",
+                report.skills.len(),
+                report.skips.len(),
+            ),
+        }
     }
 }
 
@@ -816,6 +838,38 @@ mod tests {
                 "expected a `{expected}` check row in doctor output"
             );
         }
+    }
+
+    #[test]
+    fn check_skills_warns_on_mismatched_skill() {
+        // A SKILL.md whose frontmatter name disagrees with its directory is
+        // rejected by the loader; doctor must surface it (Warn) rather than
+        // letting it vanish silently — issue #107.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_md = tmp.path().join(".caliban/skills/foo/SKILL.md");
+        std::fs::create_dir_all(skill_md.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill_md,
+            "---\nname: bar\ndescription: \"misnamed skill\"\n---\n\n# bar\n",
+        )
+        .unwrap();
+
+        let check = check_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.hint.contains("1 skipped"), "hint: {}", check.hint);
+        assert!(
+            check.hint.contains("does not match parent directory"),
+            "hint should name the reason: {}",
+            check.hint
+        );
+    }
+
+    #[test]
+    fn check_skills_passes_with_no_skills() {
+        // Empty workspace: no roots, no skips → Pass.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let check = check_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Pass);
     }
 
     #[test]
