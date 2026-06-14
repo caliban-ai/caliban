@@ -128,7 +128,7 @@ pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
 #[must_use]
 pub fn build_config_hooks(
     cfg: &crate::hooks_config::HooksConfig,
-    http_client: reqwest::Client,
+    http_client: &reqwest::Client,
 ) -> Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> {
     use crate::hooks_config::HookHandlerType;
 
@@ -715,7 +715,7 @@ tool = "t"
 "#;
         let cfg =
             crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
-        let hooks = build_config_hooks(&cfg, test_client());
+        let hooks = build_config_hooks(&cfg, &test_client());
         // 1 command handler built; the mcp stub is skipped.
         assert_eq!(hooks.len(), 1);
     }
@@ -731,7 +731,7 @@ command = "/bin/true"
 "#;
         let cfg =
             crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
-        assert!(build_config_hooks(&cfg, test_client()).is_empty());
+        assert!(build_config_hooks(&cfg, &test_client()).is_empty());
     }
 
     #[test]
@@ -745,7 +745,7 @@ command = "/bin/true"
 "#;
         let cfg =
             crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
-        assert!(build_config_hooks(&cfg, test_client()).is_empty());
+        assert!(build_config_hooks(&cfg, &test_client()).is_empty());
     }
 
     #[test]

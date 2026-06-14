@@ -11,6 +11,13 @@ the patch version for fixes.
 
 ### Added
 
+- **Config-defined hooks execute at runtime** (#121): `[[hooks.*]]` handlers in
+  settings are now built into executing `command`/`http` handlers and composed
+  into the agent's hook chain (previously they were parsed but never fired). This
+  completes end-to-end external `[[hooks.SessionStart]]` `additionalContext`
+  injection via the #106 surface. `disable_all_hooks` is honored;
+  `allow_managed_hooks_only` conservatively fires none until handler scope
+  provenance lands (#124); `mcp`/`prompt`/`agent` kinds are skipped with a warning.
 - **SessionStart context-injection hook surface** (#106): `session_start` hooks
   can return a `SessionStartOutcome` whose `additional_context` is spliced into
   the system prompt before turn 1 (via a `<session-context>` block), letting skill

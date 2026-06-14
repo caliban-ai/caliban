@@ -27,7 +27,7 @@ fn client() -> reqwest::Client {
 /// Build the bridge handlers and wrap them in a `CompositeHooks`, coercing the
 /// `Send + Sync` trait objects to the plain `dyn Hooks` the constructor takes.
 fn compose(cfg: &HooksConfig) -> CompositeHooks {
-    let layers: Vec<std::sync::Arc<dyn Hooks>> = build_config_hooks(cfg, client())
+    let layers: Vec<std::sync::Arc<dyn Hooks>> = build_config_hooks(cfg, &client())
         .into_iter()
         .map(|h| h as std::sync::Arc<dyn Hooks>)
         .collect();

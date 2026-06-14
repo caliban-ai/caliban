@@ -1882,7 +1882,7 @@ pub(crate) fn build_agent(
         // Config-defined `[[hooks.*]]` handlers (#121), inserted after the
         // observability sink and before the permission gate so a config
         // `PreToolUse` deny short-circuits the permission check.
-        for h in caliban_agent_core::build_config_hooks(hooks_cfg, web_fetch_client()) {
+        for h in caliban_agent_core::build_config_hooks(hooks_cfg, &web_fetch_client()) {
             layers.push(h);
         }
         if let Some(p) = permissions_hook {
