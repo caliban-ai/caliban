@@ -112,6 +112,84 @@ pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Config → runtime bridge
+// ---------------------------------------------------------------------------
+
+/// Build executing hook trait objects from a parsed [`HooksConfig`], for
+/// composition into the agent `Hooks` chain. Returns an empty vec when hooks are
+/// globally disabled.
+///
+/// `allow_managed_hooks_only` currently yields an empty vec + a warning: the
+/// flattened `HooksConfig` has lost per-handler scope, so we cannot prove a
+/// handler is managed and conservatively fire none (precise firing → #124).
+///
+/// `Mcp` / `Prompt` / `Agent` handler kinds are v1 stubs and are skipped with a
+/// warning (not silently dropped).
+#[must_use]
+pub fn build_config_hooks(
+    cfg: &crate::hooks_config::HooksConfig,
+    http_client: reqwest::Client,
+) -> Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> {
+    use crate::hooks_config::HookHandlerType;
+
+    if cfg.disable_all_hooks {
+        return Vec::new();
+    }
+    if cfg.allow_managed_hooks_only {
+        tracing::warn!(
+            "allow_managed_hooks_only is set but handler scope is not tracked; \
+             firing no config hooks (see #124)"
+        );
+        return Vec::new();
+    }
+
+    let mut out: Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> = Vec::new();
+    for (event_name, handlers) in &cfg.events {
+        for h in handlers {
+            match h.kind {
+                HookHandlerType::Command => {
+                    let Some(command) = h.command.clone() else {
+                        tracing::warn!(event = %event_name, "command hook missing `command`; skipping");
+                        continue;
+                    };
+                    out.push(std::sync::Arc::new(ShellCommandHook {
+                        command,
+                        args: h.args.clone(),
+                        timeout: h.timeout,
+                        env: h.env.clone(),
+                        matcher: h.matcher.clone(),
+                        event_name: event_name.clone(),
+                    }));
+                }
+                HookHandlerType::Http => {
+                    let Some(url) = h.url.clone() else {
+                        tracing::warn!(event = %event_name, "http hook missing `url`; skipping");
+                        continue;
+                    };
+                    out.push(std::sync::Arc::new(HttpHook {
+                        url,
+                        headers: h.headers.clone(),
+                        timeout: h.timeout,
+                        allowed_url_globs: cfg.allowed_http_hook_urls.clone(),
+                        event_name: event_name.clone(),
+                        matcher: h.matcher.clone(),
+                        client: http_client.clone(),
+                    }));
+                }
+                HookHandlerType::Mcp | HookHandlerType::Prompt | HookHandlerType::Agent => {
+                    tracing::warn!(
+                        event = %event_name,
+                        kind = ?h.kind,
+                        "config hook kind not yet executable at runtime; skipping"
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // ShellCommandHook
 // ---------------------------------------------------------------------------
 
@@ -615,6 +693,59 @@ mod tests {
     fn empty_blob_is_allow() {
         assert!(matches!(parse_decision_blob(""), HookDecision::Allow));
         assert!(matches!(parse_decision_blob("   "), HookDecision::Allow));
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().build().unwrap()
+    }
+
+    #[test]
+    fn bridge_builds_command_and_skips_stub_kinds() {
+        let toml = r#"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+[[hooks.SessionStart]]
+[[hooks.SessionStart.handlers]]
+type = "mcp"
+mcp = "srv"
+tool = "t"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        let hooks = build_config_hooks(&cfg, test_client());
+        // 1 command handler built; the mcp stub is skipped.
+        assert_eq!(hooks.len(), 1);
+    }
+
+    #[test]
+    fn bridge_disable_all_hooks_is_empty() {
+        let toml = r#"
+disable_all_hooks = true
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        assert!(build_config_hooks(&cfg, test_client()).is_empty());
+    }
+
+    #[test]
+    fn bridge_managed_only_is_empty() {
+        let toml = r#"
+allow_managed_hooks_only = true
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        assert!(build_config_hooks(&cfg, test_client()).is_empty());
     }
 
     #[test]
