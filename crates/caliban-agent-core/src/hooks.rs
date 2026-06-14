@@ -45,12 +45,12 @@ pub enum TurnDecision {
     Stop,
 }
 
-/// Outcome of [`Hooks::session_start`]. Carries context blocks a SessionStart
+/// Outcome of [`Hooks::session_start`]. Carries context blocks a `SessionStart`
 /// hook wants spliced into the system prompt before the first turn. Empty by
 /// default (the common case: a hook with no context to contribute).
 #[derive(Debug, Clone, Default)]
 pub struct SessionStartOutcome {
-    /// Context blocks contributed by SessionStart hooks, in firing order.
+    /// Context blocks contributed by `SessionStart` hooks, in firing order.
     /// Each entry is appended to the system prompt's session-context block.
     pub additional_context: Vec<String>,
 }
