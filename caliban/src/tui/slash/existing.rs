@@ -94,7 +94,7 @@ impl SlashCommand for MemoryCommand {
         &SlashCommandMeta {
             name: "/memory",
             description: "view or edit memory tiers and topic files",
-            args_hint: "[list|show <slug>|edit <slug>|delete <slug>]",
+            args_hint: "[list|show <slug>|edit <slug>|delete <slug> --force]",
             hidden: false,
             immediate: true,
         }
@@ -129,7 +129,7 @@ impl SlashCommand for MemoryCommand {
                         ));
                     }
                     ctx.app.transcript.push(TranscriptLine::Info(
-                        "subcommands: /memory list | show <slug> | edit <slug> | delete <slug>"
+                        "subcommands: /memory list | show <slug> | edit <slug> | delete <slug> --force"
                             .into(),
                     ));
                 }
@@ -234,24 +234,53 @@ impl SlashCommand for MemoryCommand {
                 )));
             }
             "delete" | "rm" => {
-                if rest.is_empty() {
-                    ctx.app.transcript.push(TranscriptLine::Info(
-                        "usage: /memory delete <slug>  (also: /memory rm <slug>)".into(),
-                    ));
+                let parsed = parse_delete_args(rest);
+                let usage = "usage: /memory delete <slug> --force  (also: /memory rm <slug>)";
+                let Some(slug) = parsed.slug.clone() else {
+                    ctx.app.transcript.push(TranscriptLine::Info(usage.into()));
+                    return Ok(SlashOutcome::Continue);
+                };
+                if let Err(e) = caliban_memory::auto::validate_slug(&slug) {
+                    ctx.app
+                        .transcript
+                        .push(TranscriptLine::Error(format!("bad slug: {e}")));
                     return Ok(SlashOutcome::Continue);
                 }
                 let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-                match loader.delete(rest) {
-                    Ok(()) => {
-                        ctx.app
-                            .transcript
-                            .push(TranscriptLine::Info(format!("deleted topic '{rest}'")));
+                let path = loader.dir().join(format!("{slug}.md"));
+                match delete_action(&parsed, path.exists()) {
+                    // Unreachable: the let-else above returns on a missing slug.
+                    // Handled defensively rather than panicking.
+                    DeleteAction::Usage => {
+                        ctx.app.transcript.push(TranscriptLine::Info(usage.into()));
                     }
-                    Err(e) => {
-                        ctx.app
-                            .transcript
-                            .push(TranscriptLine::Error(format!("delete failed: {e}")));
+                    DeleteAction::NoSuchTopic => {
+                        ctx.app.transcript.push(TranscriptLine::Error(format!(
+                            "no such topic: {}",
+                            path.display()
+                        )));
                     }
+                    DeleteAction::Preview => {
+                        ctx.app.transcript.push(TranscriptLine::Info(format!(
+                            "will permanently delete {}",
+                            path.display()
+                        )));
+                        ctx.app.transcript.push(TranscriptLine::Info(format!(
+                            "re-run with: /memory delete {slug} --force"
+                        )));
+                    }
+                    DeleteAction::Delete => match loader.delete(&slug) {
+                        Ok(()) => {
+                            ctx.app
+                                .transcript
+                                .push(TranscriptLine::Info(format!("deleted topic '{slug}'")));
+                        }
+                        Err(e) => {
+                            ctx.app
+                                .transcript
+                                .push(TranscriptLine::Error(format!("delete failed: {e}")));
+                        }
+                    },
                 }
             }
             other => {
@@ -314,9 +343,138 @@ impl SlashCommand for OutputStyleCommand {
     }
 }
 
+/// Parsed `/memory delete` / `/memory rm` arguments: the topic slug (the
+/// first non-flag token) and whether the destructive `--force` flag was
+/// supplied. `--force` may appear before or after the slug. See
+/// caliban-ai/caliban#112 (confirmation gate).
+struct ParsedDelete {
+    slug: Option<String>,
+    force: bool,
+}
+
+/// Split the `rest` of a `delete`/`rm` invocation into a slug + force flag.
+/// The slug is the first whitespace-separated token that does not start
+/// with `--`; `force` is set if any token is exactly `--force`.
+fn parse_delete_args(rest: &str) -> ParsedDelete {
+    let mut slug = None;
+    let mut force = false;
+    for tok in rest.split_whitespace() {
+        if tok == "--force" {
+            force = true;
+        } else if !tok.starts_with("--") && slug.is_none() {
+            slug = Some(tok.to_string());
+        }
+    }
+    ParsedDelete { slug, force }
+}
+
+/// What the `delete`/`rm` handler should do once the slug is parsed and the
+/// target file's existence is known. Keeping this decision pure lets the
+/// safety property — "without `--force`, never `Delete`" — be unit-tested
+/// without an `App` or the filesystem. See caliban-ai/caliban#112.
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteAction {
+    /// No slug supplied — show usage.
+    Usage,
+    /// Slug given but the topic file does not exist.
+    NoSuchTopic,
+    /// File exists but `--force` was not supplied — echo the path and stop.
+    Preview,
+    /// File exists and `--force` was supplied — perform the delete.
+    Delete,
+}
+
+/// Decide the action for a parsed `delete`/`rm` invocation. `exists` is
+/// whether the resolved topic file is present. A missing slug is `Usage`;
+/// a missing file is `NoSuchTopic` even with `--force` (never a delete);
+/// an existing file deletes only when forced, otherwise previews.
+fn delete_action(parsed: &ParsedDelete, exists: bool) -> DeleteAction {
+    if parsed.slug.is_none() {
+        return DeleteAction::Usage;
+    }
+    if !exists {
+        return DeleteAction::NoSuchTopic;
+    }
+    if parsed.force {
+        DeleteAction::Delete
+    } else {
+        DeleteAction::Preview
+    }
+}
+
 pub(crate) fn register(registry: &mut SlashCommandRegistry) {
     registry.register(Arc::new(PlanCommand));
     registry.register(Arc::new(SkillsCommand));
     registry.register(Arc::new(MemoryCommand));
     registry.register(Arc::new(OutputStyleCommand));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeleteAction, delete_action, parse_delete_args};
+
+    #[test]
+    fn action_no_slug_is_usage() {
+        let p = parse_delete_args("");
+        assert_eq!(delete_action(&p, true), DeleteAction::Usage);
+    }
+
+    #[test]
+    fn action_missing_file_is_no_such_topic() {
+        let p = parse_delete_args("foo");
+        assert_eq!(delete_action(&p, false), DeleteAction::NoSuchTopic);
+    }
+
+    #[test]
+    fn action_existing_without_force_previews_never_deletes() {
+        let p = parse_delete_args("foo");
+        assert_eq!(delete_action(&p, true), DeleteAction::Preview);
+    }
+
+    #[test]
+    fn action_existing_with_force_deletes() {
+        let p = parse_delete_args("foo --force");
+        assert_eq!(delete_action(&p, true), DeleteAction::Delete);
+    }
+
+    #[test]
+    fn action_force_on_missing_file_is_no_such_topic_not_delete() {
+        let p = parse_delete_args("foo --force");
+        assert_eq!(delete_action(&p, false), DeleteAction::NoSuchTopic);
+    }
+
+    #[test]
+    fn delete_args_slug_only_is_not_forced() {
+        let p = parse_delete_args("foo");
+        assert_eq!(p.slug.as_deref(), Some("foo"));
+        assert!(!p.force);
+    }
+
+    #[test]
+    fn delete_args_slug_then_force_flag_sets_force() {
+        let p = parse_delete_args("foo --force");
+        assert_eq!(p.slug.as_deref(), Some("foo"));
+        assert!(p.force);
+    }
+
+    #[test]
+    fn delete_args_force_flag_before_slug_still_parses_both() {
+        let p = parse_delete_args("--force foo");
+        assert_eq!(p.slug.as_deref(), Some("foo"));
+        assert!(p.force);
+    }
+
+    #[test]
+    fn delete_args_empty_has_no_slug() {
+        let p = parse_delete_args("");
+        assert_eq!(p.slug, None);
+        assert!(!p.force);
+    }
+
+    #[test]
+    fn delete_args_force_only_has_no_slug() {
+        let p = parse_delete_args("--force");
+        assert_eq!(p.slug, None);
+        assert!(p.force);
+    }
 }
