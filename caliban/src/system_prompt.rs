@@ -156,6 +156,30 @@ pub(crate) fn append_skills_block(prompt: &str, skill_names: &[&str]) -> String 
     out
 }
 
+/// Append a `<session-context>` block carrying `SessionStart` hook-supplied
+/// context. Returns the prompt unchanged when `blocks` is empty (byte-identical
+/// to today's prompt — no delimiter emitted). Blocks are joined with a blank
+/// line in firing order.
+#[must_use]
+pub(crate) fn append_session_context_block(prompt: &str, blocks: &[String]) -> String {
+    if blocks.is_empty() {
+        return prompt.to_string();
+    }
+    let joined = blocks.join("\n\n");
+    let mut out = String::with_capacity(prompt.len() + joined.len() + 64);
+    out.push_str(prompt);
+    if !prompt.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n<session-context>\n");
+    out.push_str(&joined);
+    if !joined.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("</session-context>\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +189,23 @@ mod tests {
         let base = "You are caliban.\n";
         let out = append_todo_block(base, &[]);
         assert_eq!(out, base);
+    }
+
+    #[test]
+    fn session_context_block_empty_is_noop() {
+        let base = "You are caliban.\n";
+        assert_eq!(append_session_context_block(base, &[]), base);
+    }
+
+    #[test]
+    fn session_context_block_appends_wrapped() {
+        let base = "You are caliban.";
+        let out = append_session_context_block(base, &["alpha".to_string(), "beta".to_string()]);
+        assert!(out.starts_with("You are caliban."));
+        assert!(out.contains("<session-context>"));
+        assert!(out.contains("alpha"));
+        assert!(out.contains("beta"));
+        assert!(out.contains("</session-context>"));
     }
 
     #[test]
