@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
         permissions_hook,
         hook_event_buffer.as_ref(),
         &settings_snapshot,
+        &hooks_cfg,
         Arc::clone(&mcp_active),
         Arc::clone(&mcp_eager_servers),
     )?;

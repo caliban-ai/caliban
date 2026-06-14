@@ -1807,6 +1807,7 @@ pub(crate) fn build_agent(
     permissions_hook: Option<Arc<dyn caliban_agent_core::Hooks + Send + Sync>>,
     hook_event_buffer: Option<&headless::HookEventBuffer>,
     settings_snapshot: &caliban_settings::Settings,
+    hooks_cfg: &caliban_agent_core::HooksConfig,
     mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
     mcp_eager_servers: Arc<std::collections::HashSet<String>>,
 ) -> Result<Arc<Agent>> {
@@ -1877,6 +1878,12 @@ pub(crate) fn build_agent(
         let mut layers: Vec<Arc<dyn caliban_agent_core::Hooks>> = Vec::new();
         if let Some(buf) = hook_event_buffer {
             layers.push(Arc::new(headless::HeadlessHookSink::new(Arc::clone(buf))));
+        }
+        // Config-defined `[[hooks.*]]` handlers (#121), inserted after the
+        // observability sink and before the permission gate so a config
+        // `PreToolUse` deny short-circuits the permission check.
+        for h in caliban_agent_core::build_config_hooks(hooks_cfg, web_fetch_client()) {
+            layers.push(h);
         }
         if let Some(p) = permissions_hook {
             // PermissionsHook is `Send + Sync` but CompositeHooks accepts
