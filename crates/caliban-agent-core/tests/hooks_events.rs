@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use caliban_agent_core::{
     CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,
     FileChangedCtx, HookDecision, Hooks, NoopHooks, NotificationCtx, NotificationLevel, PermCtx,
-    PromptCtx, Result, SessionCtx, SessionOutcome, SubagentCtx, SubagentOutcome, TaskCtx,
-    TaskOutcome, ToolCtx,
+    PromptCtx, Result, SessionCtx, SessionOutcome, SessionStartOutcome, SubagentCtx,
+    SubagentOutcome, TaskCtx, TaskOutcome, ToolCtx,
 };
 
 /// Recording hook: appends event names + payload summary to a shared log.
@@ -33,9 +33,9 @@ impl RecorderHooks {
 
 #[async_trait]
 impl Hooks for RecorderHooks {
-    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<()> {
+    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
         self.push(format!("session_start:{}", ctx.session_id));
-        Ok(())
+        Ok(SessionStartOutcome::default())
     }
     async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()> {
         self.push(format!(
@@ -697,9 +697,9 @@ impl Hooks for AssertSilentNoop {
         self.bump();
         Ok(())
     }
-    async fn session_start(&self, _: &SessionCtx<'_>) -> Result<()> {
+    async fn session_start(&self, _: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
         self.bump();
-        Ok(())
+        Ok(SessionStartOutcome::default())
     }
     async fn session_end(&self, _: &SessionCtx<'_>, _: &SessionOutcome) -> Result<()> {
         self.bump();

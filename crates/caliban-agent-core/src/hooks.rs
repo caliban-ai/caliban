@@ -45,6 +45,16 @@ pub enum TurnDecision {
     Stop,
 }
 
+/// Outcome of [`Hooks::session_start`]. Carries context blocks a SessionStart
+/// hook wants spliced into the system prompt before the first turn. Empty by
+/// default (the common case: a hook with no context to contribute).
+#[derive(Debug, Clone, Default)]
+pub struct SessionStartOutcome {
+    /// Context blocks contributed by SessionStart hooks, in firing order.
+    /// Each entry is appended to the system prompt's session-context block.
+    pub additional_context: Vec<String>,
+}
+
 /// Per-run context for the `before_run` / `after_run` lifecycle events
 /// (ADR 0028). Fires once at the start / end of each `Agent::run` invocation.
 #[derive(Debug)]
@@ -406,9 +416,10 @@ pub trait Hooks: Send + Sync {
     }
 
     /// Fired once when a session begins (after settings load, before the
-    /// first user prompt).
-    async fn session_start(&self, _ctx: &SessionCtx<'_>) -> Result<()> {
-        Ok(())
+    /// first user prompt). Return [`SessionStartOutcome`] to contribute
+    /// context spliced into the system prompt before turn 1.
+    async fn session_start(&self, _ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
+        Ok(SessionStartOutcome::default())
     }
 
     /// Fired once when a session ends (after the last run, before persistence).
@@ -721,14 +732,16 @@ impl Hooks for CompositeHooks {
         Ok(())
     }
 
-    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<()> {
+    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
         if self.all_noop {
-            return Ok(());
+            return Ok(SessionStartOutcome::default());
         }
+        let mut merged = SessionStartOutcome::default();
         for h in &self.layers {
-            h.session_start(ctx).await?;
+            let outcome = h.session_start(ctx).await?;
+            merged.additional_context.extend(outcome.additional_context);
         }
-        Ok(())
+        Ok(merged)
     }
 
     async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()> {
@@ -943,4 +956,38 @@ fn path_to_value(p: &Path) -> serde_json::Value {
 #[doc(hidden)]
 pub fn __noop_path_use(p: PathBuf) -> PathBuf {
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn composite_session_start_concatenates_context_in_order() {
+        struct CtxHook(&'static str);
+        #[async_trait]
+        impl Hooks for CtxHook {
+            async fn session_start(&self, _ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
+                Ok(SessionStartOutcome {
+                    additional_context: vec![self.0.to_string()],
+                })
+            }
+        }
+        let composite = CompositeHooks::new(vec![
+            std::sync::Arc::new(CtxHook("first")) as std::sync::Arc<dyn Hooks>,
+            std::sync::Arc::new(CtxHook("second")) as std::sync::Arc<dyn Hooks>,
+        ]);
+        let cwd = std::path::Path::new(".");
+        let ctx = SessionCtx {
+            session_id: "t",
+            cwd,
+            provider: "test",
+            model: "m",
+        };
+        let out = composite.session_start(&ctx).await.unwrap();
+        assert_eq!(
+            out.additional_context,
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
 }

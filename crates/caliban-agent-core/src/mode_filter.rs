@@ -165,7 +165,10 @@ impl Hooks for ModeFilter {
         self.inner.after_turn(ctx, outcome).await
     }
 
-    async fn session_start(&self, ctx: &crate::hooks::SessionCtx<'_>) -> Result<()> {
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
         self.inner.session_start(ctx).await
     }
 
