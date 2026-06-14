@@ -107,6 +107,55 @@ pub(crate) fn append_todo_block(prompt: &str, todos: &[Todo]) -> String {
     out
 }
 
+/// Soft cap on the joined skill-name list in the skills-awareness block, so a
+/// pathological number of loaded skills cannot bloat the system prompt.
+const SKILL_NAMES_BUDGET_BYTES: usize = 2 * 1024;
+
+/// Append a `## Skills` awareness block to the system prompt when one or more
+/// skills are loaded. Returns the original prompt unchanged when `skill_names`
+/// is empty.
+///
+/// The block instructs the model to invoke a matching skill *before*
+/// improvising and lists the available skill names (names only — the
+/// authoritative descriptions live in the `Skill` tool). The joined name list
+/// is truncated with `, …` past [`SKILL_NAMES_BUDGET_BYTES`].
+#[must_use]
+pub(crate) fn append_skills_block(prompt: &str, skill_names: &[&str]) -> String {
+    if skill_names.is_empty() {
+        return prompt.to_string();
+    }
+
+    // Join names under a byte budget; mark truncation if not all fit.
+    let mut available = String::new();
+    let mut truncated = false;
+    for name in skill_names {
+        let sep = if available.is_empty() { "" } else { ", " };
+        if available.len() + sep.len() + name.len() > SKILL_NAMES_BUDGET_BYTES {
+            truncated = true;
+            break;
+        }
+        available.push_str(sep);
+        available.push_str(name);
+    }
+    if truncated {
+        available.push_str(", …");
+    }
+
+    let mut out = String::with_capacity(prompt.len() + available.len() + 256);
+    out.push_str(prompt);
+    if !prompt.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(
+        "\n## Skills\n\
+         Loaded skills extend your abilities. BEFORE acting on a task, check whether a \
+         loaded skill applies; if one matches, invoke Skill({name}) FIRST rather than \
+         improvising.\n\n",
+    );
+    let _ = writeln!(out, "Available: {available}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +210,37 @@ mod tests {
         }];
         let out = append_todo_block(base, &todos);
         assert!(out.starts_with("no trailing nl\n\n--- Current todos ---\n"));
+    }
+
+    #[test]
+    fn skills_block_omitted_when_no_skills() {
+        let base = "You are caliban.\n";
+        assert_eq!(append_skills_block(base, &[]), base);
+    }
+
+    #[test]
+    fn skills_block_lists_names_and_nudges_invocation() {
+        let base = "You are caliban.\n";
+        let out = append_skills_block(base, &["brainstorming", "systematic-debugging"]);
+        assert!(out.contains("## Skills"));
+        assert!(out.contains("invoke Skill({name}) FIRST"));
+        assert!(out.contains("Available: brainstorming, systematic-debugging"));
+    }
+
+    #[test]
+    fn skills_block_appends_newline_if_missing() {
+        let out = append_skills_block("no trailing nl", &["alpha"]);
+        assert!(out.starts_with("no trailing nl\n\n## Skills\n"));
+    }
+
+    #[test]
+    fn skills_block_truncates_oversized_name_list() {
+        // Many long names exceed the budget; output must mark truncation and
+        // stay bounded.
+        let names: Vec<String> = (0..2000).map(|i| format!("skill-{i:05}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let out = append_skills_block("base\n", &refs);
+        assert!(out.contains(", …"));
+        assert!(out.len() < "base\n".len() + SKILL_NAMES_BUDGET_BYTES + 512);
     }
 }

@@ -65,10 +65,20 @@ impl SkillTool {
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
+
+    /// Loaded skill names, sorted for stable output. Used to surface a
+    /// compact "skills awareness" section in the system prompt so the model
+    /// proactively invokes a matching skill instead of improvising.
+    #[must_use]
+    pub fn skill_names_sorted(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.skills.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 fn build_description(skills: &HashMap<String, Skill>) -> String {
-    let intro = "Loads a skill's instruction set. Call with the exact skill name to receive its body as text, then follow the instructions.";
+    let intro = "Loads a skill's instruction set. Call with the exact skill name to receive its body as text, then follow the instructions. If a listed skill matches the task at hand, invoke it before improvising.";
     if skills.is_empty() {
         return format!("{intro} (no skills are currently loaded)");
     }
@@ -122,6 +132,10 @@ impl Tool for SkillTool {
         &self.description
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn input_schema(&self) -> &Value {
         self.schema.get_or_init(|| {
             json!({
@@ -159,5 +173,57 @@ impl Tool for SkillTool {
             text,
             cache_control: None,
         })])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(name: &str, desc: &str) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: desc.to_string(),
+            body: format!("body of {name}"),
+            metadata: std::collections::BTreeMap::new(),
+            source_path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn description_nudges_proactive_invocation() {
+        let tool = SkillTool::new(vec![skill("brainstorming", "Use before creative work")]);
+        assert!(
+            tool.description().contains("invoke it before improvising"),
+            "description should nudge proactive invocation: {}",
+            tool.description()
+        );
+    }
+
+    #[test]
+    fn description_respects_budget() {
+        // Many skills with long descriptions must not exceed the budget.
+        let skills: Vec<Skill> = (0..500)
+            .map(|i| skill(&format!("skill-{i:04}"), &"x".repeat(200)))
+            .collect();
+        let tool = SkillTool::new(skills);
+        assert!(tool.description().len() <= DESCRIPTION_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn skill_names_sorted_returns_sorted_names() {
+        let tool = SkillTool::new(vec![
+            skill("zeta", "z"),
+            skill("alpha", "a"),
+            skill("mid", "m"),
+        ]);
+        assert_eq!(tool.skill_names_sorted(), vec!["alpha", "mid", "zeta"]);
+    }
+
+    #[test]
+    fn as_any_downcasts_to_skill_tool() {
+        let tool = SkillTool::new(vec![skill("alpha", "a")]);
+        let any = Tool::as_any(&tool).expect("SkillTool overrides as_any");
+        assert!(any.downcast_ref::<SkillTool>().is_some());
     }
 }

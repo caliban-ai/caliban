@@ -111,4 +111,12 @@ pub trait Tool: Send + Sync {
     fn parallel_conflict_key(&self, _input: &serde_json::Value) -> Option<String> {
         None
     }
+
+    /// Optional downcast hook for recovering a tool's concrete type at
+    /// runtime. The default returns `None`; tools that expose extra
+    /// session metadata beyond the trait (e.g. the `Skill` tool surfacing
+    /// its loaded skill names) override it to return `Some(self)`.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }

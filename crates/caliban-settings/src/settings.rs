@@ -192,6 +192,11 @@ pub struct ToolsConfig {
     /// Soft cap on simultaneously-active MCP tools. LRU eviction
     /// applies when exceeded. Default `24`.
     pub max_active_schemas: Option<usize>,
+    /// Inject a proactive skill-invocation nudge into the system prompt
+    /// when skills are loaded (a `## Skills` awareness block listing the
+    /// available skill names). `None`/`true` = on (default), `false` =
+    /// off. See issue #56.
+    pub skill_guidance: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +593,16 @@ mod tests {
         let tools = s.tools.expect("tools should parse");
         assert_eq!(tools.lazy_mcp, Some(true));
         assert_eq!(tools.max_active_schemas, Some(32));
+        // Absent skill_guidance defaults to None (= on).
+        assert_eq!(tools.skill_guidance, None);
+    }
+
+    #[test]
+    fn tools_config_skill_guidance_opt_out() {
+        let raw = r#"{"tools": {"skill_guidance": false}}"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let tools = s.tools.expect("tools should parse");
+        assert_eq!(tools.skill_guidance, Some(false));
     }
 
     #[test]
