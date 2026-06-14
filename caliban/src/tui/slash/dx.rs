@@ -40,7 +40,7 @@ impl SlashCommand for HeapdumpCommand {
             description: "capture a heap profile (requires --features=jemalloc-prof)",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -62,7 +62,7 @@ impl SlashCommand for FeedbackCommand {
             description: "submit feedback to the configured endpoint",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -114,7 +114,7 @@ impl SlashCommand for StatuslineCommand {
             description: "customize the status line via a shell-script template",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -145,7 +145,7 @@ impl SlashCommand for TuiCommand {
             description: "toggle fullscreen vs default TUI mode",
             args_hint: "",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -166,7 +166,7 @@ impl SlashCommand for VoiceCommand {
             description: "voice dictation (reserved for future)",
             args_hint: "",
             hidden: true,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {

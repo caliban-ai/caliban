@@ -394,6 +394,7 @@ mod tests {
     fn known_immediate_commands_are_tagged_in_builtin_registry() {
         let r = register_builtin();
         let immediate = [
+            // Original 13 (read-only diagnostics, overlays, runtime config).
             "/usage",
             "/context",
             "/cost",
@@ -407,6 +408,28 @@ mod tests {
             "/quit",
             "/exit",
             "/system",
+            // Flipped in caliban-ai/caliban#13: each `execute` returns only
+            // Continue/Overlay/StatusMessage and never touches the model or
+            // the in-flight conversation, so it is safe to fire mid-turn.
+            "/heapdump",
+            "/feedback",
+            "/statusline",
+            "/tui",
+            "/voice",
+            "/hooks",
+            "/mcp",
+            "/plugins",
+            "/plugin",
+            "/agents",
+            "/skills",
+            "/memory",
+            "/output-style",
+            "/status",
+            "/login",
+            "/logout",
+            "/setup-token",
+            "/init",
+            "/resume",
         ];
         for cmd in &immediate {
             let m = r
@@ -414,8 +437,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {cmd} from registry"));
             assert!(m.immediate, "expected {cmd} to be immediate");
         }
-        // Sanity: ones that touch session state or model stay non-immediate.
-        let not_immediate = ["/clear", "/compact", "/rewind"];
+        // Sanity: ones that touch the model or the in-flight conversation
+        // stay non-immediate.
+        // - /clear, /compact, /rewind: mutate conversation history.
+        // - /plan: toggles mid-turn mutating-tool gating.
+        // - /recap, /btw: call the model/provider.
+        // - /loop: drives the agent loop (re-runs assistant turns).
+        let not_immediate = [
+            "/clear", "/compact", "/rewind", "/plan", "/recap", "/btw", "/loop",
+        ];
         for cmd in &not_immediate {
             let m = r
                 .lookup_meta(cmd)

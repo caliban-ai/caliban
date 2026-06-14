@@ -25,7 +25,7 @@ impl SlashCommand for InitCommand {
             description: "generate a CLAUDE.draft.md from AGENTS.md / cursorrules / git status",
             args_hint: "[--force]",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
@@ -130,7 +130,7 @@ impl SlashCommand for ResumeCommand {
             description: "list persisted sessions (optional substring filter)",
             args_hint: "[query]",
             hidden: false,
-            immediate: false,
+            immediate: true,
         }
     }
     async fn execute(&self, args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
