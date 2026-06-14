@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 authors = ["John Ford <john.ford2002@gmail.com>"]
@@ -41,30 +41,30 @@ homepage     = "https://github.com/caliban-ai/caliban"
 # Internal workspace crates. Path keeps local builds resolving to these
 # sources; version is what `cargo publish` writes into the registry
 # manifest (crates.io requires every dependency to carry a version).
-caliban-common             = { path = "crates/caliban-common",             version = "0.1.0" }
-caliban-provider           = { path = "crates/caliban-provider",           version = "0.1.0" }
-caliban-provider-anthropic = { path = "crates/caliban-provider-anthropic", version = "0.1.0" }
-caliban-provider-bedrock   = { path = "crates/caliban-provider-bedrock",   version = "0.1.0" }
-caliban-provider-vertex    = { path = "crates/caliban-provider-vertex",    version = "0.1.0" }
-caliban-provider-openai    = { path = "crates/caliban-provider-openai",    version = "0.1.0" }
-caliban-provider-ollama    = { path = "crates/caliban-provider-ollama",    version = "0.1.0" }
-caliban-provider-google    = { path = "crates/caliban-provider-google",    version = "0.1.0" }
-caliban-agent-core         = { path = "crates/caliban-agent-core",         version = "0.1.0" }
-caliban-tools-builtin      = { path = "crates/caliban-tools-builtin",      version = "0.1.0" }
-caliban-sessions           = { path = "crates/caliban-sessions",           version = "0.1.0" }
-caliban-checkpoint         = { path = "crates/caliban-checkpoint",         version = "0.1.0" }
-caliban-memory             = { path = "crates/caliban-memory",             version = "0.1.0" }
-caliban-output-styles      = { path = "crates/caliban-output-styles",      version = "0.1.0" }
-caliban-skills             = { path = "crates/caliban-skills",             version = "0.1.0" }
-caliban-mcp-client         = { path = "crates/caliban-mcp-client",         version = "0.1.0" }
-caliban-model-router       = { path = "crates/caliban-model-router",       version = "0.1.0" }
-caliban-sandbox            = { path = "crates/caliban-sandbox",            version = "0.1.0" }
-caliban-plugins            = { path = "crates/caliban-plugins",            version = "0.1.0" }
-caliban-telemetry          = { path = "crates/caliban-telemetry",          version = "0.1.0" }
-caliban-images             = { path = "crates/caliban-images",             version = "0.1.0" }
-caliban-worktrees          = { path = "crates/caliban-worktrees",          version = "0.1.0" }
-caliban-supervisor         = { path = "crates/caliban-supervisor",         version = "0.1.0" }
-caliban-settings           = { path = "crates/caliban-settings",           version = "0.1.0" }
+caliban-common             = { path = "crates/caliban-common",             version = "0.2.0" }
+caliban-provider           = { path = "crates/caliban-provider",           version = "0.2.0" }
+caliban-provider-anthropic = { path = "crates/caliban-provider-anthropic", version = "0.2.0" }
+caliban-provider-bedrock   = { path = "crates/caliban-provider-bedrock",   version = "0.2.0" }
+caliban-provider-vertex    = { path = "crates/caliban-provider-vertex",    version = "0.2.0" }
+caliban-provider-openai    = { path = "crates/caliban-provider-openai",    version = "0.2.0" }
+caliban-provider-ollama    = { path = "crates/caliban-provider-ollama",    version = "0.2.0" }
+caliban-provider-google    = { path = "crates/caliban-provider-google",    version = "0.2.0" }
+caliban-agent-core         = { path = "crates/caliban-agent-core",         version = "0.2.0" }
+caliban-tools-builtin      = { path = "crates/caliban-tools-builtin",      version = "0.2.0" }
+caliban-sessions           = { path = "crates/caliban-sessions",           version = "0.2.0" }
+caliban-checkpoint         = { path = "crates/caliban-checkpoint",         version = "0.2.0" }
+caliban-memory             = { path = "crates/caliban-memory",             version = "0.2.0" }
+caliban-output-styles      = { path = "crates/caliban-output-styles",      version = "0.2.0" }
+caliban-skills             = { path = "crates/caliban-skills",             version = "0.2.0" }
+caliban-mcp-client         = { path = "crates/caliban-mcp-client",         version = "0.2.0" }
+caliban-model-router       = { path = "crates/caliban-model-router",       version = "0.2.0" }
+caliban-sandbox            = { path = "crates/caliban-sandbox",            version = "0.2.0" }
+caliban-plugins            = { path = "crates/caliban-plugins",            version = "0.2.0" }
+caliban-telemetry          = { path = "crates/caliban-telemetry",          version = "0.2.0" }
+caliban-images             = { path = "crates/caliban-images",             version = "0.2.0" }
+caliban-worktrees          = { path = "crates/caliban-worktrees",          version = "0.2.0" }
+caliban-supervisor         = { path = "crates/caliban-supervisor",         version = "0.2.0" }
+caliban-settings           = { path = "crates/caliban-settings",           version = "0.2.0" }
 tokio     = { version = "1", features = ["full"] }
 thiserror = "1"
 anyhow    = "1"
