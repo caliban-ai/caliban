@@ -99,10 +99,8 @@ struct SessionStartNested {
 /// (`{"hookSpecificOutput": {"additionalContext": ...}}`) shapes. Returns
 /// `None` for empty / non-JSON / absent input.
 ///
-/// Reusable surface for #121 (config-hook execution): config-defined hooks are
-/// not yet wired into the runtime `Hooks` chain, so this is exercised by unit
-/// tests here and called once that bridge lands.
-#[allow(dead_code)] // invoked by the config-hook execution bridge (#121)
+/// Invoked by the router handlers' `session_start` (and the config-hook bridge,
+/// #121) to extract context from a handler's stdout / response body.
 pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -111,6 +109,84 @@ pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
     let blob = serde_json::from_str::<SessionStartBlob>(trimmed).ok()?;
     blob.additional_context
         .or_else(|| blob.hook_specific_output.and_then(|n| n.additional_context))
+}
+
+// ---------------------------------------------------------------------------
+// Config → runtime bridge
+// ---------------------------------------------------------------------------
+
+/// Build executing hook trait objects from a parsed [`HooksConfig`], for
+/// composition into the agent `Hooks` chain. Returns an empty vec when hooks are
+/// globally disabled.
+///
+/// `allow_managed_hooks_only` currently yields an empty vec + a warning: the
+/// flattened `HooksConfig` has lost per-handler scope, so we cannot prove a
+/// handler is managed and conservatively fire none (precise firing → #124).
+///
+/// `Mcp` / `Prompt` / `Agent` handler kinds are v1 stubs and are skipped with a
+/// warning (not silently dropped).
+#[must_use]
+pub fn build_config_hooks(
+    cfg: &crate::hooks_config::HooksConfig,
+    http_client: &reqwest::Client,
+) -> Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> {
+    use crate::hooks_config::HookHandlerType;
+
+    if cfg.disable_all_hooks {
+        return Vec::new();
+    }
+    if cfg.allow_managed_hooks_only {
+        tracing::warn!(
+            "allow_managed_hooks_only is set but handler scope is not tracked; \
+             firing no config hooks (see #124)"
+        );
+        return Vec::new();
+    }
+
+    let mut out: Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> = Vec::new();
+    for (event_name, handlers) in &cfg.events {
+        for h in handlers {
+            match h.kind {
+                HookHandlerType::Command => {
+                    let Some(command) = h.command.clone() else {
+                        tracing::warn!(event = %event_name, "command hook missing `command`; skipping");
+                        continue;
+                    };
+                    out.push(std::sync::Arc::new(ShellCommandHook {
+                        command,
+                        args: h.args.clone(),
+                        timeout: h.timeout,
+                        env: h.env.clone(),
+                        matcher: h.matcher.clone(),
+                        event_name: event_name.clone(),
+                    }));
+                }
+                HookHandlerType::Http => {
+                    let Some(url) = h.url.clone() else {
+                        tracing::warn!(event = %event_name, "http hook missing `url`; skipping");
+                        continue;
+                    };
+                    out.push(std::sync::Arc::new(HttpHook {
+                        url,
+                        headers: h.headers.clone(),
+                        timeout: h.timeout,
+                        allowed_url_globs: cfg.allowed_http_hook_urls.clone(),
+                        event_name: event_name.clone(),
+                        matcher: h.matcher.clone(),
+                        client: http_client.clone(),
+                    }));
+                }
+                HookHandlerType::Mcp | HookHandlerType::Prompt | HookHandlerType::Agent => {
+                    tracing::warn!(
+                        event = %event_name,
+                        kind = ?h.kind,
+                        "config hook kind not yet executable at runtime; skipping"
+                    );
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -135,14 +211,23 @@ pub struct ShellCommandHook {
     pub event_name: String,
 }
 
+/// Raw capture from a shell hook invocation.
+struct CaptureOutput {
+    stdout: String,
+    /// stderr, truncated to 8 KiB.
+    stderr: String,
+    exit_code: i32,
+}
+
 impl ShellCommandHook {
-    /// Spawn the child, send the envelope, return the decision.
-    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+    /// Spawn the child, send the envelope, capture stdout/stderr + exit code.
+    /// `None` on spawn / wait / timeout failure (callers treat as Allow / no-op).
+    async fn run_capture(&self, envelope: serde_json::Value) -> Option<CaptureOutput> {
         let payload = match serde_json::to_string(&envelope) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "shell hook: failed to serialize envelope");
-                return HookDecision::Allow;
+                return None;
             }
         };
 
@@ -159,7 +244,7 @@ impl ShellCommandHook {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(command = %self.command, error = %e, "shell hook: spawn failed");
-                return HookDecision::Allow;
+                return None;
             }
         };
 
@@ -174,7 +259,7 @@ impl ShellCommandHook {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "shell hook: wait failed");
-                return HookDecision::Allow;
+                return None;
             }
             Err(_) => {
                 tracing::warn!(
@@ -182,35 +267,45 @@ impl ShellCommandHook {
                     timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
                     "shell hook: timeout exceeded; treating as Allow"
                 );
-                return HookDecision::Allow;
+                return None;
             }
         };
 
-        let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr_text = String::from_utf8_lossy(&output.stderr).into_owned();
-        let truncated_stderr = truncate_kb(&stderr_text, 8);
-        if !truncated_stderr.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = truncate_kb(&String::from_utf8_lossy(&output.stderr), 8);
+        if !stderr.is_empty() {
             tracing::debug!(
                 command = %self.command,
-                hook_stderr = %truncated_stderr,
+                hook_stderr = %stderr,
                 "shell hook: stderr captured",
             );
         }
+        Some(CaptureOutput {
+            stdout,
+            stderr,
+            exit_code: output.status.code().unwrap_or(0),
+        })
+    }
+
+    /// Spawn the child, send the envelope, return the decision.
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        let Some(out) = self.run_capture(envelope).await else {
+            return HookDecision::Allow;
+        };
 
         // Prefer JSON on stdout when present.
-        let from_json = parse_decision_blob(&stdout_text);
-        if !matches!(from_json, HookDecision::Allow) || stdout_text.trim().starts_with('{') {
+        let from_json = parse_decision_blob(&out.stdout);
+        if !matches!(from_json, HookDecision::Allow) || out.stdout.trim().starts_with('{') {
             return from_json;
         }
 
         // Fall back to exit-code semantics.
-        let code = output.status.code().unwrap_or(0);
-        match code {
+        match out.exit_code {
             0 => HookDecision::Allow,
-            2 => HookDecision::Deny(if truncated_stderr.is_empty() {
+            2 => HookDecision::Deny(if out.stderr.is_empty() {
                 format!("hook `{}` exited 2", self.command)
             } else {
-                truncated_stderr
+                out.stderr
             }),
             other => {
                 tracing::warn!(
@@ -331,6 +426,31 @@ impl Hooks for ShellCommandHook {
         let _ = self.dispatch(envelope).await; // Observer-only on PostToolUse.
         Ok(())
     }
+
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
+        if self.event_name != "SessionStart" {
+            return Ok(crate::hooks::SessionStartOutcome::default());
+        }
+        let envelope = crate::hooks::build_envelope(
+            "SessionStart",
+            serde_json::json!({
+                "session_id": ctx.session_id,
+                "cwd": ctx.cwd.display().to_string(),
+                "provider": ctx.provider,
+                "model": ctx.model,
+            }),
+        );
+        let additional_context: Vec<String> = self
+            .run_capture(envelope)
+            .await
+            .and_then(|o| parse_session_start_context(&o.stdout))
+            .into_iter()
+            .collect();
+        Ok(crate::hooks::SessionStartOutcome { additional_context })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,28 +483,29 @@ impl HttpHook {
             .any(|g| crate::permissions::matches_glob(g, &self.url))
     }
 
-    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+    /// POST the envelope, returning the response body on a 2xx. `None` when the
+    /// URL is disallowed / the request fails / non-2xx / body read fails.
+    async fn fetch_body(&self, envelope: serde_json::Value) -> Option<String> {
         if !self.is_url_allowed() {
             tracing::warn!(
                 url = %self.url,
                 "http hook: URL not in allowed_http_hook_urls; skipping (Allow)"
             );
-            return HookDecision::Allow;
+            return None;
         }
         let mut req = self.client.post(&self.url).json(&envelope);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let send = tokio::time::timeout(self.timeout, req.send()).await;
-        let resp = match send {
+        let resp = match tokio::time::timeout(self.timeout, req.send()).await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::warn!(url = %self.url, error = %e, "http hook: request failed");
-                return HookDecision::Allow;
+                return None;
             }
             Err(_) => {
                 tracing::warn!(url = %self.url, "http hook: timeout exceeded; Allow");
-                return HookDecision::Allow;
+                return None;
             }
         };
         if !resp.status().is_success() {
@@ -393,21 +514,26 @@ impl HttpHook {
                 status = resp.status().as_u16(),
                 "http hook: non-2xx; Allow"
             );
-            return HookDecision::Allow;
+            return None;
         }
-        let body_result = tokio::time::timeout(self.timeout, resp.text()).await;
-        let body = match body_result {
-            Ok(Ok(b)) => b,
+        match tokio::time::timeout(self.timeout, resp.text()).await {
+            Ok(Ok(b)) => Some(b),
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "http hook: body read failed; Allow");
-                return HookDecision::Allow;
+                None
             }
             Err(_) => {
                 tracing::warn!("http hook: body read timeout; Allow");
-                return HookDecision::Allow;
+                None
             }
-        };
-        parse_decision_blob(&body)
+        }
+    }
+
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        match self.fetch_body(envelope).await {
+            Some(body) => parse_decision_blob(&body),
+            None => HookDecision::Allow,
+        }
     }
 }
 
@@ -433,6 +559,31 @@ impl Hooks for HttpHook {
             }),
         );
         Ok(self.dispatch(envelope).await)
+    }
+
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
+        if self.event_name != "SessionStart" {
+            return Ok(crate::hooks::SessionStartOutcome::default());
+        }
+        let envelope = crate::hooks::build_envelope(
+            "SessionStart",
+            serde_json::json!({
+                "session_id": ctx.session_id,
+                "cwd": ctx.cwd.display().to_string(),
+                "provider": ctx.provider,
+                "model": ctx.model,
+            }),
+        );
+        let additional_context: Vec<String> = self
+            .fetch_body(envelope)
+            .await
+            .and_then(|b| parse_session_start_context(&b))
+            .into_iter()
+            .collect();
+        Ok(crate::hooks::SessionStartOutcome { additional_context })
     }
 }
 
@@ -542,6 +693,59 @@ mod tests {
     fn empty_blob_is_allow() {
         assert!(matches!(parse_decision_blob(""), HookDecision::Allow));
         assert!(matches!(parse_decision_blob("   "), HookDecision::Allow));
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().build().unwrap()
+    }
+
+    #[test]
+    fn bridge_builds_command_and_skips_stub_kinds() {
+        let toml = r#"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+[[hooks.SessionStart]]
+[[hooks.SessionStart.handlers]]
+type = "mcp"
+mcp = "srv"
+tool = "t"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        let hooks = build_config_hooks(&cfg, &test_client());
+        // 1 command handler built; the mcp stub is skipped.
+        assert_eq!(hooks.len(), 1);
+    }
+
+    #[test]
+    fn bridge_disable_all_hooks_is_empty() {
+        let toml = r#"
+disable_all_hooks = true
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        assert!(build_config_hooks(&cfg, &test_client()).is_empty());
+    }
+
+    #[test]
+    fn bridge_managed_only_is_empty() {
+        let toml = r#"
+allow_managed_hooks_only = true
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.handlers]]
+type = "command"
+command = "/bin/true"
+"#;
+        let cfg =
+            crate::hooks_config::HooksConfig::from_str(toml, std::path::Path::new("test")).unwrap();
+        assert!(build_config_hooks(&cfg, &test_client()).is_empty());
     }
 
     #[test]

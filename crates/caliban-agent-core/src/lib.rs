@@ -48,7 +48,9 @@ pub use hooks::{
     build_envelope, envelope_with_cwd,
 };
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
-pub use hooks_router::{AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook};
+pub use hooks_router::{
+    AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook, build_config_hooks,
+};
 pub use mode_filter::ModeFilter;
 pub use permission_mode::{
     FILE_EDIT_TOOLS, PermissionMode, SharedPermissionMode, is_file_edit_tool, resolve_startup_mode,
