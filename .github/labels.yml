@@ -135,3 +135,12 @@
   color: '1d76db'
   description: "Area: docs"
   aliases: ['area:docs']
+- name: area/test
+  color: '1d76db'
+  description: "Area: testing"
+- name: area/security
+  color: '1d76db'
+  description: "Area: security"
+- name: area/performance
+  color: '1d76db'
+  description: "Area: performance"
