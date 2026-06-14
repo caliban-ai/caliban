@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use caliban_provider::{Effort, Provider, ThinkingConfig, ToolChoice};
+use caliban_provider::{Effort, Provider, ThinkingSetting, ToolChoice};
 
 use crate::error::{Error, Result};
 use crate::hooks::{Hooks, NoopHooks};
@@ -43,8 +43,12 @@ pub struct AgentConfig {
     pub top_p: Option<f32>,
     /// Sequences that stop generation when produced.
     pub stop_sequences: Vec<String>,
-    /// Optional extended-thinking configuration.
-    pub thinking: Option<ThinkingConfig>,
+    /// Extended-thinking control, swapped at runtime by `/think` (ticket
+    /// #100). Lock-free reads via [`arc_swap::ArcSwap`], mirroring `effort`;
+    /// the per-turn request builder snapshots it with `load_full()` and copies
+    /// it into `CompletionRequest.thinking`. Default is
+    /// [`ThinkingSetting::Auto`] (derive from `effort`, legacy behavior).
+    pub thinking: Arc<ArcSwap<ThinkingSetting>>,
     /// Optional opaque user identifier forwarded to the provider.
     pub user_id: Option<String>,
     /// Maximum number of agentic turns before returning `Error::MaxTurnsReached`.
@@ -93,7 +97,7 @@ impl Default for AgentConfig {
             temperature: None,
             top_p: None,
             stop_sequences: Vec::new(),
-            thinking: None,
+            thinking: Arc::new(ArcSwap::from_pointee(ThinkingSetting::Auto)),
             user_id: None,
             max_turns: 50,
             tool_choice: ToolChoice::default(),
@@ -640,5 +644,11 @@ mod effort_tests {
     fn config_default_effort_is_auto() {
         let cfg = AgentConfig::default();
         assert_eq!(*cfg.effort.load_full(), Effort::Auto);
+    }
+
+    #[test]
+    fn config_default_thinking_is_auto() {
+        let cfg = AgentConfig::default();
+        assert_eq!(*cfg.thinking.load_full(), ThinkingSetting::Auto);
     }
 }

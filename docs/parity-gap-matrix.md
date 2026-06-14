@@ -18,7 +18,7 @@
 **Legend:** ✅ parity · 🟡 partial · 🔴 gap · *(deferred)* = scoped in a
 shipped PR's v2 follow-up notes.
 
-**Last refreshed:** 2026-06-01 (two-stage tool surface — ticked F.ToolSearch + F.WaitForMcpServers 🔴 → 🟡 per ADR-0046; v1 machinery shipped opt-in via `tools.lazy_mcp`. Prior refresh 2026-05-31 custom statusline: ticked row K — TUI render integration landed, `/statusline` reports active config. Prior refresh 2026-05-31 permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
+**Last refreshed:** 2026-06-13 (#100 extended-thinking toggle: ticked row I "Extended-thinking toggle wiring" 🟡 → ✅; `/think` runtime control decoupled from `/effort`, honored on the Anthropic + OpenAI wire. Prior refresh 2026-06-01 two-stage tool surface — ticked F.ToolSearch + F.WaitForMcpServers 🔴 → 🟡 per ADR-0046; v1 machinery shipped opt-in via `tools.lazy_mcp`. Prior refresh 2026-05-31 custom statusline: ticked row K — TUI render integration landed, `/statusline` reports active config. Prior refresh 2026-05-31 permissions-v2: updated Permissions rows to reference ADR-0045 + v2 spec; added "Permissions active management" row; updated Layered settings row notes. Prior refresh 2026-05-28 TODO/parity cleanup: validated the Plan A/B/C parity-sweep items against `main` and pruned the stale backlog; corrected the "TUI Ask modal" row to ✅ to match the shipped 4-button modal. Prior refresh 2026-05-26 after Plan C "TUI slash & UX polish": `/clear` resets context_window, `/effort` runtime, `/model` runtime swap, `/cost` breakdown, `/doctor` real checks + `caliban doctor` headless, `/resume` filter, `/context` top-N, `/export`, permission-modal 4-button + runtime rules, custom statusline runner).
 
 ## Design coverage
 
@@ -173,7 +173,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | Vertex | ✅ | ADR-0034; `caliban-provider-vertex` |
 | Foundry | 🔴 | |
 | Effort levels (`low`/`medium`/`high`) | ✅ | ADR-0038; per-route `effort` + `effort_map` |
-| Extended-thinking toggle wiring | 🟡 | |
+| Extended-thinking toggle wiring | ✅ | #100; `ThinkingSetting{Auto,Off,On(budget)}` on every live request, decoupled from `Effort`. Runtime control via `/think on\|off\|auto\|<budget>` (swappable `AgentConfig.thinking` `ArcSwap`, snapshotted per turn like `/effort`). Honored by the Anthropic (`thinking` block) and OpenAI (`reasoning`) converters; `Off` suppresses even at high effort, `On` forces it on. Current effort + thinking shown in `/config`. |
 
 ## J. Headless / CI
 

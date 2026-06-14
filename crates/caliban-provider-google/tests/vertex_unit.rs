@@ -69,7 +69,7 @@ fn minimal_request_with_url_image(url: &str) -> CompletionRequest {
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: RequestMetadata::default(),
     }

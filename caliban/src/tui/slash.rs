@@ -25,6 +25,7 @@ pub(crate) mod model;
 pub(crate) mod observe;
 pub(crate) mod perms;
 pub(crate) mod session;
+pub(crate) mod think;
 
 /// Static metadata that the registry exposes for typeahead, `/help`, and
 /// suggester ranking. Held as `&'static` strings so the registry can
@@ -245,6 +246,7 @@ pub(crate) fn register_builtin() -> SlashCommandRegistry {
     cost::register(&mut registry);
     export::register(&mut registry);
     model::register(&mut registry);
+    think::register(&mut registry);
     perms::register(&mut registry);
     dx::register(&mut registry);
     existing::register(&mut registry);
@@ -403,6 +405,7 @@ mod tests {
             "/config",
             "/model",
             "/effort",
+            "/think",
             "/export",
             "/doctor",
             "/quit",

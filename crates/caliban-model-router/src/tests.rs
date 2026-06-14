@@ -24,7 +24,7 @@ fn req_main_loop() -> CompletionRequest {
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: Default::default(),
     };
@@ -340,9 +340,7 @@ async fn capability_filter_thinking_falls_back_to_capable() {
         .build()
         .unwrap();
     let mut req = req_main_loop();
-    req.thinking = Some(caliban_provider::ThinkingConfig {
-        budget_tokens: 4096,
-    });
+    req.thinking = caliban_provider::ThinkingSetting::On(Some(4096));
     let resp = r.complete(req).await.unwrap();
     assert_eq!(resp.model, "think");
 }

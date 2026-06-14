@@ -332,7 +332,7 @@ pub(crate) fn run_debug(
         top_p: None,
         top_k: None,
         stop_sequences: vec![],
-        thinking: None,
+        thinking: caliban_provider::ThinkingSetting::Auto,
         effort: None,
         metadata: caliban_provider::RequestMetadata {
             user_id: None,
@@ -363,9 +363,7 @@ pub(crate) fn run_debug(
         }];
     }
     if args.has_thinking {
-        req.thinking = Some(caliban_provider::ThinkingConfig {
-            budget_tokens: 4096,
-        });
+        req.thinking = caliban_provider::ThinkingSetting::On(Some(4096));
     }
 
     let (_cands, diagnostics) = wiring

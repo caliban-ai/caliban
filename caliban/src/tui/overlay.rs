@@ -548,6 +548,20 @@ pub(crate) fn config_lines(app: &App) -> Vec<Line<'_>> {
     out.push(Line::raw(""));
     out.push(kv("Quiet mode", app.args.quiet.to_string()));
 
+    // Reasoning controls (#100): runtime effort + extended-thinking state,
+    // swappable via `/effort` and `/think`.
+    let cfg = app.agent.config();
+    let effort_line = format!("{:?}", *cfg.effort.load_full()).to_lowercase();
+    let thinking_line = match *cfg.thinking.load_full() {
+        caliban_provider::ThinkingSetting::Auto => "auto (derived from effort)".to_string(),
+        caliban_provider::ThinkingSetting::Off => "off".to_string(),
+        caliban_provider::ThinkingSetting::On(None) => "on".to_string(),
+        caliban_provider::ThinkingSetting::On(Some(budget)) => format!("on (budget {budget})"),
+    };
+    out.push(Line::raw(""));
+    out.push(kv("Effort", effort_line));
+    out.push(kv("Thinking", thinking_line));
+
     // Settings hierarchy section (ADR 0026). Lists the scope chain + a
     // few merged-effective values when the loader ran.
     if app.settings_handle.is_some() {
@@ -1334,6 +1348,9 @@ mod overlay_render_tests {
         assert!(joined.contains("Max tokens"));
         assert!(joined.contains("Workspace root"));
         assert!(joined.contains("Tools"));
+        // Reasoning controls surfaced for #100 (runtime effort + thinking).
+        assert!(joined.contains("Effort"));
+        assert!(joined.contains("Thinking"));
         // No session in for_tests → ephemeral marker.
         assert!(joined.contains("ephemeral"));
         assert!(joined.contains("Press q or Esc to close"));

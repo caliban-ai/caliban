@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::effort::Effort;
 use crate::error::{Error, Result};
 use crate::message::{ContentBlock, Message, Role};
-use crate::thinking::ThinkingConfig;
+use crate::thinking::ThinkingSetting;
 use crate::tool::{Tool, ToolChoice};
 
 /// A provider-neutral request to generate a completion.
@@ -35,9 +35,11 @@ pub struct CompletionRequest {
     /// Sequences that stop generation when produced.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
-    /// Extended-thinking configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
+    /// Extended-thinking control, decoupled from `effort` (ticket #100).
+    /// Defaults to [`ThinkingSetting::Auto`], which derives thinking from
+    /// `effort` (legacy behavior). `Off`/`On` force it independently.
+    #[serde(default)]
+    pub thinking: ThinkingSetting,
     /// Reasoning-effort level. `None` (or `Some(Effort::Auto)`) means the
     /// provider's default behavior; adapters skip writing the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,7 +95,7 @@ impl CompletionRequest {
             top_p: None,
             top_k: None,
             stop_sequences: Vec::new(),
-            thinking: None,
+            thinking: ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata::default(),
         }
@@ -163,7 +165,7 @@ pub struct CompletionRequestBuilder {
     top_p: Option<f32>,
     top_k: Option<u32>,
     stop_sequences: Vec<String>,
-    thinking: Option<ThinkingConfig>,
+    thinking: ThinkingSetting,
     effort: Option<Effort>,
     metadata: RequestMetadata,
 }
@@ -245,9 +247,9 @@ impl CompletionRequestBuilder {
         self
     }
 
-    /// Enable extended thinking with the given configuration.
-    pub fn thinking(mut self, cfg: ThinkingConfig) -> Self {
-        self.thinking = Some(cfg);
+    /// Set the extended-thinking control (`Auto`/`Off`/`On`).
+    pub fn thinking(mut self, setting: ThinkingSetting) -> Self {
+        self.thinking = setting;
         self
     }
 

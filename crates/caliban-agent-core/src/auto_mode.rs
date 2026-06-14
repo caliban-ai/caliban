@@ -387,7 +387,7 @@ impl AutoModeClassifier {
             top_p: None,
             top_k: None,
             stop_sequences: vec![],
-            thinking: None,
+            thinking: caliban_provider::ThinkingSetting::Auto,
             effort: None,
             metadata: RequestMetadata {
                 user_id: None,
