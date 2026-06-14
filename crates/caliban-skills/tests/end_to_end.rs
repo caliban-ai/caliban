@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use caliban_agent_core::{ContentBlock, Tool, ToolContext, ToolError};
-use caliban_skills::{Skill, SkillTool, load_skills};
+use caliban_skills::{Skill, SkillTool, load_skills, load_skills_report};
 use tokio_util::sync::CancellationToken;
 
 fn write(path: &Path, body: &str) {
@@ -71,6 +71,79 @@ fn rejects_mismatched_name() {
     );
     let skills = load_skills(&[root]);
     assert!(skills.is_empty());
+}
+
+#[test]
+fn report_records_mismatched_name_skip() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    let bad = root.join("foo/SKILL.md");
+    write(&bad, &well_formed("bar", "wrong name in frontmatter"));
+
+    let report = load_skills_report(std::slice::from_ref(&root));
+    assert!(report.skills.is_empty());
+    assert_eq!(report.skips.len(), 1);
+    assert_eq!(report.skips[0].path, bad);
+    assert!(
+        report.skips[0]
+            .reason
+            .contains("does not match parent directory"),
+        "reason should name the mismatch: {}",
+        report.skips[0].reason
+    );
+}
+
+#[test]
+fn report_records_malformed_frontmatter_skip() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    write(
+        &root.join("plain/SKILL.md"),
+        "no frontmatter here, just markdown.\n",
+    );
+    let report = load_skills_report(&[root]);
+    assert!(report.skills.is_empty());
+    assert_eq!(report.skips.len(), 1);
+    assert!(report.skips[0].reason.contains("frontmatter"));
+}
+
+#[test]
+fn report_loads_valid_skill_and_skips_bad_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    write(
+        &root.join("good/SKILL.md"),
+        &well_formed("good", "a valid skill"),
+    );
+    write(
+        &root.join("oops/SKILL.md"),
+        &well_formed("nope", "misnamed"),
+    );
+
+    let report = load_skills_report(&[root]);
+    assert_eq!(report.skills.len(), 1);
+    assert_eq!(report.skills[0].name, "good");
+    assert_eq!(report.skips.len(), 1);
+}
+
+#[test]
+fn report_shadowed_duplicate_is_not_a_skip() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let user = tmp.path().join("user");
+    write(
+        &workspace.join("brainstorming/SKILL.md"),
+        &well_formed("brainstorming", "WORKSPACE version"),
+    );
+    write(
+        &user.join("brainstorming/SKILL.md"),
+        &well_formed("brainstorming", "USER version"),
+    );
+
+    let report = load_skills_report(&[workspace, user]);
+    assert_eq!(report.skills.len(), 1);
+    // Shadowing is intentional priority resolution, not a rejected file.
+    assert!(report.skips.is_empty());
 }
 
 #[test]

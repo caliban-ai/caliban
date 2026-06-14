@@ -21,7 +21,7 @@ use anyhow::{Context, Result, anyhow};
 use caliban_agent_core::{Agent, Message, ToolRegistry};
 use caliban_provider::{Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
-use caliban_skills::{SkillTool, load_skills, register_builtins};
+use caliban_skills::{SkillTool, load_skills_report, register_builtins};
 use caliban_tools_builtin::{
     AgentFactory, AgentTool, AgentToolInput, BashOutputTool, BashTool, EditTool, EnterPlanModeTool,
     ExitPlanModeTool, GlobTool, GrepTool, KillShellTool, MultiEditTool, NotebookEditTool,
@@ -436,7 +436,19 @@ pub(crate) fn build_registry(
     if !args.no_skills && !args.bare {
         let mut roots = caliban_skills::default_roots(&workspace_root);
         roots.extend(plugin_skill_roots.iter().cloned());
-        let mut skills = load_skills(&roots);
+        let report = load_skills_report(&roots);
+        // A discovered-but-rejected skill (name/dir mismatch, bad frontmatter)
+        // would otherwise vanish into a trace-level log. Warn on stderr so it
+        // is user-visible in CLI/headless runs; `caliban doctor` mirrors this
+        // for the TUI. See issue #107.
+        for skip in &report.skips {
+            eprintln!(
+                "caliban: warning: skipping skill {} — {}",
+                skip.path.display(),
+                skip.reason
+            );
+        }
+        let mut skills = report.skills;
         // Built-in skills register *before* user-dir scan results win — except
         // that the loader already shadows duplicates, so `register_builtins`
         // is a no-op if the user shipped their own `auto-memory` skill.

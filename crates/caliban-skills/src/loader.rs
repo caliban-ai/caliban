@@ -20,13 +20,39 @@ pub fn default_roots(workspace_root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Load all skills from the given roots in priority order.
+/// A `SKILL.md` that was discovered on disk but rejected, paired with the
+/// reason. Surfaced to users (startup stderr + `caliban doctor`) so a misnamed
+/// or malformed skill does not vanish silently — see issue #107.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSkip {
+    /// Path to the rejected `SKILL.md`.
+    pub path: PathBuf,
+    /// Human-readable reason (name/dir mismatch, bad frontmatter, empty
+    /// description, …) — the error string from [`load_one`].
+    pub reason: String,
+}
+
+/// Outcome of a skill scan: the skills that loaded, plus any discovered-but-
+/// rejected files. `skips` excludes intentionally *shadowed* duplicates (a
+/// later root losing to an earlier one is expected, not a loss).
+#[derive(Debug, Clone, Default)]
+pub struct SkillLoadReport {
+    /// Successfully loaded skills, sorted by name.
+    pub skills: Vec<Skill>,
+    /// Rejected files, sorted by path.
+    pub skips: Vec<SkillSkip>,
+}
+
+/// Load all skills from the given roots in priority order, returning both the
+/// loaded skills and any discovered-but-rejected files.
 ///
-/// Missing roots are silently skipped. Malformed `SKILL.md` files are logged
-/// at `warn!` and skipped — loading is best-effort.
+/// Missing roots are silently skipped. Rejected `SKILL.md` files are logged at
+/// `warn!` *and* recorded in [`SkillLoadReport::skips`] so callers can surface
+/// them to the user — loading itself remains best-effort.
 #[must_use]
-pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
+pub fn load_skills_report(roots: &[PathBuf]) -> SkillLoadReport {
     let mut by_name: HashMap<String, Skill> = HashMap::new();
+    let mut skips: Vec<SkillSkip> = Vec::new();
 
     for root in roots {
         if !root.exists() {
@@ -65,14 +91,29 @@ pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
                         error = %e,
                         "skipping malformed skill",
                     );
+                    skips.push(SkillSkip {
+                        path: path.to_path_buf(),
+                        reason: e,
+                    });
                 }
             }
         }
     }
 
-    let mut out: Vec<Skill> = by_name.into_values().collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    let mut skills: Vec<Skill> = by_name.into_values().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skips.sort_by(|a, b| a.path.cmp(&b.path));
+    SkillLoadReport { skills, skips }
+}
+
+/// Load all skills from the given roots in priority order.
+///
+/// Thin wrapper over [`load_skills_report`] that drops the skip report. Missing
+/// roots are silently skipped; rejected `SKILL.md` files are logged at `warn!`
+/// and skipped — loading is best-effort.
+#[must_use]
+pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
+    load_skills_report(roots).skills
 }
 
 /// Parse a single `SKILL.md` file. Returns an error on missing frontmatter,
