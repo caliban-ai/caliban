@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use caliban_agent_core::{
     CompactCtx, CompactOutcome, ConfigChangeCtx, CwdChangedCtx, FileChangedCtx, HookDecision,
-    Hooks, NotificationCtx, PermCtx, PromptCtx, SessionCtx, SessionOutcome, SubagentCtx,
-    SubagentOutcome, TaskCtx, TaskOutcome, ToolCtx, TurnCtx,
+    Hooks, NotificationCtx, PermCtx, PromptCtx, SessionCtx, SessionOutcome, SessionStartOutcome,
+    SubagentCtx, SubagentOutcome, TaskCtx, TaskOutcome, ToolCtx, TurnCtx,
 };
 use caliban_agent_core::{Result as HookResult, TurnDecision, TurnOutcome};
 use caliban_provider::ContentBlock;
@@ -103,14 +103,14 @@ impl Hooks for HeadlessHookSink {
         Ok(())
     }
 
-    async fn session_start(&self, ctx: &SessionCtx<'_>) -> HookResult<()> {
+    async fn session_start(&self, ctx: &SessionCtx<'_>) -> HookResult<SessionStartOutcome> {
         let mut m = Map::new();
         m.insert("session_id".into(), Value::from(ctx.session_id));
         m.insert("cwd".into(), Value::from(ctx.cwd.display().to_string()));
         m.insert("provider".into(), Value::from(ctx.provider));
         m.insert("model".into(), Value::from(ctx.model));
         self.push("SessionStart", Value::Object(m));
-        Ok(())
+        Ok(SessionStartOutcome::default())
     }
 
     async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> HookResult<()> {

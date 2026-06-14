@@ -404,8 +404,9 @@ async fn main() -> Result<()> {
         Arc::clone(&mcp_eager_servers),
     )?;
 
-    // Fire SessionStart hook (best-effort).
-    startup::fire_session_start(&args, &agent, &model).await;
+    // Fire SessionStart hook (best-effort); collect any hook-supplied context
+    // to splice into the system prompt before turn 1 (#106).
+    let session_context = startup::fire_session_start(&args, &agent, &model).await;
     let _ = hooks_cfg_summary; // silence unused when not later consumed
 
     // Resolve session store + persisted session (when --session is given).
@@ -416,8 +417,14 @@ async fn main() -> Result<()> {
     // the active output-style block + memory-tier prefix when the default
     // is in effect.
     let cwd_for_prompt = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let system_prompt =
-        startup::resolve_system_prompt(&args, &agent, &cwd_for_prompt, &settings_snapshot).await?;
+    let system_prompt = startup::resolve_system_prompt(
+        &args,
+        &agent,
+        &cwd_for_prompt,
+        &settings_snapshot,
+        &session_context,
+    )
+    .await?;
 
     // Snapshot todos for splicing into the system prompt for this run.
     let todo_snapshot = todos.lock().expect("todos lock poisoned").clone();

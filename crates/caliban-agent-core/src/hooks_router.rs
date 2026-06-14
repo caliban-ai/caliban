@@ -76,6 +76,44 @@ fn parse_decision_blob(text: &str) -> HookDecision {
 }
 
 // ---------------------------------------------------------------------------
+// SessionStart additionalContext parsing
+// ---------------------------------------------------------------------------
+
+/// Stdout JSON shapes that can carry `SessionStart` `additionalContext`.
+#[derive(Debug, Deserialize, Default)]
+struct SessionStartBlob {
+    #[serde(rename = "additionalContext")]
+    additional_context: Option<String>,
+    #[serde(rename = "hookSpecificOutput", default)]
+    hook_specific_output: Option<SessionStartNested>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SessionStartNested {
+    #[serde(rename = "additionalContext")]
+    additional_context: Option<String>,
+}
+
+/// Extract `SessionStart` `additionalContext` from a handler's stdout JSON.
+/// Accepts the flat (`{"additionalContext": ...}`) and nested
+/// (`{"hookSpecificOutput": {"additionalContext": ...}}`) shapes. Returns
+/// `None` for empty / non-JSON / absent input.
+///
+/// Reusable surface for #121 (config-hook execution): config-defined hooks are
+/// not yet wired into the runtime `Hooks` chain, so this is exercised by unit
+/// tests here and called once that bridge lands.
+#[allow(dead_code)] // invoked by the config-hook execution bridge (#121)
+pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let blob = serde_json::from_str::<SessionStartBlob>(trimmed).ok()?;
+    blob.additional_context
+        .or_else(|| blob.hook_specific_output.and_then(|n| n.additional_context))
+}
+
+// ---------------------------------------------------------------------------
 // ShellCommandHook
 // ---------------------------------------------------------------------------
 
@@ -504,6 +542,31 @@ mod tests {
     fn empty_blob_is_allow() {
         assert!(matches!(parse_decision_blob(""), HookDecision::Allow));
         assert!(matches!(parse_decision_blob("   "), HookDecision::Allow));
+    }
+
+    #[test]
+    fn session_start_context_flat_shape() {
+        let blob = r#"{ "additionalContext": "hello from hook" }"#;
+        assert_eq!(
+            parse_session_start_context(blob),
+            Some("hello from hook".to_string())
+        );
+    }
+
+    #[test]
+    fn session_start_context_nested_shape() {
+        let blob = r#"{ "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": "nested ctx" } }"#;
+        assert_eq!(
+            parse_session_start_context(blob),
+            Some("nested ctx".to_string())
+        );
+    }
+
+    #[test]
+    fn session_start_context_absent_or_nonjson() {
+        assert_eq!(parse_session_start_context(""), None);
+        assert_eq!(parse_session_start_context("not json"), None);
+        assert_eq!(parse_session_start_context(r#"{ "other": 1 }"#), None);
     }
 
     #[test]

@@ -981,6 +981,10 @@ pub(crate) async fn run_headless(
             provider: provider_name(resolved_provider(args)),
             model: &model,
         };
+        // Event-emission only: context injection already happened at the
+        // main.rs SessionStart fire (threaded into the system prompt via
+        // `resolve_system_prompt`). We discard the outcome here to avoid
+        // double-injecting (#106).
         if let Err(e) = agent.hooks().session_start(&session_ctx).await {
             tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
         }
@@ -1617,9 +1621,15 @@ mod enforce_tests {
     }
 }
 
-/// Fire the `session_start` (or `session_end`) hook with the standard
-/// session context. Errors are logged-and-swallowed (best-effort).
-pub(crate) async fn fire_session_start(args: &Args, agent: &Arc<Agent>, model: &str) {
+/// Fire the `session_start` hook with the standard session context. Errors are
+/// logged-and-swallowed (best-effort). Returns any `additional_context` blocks
+/// the `SessionStart` hooks supplied, for splicing into the system prompt before
+/// turn 1 (#106).
+pub(crate) async fn fire_session_start(
+    args: &Args,
+    agent: &Arc<Agent>,
+    model: &str,
+) -> Vec<String> {
     let cwd_now = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let session_id = args.session.clone().unwrap_or_else(|| "ephemeral".into());
     let session_ctx = caliban_agent_core::SessionCtx {
@@ -1628,8 +1638,12 @@ pub(crate) async fn fire_session_start(args: &Args, agent: &Arc<Agent>, model: &
         provider: provider_name(resolved_provider(args)),
         model,
     };
-    if let Err(e) = agent.hooks().session_start(&session_ctx).await {
-        tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
+    match agent.hooks().session_start(&session_ctx).await {
+        Ok(outcome) => outcome.additional_context,
+        Err(e) => {
+            tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_start hook error (non-fatal)");
+            Vec::new()
+        }
     }
 }
 
@@ -1940,6 +1954,7 @@ pub(crate) async fn resolve_system_prompt(
     agent: &Arc<Agent>,
     cwd_for_prompt: &std::path::Path,
     settings_snapshot: &caliban_settings::Settings,
+    session_context: &[String],
 ) -> Result<Option<String>> {
     let tool_names: Vec<&str> = agent.tools().names().collect();
     let default_prompt_in_effect =
@@ -1970,9 +1985,10 @@ pub(crate) async fn resolve_system_prompt(
     let skill_names = proactive_skill_names(agent, settings_snapshot);
 
     if !default_prompt_in_effect {
-        return Ok(Some(system_prompt::append_skills_block(
-            &body,
-            &skill_names,
+        let with_skills = system_prompt::append_skills_block(&body, &skill_names);
+        return Ok(Some(system_prompt::append_session_context_block(
+            &with_skills,
+            session_context,
         )));
     }
 
@@ -2026,9 +2042,10 @@ pub(crate) async fn resolve_system_prompt(
             }
         }
     };
-    Ok(Some(system_prompt::append_skills_block(
-        &final_prompt,
-        &skill_names,
+    let with_skills = system_prompt::append_skills_block(&final_prompt, &skill_names);
+    Ok(Some(system_prompt::append_session_context_block(
+        &with_skills,
+        session_context,
     )))
 }
 
@@ -2103,6 +2120,58 @@ mod tests {
         let mut argv: Vec<&str> = vec!["caliban"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[tokio::test]
+    async fn session_context_is_spliced_into_prompt() {
+        use super::resolve_system_prompt;
+        use caliban_agent_core::{Agent, ToolRegistry};
+        use caliban_provider::{MockProvider, Provider};
+        use std::sync::Arc;
+
+        // Minimal offline agent (no network) with an empty tool registry, so
+        // the default coding-assistant prompt is in effect and no skills block
+        // is emitted.
+        let provider: Arc<dyn Provider + Send + Sync> = Arc::new(MockProvider::new());
+        let agent = Arc::new(
+            Agent::builder()
+                .provider(provider)
+                .tools(ToolRegistry::new())
+                .model("mock")
+                .max_tokens(64)
+                .max_turns(1)
+                .build()
+                .expect("agent builder"),
+        );
+        // `--bare` skips memory load so the test is hermetic.
+        let args = parse_args(&["--bare"]);
+        let settings = caliban_settings::Settings::default();
+        let cwd = std::env::current_dir().unwrap();
+
+        let with_ctx = resolve_system_prompt(
+            &args,
+            &agent,
+            &cwd,
+            &settings,
+            &["INJECTED-MARKER".to_string()],
+        )
+        .await
+        .unwrap()
+        .expect("default prompt in effect");
+        assert!(
+            with_ctx.contains("<session-context>"),
+            "session-context block should be present when context is supplied"
+        );
+        assert!(with_ctx.contains("INJECTED-MARKER"));
+
+        let without_ctx = resolve_system_prompt(&args, &agent, &cwd, &settings, &[])
+            .await
+            .unwrap()
+            .expect("default prompt in effect");
+        assert!(
+            !without_ctx.contains("<session-context>"),
+            "no session-context block when no context is supplied"
+        );
     }
 
     #[test]
