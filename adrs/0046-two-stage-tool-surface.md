@@ -17,9 +17,8 @@ payload. Built-ins are bounded (~14 entries) but MCP tools scale
 linearly with configured servers — three average MCP servers can add
 ~20K tokens/turn of dormant tool advertising before history is
 considered. The problem is structural and will worsen as the
-MCP/plugin ecosystem grows. The TODO entry under *Performance &
-scaling (2026-05-31)* in `docs/TODO.md` calls for a design doc + ADR
-+ multi-PR sequence; this ADR is that decision.
+MCP/plugin ecosystem grows, which calls for a design doc + ADR +
+multi-PR sequence; this ADR is that decision.
 
 ## Decision
 

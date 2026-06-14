@@ -19,7 +19,7 @@ decision with context, the decision itself, and consequences.
 | [0002](0002-error-model.md) | Error model → `thiserror` for libs, `anyhow` for binary | accepted |
 | [0003](0003-license-agpl-3.0.md) | License → `AGPL-3.0-only` | accepted |
 | [0004](0004-naming-conventions.md) | Naming → `caliban-*` libraries, `caliban` binary | accepted |
-| [0005](0005-workspace-layout.md) | Workspace layout → `crates/` for libs, binaries at root | accepted |
+| [0005](0005-workspace-layout.md) | Workspace layout → `crates/` for libs, binaries at root | accepted (binaries-at-root rule amended by [0042](0042-caliband-binary-placement.md)) |
 | [0006](0006-message-schema-ir.md) | Message schema → provider-neutral IR | accepted |
 | [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
 | [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
@@ -28,19 +28,19 @@ decision with context, the decision itself, and consequences.
 | [0011](0011-sessions-and-repl.md) | Sessions persisted to disk + interactive REPL | accepted |
 | [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
-| [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted |
+| [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted (redraw-tick open question closed by [0041](0041-tui-redraw-tick-closeout.md)) |
 | [0015](0015-context-and-path-fixes.md) | Context preservation + path conventions (~ expansion) | accepted |
 | [0016](0016-parallel-tool-dispatch.md) | Parallel tool dispatch (semaphore-bounded; supersedes 0009 sequential clause) | accepted |
-| [0017](0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted |
+| [0017](0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted (stdio-only scope superseded by [0023](0023-mcp-v2-transports-and-oauth.md)) |
 | [0018](0018-memory-tier-model.md) | Memory tier model (global / project / auto-memory; spliced into system prompt) | accepted |
 | [0019](0019-skills-loading.md) | Skills loading & invocation (frontmatter + body; `SkillTool` on-demand load) | accepted |
 | [0020](0020-permission-rules.md) | Permission rules layered on Hooks (TOML rule sources; interactive Ask) | accepted |
 | [0021](0021-sub-agent-primitive.md) | Sub-agent primitive (`AgentTool`; synchronous in-process; allowlist-filtered registry) | accepted |
-| [0022](0022-model-routing-architecture.md) | Model routing architecture (Layer 3 `caliban-model-router`; router-impl-Provider) | accepted |
+| [0022](0022-model-routing-architecture.md) | Model routing architecture (Layer 3 `caliban-model-router`; router-impl-Provider) | accepted (deferred-item scope superseded by [0038](0038-model-router-v2.md)) |
 | [0023](0023-mcp-v2-transports-and-oauth.md) | MCP v2 — transports, OAuth, elicitation, resources | accepted |
 | [0024](0024-hook-event-taxonomy.md) | Hook event taxonomy (expanded events + handler types) | accepted |
 | [0025](0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | accepted |
-| [0026](0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | accepted |
+| [0026](0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | accepted (write format + rule schema partially superseded by [0045](0045-permissions-v2-and-toml-primary-config.md)) |
 | [0027](0027-tui-ergonomics.md) | TUI ergonomics (@file, !, Ctrl+G, Ask modal, transcript viewer) | accepted |
 | [0028](0028-checkpointing-rewind.md) | Auto-checkpointing + `/rewind` | accepted |
 | [0029](0029-permission-modes-and-auto-mode.md) | Permission modes (acceptEdits / auto / dontAsk / bypassPermissions) + auto-mode classifier | accepted |

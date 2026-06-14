@@ -18,8 +18,7 @@ ADR 0005 ("Workspace layout") establishes the convention that
 "primary" binaries live at the workspace root. `caliband` does not —
 it lives nested under its owning crate. ADR 0037 introduces the
 daemon obliquely (its name, its on-disk paths, and its protocol) but
-does not document the placement choice. The 2026-05-25 ADR conformance
-audit (Finding 7) flagged this gap.
+does not document the placement choice. This ADR records it.
 
 ## Decision
 
@@ -74,6 +73,5 @@ ADR 0005's rule by adding that nuance.
 - ADR 0005 (workspace layout — sets the "binaries at root" convention
   this ADR refines).
 - ADR 0037 (subagent isolation + fleet — introduces `caliband`).
-- 2026-05-25 ADR conformance audit, Finding 7.
 - Source: `crates/caliban-supervisor/src/bin/caliband.rs`.
 - Declaration: `crates/caliban-supervisor/Cargo.toml` (`[[bin]]`).

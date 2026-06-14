@@ -94,7 +94,7 @@ order.
   (builder fields), `b5fba58` (FuturesUnordered + Semaphore refactor)
 - Implementation: `crates/caliban-agent-core/src/agent.rs`
   (`parallel_tools` / `parallel_tool_limit` fields),
-  `crates/caliban-agent-core/src/stream.rs` (three-phase dispatch)
+  `crates/caliban-agent-core/src/stream/parallel.rs` (three-phase dispatch)
 
 ## Revised 2026-05-26
 

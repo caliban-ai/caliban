@@ -20,8 +20,7 @@ Several read-mostly shared-state surfaces in the workspace use
   many subsystems; written when `SettingsWatcher` fires a reload).
 
 The choice was made per-surface during the parity sweep but never
-documented at the workspace level. The 2026-05-25 ADR conformance
-audit (Finding 7) flagged the gap.
+documented at the workspace level until this ADR.
 
 ## Decision
 
@@ -85,4 +84,3 @@ need to await across the lock.
   - `crates/caliban-agent-core/src/permission_mode.rs:124-140`
   - `crates/caliban-model-router/src/breaker.rs:68-79`
   - `crates/caliban-settings/src/lib.rs:70-83`
-- 2026-05-25 ADR conformance audit, Finding 7.
