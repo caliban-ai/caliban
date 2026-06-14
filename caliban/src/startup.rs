@@ -1949,8 +1949,19 @@ pub(crate) async fn resolve_system_prompt(
     let Some(body) = system_prompt else {
         return Ok(None);
     };
+
+    // Proactive skill-invocation nudge (#56): list loaded skill names so the
+    // model invokes a matching skill instead of improvising. Gated by
+    // `tools.skill_guidance`; empty when disabled or no skills are loaded. The
+    // block is appended at the tail of whatever prompt is in effect (default or
+    // custom), so it survives output-style/memory layering.
+    let skill_names = proactive_skill_names(agent, settings_snapshot);
+
     if !default_prompt_in_effect {
-        return Ok(Some(body));
+        return Ok(Some(system_prompt::append_skills_block(
+            &body,
+            &skill_names,
+        )));
     }
 
     let workspace_root = args
@@ -2003,7 +2014,31 @@ pub(crate) async fn resolve_system_prompt(
             }
         }
     };
-    Ok(Some(final_prompt))
+    Ok(Some(system_prompt::append_skills_block(
+        &final_prompt,
+        &skill_names,
+    )))
+}
+
+/// Skill names to surface in the system prompt's proactive-invocation block,
+/// honoring the `tools.skill_guidance` opt-out (#56). Returns an empty list when
+/// guidance is disabled or no `Skill` tool is registered (e.g. `--no-skills`,
+/// `--bare`, `--no-tools`), in which case no block is injected.
+fn proactive_skill_names<'a>(
+    agent: &'a Agent,
+    settings: &caliban_settings::Settings,
+) -> Vec<&'a str> {
+    let disabled = settings.tools.as_ref().and_then(|t| t.skill_guidance) == Some(false);
+    if disabled {
+        return Vec::new();
+    }
+    agent
+        .tools()
+        .get("Skill")
+        .and_then(|t| t.as_any())
+        .and_then(|a| a.downcast_ref::<SkillTool>())
+        .map(SkillTool::skill_names_sorted)
+        .unwrap_or_default()
 }
 
 /// Overlay `settings.memory.cap_tokens_*` (when present) onto a `MemoryConfig`
