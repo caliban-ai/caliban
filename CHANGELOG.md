@@ -9,6 +9,30 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Added
+
+- **SessionStart context-injection hook surface** (#106): `session_start` hooks
+  can return a `SessionStartOutcome` whose `additional_context` is spliced into
+  the system prompt before turn 1 (via a `<session-context>` block), letting skill
+  packs / plugins ship their own activation preambles. The #56 built-in skills
+  nudge remains an independent fallback. Ships a reusable `additionalContext`
+  parser; runtime execution of config-defined hooks is tracked in #121. (#122)
+- **Proactive skill-invocation nudge** (#56): the system prompt now lists loaded
+  skills and instructs the model to invoke a matching skill before improvising,
+  gated by `tools.skill_guidance`. (#105)
+- **User-facing extended-thinking toggle** (#100): control extended thinking
+  independently of the effort level. (#110)
+
+### Changed
+
+- **Immediate slash commands** (#13): 19 eligible slash commands now execute
+  immediately instead of requiring a confirmation step. (#104)
+
+### Fixed
+
+- **Skipped skills surfaced** (#107): skills that fail to load are now reported
+  instead of being silently dropped. (#108)
+
 ## [0.2.0] - 2026-06-13
 
 This release centers on **interactive background sub-agents** and the supervisor
