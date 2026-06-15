@@ -13,9 +13,9 @@ create-missing = false
 git-repository-url = "https://github.com/caliban-ai/caliban"
 edit-url-template = "https://github.com/caliban-ai/caliban/edit/main/docs/guide/{path}"
 preferred-dark-theme = "navy"
-additional-css = ["mdbook-admonish.css", "theme/custom.css"]
+additional-css = ["mdbook-admonish.css", "theme/custom.css", "theme/caliban-ai.css"]
 no-section-label = false
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/nav.js"]
 
 [output.html.fold]
 enable = true

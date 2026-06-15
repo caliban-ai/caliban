@@ -19,3 +19,10 @@ Cargo.lock.bak
 # Per-user agent state / config (never committed)
 .caliban/
 .claude/
+
+# Generated ADR copies for the mdBook guide (source of truth: docs/adr/)
+/docs/guide/src/adr/
+
+# Shared theme files fetched from the hub at build time (source: caliban-ai.github.io)
+/docs/guide/theme/caliban-ai.css
+/docs/guide/theme/nav.js
