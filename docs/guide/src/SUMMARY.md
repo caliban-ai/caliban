@@ -156,5 +156,3 @@
   - [ADR 0045 · Permissions v2 — TOML-primary config + richer rule schema](./adr/0045-permissions-v2-and-toml-primary-config.md)
   - [ADR 0046 · Two-stage tool surface — lazy MCP schema loading + ToolSearch](./adr/0046-two-stage-tool-surface.md)
   - [ADR 0047 · Interactive background sub-agents (idle / await-input)](./adr/0047-interactive-background-subagents.md)
-  - [Architecture Decision Records](./adr/README.md)
-  - [ADR NNNN · Short title of the decision](./adr/template.md)
