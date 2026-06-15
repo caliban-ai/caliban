@@ -19,3 +19,6 @@ Cargo.lock.bak
 # Per-user agent state / config (never committed)
 .caliban/
 .claude/
+
+# Generated ADR copies for the mdBook guide (source of truth: docs/adr/)
+/docs/guide/src/adr/
