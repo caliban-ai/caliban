@@ -42,7 +42,13 @@ impl EventHub {
     /// Append a serialized event line (NO trailing newline) to history and
     /// broadcast it to live subscribers, atomically.
     fn publish(&self, line: Arc<str>) {
-        let mut hist = self.history.lock().expect("event hub lock");
+        // Recover a poisoned guard instead of panicking: a panic elsewhere
+        // while holding this lock must not cascade into worker death, just
+        // because the history Vec was left in a consistent-enough state. (#113)
+        let mut hist = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         hist.push(Arc::clone(&line));
         // Err just means there are no live subscribers right now — fine.
         let _ = self.tx.send(line);
@@ -52,7 +58,11 @@ impl EventHub {
     /// returned receiver yields only events published AFTER this call;
     /// combined with the snapshot, the caller sees each event exactly once.
     fn subscribe(&self) -> (Vec<Arc<str>>, broadcast::Receiver<Arc<str>>) {
-        let hist = self.history.lock().expect("event hub lock");
+        // Recover a poisoned guard instead of panicking (see `publish`). (#113)
+        let hist = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rx = self.tx.subscribe();
         (hist.clone(), rx)
     }
@@ -788,6 +798,62 @@ mod tests {
         assert_eq!(&*history[0], "a");
         assert_eq!(&*history[1], "b");
         assert_eq!(&*history[2], "c");
+    }
+
+    /// Poison the hub's `history` mutex by panicking while holding the guard,
+    /// with the panic message suppressed so test output stays clean. A static
+    /// guard serializes the process-global panic-hook swap so concurrent
+    /// poison tests can't clobber each other's saved hook.
+    fn poison_history(hub: &EventHub) {
+        static HOOK_GUARD: Mutex<()> = Mutex::new(());
+        let _serial = HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = hub.history.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        std::panic::set_hook(prev);
+        assert!(result.is_err(), "poisoning closure should have unwound");
+        assert!(
+            hub.history.is_poisoned(),
+            "history mutex should be poisoned after a panic-while-locked"
+        );
+    }
+
+    #[test]
+    fn event_hub_publish_recovers_from_poisoned_lock() {
+        // A panic while holding the history lock poisons it. `publish` must
+        // recover the guard rather than panic the worker, so events keep
+        // flowing after a poisoned-lock recovery.
+        let hub = EventHub::new();
+        hub.publish(Arc::from("before"));
+        poison_history(&hub);
+
+        hub.publish(Arc::from("after"));
+
+        let (history, _rx) = hub.subscribe();
+        assert!(
+            history.iter().any(|l| &**l == "after"),
+            "publish after poison must append, got {history:?}"
+        );
+    }
+
+    #[test]
+    fn event_hub_subscribe_recovers_from_poisoned_lock() {
+        // `subscribe` must also recover a poisoned history lock so an attaching
+        // client still receives the retained snapshot.
+        let hub = EventHub::new();
+        hub.publish(Arc::from("x"));
+        poison_history(&hub);
+
+        let (history, _rx) = hub.subscribe();
+        assert!(
+            history.iter().any(|l| &**l == "x"),
+            "subscribe after poison must return the snapshot, got {history:?}"
+        );
     }
 
     #[tokio::test]
