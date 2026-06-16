@@ -131,6 +131,12 @@ struct SocketInputProvider {
     has_clients: Arc<AtomicUsize>,
 }
 
+/// Idle poll cadence: how often `next_input` wakes to observe a client
+/// attaching mid-idle (and reset the deadline). The timeout itself fires on a
+/// `sleep_until(deadline)`, so this interval bounds attach-detection latency,
+/// not timeout precision. (#119)
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[async_trait::async_trait]
 impl InputProvider for SocketInputProvider {
     async fn next_input(
@@ -141,15 +147,20 @@ impl InputProvider for SocketInputProvider {
             s.set(caliban_supervisor::proto::AgentStatus::Idle).await;
         }
         let mut rx = self.inbox.lock().await;
-        // Poll on a tick (<= the timeout) so a client attaching mid-idle resets
-        // the accumulated idle time before it can trip the timeout.
-        let tick = self
+        // Track an absolute deadline rather than accumulating elapsed time in
+        // discrete ticks: chunked accumulation overshot a custom timeout that
+        // isn't a multiple of the poll interval by up to one poll (e.g. a 7s
+        // timeout fired at ~10s). We still poll at `POLL` so a client attaching
+        // mid-idle is observed and the deadline reset, but `sleep_until` wakes
+        // exactly at the deadline when it is nearer than the next poll. (#119)
+        let mut deadline = self
             .idle_timeout
-            .map_or(std::time::Duration::from_secs(5), |d| {
-                d.min(std::time::Duration::from_secs(5))
-            });
-        let mut idle_elapsed = std::time::Duration::ZERO;
+            .map(|limit| tokio::time::Instant::now() + limit);
         let out = loop {
+            let wake = match deadline {
+                Some(d) => d.min(tokio::time::Instant::now() + IDLE_POLL_INTERVAL),
+                None => tokio::time::Instant::now() + IDLE_POLL_INTERVAL,
+            };
             tokio::select! {
                 () = cancel.cancelled() => break None,
                 frame = rx.recv() => break match frame {
@@ -157,21 +168,23 @@ impl InputProvider for SocketInputProvider {
                         Some(vec![caliban_provider::Message::user_text(text)]),
                     Some(AttachInbound::EndInput) | None => None,
                 },
-                () = tokio::time::sleep(tick) => {
+                () = tokio::time::sleep_until(wake) => {
                     if self.has_clients.load(Ordering::Relaxed) > 0 {
-                        idle_elapsed = std::time::Duration::ZERO; // operator present — reset
+                        // operator present — reset the countdown
+                        deadline = self
+                            .idle_timeout
+                            .map(|limit| tokio::time::Instant::now() + limit);
                         continue;
                     }
-                    if let Some(limit) = self.idle_timeout {
-                        idle_elapsed += tick;
-                        if idle_elapsed >= limit {
-                            tracing::info!(
-                                "interactive agent idle timeout with no clients — ending"
-                            );
-                            break None;
-                        }
+                    if let Some(d) = deadline
+                        && tokio::time::Instant::now() >= d
+                    {
+                        tracing::info!(
+                            "interactive agent idle timeout with no clients — ending"
+                        );
+                        break None;
                     }
-                    // None: no timeout configured — keep waiting
+                    // No timeout configured (or not yet reached) — keep polling.
                 }
             }
         };
@@ -1204,6 +1217,40 @@ mod tests {
             .expect("should resolve after cancel")
             .expect("task should not panic");
         assert!(result.is_none());
+    }
+
+    /// A custom idle timeout that is greater than the 5s poll interval and not
+    /// a multiple of it (7s) must fire at ~7s, not overshoot to the next poll
+    /// boundary (~10s). Uses the paused clock so the virtual elapsed time is
+    /// exact and the test runs instantly. (#119)
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_fires_at_deadline_not_next_poll_multiple() {
+        use tokio_util::sync::CancellationToken;
+
+        let (tx, rx) = mpsc::channel::<AttachInbound>(16);
+        let provider = SocketInputProvider {
+            inbox: AsyncMutex::new(rx),
+            status: None,
+            idle_timeout: Some(std::time::Duration::from_secs(7)),
+            has_clients: Arc::new(AtomicUsize::new(0)),
+        };
+        let cancel = CancellationToken::new();
+        // Keep tx alive so channel-close cannot race with the timeout.
+        let _tx_keepalive = tx;
+
+        let start = tokio::time::Instant::now();
+        let result = provider.next_input(&cancel).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "idle timeout must resolve to None");
+        assert!(
+            elapsed >= std::time::Duration::from_secs(7),
+            "idle timeout fired too early at {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(7500),
+            "idle timeout overshot: fired at {elapsed:?}, expected ~7s not ~10s"
+        );
     }
 
     /// When `idle_timeout` is `None`, the timer loop never auto-ends, so
