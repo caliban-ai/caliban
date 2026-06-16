@@ -25,8 +25,14 @@ use crate::attach::AttachInbound;
 /// atomic with respect to each other, so a client that attaches mid-run
 /// receives every event exactly once (no gap between the historical
 /// snapshot and the live tail).
+/// Maximum number of event lines the hub retains for replay. Matches the
+/// broadcast channel capacity so an attaching client replays at most the same
+/// window the live channel can buffer. Bounds per-worker memory on a
+/// long-running session — without this the history grew unbounded. (#116)
+const HISTORY_CAP: usize = 1024;
+
 struct EventHub {
-    history: Mutex<Vec<Arc<str>>>,
+    history: Mutex<std::collections::VecDeque<Arc<str>>>,
     tx: broadcast::Sender<Arc<str>>,
 }
 
@@ -34,7 +40,7 @@ impl EventHub {
     fn new() -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(1024);
         Arc::new(Self {
-            history: Mutex::new(Vec::new()),
+            history: Mutex::new(std::collections::VecDeque::with_capacity(HISTORY_CAP)),
             tx,
         })
     }
@@ -49,7 +55,12 @@ impl EventHub {
             .history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        hist.push(Arc::clone(&line));
+        // Ring buffer: drop the oldest line once at capacity so a long-running
+        // worker's history stays bounded. (#116)
+        if hist.len() == HISTORY_CAP {
+            hist.pop_front();
+        }
+        hist.push_back(Arc::clone(&line));
         // Err just means there are no live subscribers right now — fine.
         let _ = self.tx.send(line);
     }
@@ -64,7 +75,7 @@ impl EventHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rx = self.tx.subscribe();
-        (hist.clone(), rx)
+        (hist.iter().cloned().collect(), rx)
     }
 }
 
@@ -807,6 +818,24 @@ mod tests {
         assert_eq!(&*history[0], "a");
         assert_eq!(&*history[1], "b");
         assert_eq!(&*history[2], "c");
+    }
+
+    #[test]
+    fn event_hub_history_is_bounded_to_cap() {
+        // A long-running worker emits events indefinitely; history must not
+        // grow without bound. Past the cap the oldest lines are dropped, and
+        // an attaching client still replays the most-recent retained window.
+        let hub = EventHub::new();
+        let total = HISTORY_CAP + 50;
+        for i in 0..total {
+            hub.publish(Arc::from(format!("e{i}").as_str()));
+        }
+        let (history, _rx) = hub.subscribe();
+        assert_eq!(history.len(), HISTORY_CAP, "history must be capped");
+        // Newest retained...
+        assert_eq!(&*history[history.len() - 1], format!("e{}", total - 1));
+        // ...oldest dropped: the window starts at total - HISTORY_CAP.
+        assert_eq!(&*history[0], format!("e{}", total - HISTORY_CAP));
     }
 
     /// Poison the hub's `history` mutex by panicking while holding the guard,
