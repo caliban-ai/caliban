@@ -51,7 +51,11 @@ pub struct Rule {
 /// Ask modal branches. Composes with config rules under existing
 /// precedence (runtime > project > user > managed); session-scoped only,
 /// never persisted to disk.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` let a parent's accumulated runtime rules cross
+/// the process boundary to a background sub-agent via the spawn spec (#114),
+/// so a live "Always deny" is honored by inherited workers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRule {
     /// Pattern of the form `Tool` or `Tool:first-arg-glob`.
     pub pattern: String,

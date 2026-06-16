@@ -1243,6 +1243,7 @@ pub(crate) fn install_sub_agent(
     parent_max_active_schemas: usize,
     parent_lazy_mcp: bool,
     inheritable_config: Option<crate::hook_inherit::InheritableHookConfig>,
+    parent_runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
 ) {
     if args.no_sub_agent || args.no_tools {
         return;
@@ -1312,6 +1313,10 @@ pub(crate) fn install_sub_agent(
     // Clone once outside the Fn closure so the closure can call .as_ref()
     // on each invocation without consuming the captured value (#84).
     let inheritable_config_for_bg = inheritable_config;
+    // The parent's live runtime-rule store, snapshotted per spawn so an
+    // "Always allow/deny" the operator set after startup still reaches the
+    // child (the config template captured above carries an empty list). (#114)
+    let runtime_rules_for_bg = parent_runtime_rules;
     // Compute the parent's provider name once so background sub-agents
     // inherit the same provider by default (#93).
     let parent_provider = crate::provider_name(crate::resolved_provider(args)).to_string();
@@ -1335,9 +1340,14 @@ pub(crate) fn install_sub_agent(
                 inherit_hooks: input.inherit_hooks,
                 interactive: false,
                 inherited_hooks_config: if input.inherit_hooks {
-                    inheritable_config_for_bg
-                        .as_ref()
-                        .and_then(crate::hook_inherit::InheritableHookConfig::to_json)
+                    inheritable_config_for_bg.as_ref().and_then(|cfg| {
+                        // Snapshot the parent's LIVE runtime rules at spawn time
+                        // and stamp them into a per-spawn clone of the template
+                        // before serializing, so the child enforces them. (#114)
+                        let mut cfg = cfg.clone();
+                        cfg.runtime_rules = runtime_rules_for_bg.snapshot();
+                        cfg.to_json()
+                    })
                 } else {
                     None
                 },
@@ -1412,6 +1422,7 @@ pub(crate) struct PermissionsSetup {
 ///
 /// Returns `PermissionsSetup::default`-equivalent (all-`None`) when
 /// `--no-permissions` is set.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn build_permissions(
     args: &Args,
     settings_snapshot: &caliban_settings::Settings,
@@ -1541,6 +1552,7 @@ pub(crate) fn build_permissions(
             rules: inheritable_rules,
             mode: permission_mode.load(),
             audit: audit_enabled,
+            runtime_rules: Vec::new(),
         }),
     }
 }

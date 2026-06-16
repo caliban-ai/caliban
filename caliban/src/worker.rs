@@ -518,8 +518,17 @@ fn build_inherited_hooks(
     };
     let ask: Arc<dyn caliban_agent_core::AskHandler> =
         Arc::new(NonInteractiveAskHandler { auto_allow: false });
-    let inner: Arc<dyn caliban_agent_core::Hooks> =
-        Arc::new(PermissionsHook::new(cfg.rules, ask, Arc::new(NoopHooks)));
+    // Re-hydrate the parent's snapshotted runtime rules into a fresh store and
+    // wire it into the gate, so a live "Always allow/deny" set in the parent is
+    // honored by this inherited worker (consulted before the static rules).
+    // (#114)
+    let runtime_store = Arc::new(caliban_agent_core::RuntimeRuleStore::new());
+    for rule in cfg.runtime_rules {
+        runtime_store.add(rule);
+    }
+    let inner: Arc<dyn caliban_agent_core::Hooks> = Arc::new(
+        PermissionsHook::new(cfg.rules, ask, Arc::new(NoopHooks)).with_runtime_rules(runtime_store),
+    );
 
     let mode = SharedPermissionMode::new(cfg.mode);
     // Auto mode needs the LLM classifier; other modes pass `None` which makes
@@ -1279,6 +1288,7 @@ mod tests {
             }],
             mode: PermissionMode::Default,
             audit: false,
+            runtime_rules: vec![],
         };
         let json = cfg.to_json().expect("to_json should succeed");
 
@@ -1326,9 +1336,96 @@ mod tests {
             }],
             mode: PermissionMode::Default,
             audit: false,
+            runtime_rules: vec![],
         };
 
         // Must not panic.
         let _chain = build_inherited_hooks(cfg, &provider, "claude-3-haiku", "test-session".into());
+    }
+
+    /// Build a config where the static policy ALLOWS `Bash` but the inherited
+    /// runtime rules DENY it. Because runtime rules outrank config rules, the
+    /// worker's inherited hook chain must deny the call — proving the parent's
+    /// live "Always deny" propagated through the spawn spec (#114). Uses a
+    /// `MockProvider` so it runs without an API key (Default mode never touches
+    /// the provider).
+    #[tokio::test]
+    async fn inherited_runtime_deny_overrides_config_allow() {
+        use crate::hook_inherit::InheritableHookConfig;
+        use caliban_agent_core::{
+            Action, HookDecision, PermissionMode, Rule, RuntimeRule, ToolCtx,
+        };
+        use caliban_provider::MockProvider;
+
+        let provider: Arc<dyn caliban_provider::Provider + Send + Sync> =
+            Arc::new(MockProvider::new());
+        let cfg = InheritableHookConfig {
+            rules: vec![Rule {
+                tool: "Bash".into(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            }],
+            mode: PermissionMode::Default,
+            audit: false,
+            runtime_rules: vec![RuntimeRule {
+                pattern: "Bash".into(),
+                action: Action::Deny,
+            }],
+        };
+        let chain = build_inherited_hooks(cfg, &provider, "mock-model", "test-session".into());
+
+        let input = serde_json::json!({"command": "rm -rf /"});
+        let ctx = ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t1",
+            tool_name: "Bash",
+            input: &input,
+        };
+        let decision = chain.before_tool(&ctx).await.expect("hook decision");
+        assert!(
+            matches!(decision, HookDecision::Deny(_)),
+            "inherited runtime deny must override config allow, got {decision:?}"
+        );
+    }
+
+    /// Control for the test above: with NO inherited runtime rules, the same
+    /// config `Allow Bash` stands. Confirms the deny in the sibling test comes
+    /// from the inherited runtime rule, not the base policy.
+    #[tokio::test]
+    async fn without_inherited_runtime_rules_config_allow_stands() {
+        use crate::hook_inherit::InheritableHookConfig;
+        use caliban_agent_core::{Action, HookDecision, PermissionMode, Rule, ToolCtx};
+        use caliban_provider::MockProvider;
+
+        let provider: Arc<dyn caliban_provider::Provider + Send + Sync> =
+            Arc::new(MockProvider::new());
+        let cfg = InheritableHookConfig {
+            rules: vec![Rule {
+                tool: "Bash".into(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            }],
+            mode: PermissionMode::Default,
+            audit: false,
+            runtime_rules: vec![],
+        };
+        let chain = build_inherited_hooks(cfg, &provider, "mock-model", "test-session".into());
+
+        let input = serde_json::json!({"command": "ls"});
+        let ctx = ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t1",
+            tool_name: "Bash",
+            input: &input,
+        };
+        let decision = chain.before_tool(&ctx).await.expect("hook decision");
+        assert!(
+            matches!(decision, HookDecision::Allow),
+            "config allow must stand without an inherited runtime rule, got {decision:?}"
+        );
     }
 }

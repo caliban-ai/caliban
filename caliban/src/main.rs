@@ -380,6 +380,7 @@ async fn main() -> Result<()> {
             .and_then(|t| t.lazy_mcp)
             .unwrap_or(false),
         inheritable_config,
+        Arc::clone(&runtime_rules),
     );
 
     // When `--include-hook-events` is set, allocate a buffer so the
