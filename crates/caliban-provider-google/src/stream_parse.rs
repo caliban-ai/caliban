@@ -19,6 +19,37 @@ use crate::schema::request::NativePart;
 use crate::schema::response::NativeFinishReason;
 
 // ---------------------------------------------------------------------------
+// In-band error envelope
+// ---------------------------------------------------------------------------
+
+/// Gemini can deliver a fault mid-stream as HTTP 200 + an `{"error": {...}}`
+/// object on a `data:` line instead of as a non-2xx status. Because every
+/// field of `NativeResponse` is `#[serde(default)]`, such a payload would
+/// otherwise deserialize into an *empty* chunk and be silently dropped. We
+/// detect the envelope first and route its message through the `GoogleError`
+/// classifier (context overflow → `ContextTooLong`, server fault →
+/// `UpstreamServerFault`, else `InvalidRequest`).
+#[derive(serde::Deserialize)]
+struct ErrorEnvelope {
+    error: Option<ErrorBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    message: String,
+}
+
+/// If `data` is an in-band error envelope, return its message; otherwise
+/// `None` (it is a normal response chunk).
+fn in_band_error_message(data: &str) -> Option<String> {
+    serde_json::from_str::<ErrorEnvelope>(data)
+        .ok()
+        .and_then(|env| env.error)
+        .map(|err| err.message)
+}
+
+// ---------------------------------------------------------------------------
 // Internal state machine
 // ---------------------------------------------------------------------------
 
@@ -70,6 +101,14 @@ pub(crate) fn map_gemini_sse_to_events(
             // Skip SSE comments / keep-alive frames with no data.
             if event.data.is_empty() {
                 continue;
+            }
+
+            // An in-band `{"error": {...}}` envelope is a server-side fault
+            // delivered over a 200 stream. Classify and surface it instead of
+            // letting it deserialize into an empty (silently dropped) chunk.
+            if let Some(msg) = in_band_error_message(&event.data) {
+                Err(ProviderError::from(GoogleError::UpstreamError(msg)))?;
+                unreachable!();
             }
 
             let chunk: NativeResponse = serde_json::from_str(&event.data).map_err(|e| {
@@ -205,4 +244,84 @@ pub(crate) fn map_gemini_sse_to_events(
     };
 
     Box::pin(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a byte-stream of SSE `data:` frames from raw JSON payloads.
+    fn sse_bytes(frames: &[&str]) -> BoxStream<'static, Result<Bytes, GoogleError>> {
+        let mut body = String::new();
+        for f in frames {
+            body.push_str("data: ");
+            body.push_str(f);
+            body.push_str("\n\n");
+        }
+        futures::stream::iter(vec![Ok(Bytes::from(body))]).boxed()
+    }
+
+    async fn collect_events(
+        bytes: BoxStream<'static, Result<Bytes, GoogleError>>,
+    ) -> Vec<Result<StreamEvent, ProviderError>> {
+        map_gemini_sse_to_events(bytes).collect().await
+    }
+
+    #[tokio::test]
+    async fn in_band_internal_fault_yields_server_fault_error() {
+        // Gemini delivers a mid-stream 500 as HTTP 200 + an in-band error
+        // object. Today this parses into an empty NativeResponse and is
+        // silently swallowed; it must instead surface as UpstreamServerFault.
+        let frame =
+            r#"{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}"#;
+        let events = collect_events(sse_bytes(&[frame])).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Err(ProviderError::UpstreamServerFault(_)))),
+            "expected an UpstreamServerFault error, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_band_context_overflow_yields_context_too_long_error() {
+        // A context overflow detected after the stream opens must route to
+        // ContextTooLong so the agent loop's reactive compaction fires.
+        let frame = r#"{"error":{"code":400,"message":"The input token count (5200) exceeds the maximum number of tokens allowed (4096).","status":"INVALID_ARGUMENT"}}"#;
+        let events = collect_events(sse_bytes(&[frame])).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Err(ProviderError::ContextTooLong { .. }))),
+            "expected a ContextTooLong error, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_chunk_is_unaffected_by_error_envelope_check() {
+        // Regression: a normal response chunk (no `error` key) must still
+        // produce MessageStart + a text delta and no error.
+        let frame = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{},"modelVersion":"gemini-2.0"}"#;
+        let events = collect_events(sse_bytes(&[frame])).await;
+        assert!(
+            events.iter().all(std::result::Result::is_ok),
+            "normal chunk must not error, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(StreamEvent::MessageStart { .. }))),
+            "expected MessageStart, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Ok(StreamEvent::Delta {
+                    delta: StreamingDelta::Text(t),
+                    ..
+                }) if t == "hi"
+            )),
+            "expected a text delta 'hi', got {events:?}"
+        );
+    }
 }
