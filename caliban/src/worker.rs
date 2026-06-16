@@ -204,15 +204,25 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncBufReadExt as _;
+    use tokio::sync::mpsc::error::TrySendError;
     let mut lines = tokio::io::BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(frame) = serde_json::from_str::<AttachInbound>(&line)
-            && inbox.send(frame).await.is_err()
-        {
-            break;
+        if let Ok(frame) = serde_json::from_str::<AttachInbound>(&line) {
+            // Non-blocking forward: the receiver only drains between runs, so a
+            // blocking `send().await` would let an operator flooding frames
+            // while the agent is busy wedge this reader task indefinitely.
+            // Policy: drop the frame (and warn) when the inbox is full; stop on
+            // a closed channel. (#118)
+            match inbox.try_send(frame) {
+                Ok(()) => {}
+                Err(TrySendError::Full(dropped)) => {
+                    tracing::warn!(?dropped, "inbound frame channel full — dropping frame");
+                }
+                Err(TrySendError::Closed(_)) => break,
+            }
         }
         // Malformed lines are silently skipped.
     }
@@ -968,6 +978,36 @@ mod tests {
         assert_eq!(second, AttachInbound::EndInput);
         // Channel should be closed (no more frames).
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_inbound_frames_does_not_stall_when_channel_full() {
+        // 100 valid frames into a 64-cap channel that is never drained while
+        // the reader runs. With the old blocking send().await the reader wedged
+        // at frame 65; try_send must drop the overflow and drain to EOF. (#118)
+        let mut input = Vec::new();
+        for i in 0..100 {
+            input.extend_from_slice(
+                format!("{{\"type\":\"UserMessage\",\"text\":\"m{i}\"}}\n").as_bytes(),
+            );
+        }
+        let (tx, mut rx) = mpsc::channel::<AttachInbound>(64);
+
+        // `rx` stays alive (channel open) but is NOT drained during the run, so
+        // the channel fills and try_send must reject overflow rather than block.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_inbound_frames(input.as_slice(), tx),
+        )
+        .await;
+        assert!(res.is_ok(), "reader stalled on a full inbox channel");
+
+        // Exactly the cap was buffered; the overflow was dropped, not blocked.
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 64, "should buffer exactly the channel capacity");
     }
 
     // --- SocketInputProvider ---
