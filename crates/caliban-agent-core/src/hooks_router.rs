@@ -46,33 +46,45 @@ struct DecisionEnvelope {
     hook_specific_output: Option<HookSpecificOutput>,
 }
 
-/// Parse a decision blob. Empty / unparseable input yields `Allow`.
-fn parse_decision_blob(text: &str) -> HookDecision {
+/// Parse an *explicit* decision from a hook's stdout/response JSON.
+///
+/// Returns `Some(_)` only when the blob carries an actionable decision — an
+/// explicit `permissionDecision` or an `updatedInput`. Returns `None` for
+/// empty / non-JSON input, or a JSON object that has no `hookSpecificOutput`
+/// (e.g. informational `{"foo":1}`) or an empty one. `None` lets the caller
+/// fall back to exit-code semantics rather than silently treating the blob as
+/// Allow (#171: a `{…}` + `exit 2` deny was being swallowed).
+fn explicit_decision(text: &str) -> Option<HookDecision> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return HookDecision::Allow;
+        return None;
     }
-    let Ok(env) = serde_json::from_str::<DecisionEnvelope>(trimmed) else {
-        return HookDecision::Allow;
-    };
-    let Some(out) = env.hook_specific_output else {
-        return HookDecision::Allow;
-    };
+    let env = serde_json::from_str::<DecisionEnvelope>(trimmed).ok()?;
+    let out = env.hook_specific_output?;
     match out.permission_decision.as_deref() {
-        Some("deny") => HookDecision::Deny(
+        Some("deny") => Some(HookDecision::Deny(
             out.permission_decision_reason
                 .unwrap_or_else(|| "denied by hook".into()),
-        ),
-        Some("ask") => HookDecision::Deny(
+        )),
+        Some("ask") => Some(HookDecision::Deny(
             out.permission_decision_reason
                 .unwrap_or_else(|| "ask path not yet wired".into()),
+        )),
+        // An explicit "allow" (or any other explicit value) is authoritative —
+        // honor updatedInput if present, else plain Allow.
+        Some(_) => Some(
+            out.updated_input
+                .map_or(HookDecision::Allow, HookDecision::UpdatedInput),
         ),
-        // "allow" (default) — honor updatedInput if present.
-        _ => match out.updated_input {
-            Some(v) => HookDecision::UpdatedInput(v),
-            None => HookDecision::Allow,
-        },
+        // No explicit decision: only `updatedInput` alone is actionable.
+        None => out.updated_input.map(HookDecision::UpdatedInput),
     }
+}
+
+/// Parse a decision blob with no exit-code fallback (used by HTTP hooks, which
+/// have no exit code). Empty / unparseable / no-decision input yields `Allow`.
+fn parse_decision_blob(text: &str) -> HookDecision {
+    explicit_decision(text).unwrap_or(HookDecision::Allow)
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +170,8 @@ pub fn build_config_hooks(
                         timeout: h.timeout,
                         env: h.env.clone(),
                         matcher: h.matcher.clone(),
+                        if_pattern: h.if_pattern.clone(),
+                        asynchronous: h.asynchronous,
                         event_name: event_name.clone(),
                     }));
                 }
@@ -173,6 +187,8 @@ pub fn build_config_hooks(
                         allowed_url_globs: cfg.allowed_http_hook_urls.clone(),
                         event_name: event_name.clone(),
                         matcher: h.matcher.clone(),
+                        if_pattern: h.if_pattern.clone(),
+                        asynchronous: h.asynchronous,
                         client: http_client.clone(),
                     }));
                 }
@@ -207,6 +223,13 @@ pub struct ShellCommandHook {
     pub env: BTreeMap<String, String>,
     /// Tool-name glob filter (`"*"` matches all). Only relevant for tool events.
     pub matcher: String,
+    /// Optional full-pattern (`Tool:arg-glob`) firing guard from `if = "…"`.
+    /// `None` means "no extra guard"; `Some(p)` fires only when `p` matches the
+    /// tool + first-arg (#171).
+    pub if_pattern: Option<String>,
+    /// When true, this handler is fire-and-forget: its decision is ignored and
+    /// it never blocks the tool (ADR-0024). See #171.
+    pub asynchronous: bool,
     /// Event name this hook fires on (used to filter dispatch in fan-out).
     pub event_name: String,
 }
@@ -287,19 +310,31 @@ impl ShellCommandHook {
         })
     }
 
+    /// Whether this hook should fire for `ctx`: the tool-name `matcher` must
+    /// match AND, when an `if` pattern is configured, the full `Tool:arg-glob`
+    /// pattern must match too (#171).
+    fn fires_for(&self, ctx: &ToolCtx<'_>) -> bool {
+        crate::permissions::matches_glob(&self.matcher, ctx.tool_name)
+            && match &self.if_pattern {
+                None => true,
+                Some(p) => crate::permissions_matcher::matches(p, ctx),
+            }
+    }
+
     /// Spawn the child, send the envelope, return the decision.
     async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
         let Some(out) = self.run_capture(envelope).await else {
             return HookDecision::Allow;
         };
 
-        // Prefer JSON on stdout when present.
-        let from_json = parse_decision_blob(&out.stdout);
-        if !matches!(from_json, HookDecision::Allow) || out.stdout.trim().starts_with('{') {
-            return from_json;
+        // An *explicit* JSON decision (permissionDecision / updatedInput) wins.
+        // Informational JSON without a decision must NOT mask the exit code —
+        // otherwise a `{…}` + `exit 2` deny is swallowed (#171).
+        if let Some(decision) = explicit_decision(&out.stdout) {
+            return decision;
         }
 
-        // Fall back to exit-code semantics.
+        // No explicit decision — fall back to exit-code semantics.
         match out.exit_code {
             0 => HookDecision::Allow,
             2 => HookDecision::Deny(if out.stderr.is_empty() {
@@ -379,10 +414,7 @@ fn truncate_kb(s: &str, kib: usize) -> String {
 #[async_trait]
 impl Hooks for ShellCommandHook {
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        if self.event_name != "PreToolUse" {
-            return Ok(HookDecision::Allow);
-        }
-        if !crate::permissions::matches_glob(&self.matcher, ctx.tool_name) {
+        if self.event_name != "PreToolUse" || !self.fires_for(ctx) {
             return Ok(HookDecision::Allow);
         }
         let envelope = crate::hooks::build_envelope(
@@ -397,6 +429,14 @@ impl Hooks for ShellCommandHook {
                 }
             }),
         );
+        // async = true: fire-and-forget, decision ignored, never blocks (#171).
+        if self.asynchronous {
+            let hook = self.clone();
+            tokio::spawn(async move {
+                let _ = hook.dispatch(envelope).await;
+            });
+            return Ok(HookDecision::Allow);
+        }
         Ok(self.dispatch(envelope).await)
     }
 
@@ -405,10 +445,7 @@ impl Hooks for ShellCommandHook {
         ctx: &ToolCtx<'_>,
         _result: &std::result::Result<Vec<caliban_provider::ContentBlock>, crate::tool::ToolError>,
     ) -> Result<()> {
-        if self.event_name != "PostToolUse" {
-            return Ok(());
-        }
-        if !crate::permissions::matches_glob(&self.matcher, ctx.tool_name) {
+        if self.event_name != "PostToolUse" || !self.fires_for(ctx) {
             return Ok(());
         }
         let envelope = crate::hooks::build_envelope(
@@ -423,7 +460,15 @@ impl Hooks for ShellCommandHook {
                 }
             }),
         );
-        let _ = self.dispatch(envelope).await; // Observer-only on PostToolUse.
+        // PostToolUse is observer-only; async just detaches the await.
+        if self.asynchronous {
+            let hook = self.clone();
+            tokio::spawn(async move {
+                let _ = hook.dispatch(envelope).await;
+            });
+            return Ok(());
+        }
+        let _ = self.dispatch(envelope).await;
         Ok(())
     }
 
@@ -472,6 +517,10 @@ pub struct HttpHook {
     pub event_name: String,
     /// Tool-name matcher.
     pub matcher: String,
+    /// Optional full-pattern (`Tool:arg-glob`) firing guard from `if = "…"` (#171).
+    pub if_pattern: Option<String>,
+    /// When true, fire-and-forget: decision ignored, never blocks the tool (#171).
+    pub asynchronous: bool,
     /// Shared `reqwest::Client` (lets callers reuse a connection pool).
     pub client: reqwest::Client,
 }
@@ -535,15 +584,22 @@ impl HttpHook {
             None => HookDecision::Allow,
         }
     }
+
+    /// Whether this hook should fire for `ctx`: tool-name `matcher` plus the
+    /// optional `if` full-pattern guard (#171).
+    fn fires_for(&self, ctx: &ToolCtx<'_>) -> bool {
+        crate::permissions::matches_glob(&self.matcher, ctx.tool_name)
+            && match &self.if_pattern {
+                None => true,
+                Some(p) => crate::permissions_matcher::matches(p, ctx),
+            }
+    }
 }
 
 #[async_trait]
 impl Hooks for HttpHook {
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        if self.event_name != "PreToolUse" {
-            return Ok(HookDecision::Allow);
-        }
-        if !crate::permissions::matches_glob(&self.matcher, ctx.tool_name) {
+        if self.event_name != "PreToolUse" || !self.fires_for(ctx) {
             return Ok(HookDecision::Allow);
         }
         let envelope = crate::hooks::build_envelope(
@@ -558,6 +614,14 @@ impl Hooks for HttpHook {
                 }
             }),
         );
+        // async = true: fire-and-forget, decision ignored, never blocks (#171).
+        if self.asynchronous {
+            let hook = self.clone();
+            tokio::spawn(async move {
+                let _ = hook.dispatch(envelope).await;
+            });
+            return Ok(HookDecision::Allow);
+        }
         Ok(self.dispatch(envelope).await)
     }
 
