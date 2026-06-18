@@ -144,22 +144,27 @@ impl SlashCommandRegistry {
         }
     }
 
-    /// Filter to commands whose name *contains* the given prefix as a
-    /// substring (excluding hidden commands). Sorted: prefix matches
-    /// first, then alphabetical within each group. `prefix` may be
-    /// empty (returns all visible commands alphabetically).
+    /// Fuzzy-filter to commands whose name (sans the leading `/`) contains
+    /// `prefix` as a case-insensitive *subsequence* — so `cfg` matches
+    /// `/config` — excluding hidden commands. Results are ranked best-match
+    /// first (contiguous, start/word-boundary matches outscore scattered
+    /// ones) with alphabetical name as the tiebreak, which keeps plain
+    /// prefix matches ordered ahead of looser ones. An empty `prefix`
+    /// returns all visible commands alphabetically. (#15)
     pub(crate) fn suggest(&self, prefix: &str) -> Vec<&SlashCommandMeta> {
-        let mut matches: Vec<&SlashCommandMeta> = self
+        let mut scored: Vec<(i32, &SlashCommandMeta)> = self
             .by_name
             .values()
             .map(|c| c.meta())
             .filter(|m| !m.hidden)
-            .filter(|m| m.name.contains(prefix))
+            .filter_map(|m| {
+                let body = m.name.strip_prefix('/').unwrap_or(m.name);
+                fuzzy_score(body, prefix).map(|score| (score, m))
+            })
             .collect();
-        // Prefix matches sort before substring matches; within each group,
-        // alphabetical by name.
-        matches.sort_by_key(|m| (!m.name.starts_with(prefix), m.name));
-        matches
+        // Higher score first; alphabetical by name within equal scores.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(b.1.name)));
+        scored.into_iter().map(|(_, m)| m).collect()
     }
 
     /// Return every visible command's meta, sorted alphabetically. Used
@@ -215,6 +220,47 @@ impl SlashCommandRegistry {
         };
         cmd.execute(args, ctx).await
     }
+}
+
+/// Fuzzy subsequence score of `needle` against `haystack`, matched
+/// case-insensitively. Returns `None` when `needle` is not a subsequence of
+/// `haystack`; a higher score is a better match. An empty needle scores a
+/// neutral `0` (matches everything, leaving alphabetical tiebreak to decide
+/// order). Matches at the very start (`+15`) or just after a non-alphanumeric
+/// word boundary (`+10`) and contiguous runs (`+8` per adjacent char) score
+/// higher; gaps between matched chars are penalized. (#15)
+fn fuzzy_score(haystack: &str, needle: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let hay: Vec<char> = haystack.chars().flat_map(char::to_lowercase).collect();
+    let mut score = 0i32;
+    let mut hi = 0usize;
+    let mut prev: Option<usize> = None;
+    for nc in needle.chars().flat_map(char::to_lowercase) {
+        let idx = loop {
+            if hi >= hay.len() {
+                return None; // needle char not found → not a subsequence
+            }
+            if hay[hi] == nc {
+                break hi;
+            }
+            hi += 1;
+        };
+        if idx == 0 {
+            score += 15;
+        } else if !hay[idx - 1].is_alphanumeric() {
+            score += 10;
+        }
+        match prev {
+            Some(p) if idx == p + 1 => score += 8,
+            Some(p) => score -= i32::try_from(idx - p - 1).unwrap_or(i32::MAX),
+            None => {}
+        }
+        prev = Some(idx);
+        hi = idx + 1;
+    }
+    Some(score)
 }
 
 /// IE1 classifier: returns `true` iff `prompt` is a slash invocation
@@ -348,6 +394,59 @@ mod tests {
         // Same group: alphabetical.
         // "/config" contains "ca"? no — drop it.
         assert_eq!(names, vec!["/recap"]);
+    }
+
+    #[test]
+    fn suggester_matches_non_contiguous_subsequence() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo("/compact", false));
+        r.register(echo("/config", false));
+        r.register(echo("/context", false));
+        // "cfg" is a subsequence of "config" (c-o-n-f-i-g) only — substring
+        // matching would have dropped it entirely.
+        let names: Vec<&str> = r.suggest("cfg").iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["/config"]);
+    }
+
+    #[test]
+    fn suggester_is_case_insensitive() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo("/compact", false));
+        let names: Vec<&str> = r.suggest("CMP").iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["/compact"]);
+    }
+
+    #[test]
+    fn suggester_ranks_contiguous_prefix_above_scattered() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo("/cost", false)); // "co" contiguous at start
+        r.register(echo("/doctor", false)); // "co" scattered (d-o-...-c→o)
+        let names: Vec<&str> = r.suggest("co").iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["/cost", "/doctor"]);
+    }
+
+    #[test]
+    fn suggester_drops_non_subsequence() {
+        let mut r = SlashCommandRegistry::new();
+        r.register(echo("/compact", false));
+        assert!(r.suggest("xyz").is_empty());
+    }
+
+    #[test]
+    fn fuzzy_score_rejects_non_subsequence() {
+        assert!(fuzzy_score("config", "cfgx").is_none());
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_contiguous_over_gapped() {
+        let contiguous = fuzzy_score("config", "co").expect("subsequence");
+        let gapped = fuzzy_score("doctor", "co").expect("subsequence");
+        assert!(contiguous > gapped, "{contiguous} !> {gapped}");
+    }
+
+    #[test]
+    fn fuzzy_score_empty_needle_is_neutral() {
+        assert_eq!(fuzzy_score("anything", ""), Some(0));
     }
 
     #[test]
