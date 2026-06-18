@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 
 use crate::proto::AgentRecord;
 
+/// Filename of the per-agent append-only `TurnEvent` transcript inside a
+/// session dir. The worker writes it; `agents logs` reads it. Single source of
+/// truth so the writer and reader can't drift (#143).
+pub const TRANSCRIPT_FILE: &str = "stdout.ndjson";
+
 /// On-disk store for agent state. Cheap to clone (one `PathBuf`).
 #[derive(Debug, Clone)]
 pub struct AgentStore {

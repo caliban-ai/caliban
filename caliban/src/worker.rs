@@ -362,7 +362,9 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
 
     // --- Build the agent. ---
     let _ = tokio::fs::create_dir_all(&record.session_dir).await;
-    let ndjson_path = record.session_dir.join("stdout.ndjson");
+    let ndjson_path = record
+        .session_dir
+        .join(caliban_supervisor::store::TRANSCRIPT_FILE);
 
     // Construct minimal Args with the spec's model override.
     // Args does not impl Default, so we parse a minimal invocation.
