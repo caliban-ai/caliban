@@ -112,6 +112,19 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Whether this tool is side-effect-free — it only reads state (or injects
+    /// context) and never mutates the workspace or the outside world.
+    ///
+    /// Defaults to `false` (assume side effects). Read-only tools (`Read`,
+    /// `Grep`, `Glob`, `WebFetch`, `Skill`, …) override it to return `true`.
+    /// The permission layer uses this — instead of a hardcoded central name
+    /// allowlist — to decide what may run while plan mode is active, so a new
+    /// read-only built-in (or an MCP tool) becomes plan-safe just by overriding
+    /// this method, with no central edit.
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
     /// Optional downcast hook for recovering a tool's concrete type at
     /// runtime. The default returns `None`; tools that expose extra
     /// session metadata beyond the trait (e.g. the `Skill` tool surfacing

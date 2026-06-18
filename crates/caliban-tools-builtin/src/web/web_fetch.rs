@@ -413,6 +413,10 @@ impl Tool for WebFetchTool {
         "WebFetch"
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Fetch an http(s):// URL via GET and return its body as text. HTML is converted to Markdown; text/plain and JSON pass through; binary content returns a short notice. Manual redirect handling: same-host redirects (≤10 hops) are followed; cross-host redirects are surfaced to the caller. Bounded at 10MB body and 60s default timeout (1–300s configurable). Authenticated services are not supported — use a dedicated MCP tool. If an optional `prompt` is set and a summarizer is wired, the body is summarized against that prompt; otherwise the body is returned verbatim. NOTE: requests to localhost and private IPs are allowed for homelab use; the operator's host network is reachable."
     }

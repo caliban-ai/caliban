@@ -88,6 +88,8 @@ pub(crate) async fn run_shell_escape(
         tool_use_id: &tool_use_id,
         tool_name: "Bash",
         input: &input,
+        // Shell-escape always runs Bash, which is never read-only.
+        is_read_only: false,
     };
     match hooks.before_tool(&ctx).await {
         // Allow + UpdatedInput both proceed. The shell-escape path is a

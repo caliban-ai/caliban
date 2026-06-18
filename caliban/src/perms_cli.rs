@@ -204,6 +204,9 @@ fn cmd_test(tool: &str, input: &serde_json::Value) -> i32 {
         tool_use_id: "test",
         tool_name: tool,
         input,
+        // `caliban perms` evaluates static rules; plan-mode gating (the only
+        // consumer of is_read_only) is not in play here.
+        is_read_only: false,
     };
     if let Some(r) = caliban_agent_core::evaluate_rules(&rules, &ctx) {
         println!("MATCH: pattern={} action={}", r.tool, action_str(r.action));
@@ -232,6 +235,9 @@ fn cmd_explain(tool: &str, input: &serde_json::Value) -> i32 {
         tool_use_id: "test",
         tool_name: tool,
         input,
+        // `caliban perms` evaluates static rules; plan-mode gating (the only
+        // consumer of is_read_only) is not in play here.
+        is_read_only: false,
     };
     println!("Rule list (source order; first match wins):");
     for (i, r) in rules.iter().enumerate() {
@@ -510,6 +516,7 @@ mod tests {
             tool_use_id: "t",
             tool_name: "Bash",
             input: &serde_json::json!({"command": "ls"}),
+            is_read_only: false,
         };
         let matched =
             caliban_agent_core::evaluate_rules(&rules, &ctx).expect("default catch-all must match");

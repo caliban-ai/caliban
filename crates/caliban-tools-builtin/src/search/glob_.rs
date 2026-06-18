@@ -48,6 +48,10 @@ impl Tool for GlobTool {
         "Glob"
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.py'). Respects .gitignore by default. Capped at 200 results."
     }

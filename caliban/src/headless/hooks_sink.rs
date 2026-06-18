@@ -323,6 +323,7 @@ mod tests {
             tool_use_id: "tu_1",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         let dec = sink.before_tool(&ctx).await.unwrap();
         assert!(matches!(dec, HookDecision::Allow));

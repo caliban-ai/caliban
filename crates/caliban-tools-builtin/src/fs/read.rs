@@ -49,6 +49,10 @@ impl Tool for ReadTool {
         "Read"
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Read a UTF-8 text file. Returns the file's contents prefixed with a header line. Use offset+limit to read large files in chunks."
     }

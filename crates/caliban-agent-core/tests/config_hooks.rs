@@ -82,6 +82,7 @@ async fn pretooluse_hook_denies() {
         tool_use_id: "t1",
         tool_name: "Bash",
         input: &input,
+        is_read_only: false,
     };
     let d = composite.before_tool(&ctx).await.unwrap();
     assert!(matches!(d, HookDecision::Deny(_)));

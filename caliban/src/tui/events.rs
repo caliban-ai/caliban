@@ -1674,6 +1674,9 @@ fn run_permissions_test(app: &mut App) {
         tool_use_id: "test",
         tool_name: &tp.tool_name,
         input: &input,
+        // The /permissions rule-test overlay evaluates static rules, not
+        // plan-mode gating, so the read-only flag is not consulted here.
+        is_read_only: false,
     };
     // Build the effective rule list: runtime rules (as Rule objects) first,
     // then built-in defaults.
@@ -1887,6 +1890,7 @@ pub(crate) fn drain_ask_queue(app: &mut App) {
             tool_use_id: "",
             tool_name: &req.tool_name,
             input: &req.tool_input,
+            is_read_only: false,
         };
         match app.runtime_rules.evaluate(&ctx) {
             Some(caliban_agent_core::Action::Allow) => {
@@ -2834,6 +2838,7 @@ mod tests {
             tool_use_id: "t",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         assert_eq!(
             app.runtime_rules.evaluate(&ctx),

@@ -49,6 +49,7 @@ pub(crate) async fn dispatch_tool(
         tool_use_id,
         tool_name,
         input: &input,
+        is_read_only: agent.tools.get(tool_name).is_some_and(|t| t.is_read_only()),
     };
 
     let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> =

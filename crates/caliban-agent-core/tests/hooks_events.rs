@@ -320,6 +320,7 @@ async fn composite_before_tool_short_circuits_on_first_deny() {
         tool_use_id: "x",
         tool_name: "Bash",
         input: &input,
+        is_read_only: false,
     };
     let d = composite.before_tool(&ctx).await.unwrap();
     assert!(matches!(d, HookDecision::Deny(_)));
@@ -356,6 +357,7 @@ async fn composite_threads_updated_input_through_layers() {
         tool_use_id: "x",
         tool_name: "Bash",
         input: &input,
+        is_read_only: false,
     };
     let d = composite.before_tool(&ctx).await.unwrap();
     assert!(matches!(d, HookDecision::UpdatedInput(_)));
@@ -376,6 +378,7 @@ async fn composite_empty_returns_allow() {
         tool_use_id: "x",
         tool_name: "Bash",
         input: &input,
+        is_read_only: false,
     };
     let d = composite.before_tool(&ctx).await.unwrap();
     assert!(matches!(d, HookDecision::Allow));
@@ -854,6 +857,7 @@ async fn composite_all_noop_returns_default_without_calling_members() {
         tool_use_id: "t",
         tool_name: "Bash",
         input: &input,
+        is_read_only: false,
     };
     let bt = composite.before_tool(&tool_ctx).await.unwrap();
     assert!(matches!(bt, HookDecision::Allow));

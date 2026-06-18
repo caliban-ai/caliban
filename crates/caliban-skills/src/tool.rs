@@ -128,6 +128,12 @@ impl Tool for SkillTool {
         "Skill"
     }
 
+    // The Skill tool only injects skill context into the conversation; it has
+    // no workspace side effects, so it is plan-mode-safe.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

@@ -223,6 +223,7 @@ mod tests {
             tool_use_id: "tu_1",
             tool_name: "Write",
             input: &input,
+            is_read_only: false,
         };
         let decision = hook.before_tool(&tctx).await.unwrap();
         assert!(matches!(decision, HookDecision::Allow));
@@ -248,6 +249,7 @@ mod tests {
             tool_use_id: "tu_1",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         hook.before_tool(&tctx).await.unwrap();
         let m = rec.snapshot_manifest().await.unwrap();

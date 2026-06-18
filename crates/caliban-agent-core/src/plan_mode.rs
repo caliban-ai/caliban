@@ -20,23 +20,24 @@ pub fn new_shared_plan_mode() -> SharedPlanMode {
 
 /// Built-in tools that are allowed to run while plan mode is active.
 ///
-/// `EnterPlanMode` is idempotent; `ExitPlanMode` is the escape hatch.
-/// Read-only built-ins (`Read`, `Grep`, `Glob`, `WebFetch`) and the `Skill`
-/// tool are pure injections of context with no side effects.
-pub const PLAN_MODE_ALLOWLIST: &[&str] = &[
-    "Read",
-    "Grep",
-    "Glob",
-    "WebFetch",
-    "Skill",
-    "EnterPlanMode",
-    "ExitPlanMode",
-];
+/// The plan-control tools that must always run while plan mode is active,
+/// regardless of side effects: `EnterPlanMode` is idempotent and `ExitPlanMode`
+/// is the escape hatch out of plan mode. These are intrinsic framework tools
+/// (not user-extensible), so they stay an explicit pair.
+///
+/// Every *other* tool's plan-mode eligibility is decided by whether it is
+/// side-effect-free ([`crate::Tool::is_read_only`]) — read-only built-ins
+/// (`Read`, `Grep`, `Glob`, `WebFetch`) and the `Skill` tool override that to
+/// `true`. This replaces the previous hardcoded name allowlist so a new
+/// read-only built-in or MCP tool becomes plan-safe without a central edit.
+const PLAN_CONTROL_TOOLS: &[&str] = &["EnterPlanMode", "ExitPlanMode"];
 
-/// Returns `true` when `name` is in the plan-mode allowlist.
+/// Returns `true` when `name` is a plan-control tool (always allowed in plan
+/// mode). Read-only tools are allowed separately by the permission layer via
+/// [`crate::Tool::is_read_only`].
 #[must_use]
-pub fn is_allowed_in_plan_mode(name: &str) -> bool {
-    PLAN_MODE_ALLOWLIST.contains(&name)
+pub fn is_plan_control_tool(name: &str) -> bool {
+    PLAN_CONTROL_TOOLS.contains(&name)
 }
 
 #[cfg(test)]
@@ -59,21 +60,23 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_includes_expected_tools() {
-        assert!(is_allowed_in_plan_mode("Read"));
-        assert!(is_allowed_in_plan_mode("Grep"));
-        assert!(is_allowed_in_plan_mode("Glob"));
-        assert!(is_allowed_in_plan_mode("WebFetch"));
-        assert!(is_allowed_in_plan_mode("Skill"));
-        assert!(is_allowed_in_plan_mode("EnterPlanMode"));
-        assert!(is_allowed_in_plan_mode("ExitPlanMode"));
+    fn plan_control_tools_recognized() {
+        assert!(is_plan_control_tool("EnterPlanMode"));
+        assert!(is_plan_control_tool("ExitPlanMode"));
     }
 
     #[test]
-    fn allowlist_excludes_mutating_tools() {
-        assert!(!is_allowed_in_plan_mode("Bash"));
-        assert!(!is_allowed_in_plan_mode("Write"));
-        assert!(!is_allowed_in_plan_mode("Edit"));
-        assert!(!is_allowed_in_plan_mode("TodoWrite"));
+    fn non_control_tools_are_not_plan_control() {
+        // Read-only tools (Read/Grep/Glob/WebFetch/Skill) are allowed in plan
+        // mode via Tool::is_read_only, checked by the permission layer — not
+        // here. Mutating tools are neither read-only nor plan-control.
+        for name in [
+            "Read", "Grep", "Glob", "WebFetch", "Skill", "Bash", "Write", "Edit",
+        ] {
+            assert!(
+                !is_plan_control_tool(name),
+                "{name} should not be plan-control"
+            );
+        }
     }
 }

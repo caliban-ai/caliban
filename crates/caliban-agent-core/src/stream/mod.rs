@@ -949,15 +949,21 @@ impl Agent {
                     }
                     let ContentBlock::ToolUse(tu) = block else { continue };
 
-                    // Plan-mode gating: when active, reject tools not on the
-                    // allowlist BEFORE running hooks (cheaper, and the
+                    // Plan-mode gating: when active, reject tools that are
+                    // neither side-effect-free (Tool::is_read_only) nor a
+                    // plan-control tool, BEFORE running hooks (cheaper, and the
                     // rejection still goes back to the model as a normal
                     // ToolResult so it can adapt).
+                    let tool_is_read_only =
+                        self.tools.get(&tu.name).is_some_and(|t| t.is_read_only());
                     let plan_mode_active = self
                         .plan_mode
                         .as_ref()
                         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-                    if plan_mode_active && !crate::plan_mode::is_allowed_in_plan_mode(&tu.name) {
+                    if plan_mode_active
+                        && !(tool_is_read_only
+                            || crate::plan_mode::is_plan_control_tool(&tu.name))
+                    {
                         let msg = format!(
                             "Tool '{}' is not available in plan mode. Use ExitPlanMode to proceed.",
                             tu.name
@@ -989,6 +995,7 @@ impl Agent {
                         tool_use_id: &tu.id,
                         tool_name: &tu.name,
                         input: &tu.input,
+                        is_read_only: tool_is_read_only,
                     };
                     let decision = match self.hooks.before_tool(&tool_ctx).await {
                         Ok(d) => d,

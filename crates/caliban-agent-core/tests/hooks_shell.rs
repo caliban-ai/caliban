@@ -24,6 +24,7 @@ fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
         tool_use_id: "t1",
         tool_name: name,
         input,
+        is_read_only: false,
     }
 }
 

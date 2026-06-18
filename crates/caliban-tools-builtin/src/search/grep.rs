@@ -84,6 +84,10 @@ impl Tool for GrepTool {
         "Grep"
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Search file contents using a regex pattern. Respects .gitignore by default. Returns matches in {path}:{line}:{text} format, capped at 100 matches by default (max 500)."
     }

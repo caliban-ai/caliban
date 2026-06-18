@@ -21,6 +21,7 @@ struct RecordingTool {
     name: String,
     schema: serde_json::Value,
     called: Arc<AtomicBool>,
+    read_only: bool,
 }
 
 impl RecordingTool {
@@ -29,6 +30,17 @@ impl RecordingTool {
             name: name.into(),
             schema: serde_json::json!({"type":"object"}),
             called,
+            read_only: false,
+        }
+    }
+
+    /// A recording tool that reports itself side-effect-free, so plan-mode
+    /// gating (which now keys off `Tool::is_read_only`, not a name allowlist)
+    /// permits it.
+    fn new_read_only(name: &str, called: Arc<AtomicBool>) -> Self {
+        Self {
+            read_only: true,
+            ..Self::new(name, called)
         }
     }
 }
@@ -43,6 +55,9 @@ impl Tool for RecordingTool {
     }
     fn input_schema(&self) -> &serde_json::Value {
         &self.schema
+    }
+    fn is_read_only(&self) -> bool {
+        self.read_only
     }
     async fn invoke(
         &self,
@@ -155,7 +170,10 @@ async fn read_only_tool_allowed_in_plan_mode() {
 
     let called = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::default();
-    registry.register(Arc::new(RecordingTool::new("Read", Arc::clone(&called))));
+    registry.register(Arc::new(RecordingTool::new_read_only(
+        "Read",
+        Arc::clone(&called),
+    )));
 
     let agent = Agent::builder()
         .provider(mp as Arc<dyn Provider + Send + Sync>)
