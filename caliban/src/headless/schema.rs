@@ -53,6 +53,18 @@ impl JsonSchema {
         Ok(Self { raw })
     }
 
+    /// A system-prompt directive instructing the model to reply with only a
+    /// JSON object matching this schema. Without it the flag is validate-only:
+    /// a normal prose reply fails extraction and yields `subtype=error` (#174).
+    pub(crate) fn instruction(&self) -> String {
+        let schema = serde_json::to_string(&self.raw).unwrap_or_else(|_| self.raw.to_string());
+        format!(
+            "You must respond with ONLY a single JSON value that conforms to this JSON Schema. \
+             Do not include any prose, explanation, markdown, or code fences — output the raw \
+             JSON value and nothing else.\n\nJSON Schema:\n{schema}"
+        )
+    }
+
     /// Validate `candidate` against the schema (best-effort).
     ///
     /// Returns `Ok(())` on a valid match. The error string is a human-
@@ -92,15 +104,20 @@ impl JsonSchema {
             }
         }
 
-        // Per-field type check (from properties.<name>.type).
+        // Per-field type check (from properties.<name>.type). The `type` may be
+        // a string or, per JSON Schema, an array of acceptable type names.
         if let Some(props) = self.raw.get("properties").and_then(Value::as_object) {
             for (k, prop) in props {
                 let Some(v) = obj.get(k) else { continue };
-                if let Some(t) = prop.get("type").and_then(Value::as_str)
-                    && !type_matches(t, v)
+                if let Some(type_spec) = prop.get("type")
+                    && !type_spec_matches(type_spec, v)
                 {
+                    let want = match type_spec {
+                        Value::String(t) => t.clone(),
+                        other => other.to_string(),
+                    };
                     return Err(format!(
-                        "field `{k}` expected type `{t}`, got `{}`",
+                        "field `{k}` expected type `{want}`, got `{}`",
                         json_type_name(v),
                     ));
                 }
@@ -111,13 +128,34 @@ impl JsonSchema {
     }
 }
 
+/// Match a JSON Schema `type` keyword — either a single type name (`"string"`)
+/// or an array of acceptable names (`["string","null"]`) — against a value.
+/// A non-string/array spec is not a recognizable type constraint, so it does
+/// not reject (#174: an array-form `type` previously disabled type checking).
+fn type_spec_matches(type_spec: &Value, v: &Value) -> bool {
+    match type_spec {
+        Value::String(t) => type_matches(t, v),
+        Value::Array(types) => types
+            .iter()
+            .any(|t| t.as_str().is_some_and(|t| type_matches(t, v))),
+        _ => true,
+    }
+}
+
 fn type_matches(schema_type: &str, v: &Value) -> bool {
     match schema_type {
         "object" => v.is_object(),
         "array" => v.is_array(),
         "string" => v.is_string(),
         "number" => v.is_number(),
-        "integer" => v.is_i64() || v.is_u64(),
+        // An integral-valued float (`3.0`) is a valid integer — serde_json
+        // parses it as f64, so accept that too (#174).
+        "integer" => {
+            v.is_i64()
+                || v.is_u64()
+                || v.as_f64()
+                    .is_some_and(|f| f.is_finite() && f.fract() == 0.0)
+        }
         "boolean" => v.is_boolean(),
         "null" => v.is_null(),
         _ => true, // Unknown type → don't reject.
@@ -170,7 +208,12 @@ pub(crate) fn extract_json_object(text: &str) -> Option<Value> {
                 depth += 1;
             }
             b'}' => {
-                depth -= 1;
+                // A `}` before any `{` is stray text — clamp at 0 rather than
+                // letting `depth` go negative, which would desync the next
+                // real object's `{` (seen at depth −1) and skip it (#174).
+                if depth > 0 {
+                    depth -= 1;
+                }
                 if depth == 0
                     && let Some(s) = start
                     && let Ok(v) = serde_json::from_str::<Value>(&text[s..=i])
@@ -192,6 +235,45 @@ mod tests {
     fn parse_inline_object_schema() {
         let s = JsonSchema::from_cli_arg(r#"{"type":"object","required":["ok"]}"#).unwrap();
         assert_eq!(s.raw["type"], "object");
+    }
+
+    #[test]
+    fn integer_accepts_integral_valued_float() {
+        // #174: serde_json parses `3.0` as f64; a schema-valid integer must pass.
+        let s = JsonSchema::parse_str(r#"{"type":"object","properties":{"n":{"type":"integer"}}}"#)
+            .unwrap();
+        s.validate(&serde_json::json!({"n": 3.0})).unwrap();
+        // A non-integral float is still rejected.
+        assert!(s.validate(&serde_json::json!({"n": 3.5})).is_err());
+    }
+
+    #[test]
+    fn array_form_type_is_enforced() {
+        // #174: `"type":["string","null"]` must still type-check (not be skipped).
+        let s = JsonSchema::parse_str(
+            r#"{"type":"object","properties":{"x":{"type":["string","null"]}}}"#,
+        )
+        .unwrap();
+        s.validate(&serde_json::json!({"x": "hi"})).unwrap();
+        s.validate(&serde_json::json!({"x": null})).unwrap();
+        let err = s.validate(&serde_json::json!({"x": 5})).unwrap_err();
+        assert!(err.contains("field `x`"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_skips_leading_stray_brace() {
+        // #174: a `}` before the first `{` must not desync brace tracking.
+        let v = extract_json_object("} {\"a\":1}").expect("should extract the real object");
+        assert_eq!(v, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn instruction_mentions_json_only_and_schema() {
+        let s = JsonSchema::parse_str(r#"{"type":"object","required":["ok"]}"#).unwrap();
+        let instr = s.instruction();
+        assert!(instr.contains("ONLY"));
+        assert!(instr.contains("JSON Schema"));
+        assert!(instr.contains("\"required\""));
     }
 
     #[test]

@@ -112,8 +112,10 @@ pub(crate) struct Args {
     #[arg(long = "bare", help_heading = "Headless / -p mode (ADR 0025)")]
     pub(crate) bare: bool,
 
-    /// Force structured final output matching the given JSON Schema. Value
-    /// can be inline JSON or a path to a `.json` file.
+    /// Request and validate structured final output matching the given JSON
+    /// Schema: the model is instructed to emit only matching JSON, and the
+    /// final reply is validated against it. Value can be inline JSON or a path
+    /// to a `.json` file.
     #[arg(
         long = "json-schema",
         value_name = "FILE_OR_JSON",
