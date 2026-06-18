@@ -106,10 +106,16 @@ impl Hooks for ModeFilter {
                 self.inner.before_tool(ctx).await
             }
             PermissionMode::AcceptEdits => {
+                // Consult the rules first so a static Allow/Deny always wins
+                // (ADR-0029). Only an *Ask* on a file-edit tool is overridden
+                // to Allow — mirroring dontAsk's rewrite, scoped to file edits.
+                // See #169: short-circuiting to Allow here bypassed a Deny.
+                let decision = self.inner.before_tool(ctx).await?;
                 if is_file_edit_tool(ctx.tool_name) {
-                    return Ok(HookDecision::Allow);
+                    Ok(rewrite_ask_to_allow(decision))
+                } else {
+                    Ok(decision)
                 }
-                self.inner.before_tool(ctx).await
             }
             PermissionMode::Plan => {
                 if is_allowed_in_plan_mode(ctx.tool_name) {
@@ -437,9 +443,10 @@ mod tests {
 
     #[tokio::test]
     async fn accept_edits_auto_allows_file_edit_tools() {
-        // Inner returns Deny for Bash and Write to prove the filter
-        // short-circuits *before* consulting the rules for Write/Edit.
-        let mut rules = vec![rule("Write", Action::Deny), rule("Bash", Action::Deny)];
+        // No static rule for the file-edit tools: inner would synthesize an
+        // Ask (→ Deny "requires interactive approval" via the non-interactive
+        // handler). acceptEdits upgrades that Ask→Allow for file edits only.
+        let mut rules = vec![rule("Bash", Action::Deny)];
         rules.extend(crate::permissions::default_rules());
         let inner = permissions_hook(
             rules,
@@ -448,8 +455,7 @@ mod tests {
         let mode = SharedPermissionMode::new(PermissionMode::AcceptEdits);
         let filter = ModeFilter::new(mode, inner, None, false);
 
-        // Write/Edit/MultiEdit/NotebookEdit all short-circuit to Allow,
-        // bypassing the explicit Deny in the inner rules.
+        // Write/Edit/MultiEdit/NotebookEdit auto-allow (otherwise-Ask → Allow).
         for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
             let d = filter
                 .before_tool(&ctx(tool, &json!({"path": "/tmp/x"})))
@@ -467,6 +473,29 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(d, HookDecision::Deny(_)));
+    }
+
+    #[tokio::test]
+    async fn accept_edits_preserves_static_deny() {
+        // ADR-0029 / modes-spec invariant: a static Deny on a file-edit tool
+        // must survive acceptEdits. Only an *Ask* is mode-overridable. See #169.
+        let mut rules = vec![rule("Write", Action::Deny)];
+        rules.extend(crate::permissions::default_rules());
+        let inner = permissions_hook(
+            rules,
+            Arc::new(NonInteractiveAskHandler { auto_allow: false }),
+        );
+        let mode = SharedPermissionMode::new(PermissionMode::AcceptEdits);
+        let filter = ModeFilter::new(mode, inner, None, false);
+
+        let d = filter
+            .before_tool(&ctx("Write", &json!({"path": "/tmp/x"})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(d, HookDecision::Deny(_)),
+            "acceptEdits must preserve a static Write→Deny, got {d:?}",
+        );
     }
 
     // --- plan ---
