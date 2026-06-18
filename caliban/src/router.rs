@@ -281,8 +281,9 @@ fn render_no_config(args: &RouterDebugArgs) -> Result<String> {
     )?;
     writeln!(
         out,
-        "fallback: single-provider via --provider/--model \
-         (default: anthropic/claude-3-5-sonnet)",
+        "fallback: single-provider via --provider/--model (default: {}/{})",
+        crate::args::provider_name(crate::args::ProviderKind::Anthropic),
+        crate::args::default_model_for(crate::args::ProviderKind::Anthropic),
     )?;
     writeln!(out)?;
     writeln!(
@@ -408,6 +409,32 @@ fallback = []
 [provider.ollama]
 base_url = "http://localhost:11434"
 "#;
+
+    #[test]
+    fn no_config_default_model_is_derived_not_hardcoded() {
+        // Regression #144: the fallback-default line must reflect the real
+        // default model (args::default_model_for), not a hardcoded id that
+        // drifts when the default bumps.
+        use crate::args::{ProviderKind, default_model_for, provider_name};
+        let args = RouterDebugArgs {
+            purpose: "main_loop".into(),
+            has_vision: false,
+            has_tools: false,
+            has_thinking: false,
+            effort: None,
+        };
+        let out = render_no_config(&args).unwrap();
+        let expected = format!(
+            "{}/{}",
+            provider_name(ProviderKind::Anthropic),
+            default_model_for(ProviderKind::Anthropic),
+        );
+        assert!(out.contains(&expected), "expected `{expected}` in:\n{out}");
+        assert!(
+            !out.contains("claude-3-5-sonnet"),
+            "stale hardcoded model id present:\n{out}"
+        );
+    }
 
     #[test]
     fn debug_prints_candidate_list() {
