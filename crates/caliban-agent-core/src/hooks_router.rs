@@ -127,6 +127,12 @@ pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
 // Config → runtime bridge
 // ---------------------------------------------------------------------------
 
+/// Events that the executable `Command`/`Http` hook handlers actually fire on.
+/// Anything else is a config gap that would silently never run (#185 H4).
+fn event_supported(event_name: &str) -> bool {
+    matches!(event_name, "PreToolUse" | "PostToolUse" | "SessionStart")
+}
+
 /// Build executing hook trait objects from a parsed [`HooksConfig`], for
 /// composition into the agent `Hooks` chain. Returns an empty vec when hooks are
 /// globally disabled.
@@ -158,6 +164,21 @@ pub fn build_config_hooks(
     let mut out: Vec<std::sync::Arc<dyn crate::hooks::Hooks + Send + Sync>> = Vec::new();
     for (event_name, handlers) in &cfg.events {
         for h in handlers {
+            // Command/Http hooks only fire on the events they implement
+            // (PreToolUse / PostToolUse / SessionStart). A handler bound to any
+            // other event (UserPromptSubmit, PreCompact, …) would build, join
+            // the chain, and never run — warn and skip instead (#185 H4).
+            if matches!(h.kind, HookHandlerType::Command | HookHandlerType::Http)
+                && !event_supported(event_name)
+            {
+                tracing::warn!(
+                    event = %event_name,
+                    kind = ?h.kind,
+                    "hook is bound to an event this handler kind does not fire on \
+                     (only PreToolUse/PostToolUse/SessionStart are supported); skipping"
+                );
+                continue;
+            }
             match h.kind {
                 HookHandlerType::Command => {
                     let Some(command) = h.command.clone() else {
@@ -189,6 +210,7 @@ pub fn build_config_hooks(
                         matcher: h.matcher.clone(),
                         if_pattern: h.if_pattern.clone(),
                         asynchronous: h.asynchronous,
+                        allowed_env_vars: cfg.http_hook_allowed_env_vars.clone(),
                         client: http_client.clone(),
                     }));
                 }
@@ -404,10 +426,13 @@ fn truncate_kb(s: &str, kib: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!(
-            "{}\n[truncated to {kib} KiB]",
-            &s[..max.min(s.len() - (s.len() - max))]
-        )
+        // Back off to the nearest char boundary at or below `max`; slicing at a
+        // byte that splits a multibyte char panics (#185 H7).
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n[truncated to {kib} KiB]", &s[..end])
     }
 }
 
@@ -521,30 +546,72 @@ pub struct HttpHook {
     pub if_pattern: Option<String>,
     /// When true, fire-and-forget: decision ignored, never blocks the tool (#171).
     pub asynchronous: bool,
+    /// Env vars allowed for `${VAR}` expansion in the URL / headers, from
+    /// `http_hook_allowed_env_vars` (#185 H5).
+    pub allowed_env_vars: Vec<String>,
     /// Shared `reqwest::Client` (lets callers reuse a connection pool).
     pub client: reqwest::Client,
 }
 
+/// Expand `${VAR}` references in `s`, substituting only env vars present in
+/// `allowed` (the `http_hook_allowed_env_vars` allowlist). A non-allowlisted or
+/// unset var expands to empty with a warning; a `${` with no closing `}` is
+/// left literal. ADR-0024 documents this allowlist-gated expansion (#185 H5).
+fn expand_env_vars(s: &str, allowed: &[String]) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // Unterminated `${` — emit verbatim and stop scanning.
+            out.push_str("${");
+            rest = after;
+            continue;
+        };
+        let var = &after[..end];
+        if allowed.iter().any(|a| a == var) {
+            match std::env::var(var) {
+                Ok(val) => out.push_str(&val),
+                Err(_) => {
+                    tracing::warn!(var = %var, "http hook: ${{VAR}} is unset; expanding to empty");
+                }
+            }
+        } else {
+            tracing::warn!(
+                var = %var,
+                "http hook: ${{VAR}} not in http_hook_allowed_env_vars; expanding to empty"
+            );
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl HttpHook {
-    fn is_url_allowed(&self) -> bool {
+    fn is_url_allowed(&self, url: &str) -> bool {
         self.allowed_url_globs
             .iter()
-            .any(|g| crate::permissions::matches_glob(g, &self.url))
+            .any(|g| crate::permissions::matches_glob(g, url))
     }
 
     /// POST the envelope, returning the response body on a 2xx. `None` when the
     /// URL is disallowed / the request fails / non-2xx / body read fails.
     async fn fetch_body(&self, envelope: serde_json::Value) -> Option<String> {
-        if !self.is_url_allowed() {
+        // Expand `${VAR}` (allowlist-gated) before the allow-check so the URL
+        // actually contacted is the one validated against the globs (#185 H5).
+        let url = expand_env_vars(&self.url, &self.allowed_env_vars);
+        if !self.is_url_allowed(&url) {
             tracing::warn!(
-                url = %self.url,
+                url = %url,
                 "http hook: URL not in allowed_http_hook_urls; skipping (Allow)"
             );
             return None;
         }
-        let mut req = self.client.post(&self.url).json(&envelope);
+        let mut req = self.client.post(&url).json(&envelope);
         for (k, v) in &self.headers {
-            req = req.header(k, v);
+            req = req.header(k, expand_env_vars(v, &self.allowed_env_vars));
         }
         let resp = match tokio::time::timeout(self.timeout, req.send()).await {
             Ok(Ok(r)) => r,
@@ -623,6 +690,39 @@ impl Hooks for HttpHook {
             return Ok(HookDecision::Allow);
         }
         Ok(self.dispatch(envelope).await)
+    }
+
+    async fn after_tool(
+        &self,
+        ctx: &ToolCtx<'_>,
+        _result: &std::result::Result<Vec<caliban_provider::ContentBlock>, crate::tool::ToolError>,
+    ) -> Result<()> {
+        // PostToolUse is observer-only — a `[[hooks.PostToolUse]]` http handler
+        // previously built but never fired (#185 H4).
+        if self.event_name != "PostToolUse" || !self.fires_for(ctx) {
+            return Ok(());
+        }
+        let envelope = crate::hooks::build_envelope(
+            "PostToolUse",
+            serde_json::json!({
+                "session_id": "",
+                "turn_index": ctx.turn_index,
+                "tool": {
+                    "name": ctx.tool_name,
+                    "useId": ctx.tool_use_id,
+                    "input": ctx.input,
+                }
+            }),
+        );
+        if self.asynchronous {
+            let hook = self.clone();
+            tokio::spawn(async move {
+                let _ = hook.dispatch(envelope).await;
+            });
+            return Ok(());
+        }
+        let _ = self.dispatch(envelope).await;
+        Ok(())
     }
 
     async fn session_start(
@@ -880,6 +980,51 @@ command = "/bin/true"
     #[test]
     fn truncate_kb_short_string_untouched() {
         assert_eq!(truncate_kb("hi", 8), "hi");
+    }
+
+    #[test]
+    fn truncate_kb_handles_multibyte_at_boundary() {
+        // #185 H7: a 4-byte char straddling the 8 KiB cut must not panic.
+        let mut s = "a".repeat(8 * 1024 - 1);
+        s.push('😀'); // bytes 8191..8195; byte 8192 splits the char
+        let out = truncate_kb(&s, 8);
+        assert!(out.contains("[truncated to 8 KiB]"));
+        // The emoji was dropped at the boundary; only ASCII 'a's survive.
+        assert!(!out.contains('😀'));
+    }
+
+    #[test]
+    fn event_supported_only_for_implemented_events() {
+        // #185 H4.
+        assert!(event_supported("PreToolUse"));
+        assert!(event_supported("PostToolUse"));
+        assert!(event_supported("SessionStart"));
+        assert!(!event_supported("UserPromptSubmit"));
+        assert!(!event_supported("PreCompact"));
+        assert!(!event_supported("Stop"));
+    }
+
+    #[test]
+    fn expand_env_vars_only_substitutes_allowlisted() {
+        // #185 H5: only allow-listed vars expand; others (and unset) → empty.
+        // A non-allowlisted var is never looked up — the security gate.
+        assert_eq!(expand_env_vars("x=${HOME}", &[]), "x=");
+        // Allowlisted but unset → empty.
+        assert_eq!(
+            expand_env_vars(
+                "x=${DEFINITELY_UNSET_VAR_H5}",
+                &["DEFINITELY_UNSET_VAR_H5".to_string()]
+            ),
+            "x="
+        );
+        // Unterminated `${` is left literal.
+        assert_eq!(expand_env_vars("a${b", &["b".to_string()]), "a${b");
+        // A real, allowlisted env var expands to its value (use whatever the
+        // test process already has — avoids the forbidden `set_var`).
+        if let Some((name, value)) = std::env::vars().next() {
+            let tmpl = format!("v=${{{name}}}");
+            assert_eq!(expand_env_vars(&tmpl, &[name]), format!("v={value}"));
+        }
     }
 
     #[test]

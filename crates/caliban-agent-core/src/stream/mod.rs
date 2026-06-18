@@ -21,6 +21,32 @@ mod turn;
 /// requests continuation.
 pub const MAX_FORCED_CONTINUATIONS: u8 = 3;
 
+/// Best-effort validation of a hook-rewritten tool input (`UpdatedInput`)
+/// against the tool's declared JSON Schema. ADR-0024 requires the rewrite be
+/// validated and a failure be a hard deny (#185 H6). Full JSON Schema
+/// validation is intentionally out of scope (agent-core avoids the `jsonschema`
+/// dep, as the headless validator does): we check the input is a JSON object
+/// and that every `required` property is present — the realistic failure modes
+/// for a malformed rewrite.
+fn updated_input_is_valid(
+    schema: &serde_json::Value,
+    input: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    let Some(obj) = input.as_object() else {
+        return Err("rewritten input is not a JSON object".to_string());
+    };
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for r in required {
+            if let Some(name) = r.as_str()
+                && !obj.contains_key(name)
+            {
+                return Err(format!("missing required field `{name}`"));
+            }
+        }
+    }
+    Ok(())
+}
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -220,6 +246,32 @@ impl StopCondition {
                 | Self::ContentFilter(_)
                 | Self::StreamIdle(_)
         )
+    }
+}
+
+#[cfg(test)]
+mod updated_input_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn valid_rewrite_passes() {
+        // #185 H6.
+        let schema = json!({"type": "object", "required": ["path"]});
+        assert!(updated_input_is_valid(&schema, &json!({"path": "/x", "extra": 1})).is_ok());
+    }
+
+    #[test]
+    fn non_object_rewrite_is_rejected() {
+        let schema = json!({"type": "object"});
+        assert!(updated_input_is_valid(&schema, &json!("not an object")).is_err());
+    }
+
+    #[test]
+    fn missing_required_field_is_rejected() {
+        let schema = json!({"type": "object", "required": ["path"]});
+        let err = updated_input_is_valid(&schema, &json!({"other": 1})).unwrap_err();
+        assert!(err.contains("required field `path`"), "got: {err}");
     }
 }
 
@@ -1005,6 +1057,28 @@ impl Agent {
                             );
                             break 'outer;
                         }
+                    };
+
+                    // ADR-0024 / #185 H6: a hook may rewrite a tool's input via
+                    // UpdatedInput, but the rewrite must be validated against
+                    // the tool's schema; an invalid rewrite is a *hard deny*
+                    // (not dispatched). Convert it to Deny here so it flows
+                    // through the denial path below (after_tool notify + error
+                    // result).
+                    let decision = if let HookDecision::UpdatedInput(new_input) = &decision {
+                        match self.tools.get(&tu.name) {
+                            Some(tool) => {
+                                match updated_input_is_valid(tool.input_schema(), new_input) {
+                                    Ok(()) => decision,
+                                    Err(why) => HookDecision::Deny(format!(
+                                        "before_tool hook rewrote input to an invalid shape: {why}"
+                                    )),
+                                }
+                            }
+                            None => decision,
+                        }
+                    } else {
+                        decision
                     };
 
                     match decision {
