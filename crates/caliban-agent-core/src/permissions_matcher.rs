@@ -122,9 +122,15 @@ pub fn matches_with_workspace(
         let glob_pat: String = if spec_path.is_absolute() {
             spec.to_owned()
         } else {
-            // Strip a leading `./` first, then anchor with `**/`.
+            // Strip a leading `./`, then anchor to the workspace root so the
+            // pattern stays *inside* the repo. `<ws>/**/<stripped>` still lets
+            // `src/**` match at any depth within the workspace, but a leading
+            // `**/` alone would also match `/etc/src/...` outside it (#177).
+            // Escape the workspace prefix so a literal path containing glob
+            // metacharacters isn't reinterpreted.
             let stripped = spec.strip_prefix("./").unwrap_or(spec);
-            format!("**/{stripped}")
+            let ws = globset::escape(&workspace.to_string_lossy());
+            format!("{ws}/**/{stripped}")
         };
         return glob_match_path(&glob_pat, &target);
     }
@@ -204,6 +210,30 @@ mod tests {
         assert!(
             matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &i), ws),
             "globstar should match nested .rs under the workspace src tree"
+        );
+    }
+
+    #[test]
+    fn relative_pattern_does_not_escape_workspace() {
+        // Security (#177): a relative file-edit pattern must scope to the
+        // workspace. It must NOT match a same-named subtree elsewhere on the
+        // filesystem.
+        let ws = std::path::Path::new("/repo");
+        let outside = json!({"path": "/etc/src/evil.rs"});
+        assert!(
+            !matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &outside), ws),
+            "relative pattern must be workspace-scoped, must not match /etc/src/..."
+        );
+        let home = json!({"path": "/home/attacker/src/evil.rs"});
+        assert!(
+            !matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &home), ws),
+            "relative pattern must not match /home/attacker/src/..."
+        );
+        // Still matches inside the workspace, at any depth.
+        let inside = json!({"path": "/repo/crates/x/src/y.rs"});
+        assert!(
+            matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &inside), ws),
+            "relative pattern must still match src/** anywhere under the workspace"
         );
     }
 
