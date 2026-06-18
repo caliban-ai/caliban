@@ -133,9 +133,10 @@ fn atomic_overwrite(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 }
 
 /// Truncate `session.messages` so the last surviving message matches the
-/// checkpoint's `last_message_id`. When the id is `None` or can't be
-/// located, falls back to truncating to the message immediately after
-/// the prompt index (counting user messages).
+/// checkpoint's `last_message_id`. When the id is `None` or can't be located,
+/// falls back to keeping history through the `prompt_index`-th user prompt and
+/// its assistant turns (counting user messages), matching the documented
+/// "removes all messages after the selected prompt's last assistant message".
 ///
 /// Returns the number of messages remaining.
 pub fn restore_conversation(
@@ -152,22 +153,34 @@ pub fn restore_conversation(
         session.messages.truncate(pos + 1);
         return session.messages.len();
     }
-    // Fallback: count user messages and truncate after the prompt_index-th.
+    // Fallback (no usable message id): keep history through the prompt_index-th
+    // user prompt *and its assistant turns* — truncate just before the *next*
+    // user message. Truncating at the user prompt itself (the old `c + 1`)
+    // dropped that prompt's assistant response, contradicting the documented
+    // contract "removes all messages after the selected prompt's last assistant
+    // message" (#181).
     let mut user_seen: u32 = 0;
+    let mut reached_target = false;
     let mut cut: Option<usize> = None;
     for (idx, m) in session.messages.iter().enumerate() {
         if m.role == caliban_provider::Role::User {
             user_seen += 1;
-            if user_seen == prompt_index {
+            if reached_target {
+                // First user message *after* the target prompt — cut here so
+                // the target's assistant turns are preserved.
                 cut = Some(idx);
                 break;
+            }
+            if user_seen == prompt_index {
+                reached_target = true;
             }
         }
     }
     if let Some(c) = cut {
-        // Truncate including the matched user message (the prompt itself
-        // stays so the operator can see what they asked for).
-        session.messages.truncate(c + 1);
+        // Exclude the next user message; the target prompt and its assistant
+        // turns stay. If the target was the last prompt (`cut == None` but
+        // reached), the whole tail is its turns and we keep everything.
+        session.messages.truncate(c);
     }
     session.messages.len()
 }
@@ -439,7 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn truncate_at_prompt_keeps_prompt_n_visible() {
+    fn truncate_at_prompt_keeps_prompt_n_assistant_turn() {
+        // #181: rewind to prompt 2 keeps through prompt 2's assistant response,
+        // not just the user prompt.
         let messages = vec![
             user("prompt 1"),
             assistant("response 1"),
@@ -450,9 +465,22 @@ mod tests {
         ];
         let mut session = make_session(messages);
         let remaining = restore_conversation(&mut session, None, 2);
-        // Should keep up through "prompt 2" (we don't have message ids).
-        assert_eq!(remaining, 3);
-        assert_eq!(session.messages.len(), 3);
+        assert_eq!(remaining, 4, "U1, A1, U2, A2 survive");
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn truncate_at_last_prompt_keeps_everything() {
+        let messages = vec![
+            user("prompt 1"),
+            assistant("response 1"),
+            user("prompt 2"),
+            assistant("response 2"),
+        ];
+        let mut session = make_session(messages);
+        let remaining = restore_conversation(&mut session, None, 2);
+        assert_eq!(remaining, 4, "rewinding to the final prompt is a no-op");
     }
 
     #[tokio::test]
@@ -488,7 +516,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.files_restored, 1);
-        assert_eq!(outcome.messages_after, 1);
+        // #181: rewind to prompt 1 keeps its assistant turn too — `p1` + `r1`.
+        assert_eq!(outcome.messages_after, 2);
         assert_eq!(std::fs::read(&file).unwrap(), b"v1");
     }
 
@@ -659,8 +688,8 @@ mod tests {
         let messages = vec![user("p1"), assistant("r1"), user("p2"), assistant("r2")];
         let mut session = make_session(messages);
         let remaining = restore_conversation(&mut session, Some("nonexistent-id"), 1);
-        // Fallback truncates after the 1st user message.
-        assert_eq!(remaining, 1);
+        // Fallback keeps prompt 1 and its assistant turn (p1, r1) — #181.
+        assert_eq!(remaining, 2);
     }
 
     #[test]
@@ -731,8 +760,9 @@ mod tests {
         };
         let outcome = restore(&store, &mut session, 1, opts).await.unwrap();
         assert_eq!(outcome.files_restored, 0);
-        // Conversation truncation still ran.
-        assert_eq!(outcome.messages_after, 1);
+        // Conversation truncation still ran; rewinding to the only (last)
+        // prompt keeps it and its assistant turn — p1, r1 (#181).
+        assert_eq!(outcome.messages_after, 2);
         // Disk file is left dirty because files=false.
         assert_eq!(std::fs::read(&file).unwrap(), b"DIRTY");
     }

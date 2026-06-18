@@ -61,11 +61,16 @@ pub fn default_root() -> Result<PathBuf> {
 
 /// Deterministic, filesystem-safe identifier for a workspace cwd.
 ///
-/// Mirrors Claude Code's mapping: `sha256(canonical_path)[..16]` hex-encoded.
-/// We canonicalise where possible, fall back to the raw path otherwise.
+/// `sha256(resolved_path)[..16]` hex-encoded. We canonicalise the deepest
+/// existing ancestor and re-append any non-existent tail (#181): a plain
+/// `canonicalize().unwrap_or(raw)` produced a *different* hash before vs. after
+/// the path resolved (raw path on failure, canonical path on success), so the
+/// same logical cwd could split its checkpoints across two `projects/<hash>`
+/// dirs. For a fully-existing path this equals `canonicalize`, so existing
+/// project dirs are unchanged.
 #[must_use]
 pub fn sanitize_cwd(cwd: &Path) -> String {
-    let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let canon = crate::recorder::canonicalize_existing_ancestor(cwd);
     let mut hasher = Sha256::new();
     hasher.update(canon.display().to_string().as_bytes());
     let digest = hasher.finalize();
@@ -310,6 +315,24 @@ mod tests {
         let store = store_in(tmp.path());
         assert!(store.session_dir().exists());
         assert!(store.session_dir().is_dir());
+    }
+
+    #[test]
+    fn sanitize_cwd_is_stable_across_path_existence() {
+        // #181: the same cwd must hash to one project dir whether or not it
+        // exists yet (canonicalize succeeds/fails). A leaf under an existing
+        // dir: hash it before creating it, then after.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project-a");
+        let before = sanitize_cwd(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+        let after = sanitize_cwd(&cwd);
+        assert_eq!(
+            before, after,
+            "the hash must not change once the path resolves"
+        );
+        // And it equals the fully-canonicalised hash for an existing path.
+        assert_eq!(after.len(), 16);
     }
 
     #[test]
