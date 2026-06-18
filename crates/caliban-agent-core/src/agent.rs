@@ -173,7 +173,9 @@ pub struct Agent {
     /// `parallel_tools` is false (equivalent to `1`).
     pub(crate) parallel_tool_limit: NonZeroUsize,
     /// Shared plan-mode flag. When `Some` and the inner flag is set, the
-    /// dispatcher rejects tools not in [`crate::plan_mode::PLAN_MODE_ALLOWLIST`].
+    /// dispatcher rejects tools that are neither side-effect-free
+    /// ([`crate::Tool::is_read_only`]) nor a plan-control tool
+    /// ([`crate::plan_mode::is_plan_control_tool`]).
     /// `None` means plan-mode gating is disabled entirely.
     pub(crate) plan_mode: Option<crate::plan_mode::SharedPlanMode>,
     /// Post-processor applied to each assistant message's text blocks
@@ -462,8 +464,9 @@ impl AgentBuilder {
     }
 
     /// Attach a shared plan-mode flag. When set and the inner flag is `true`,
-    /// the dispatcher rejects tools not in
-    /// [`crate::plan_mode::PLAN_MODE_ALLOWLIST`]. Default: `None` (gating off).
+    /// the dispatcher rejects tools that are neither side-effect-free
+    /// ([`crate::Tool::is_read_only`]) nor a plan-control tool. Default: `None`
+    /// (gating off).
     #[must_use]
     pub fn plan_mode(mut self, handle: crate::plan_mode::SharedPlanMode) -> Self {
         self.plan_mode = Some(handle);

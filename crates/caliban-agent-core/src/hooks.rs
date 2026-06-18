@@ -119,6 +119,11 @@ pub struct ToolCtx<'a> {
     pub tool_name: &'a str,
     /// Input JSON passed to the tool.
     pub input: &'a serde_json::Value,
+    /// Whether the resolved tool reports itself side-effect-free
+    /// ([`crate::Tool::is_read_only`]). Populated by the dispatcher from the
+    /// live registry and consumed by plan-mode gating. `false` when the tool
+    /// is unknown or has side effects.
+    pub is_read_only: bool,
 }
 
 /// Per-session context for `SessionStart` / `SessionEnd` events.
@@ -703,6 +708,7 @@ impl Hooks for CompositeHooks {
                 tool_use_id: ctx.tool_use_id,
                 tool_name: ctx.tool_name,
                 input: effective_input,
+                is_read_only: ctx.is_read_only,
             };
             match h.before_tool(&layer_ctx).await? {
                 HookDecision::Allow => {}

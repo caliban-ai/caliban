@@ -197,6 +197,7 @@ mod tests {
             tool_use_id: "t",
             tool_name: name,
             input,
+            is_read_only: false,
         }
     }
 

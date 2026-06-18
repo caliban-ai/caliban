@@ -1500,6 +1500,7 @@ mod tests {
             tool_use_id: "t1",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         let decision = chain.before_tool(&ctx).await.expect("hook decision");
         assert!(
@@ -1539,6 +1540,7 @@ mod tests {
             tool_use_id: "t1",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         let decision = chain.before_tool(&ctx).await.expect("hook decision");
         assert!(

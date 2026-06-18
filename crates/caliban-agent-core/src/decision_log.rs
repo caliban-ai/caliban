@@ -308,6 +308,7 @@ mod tests {
             tool_use_id: "t",
             tool_name: "Bash",
             input: &input,
+            is_read_only: false,
         };
         for _ in 0..30 {
             w.record(&ctx, "allow", None);
@@ -364,6 +365,7 @@ mod tests {
             tool_use_id: "t1",
             tool_name: "Read",
             input: &input,
+            is_read_only: true,
         };
         let d = recorder.before_tool(&ctx).await.unwrap();
         assert!(matches!(d, HookDecision::Allow));

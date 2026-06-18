@@ -619,6 +619,7 @@ mod tests {
             tool_use_id: "t1",
             tool_name: name,
             input,
+            is_read_only: false,
         }
     }
 
@@ -908,6 +909,7 @@ mod runtime_rule_tests {
             tool_use_id: "t",
             tool_name: name,
             input,
+            is_read_only: false,
         }
     }
 
@@ -1018,6 +1020,7 @@ mod evaluate_rules_tests {
             tool_use_id: "t",
             tool_name: name,
             input,
+            is_read_only: false,
         }
     }
 

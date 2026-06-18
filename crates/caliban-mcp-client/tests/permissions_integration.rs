@@ -65,6 +65,7 @@ async fn server_deny_rule_blocks_matching_tool() {
         tool_use_id: "t1",
         tool_name: "mcp__linear__delete_issue",
         input: &input,
+        is_read_only: false,
     };
     let action = hook.evaluate(&ctx);
     assert_eq!(action, Action::Deny);
@@ -98,6 +99,7 @@ async fn server_allow_lets_tool_through() {
         tool_use_id: "t1",
         tool_name: "mcp__linear__read_issues",
         input: &input,
+        is_read_only: false,
     };
     let action = hook.evaluate(&ctx);
     assert_eq!(action, Action::Allow);
@@ -135,6 +137,7 @@ async fn global_deny_overrides_server_allow() {
         tool_use_id: "t1",
         tool_name: "mcp__linear__delete_issue",
         input: &input,
+        is_read_only: false,
     };
     let action = hook.evaluate(&ctx);
     assert_eq!(

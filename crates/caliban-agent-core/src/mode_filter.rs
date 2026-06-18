@@ -23,7 +23,7 @@ use crate::auto_mode::{AutoModeClassifier, AutoVerdict};
 use crate::error::Result;
 use crate::hooks::{HookDecision, Hooks, PermCtx, ToolCtx};
 use crate::permission_mode::{PermissionMode, SharedPermissionMode, is_file_edit_tool};
-use crate::plan_mode::is_allowed_in_plan_mode;
+use crate::plan_mode::is_plan_control_tool;
 
 /// `Hooks` impl that wraps an inner `Hooks` (typically [`crate::PermissionsHook`])
 /// and applies [`PermissionMode`] semantics on every `before_tool`.
@@ -118,7 +118,10 @@ impl Hooks for ModeFilter {
                 }
             }
             PermissionMode::Plan => {
-                if is_allowed_in_plan_mode(ctx.tool_name) {
+                // Allowed in plan mode when the tool is side-effect-free
+                // (Tool::is_read_only, surfaced via the ctx) or is a
+                // plan-control tool (Enter/ExitPlanMode).
+                if ctx.is_read_only || is_plan_control_tool(ctx.tool_name) {
                     self.inner.before_tool(ctx).await
                 } else {
                     let perm_ctx = PermCtx {
@@ -333,11 +336,15 @@ mod tests {
     use crate::permissions::{Action, NonInteractiveAskHandler, PermissionsHook, Rule};
 
     fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
+        // Mirror production: the read-only built-ins report is_read_only=true,
+        // which is how they become plan-mode-allowed.
+        let is_read_only = matches!(name, "Read" | "Grep" | "Glob" | "WebFetch" | "Skill");
         ToolCtx {
             turn_index: 0,
             tool_use_id: "t1",
             tool_name: name,
             input,
+            is_read_only,
         }
     }
 

@@ -64,9 +64,7 @@ pub use permissions::{
 // so the consumer-side deprecation warning is the one that surfaces.
 #[allow(deprecated)]
 pub use permissions::{load_rules, load_rules_file};
-pub use plan_mode::{
-    PLAN_MODE_ALLOWLIST, SharedPlanMode, is_allowed_in_plan_mode, new_shared_plan_mode,
-};
+pub use plan_mode::{SharedPlanMode, is_plan_control_tool, new_shared_plan_mode};
 pub use post_process::{AssistantPostProcessor, NoopPostProcessor};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;

@@ -490,6 +490,7 @@ mod tests {
             tool_use_id: "t1",
             tool_name: name,
             input,
+            is_read_only: false,
         }
     }
 
