@@ -1,6 +1,5 @@
 //! Bash tool — spawn a shell command and capture stdout + stderr.
 
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -185,7 +184,12 @@ impl Tool for BashTool {
 
         // Background path: enroll and return immediately.
         if parsed.background {
-            let id = spawn_background(&self.bg_registry, parsed.command.clone(), &cwd)?;
+            let id = spawn_background(
+                &self.bg_registry,
+                parsed.command.clone(),
+                &cwd,
+                self.sandbox.as_ref(),
+            )?;
             return Ok(vec![ContentBlock::Text(TextBlock {
                 text: format!(
                     "Started background shell {id}: {} (use BashOutput/KillShell with shell_id={id})",
@@ -198,37 +202,11 @@ impl Tool for BashTool {
         let timeout_secs = parsed.timeout_seconds.unwrap_or(60).clamp(1, 600);
         let timeout = Duration::from_secs(timeout_secs);
 
-        let mut shell = tokio::process::Command::new("/bin/sh");
-        shell
-            .arg("-c")
-            .arg(&parsed.command)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        // Put the child into its own process group so on timeout/cancel
-        // we can SIGKILL the entire tree — not just the shell, but any
-        // subprocesses it spawned (e.g., `sh -c "find / | xargs grep …"`
-        // forks find AND grep AND xargs). Without process_group(0), the
-        // shell dies and its descendants get reparented to init,
-        // leaving orphans.
-        #[cfg(unix)]
-        shell.process_group(0);
-
-        // OS-level sandbox wrap (ADR 0032). No-op when no sandbox is
-        // attached, when the policy is disabled, when the backend is
-        // unavailable, or when the command is on the bypass list. The
-        // shim preserves cwd / env / stdio / process_group(0) / kill_on_drop
-        // so the existing kill_process_tree logic continues to work — the
-        // wrapper (sandbox-exec / bwrap) propagates SIGKILL to its child.
-        if let Some(shim) = self.sandbox.as_ref() {
-            shim.wrap_command(&mut shell, &parsed.command)
-                .map_err(|e| {
-                    ToolError::execution(std::io::Error::other(format!("sandbox: {e}")))
-                })?;
-        }
+        // Build the shell (piped stdio, kill-on-drop, own process group so the
+        // whole tree can be SIGKILLed on timeout/cancel) and apply the OS
+        // sandbox wrap (ADR 0032). Shared with the background path via
+        // `build_shell` so both are sandboxed identically.
+        let mut shell = super::bash_bg::build_shell(&parsed.command, &cwd, self.sandbox.as_ref())?;
 
         let mut child = shell.spawn().map_err(ToolError::execution)?;
         // Capture the PID now while we still have access to the Child.
