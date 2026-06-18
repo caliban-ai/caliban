@@ -749,6 +749,110 @@ async fn respawn_cannot_supersede_agent_while_kill_signal_in_flight() {
     supervisor.cancel_token().cancel();
 }
 
+/// Deterministic regression test for the `Rm --force`/`Respawn` lock-ordering
+/// race (#138, same class as #115). With `rm --force`'s signal frozen
+/// in-flight, a concurrent `Respawn` must NOT be able to supersede the agent —
+/// otherwise `rm` would have signaled a pid that is being respawned away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)]
+async fn respawn_cannot_supersede_agent_while_rm_force_signal_in_flight() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let signaller = Arc::new(BlockingSignaller {
+        signaled: std::sync::Mutex::new(Vec::new()),
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+        release: std::sync::Mutex::new(release_rx),
+        blocked_once: std::sync::atomic::AtomicBool::new(false),
+    });
+
+    // Long-lived worker so its pid stays in `procs` for rm --force to signal.
+    let launcher = Arc::new(ShLauncher {
+        script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; sleep 30"#.into(),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("caliband.sock");
+    let agent_dir = dir.path().join("agents-rt");
+    let store = AgentStore::new(dir.path().join("data"));
+    let supervisor = Arc::new(
+        Supervisor::with_launcher(socket_path.clone(), store, agent_dir, launcher)
+            .with_signaller(Arc::clone(&signaller) as Arc<dyn caliban_supervisor::Signaller>),
+    );
+    let server = Arc::clone(&supervisor);
+    let _h = tokio::spawn(async move { Arc::clone(&server).serve().await });
+    for _ in 0..200 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let client = SupervisorClient::new(socket_path.clone());
+    let (id, _) = client.spawn(spec()).await.unwrap();
+    // Wait until Running so the worker pid is tracked in `procs`.
+    for _ in 0..200 {
+        if client
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Start `rm --force`; it will read the pid, deliver the (blocking) signal,
+    // and freeze in-flight.
+    let rm_client = SupervisorClient::new(socket_path.clone());
+    let rm_id = id.clone();
+    let rm_task = tokio::spawn(async move { rm_client.rm(&rm_id, true).await });
+    entered_rx
+        .await
+        .expect("rm --force never entered the signaller");
+
+    // With rm's signal frozen, fire a concurrent Respawn of the same agent.
+    let respawn_client = SupervisorClient::new(socket_path.clone());
+    let respawn_id = id.clone();
+    let mut respawn_task = tokio::spawn(async move { respawn_client.respawn(&respawn_id).await });
+
+    // The fix serializes rm --force and Respawn under the registry lock, so
+    // Respawn must NOT complete while rm holds it mid-signal. The bug lets
+    // Respawn run to completion here, superseding the just-signaled worker.
+    let progressed = tokio::time::timeout(Duration::from_secs(2), &mut respawn_task).await;
+    assert!(
+        progressed.is_err(),
+        "Respawn superseded the agent while rm --force's signal was in flight — \
+         rm signaled a pid that was being respawned away (stale signal against \
+         a superseded pid)"
+    );
+
+    // Release rm's signal and let both operations drain.
+    release_tx.send(()).unwrap();
+    let _ = rm_task.await;
+    let _ = respawn_task.await;
+
+    // Reap surviving `sleep 30` workers (the blocking signaller never killed
+    // them).
+    if let Ok(entries) = std::fs::read_dir(dir.path().join("agents-rt")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            #[allow(clippy::cast_possible_wrap)] // pids fit in i32 on unix
+            if path.extension().is_some_and(|e| e == "pid")
+                && let Ok(s) = std::fs::read_to_string(&path)
+                && let Ok(pid) = s.trim().parse::<i32>()
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+
+    supervisor.cancel_token().cancel();
+}
+
 #[tokio::test]
 async fn socket_file_removed_after_worker_exits() {
     // Worker creates the socket file then exits 0 → Done. The monitor task

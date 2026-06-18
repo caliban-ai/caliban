@@ -230,6 +230,28 @@ impl Supervisor {
         }
     }
 
+    /// Deliver `SIGTERM` to the live worker tracked for `id`, if any.
+    ///
+    /// The `&Registry` argument is a witness that the caller holds the registry
+    /// lock: all `procs` access must happen inside the registry critical section
+    /// so a concurrent `Respawn` cannot supersede the worker between the signal
+    /// and the surrounding bookkeeping (#115, #138). Since the only way to
+    /// obtain a `&Registry` is by locking the registry mutex, this precondition
+    /// is enforced at the call site rather than left to comments.
+    async fn signal_worker(&self, _registry_held: &Registry, id: &crate::proto::AgentId) {
+        let pid = self.procs.lock().await.get(id).copied();
+        if let Some(pid) = pid {
+            let delivered = self.signaller.signal_term(pid);
+            tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
+        }
+    }
+
+    /// Drop the tracked pid for `id` from the `procs` map. Same held-lock
+    /// witness contract as [`Self::signal_worker`].
+    async fn forget_worker(&self, _registry_held: &Registry, id: &crate::proto::AgentId) {
+        self.procs.lock().await.remove(id);
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn dispatch(&self, req: CtlRequest) -> CtlReply {
         match req {
@@ -264,23 +286,16 @@ impl Supervisor {
                 }
             }
             CtlRequest::Kill { id } => {
-                // Signal the owned child if we have its pid; then record
-                // the state transition. The monitor task will observe the
-                // real exit but won't clobber `Killed` (guarded by
-                // `set_status_if_running`).
+                // Signal the owned child if we have its pid; then record the
+                // state transition. The monitor task observes the real exit but
+                // won't clobber `Killed` (guarded by `set_status_if_running`)
+                // and removes the pid from `procs`.
                 //
-                // Hold the registry lock across the pid lookup, signal, and
-                // status update so a concurrent `Respawn` cannot supersede the
-                // worker between the signal and the bookkeeping — otherwise we
-                // would SIGTERM a pid that is being respawned away and then
-                // report failure (#115). `Respawn` removes the pid inside the
-                // same critical section, so the two serialize on this lock.
+                // Signalling happens under the registry lock (see
+                // `signal_worker`) so a concurrent `Respawn` cannot supersede
+                // the worker between the signal and the status update (#115).
                 let mut r = self.registry.lock().await;
-                let pid = self.procs.lock().await.get(&id).copied();
-                if let Some(pid) = pid {
-                    let delivered = self.signaller.signal_term(pid);
-                    tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
-                }
+                self.signal_worker(&r, &id).await;
                 match r.set_status(&id, crate::proto::AgentStatus::Killed) {
                     Ok(_) => CtlReply::Killed,
                     Err(e) => CtlReply::Error { error: e },
@@ -297,8 +312,8 @@ impl Supervisor {
                     // Drop the stale pid inside the registry critical section
                     // (not before it) so a concurrent `Kill` sees a consistent
                     // procs+registry snapshot and never signals a superseded
-                    // pid (#115). Mirrors `Kill`'s registry→procs ordering.
-                    self.procs.lock().await.remove(&id);
+                    // pid (#115).
+                    self.forget_worker(&r, &id).await;
                     // Drop old (force=true so it can be running) and
                     // re-register with the same spec.
                     if let Err(e) = r.remove(&id, true) {
@@ -321,20 +336,22 @@ impl Supervisor {
                 // (#76). Only when `force` is set — a non-force rm of a
                 // running agent is refused by `remove` below, so we must
                 // not signal in that case.
-                if force {
-                    let pid = self.procs.lock().await.get(&id).copied();
-                    if let Some(pid) = pid {
-                        let delivered = self.signaller.signal_term(pid);
-                        tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker during rm --force");
-                    }
-                }
+                //
+                // Take the registry lock up front so the signal, the registry
+                // removal, and the pid drop all happen in one critical section
+                // — otherwise a concurrent `Respawn` could supersede the agent
+                // between the signal and the removal, leaving us having
+                // SIGTERM'd a pid that was being respawned away (#138, same
+                // class as #115).
                 let mut r = self.registry.lock().await;
+                if force {
+                    self.signal_worker(&r, &id).await;
+                }
                 match r.remove(&id, force) {
                     Ok(()) => {
-                        drop(r);
                         // Entry is gone; drop the pid proactively (the
                         // monitor task also removes it on the child's exit).
-                        self.procs.lock().await.remove(&id);
+                        self.forget_worker(&r, &id).await;
                         CtlReply::Removed
                     }
                     Err(e) => CtlReply::Error { error: e },
