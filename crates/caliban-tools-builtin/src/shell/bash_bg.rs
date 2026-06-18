@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use caliban_agent_core::{Tool, ToolContext, ToolError};
 use caliban_provider::{ContentBlock, TextBlock};
+use caliban_sandbox::SandboxedShim;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -370,9 +371,50 @@ pub fn new_shell_id() -> String {
 // Spawn helper used by Bash when `background: true`.
 // ---------------------------------------------------------------------------
 
+/// Build the `/bin/sh -c <command>` child shared by the foreground and
+/// background Bash paths: piped stdio, kill-on-drop, its own process group
+/// (so the whole process tree can be killed), and the OS-sandbox wrap (ADR 0032).
+///
+/// Centralizing construction here is what guarantees the background path is
+/// sandboxed identically to the foreground path. The wrap is a no-op when no
+/// shim is attached, the policy is disabled, the backend is unavailable, or
+/// the command is on the bypass list (`SandboxedShim::wrap_command`).
+///
+/// # Errors
+///
+/// Returns [`ToolError::Execution`] if the sandbox wrap fails (rare — only on
+/// an invalid sandbox config).
+pub(super) fn build_shell(
+    command: &str,
+    cwd: &std::path::Path,
+    sandbox: Option<&Arc<SandboxedShim>>,
+) -> Result<tokio::process::Command, ToolError> {
+    use std::process::Stdio;
+
+    let mut shell = tokio::process::Command::new("/bin/sh");
+    shell
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    shell.process_group(0);
+
+    if let Some(shim) = sandbox {
+        shim.wrap_command(&mut shell, command)
+            .map_err(|e| ToolError::execution(std::io::Error::other(format!("sandbox: {e}"))))?;
+    }
+
+    Ok(shell)
+}
+
 /// Spawn `command` as a background shell, enrolling it in `registry`. Returns
 /// the shell id. The shell runs in `cwd` and inherits no stdin; stdout/stderr
-/// are piped into the job's ring buffers.
+/// are piped into the job's ring buffers, and the OS sandbox (when active) is
+/// applied via [`build_shell`].
 ///
 /// # Errors
 ///
@@ -384,23 +426,15 @@ pub fn spawn_background(
     registry: &Arc<BashBgRegistry>,
     command: String,
     cwd: &std::path::Path,
+    sandbox: Option<&Arc<SandboxedShim>>,
 ) -> Result<String, ToolError> {
-    use std::process::Stdio;
-
     let id = new_shell_id();
     let cap = registry.cap_bytes();
 
-    let mut shell = tokio::process::Command::new("/bin/sh");
-    shell
-        .arg("-c")
-        .arg(&command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    shell.process_group(0);
+    // Build the shell through the shared helper so the background path is
+    // sandbox-wrapped identically to the foreground path (#160) — previously
+    // it spawned `/bin/sh` directly and skipped the OS-sandbox wrap entirely.
+    let mut shell = build_shell(&command, cwd, sandbox)?;
 
     let mut child = shell.spawn().map_err(ToolError::execution)?;
     let pid = child.id();
@@ -748,12 +782,53 @@ mod tests {
     // spawn_background / BashOutput / KillShell
     // ----------------------------------------------------------------------
 
+    #[test]
+    fn build_shell_without_sandbox_invokes_bin_sh_directly() {
+        let cmd = build_shell("echo hi", &std::env::current_dir().unwrap(), None).unwrap();
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), "/bin/sh");
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["-c", "echo hi"]);
+    }
+
+    #[test]
+    fn build_shell_routes_through_the_sandbox_wrap() {
+        // Regression for #160: the background path must apply the OS-sandbox
+        // wrap exactly like the foreground path. An *active* shim rewrites the
+        // program to the sandbox wrapper; an inactive one (disabled policy, or
+        // no backend binary on this runner) is a documented no-op that leaves
+        // `/bin/sh` in place. Either way the wrap is now invoked.
+        let policy = caliban_sandbox::Policy {
+            enabled: true,
+            ..Default::default()
+        };
+        let shim = Arc::new(caliban_sandbox::SandboxedShim::new(policy).unwrap());
+        let cmd = build_shell("echo hi", &std::env::current_dir().unwrap(), Some(&shim)).unwrap();
+        let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+        if shim.is_active() {
+            assert_ne!(
+                program, "/bin/sh",
+                "an active sandbox must wrap the shell program",
+            );
+        } else {
+            assert_eq!(program, "/bin/sh");
+        }
+    }
+
     #[tokio::test]
     async fn spawn_background_returns_shell_id_immediately() {
         let reg = BashBgRegistry::new_for_test(1024 * 1024);
         let start = Instant::now();
-        let id =
-            spawn_background(&reg, "sleep 5".into(), &std::env::current_dir().unwrap()).unwrap();
+        let id = spawn_background(
+            &reg,
+            "sleep 5".into(),
+            &std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
         // The call must not block — well under 1s.
         assert!(start.elapsed() < Duration::from_millis(500));
         assert_eq!(id.len(), 12);
@@ -773,6 +848,7 @@ mod tests {
             &reg,
             "printf 'hello'; sleep 30".into(),
             &std::env::current_dir().unwrap(),
+            None,
         )
         .unwrap();
         // Give the drainer a moment.
@@ -804,6 +880,7 @@ mod tests {
             &reg,
             "printf 'aaaaa'; sleep 30".into(),
             &std::env::current_dir().unwrap(),
+            None,
         )
         .unwrap();
         // Wait until we have 5 bytes.
@@ -831,8 +908,13 @@ mod tests {
     #[tokio::test]
     async fn kill_shell_terminates_running_job() {
         let reg = BashBgRegistry::new_for_test(1024 * 1024);
-        let id =
-            spawn_background(&reg, "sleep 60".into(), &std::env::current_dir().unwrap()).unwrap();
+        let id = spawn_background(
+            &reg,
+            "sleep 60".into(),
+            &std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
         assert_eq!(reg.running_count(), 1);
         let tool = KillShellTool::with_grace(reg.clone(), Duration::from_millis(500));
         let out = tool
@@ -858,8 +940,13 @@ mod tests {
         let reg = BashBgRegistry::new_for_test(1024 * 1024);
         let ids: Vec<String> = (0..3)
             .map(|_| {
-                spawn_background(&reg, "sleep 60".into(), &std::env::current_dir().unwrap())
-                    .unwrap()
+                spawn_background(
+                    &reg,
+                    "sleep 60".into(),
+                    &std::env::current_dir().unwrap(),
+                    None,
+                )
+                .unwrap()
             })
             .collect();
         assert_eq!(reg.running_count(), 3);
