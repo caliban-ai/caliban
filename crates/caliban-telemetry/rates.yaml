@@ -11,13 +11,17 @@
 version: 1
 providers:
   anthropic:
-    - model_glob: "claude-opus-4-7*"
+    # Generation-agnostic globs: Anthropic's per-family pricing is uniform across
+    # the 4.x line, so match every opus/sonnet generation rather than pinning one
+    # (which left the default `claude-sonnet-4-6` and flagship `claude-opus-4-8`
+    # unpriced — #142).
+    - model_glob: "claude-opus-*"
       effective_from: 2026-04-01
       input_per_mtok: 15.00
       output_per_mtok: 75.00
       cache_read_per_mtok: 1.50
       cache_creation_per_mtok: 18.75
-    - model_glob: "claude-sonnet-4-7*"
+    - model_glob: "claude-sonnet-*"
       effective_from: 2026-04-01
       input_per_mtok: 3.00
       output_per_mtok: 15.00
