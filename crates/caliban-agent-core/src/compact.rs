@@ -48,13 +48,27 @@ impl Compactor for MicroCompactor {
         messages: &[Message],
         _capabilities: &Capabilities,
     ) -> Result<Option<Vec<Message>>> {
-        // First pass: find the latest tool_use_id for each (tool, key).
+        // Map tool_use_id → is_error from the ToolResult blocks, so a failed
+        // result can't be chosen as the surviving "latest" (#170).
+        let mut errored: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+        for m in messages {
+            for cb in &m.content {
+                if let caliban_provider::ContentBlock::ToolResult(tr) = cb {
+                    errored.insert(tr.tool_use_id.as_str(), tr.is_error);
+                }
+            }
+        }
+        // First pass: find the latest *successful* tool_use_id for each
+        // (tool, key). Only a result that exists and did not error may
+        // supersede earlier ones — otherwise a later failed Read would
+        // destroy the earlier good content.
         let mut latest: std::collections::HashMap<(String, String), String> =
             std::collections::HashMap::new();
         for m in messages {
             for cb in &m.content {
                 if let caliban_provider::ContentBlock::ToolUse(tu) = cb
                     && let Some(k) = supersession_key(&tu.name, &tu.input)
+                    && errored.get(tu.id.as_str()) == Some(&false)
                 {
                     latest.insert((tu.name.clone(), k), tu.id.clone());
                 }
@@ -369,6 +383,113 @@ impl Compactor for SummarizingCompactor {
 
     fn strategy_name(&self) -> &'static str {
         "Summarizing"
+    }
+}
+
+#[cfg(test)]
+mod microcompactor_tests {
+    use super::*;
+    use caliban_provider::{ContentBlock, Message, Role, TextBlock, ToolResultBlock, ToolUseBlock};
+    use serde_json::json;
+
+    fn caps() -> Capabilities {
+        Capabilities {
+            max_input_tokens: 1024,
+            max_output_tokens: 1024,
+            vision: false,
+            tool_use: caliban_provider::ToolUseCapability::None,
+            thinking: false,
+            prompt_caching: caliban_provider::PromptCachingCapability::None,
+            json_mode: false,
+            streaming: false,
+            stop_sequences: false,
+            top_k: false,
+            system_prompt: caliban_provider::SystemPromptCapability::SeparateField,
+            refusal_field: false,
+        }
+    }
+
+    fn read_use(id: &str, path: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse(ToolUseBlock {
+                id: id.into(),
+                name: "Read".into(),
+                input: json!({ "file_path": path }),
+            })],
+        }
+    }
+
+    fn read_result(id: &str, text: &str, is_error: bool) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResultBlock {
+                tool_use_id: id.into(),
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: text.into(),
+                    cache_control: None,
+                })],
+                is_error,
+            })],
+        }
+    }
+
+    /// Pull the text of the (single) result block carrying `tool_use_id`.
+    fn result_text(messages: &[Message], id: &str) -> String {
+        for m in messages {
+            for cb in &m.content {
+                if let ContentBlock::ToolResult(tr) = cb
+                    && tr.tool_use_id == id
+                    && let Some(ContentBlock::Text(t)) = tr.content.first()
+                {
+                    return t.text.clone();
+                }
+            }
+        }
+        panic!("no result for {id}");
+    }
+
+    #[tokio::test]
+    async fn error_result_does_not_supersede_successful() {
+        // #170: a later *failed* Read of the same path must not destroy the
+        // earlier successful content.
+        let messages = vec![
+            read_use("a", "/x"),
+            read_result("a", "good", false),
+            read_use("b", "/x"),
+            read_result("b", "boom", true),
+        ];
+        let out = MicroCompactor::new()
+            .compact(&messages, &caps())
+            .await
+            .unwrap()
+            .expect("a superseding pair exists, so compaction applies");
+        assert_eq!(
+            result_text(&out, "a"),
+            "good",
+            "the successful earlier Read must be preserved, not superseded by a failed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_supersession_still_collapses() {
+        // A genuinely newer *successful* Read still collapses the older one.
+        let messages = vec![
+            read_use("a", "/x"),
+            read_result("a", "old", false),
+            read_use("b", "/x"),
+            read_result("b", "new", false),
+        ];
+        let out = MicroCompactor::new()
+            .compact(&messages, &caps())
+            .await
+            .unwrap()
+            .expect("supersession applies");
+        assert!(
+            result_text(&out, "a").starts_with("[superseded:"),
+            "older successful Read should collapse to a placeholder"
+        );
+        assert_eq!(result_text(&out, "b"), "new", "newest result kept verbatim");
     }
 }
 
