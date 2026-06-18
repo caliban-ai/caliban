@@ -24,7 +24,7 @@ pub mod server;
 pub mod store;
 
 pub use client::{ClientError, SupervisorClient};
-pub use proc::{ExecWorkerLauncher, WorkerHandle, WorkerLauncher};
+pub use proc::{ExecWorkerLauncher, OsSignaller, Signaller, WorkerHandle, WorkerLauncher};
 pub use proto::{
     AgentId, AgentRecord, AgentStatus, CtlReply, CtlRequest, DaemonStatus, SpawnSpec,
     SupervisorError,

@@ -112,6 +112,25 @@ pub fn signal_term(_pid: u32) -> bool {
     false
 }
 
+/// Strategy for delivering a termination signal to a worker pid. Abstracted
+/// (like [`WorkerLauncher`]) so tests can interpose on the exact moment a
+/// signal is sent — e.g. to deterministically drive the `Kill`/`Respawn`
+/// interleaving without relying on a probabilistic race.
+pub trait Signaller: Send + Sync {
+    /// Best-effort terminate `pid`. Returns whether the signal was delivered.
+    fn signal_term(&self, pid: u32) -> bool;
+}
+
+/// Production signaller: delivers a real `SIGTERM` via [`signal_term`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OsSignaller;
+
+impl Signaller for OsSignaller {
+    fn signal_term(&self, pid: u32) -> bool {
+        signal_term(pid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

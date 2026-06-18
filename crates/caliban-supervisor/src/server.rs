@@ -14,7 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::proc::WorkerLauncher;
+use crate::proc::{OsSignaller, Signaller, WorkerLauncher};
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
@@ -30,6 +30,8 @@ pub struct Supervisor {
     agent_runtime_dir: PathBuf,
     /// Strategy for launching worker processes.
     launcher: Arc<dyn WorkerLauncher>,
+    /// Strategy for delivering termination signals to worker pids.
+    signaller: Arc<dyn Signaller>,
     /// Live worker pids, keyed by agent id. Inserted on launch, read by
     /// `Kill`, removed by the per-child monitor task on exit.
     procs: Arc<Mutex<HashMap<crate::proto::AgentId, u32>>>,
@@ -69,8 +71,17 @@ impl Supervisor {
             cancel: CancellationToken::new(),
             agent_runtime_dir,
             launcher,
+            signaller: Arc::new(OsSignaller),
             procs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the signaller (tests interpose here to drive the
+    /// `Kill`/`Respawn` interleaving deterministically).
+    #[must_use]
+    pub fn with_signaller(mut self, signaller: Arc<dyn Signaller>) -> Self {
+        self.signaller = signaller;
+        self
     }
 
     /// Cancellation handle the daemon binary can fire on `SIGTERM` / `Shutdown`.
@@ -257,20 +268,25 @@ impl Supervisor {
                 // the state transition. The monitor task will observe the
                 // real exit but won't clobber `Killed` (guarded by
                 // `set_status_if_running`).
+                //
+                // Hold the registry lock across the pid lookup, signal, and
+                // status update so a concurrent `Respawn` cannot supersede the
+                // worker between the signal and the bookkeeping — otherwise we
+                // would SIGTERM a pid that is being respawned away and then
+                // report failure (#115). `Respawn` removes the pid inside the
+                // same critical section, so the two serialize on this lock.
+                let mut r = self.registry.lock().await;
                 let pid = self.procs.lock().await.get(&id).copied();
                 if let Some(pid) = pid {
-                    let delivered = crate::proc::signal_term(pid);
+                    let delivered = self.signaller.signal_term(pid);
                     tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
                 }
-                let mut r = self.registry.lock().await;
                 match r.set_status(&id, crate::proto::AgentStatus::Killed) {
                     Ok(_) => CtlReply::Killed,
                     Err(e) => CtlReply::Error { error: e },
                 }
             }
             CtlRequest::Respawn { id } => {
-                // Drop any stale pid for the old id before re-registering.
-                self.procs.lock().await.remove(&id);
                 let new_rec = {
                     let mut r = self.registry.lock().await;
                     let Some(old) = r.get(&id).cloned() else {
@@ -278,6 +294,11 @@ impl Supervisor {
                             error: SupervisorError::NotFound { id },
                         };
                     };
+                    // Drop the stale pid inside the registry critical section
+                    // (not before it) so a concurrent `Kill` sees a consistent
+                    // procs+registry snapshot and never signals a superseded
+                    // pid (#115). Mirrors `Kill`'s registry→procs ordering.
+                    self.procs.lock().await.remove(&id);
                     // Drop old (force=true so it can be running) and
                     // re-register with the same spec.
                     if let Err(e) = r.remove(&id, true) {
@@ -303,7 +324,7 @@ impl Supervisor {
                 if force {
                     let pid = self.procs.lock().await.get(&id).copied();
                     if let Some(pid) = pid {
-                        let delivered = crate::proc::signal_term(pid);
+                        let delivered = self.signaller.signal_term(pid);
                         tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker during rm --force");
                     }
                 }

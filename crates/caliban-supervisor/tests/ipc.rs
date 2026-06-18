@@ -612,6 +612,143 @@ async fn report_status_transitions_idle_running() {
     sup.cancel_token().cancel();
 }
 
+/// A [`Signaller`] that blocks the first signal in-flight until the test
+/// releases it, recording every pid it was asked to signal. This lets the
+/// test freeze `Kill` at the exact instant it delivers SIGTERM and observe
+/// whether a concurrent `Respawn` can supersede the agent in that window.
+struct BlockingSignaller {
+    /// pids passed to `signal_term`, in order.
+    signaled: std::sync::Mutex<Vec<u32>>,
+    /// Fires (once) when the first signal is entered and now blocking.
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// The first signal blocks on this until the test sends `()`.
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    /// Ensures only the first signal blocks.
+    blocked_once: std::sync::atomic::AtomicBool,
+}
+
+impl caliban_supervisor::Signaller for BlockingSignaller {
+    fn signal_term(&self, pid: u32) -> bool {
+        self.signaled.lock().unwrap().push(pid);
+        if !self
+            .blocked_once
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            // Block this signal in-flight (sync, on a tokio worker thread)
+            // until the test releases it.
+            let _ = self.release.lock().unwrap().recv();
+        }
+        true
+    }
+}
+
+/// Deterministic regression test for the `Kill`/`Respawn` lock-ordering race
+/// (#115). With `Kill`'s signal frozen in-flight, a concurrent `Respawn` must
+/// NOT be able to supersede the agent — otherwise `Kill` would have signaled a
+/// pid that is being respawned away (a stale signal against a superseded pid).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)]
+async fn respawn_cannot_supersede_agent_while_kill_signal_in_flight() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let signaller = Arc::new(BlockingSignaller {
+        signaled: std::sync::Mutex::new(Vec::new()),
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+        release: std::sync::Mutex::new(release_rx),
+        blocked_once: std::sync::atomic::AtomicBool::new(false),
+    });
+
+    // Long-lived worker so its pid stays in `procs` for Kill to signal. The
+    // blocking signaller never delivers a real signal, so workers survive the
+    // test; record pids to reap them at the end.
+    let launcher = Arc::new(ShLauncher {
+        script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; sleep 30"#.into(),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("caliband.sock");
+    let agent_dir = dir.path().join("agents-rt");
+    let store = AgentStore::new(dir.path().join("data"));
+    let supervisor = Arc::new(
+        Supervisor::with_launcher(socket_path.clone(), store, agent_dir, launcher)
+            .with_signaller(Arc::clone(&signaller) as Arc<dyn caliban_supervisor::Signaller>),
+    );
+    let server = Arc::clone(&supervisor);
+    let _h = tokio::spawn(async move { Arc::clone(&server).serve().await });
+    for _ in 0..200 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let client = SupervisorClient::new(socket_path.clone());
+    let (id, _) = client.spawn(spec()).await.unwrap();
+    // Wait until Running so the worker pid is tracked in `procs`.
+    for _ in 0..200 {
+        if client
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == id && a.status == AgentStatus::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Start Kill; it will read the pid, deliver the (blocking) signal, and
+    // freeze in-flight.
+    let kill_client = SupervisorClient::new(socket_path.clone());
+    let kill_id = id.clone();
+    let kill_task = tokio::spawn(async move { kill_client.kill(&kill_id).await });
+    entered_rx.await.expect("Kill never entered the signaller");
+
+    // With Kill's signal frozen, fire a concurrent Respawn of the same agent.
+    let respawn_client = SupervisorClient::new(socket_path.clone());
+    let respawn_id = id.clone();
+    let mut respawn_task = tokio::spawn(async move { respawn_client.respawn(&respawn_id).await });
+
+    // The fix serializes Kill and Respawn under the registry lock, so Respawn
+    // must NOT complete while Kill holds it mid-signal. The bug lets Respawn
+    // run to completion here, superseding the just-signaled worker.
+    let progressed = tokio::time::timeout(Duration::from_secs(2), &mut respawn_task).await;
+    assert!(
+        progressed.is_err(),
+        "Respawn superseded the agent while Kill's signal was in flight — \
+         Kill signaled a pid that was being respawned away (stale signal \
+         against a superseded pid)"
+    );
+
+    // Release Kill's signal and let both operations drain.
+    release_tx.send(()).unwrap();
+    let _ = kill_task.await;
+    let _ = respawn_task.await;
+
+    // Reap surviving `sleep 30` workers (the blocking signaller never killed
+    // them).
+    if let Ok(entries) = std::fs::read_dir(dir.path().join("agents-rt")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            #[allow(clippy::cast_possible_wrap)] // pids fit in i32 on unix
+            if path.extension().is_some_and(|e| e == "pid")
+                && let Ok(s) = std::fs::read_to_string(&path)
+                && let Ok(pid) = s.trim().parse::<i32>()
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+
+    supervisor.cancel_token().cancel();
+}
+
 #[tokio::test]
 async fn socket_file_removed_after_worker_exits() {
     // Worker creates the socket file then exits 0 → Done. The monitor task
