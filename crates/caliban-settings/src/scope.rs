@@ -100,13 +100,15 @@ pub struct ScopePaths {
     /// `/etc/caliban` on Linux by default.
     pub managed_root: Option<PathBuf>,
     /// Override for the user-config directory (the parent that holds
-    /// `caliban/settings.json`). Defaults to [`dirs::config_dir`].
+    /// `caliban/settings.json`). Defaults to
+    /// [`caliban_common::paths::platform_config_dir`].
     pub user_config_dir: Option<PathBuf>,
 }
 
 impl ScopePaths {
     /// Use the production defaults: `/etc/caliban` (Linux managed) and
-    /// `dirs::config_dir()` (user).
+    /// `caliban_common::paths::platform_config_dir()` (user — the OS-native
+    /// config dir, with an honored `$XDG_CONFIG_HOME` override).
     #[must_use]
     pub fn defaults() -> Self {
         let managed_root = if cfg!(target_os = "linux") {
@@ -120,7 +122,7 @@ impl ScopePaths {
         };
         Self {
             managed_root,
-            user_config_dir: dirs::config_dir(),
+            user_config_dir: caliban_common::paths::platform_config_dir(),
         }
     }
 }

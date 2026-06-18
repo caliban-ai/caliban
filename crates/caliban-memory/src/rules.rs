@@ -204,36 +204,20 @@ struct RawRuleFrontmatter {
 
 fn parse_rule(path: &Path, scope: RuleScope, stem: &str) -> Result<Rule, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("io: {e}"))?;
-    let trimmed = raw.trim_start_matches('\u{feff}');
-    let body_start = "---\n";
-    if !trimmed.starts_with(body_start) {
-        // No frontmatter — entire file is the body; rule is always-active.
-        return Ok(Rule {
-            name: stem.to_string(),
-            description: None,
-            paths: Vec::new(),
-            body: trimmed.to_string(),
-            path: path.to_path_buf(),
-            scope,
-        });
-    }
-    let after = &trimmed[body_start.len()..];
-    let Some(end) = after.find("\n---\n").or_else(|| {
-        let i = after.find("\n---")?;
-        if after[i..].starts_with("\n---") {
-            Some(i)
-        } else {
-            None
+    let (yaml, body) = match caliban_common::frontmatter::split(&raw) {
+        Ok(parts) => parts,
+        Err(caliban_common::frontmatter::FrontmatterError::MissingOpening) => {
+            // No frontmatter — entire file is the body; rule is always-active.
+            return Ok(Rule {
+                name: stem.to_string(),
+                description: None,
+                paths: Vec::new(),
+                body: raw.trim_start_matches('\u{feff}').to_string(),
+                path: path.to_path_buf(),
+                scope,
+            });
         }
-    }) else {
-        return Err("missing closing `---` frontmatter delimiter".into());
-    };
-    let yaml = &after[..end];
-    let body_off = end + "\n---\n".len();
-    let body = if body_off >= after.len() {
-        ""
-    } else {
-        &after[body_off..]
+        Err(e) => return Err(e.reason().to_string()),
     };
     let fm: RawRuleFrontmatter = serde_yaml::from_str(yaml).map_err(|e| format!("yaml: {e}"))?;
     Ok(Rule {

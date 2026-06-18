@@ -77,7 +77,7 @@ impl TrustStore {
     /// Default on-disk paths under `$HOME` / `$XDG_DATA_HOME`.
     #[must_use]
     pub fn default_paths() -> (PathBuf, PathBuf) {
-        let trust = dirs::data_local_dir().map_or_else(
+        let trust = caliban_common::paths::platform_data_dir().map_or_else(
             || PathBuf::from(".caliban-trust/plugins.json"),
             |d| d.join("caliban").join("trust").join("plugins.json"),
         );

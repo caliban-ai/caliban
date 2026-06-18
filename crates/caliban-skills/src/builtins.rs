@@ -30,30 +30,10 @@ struct EmbeddedFrontmatter {
 /// embedded bodies ship with the binary, so failure indicates a programmer
 /// error (malformed frontmatter), not a runtime/operator issue.
 fn parse_embedded(name_hint: &'static str, raw: &str) -> Skill {
-    let trimmed = raw.trim_start_matches('\u{feff}');
-    let opener = "---\n";
-    assert!(
-        trimmed.starts_with(opener),
-        "builtin skill {name_hint} missing leading frontmatter delimiter"
-    );
-    let after_start = &trimmed[opener.len()..];
-    let end_idx = after_start
-        .find("\n---\n")
-        .or_else(|| {
-            after_start
-                .find("\n---")
-                .filter(|i| after_start[*i..].starts_with("\n---"))
-        })
-        .unwrap_or_else(|| {
-            panic!("builtin skill {name_hint} missing closing frontmatter delimiter")
-        });
-    let yaml_chunk = &after_start[..end_idx];
-    let body_start_offset = end_idx + "\n---\n".len();
-    let body = if body_start_offset >= after_start.len() {
-        String::new()
-    } else {
-        after_start[body_start_offset..].to_string()
-    };
+    let (yaml_chunk, body) = caliban_common::frontmatter::split(raw).unwrap_or_else(|e| {
+        panic!("builtin skill {name_hint} {}", e.reason());
+    });
+    let body = body.to_string();
     let fm: EmbeddedFrontmatter = serde_yaml::from_str(yaml_chunk)
         .unwrap_or_else(|e| panic!("builtin skill {name_hint} bad yaml: {e}"));
     Skill {

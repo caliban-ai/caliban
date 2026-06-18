@@ -61,6 +61,49 @@ pub fn xdg_runtime_home(app: &str) -> Option<PathBuf> {
     Some(PathBuf::from(raw).join(app))
 }
 
+/// The base user-config directory, honoring an `$XDG_CONFIG_HOME` override but
+/// otherwise the OS-native location.
+///
+/// 1. `$XDG_CONFIG_HOME` if set and non-empty.
+/// 2. Else [`dirs::config_dir`] — `~/.config` on Linux, `~/Library/Application
+///    Support` on macOS, `%APPDATA%` on Windows.
+///
+/// This is the drop-in replacement for bare `dirs::config_dir()` call sites:
+/// it keeps the platform-native default (so existing on-disk locations don't
+/// move) while making `$XDG_CONFIG_HOME` an honored override on every OS, which
+/// `dirs` does not do on macOS/Windows. Unlike [`xdg_config_home`], it does
+/// **not** force the XDG `~/.config` layout on macOS, and it does **not** join
+/// an app segment — callers append their own (e.g. `.join("caliban")`).
+#[must_use]
+pub fn platform_config_dir() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("XDG_CONFIG_HOME")
+        && !custom.is_empty()
+    {
+        return Some(PathBuf::from(custom));
+    }
+    dirs::config_dir()
+}
+
+/// The base user-data directory, honoring an `$XDG_DATA_HOME` override but
+/// otherwise the OS-native location.
+///
+/// 1. `$XDG_DATA_HOME` if set and non-empty.
+/// 2. Else [`dirs::data_local_dir`].
+///
+/// The data-dir analogue of [`platform_config_dir`]: a drop-in for bare
+/// `dirs::data_local_dir()` that adds an honored `$XDG_DATA_HOME` override
+/// without moving the platform-native default. Callers append their own app
+/// segment.
+#[must_use]
+pub fn platform_data_dir() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("XDG_DATA_HOME")
+        && !custom.is_empty()
+    {
+        return Some(PathBuf::from(custom));
+    }
+    dirs::data_local_dir()
+}
+
 /// Build a directory-safe slug from an absolute workspace path.
 ///
 /// Rules:
@@ -207,6 +250,32 @@ mod tests {
         let _g = EnvGuard::set("XDG_DATA_HOME", Some("/tmp/data"));
         let p = xdg_data_home("caliban");
         assert_eq!(p, PathBuf::from("/tmp/data/caliban"));
+    }
+
+    #[test]
+    fn platform_config_dir_honors_xdg_override() {
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", Some("/tmp/cfg"));
+        assert_eq!(platform_config_dir(), Some(PathBuf::from("/tmp/cfg")));
+    }
+
+    #[test]
+    fn platform_config_dir_falls_back_to_os_native() {
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
+        // Without the override we defer to the OS-native dir (no forced
+        // `~/.config` layout on macOS) — i.e. exactly `dirs::config_dir()`.
+        assert_eq!(platform_config_dir(), dirs::config_dir());
+    }
+
+    #[test]
+    fn platform_data_dir_honors_xdg_override() {
+        let _g = EnvGuard::set("XDG_DATA_HOME", Some("/tmp/data"));
+        assert_eq!(platform_data_dir(), Some(PathBuf::from("/tmp/data")));
+    }
+
+    #[test]
+    fn platform_data_dir_falls_back_to_os_native() {
+        let _g = EnvGuard::set("XDG_DATA_HOME", None);
+        assert_eq!(platform_data_dir(), dirs::data_local_dir());
     }
 
     #[test]

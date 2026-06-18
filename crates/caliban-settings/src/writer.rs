@@ -36,7 +36,8 @@ pub fn scope_path(scope: Scope, kind: FileKind, cwd: &Path) -> Option<PathBuf> {
             "{}.local.toml",
             kind.filename().trim_end_matches(".toml")
         ))),
-        Scope::User => dirs::config_dir().map(|d| d.join("caliban").join(kind.filename())),
+        Scope::User => caliban_common::paths::platform_config_dir()
+            .map(|d| d.join("caliban").join(kind.filename())),
         // Managed is read-only from caliban's perspective; CLI is in-memory only.
         Scope::Managed | Scope::Cli => None,
     }
