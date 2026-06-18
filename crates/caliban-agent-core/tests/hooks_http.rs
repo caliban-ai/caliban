@@ -29,6 +29,8 @@ async fn http_200_with_deny_body_denies() {
 
     let url = format!("{}/preflight", server.uri());
     let hook = HttpHook {
+        if_pattern: None,
+        asynchronous: false,
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -52,6 +54,8 @@ async fn http_url_not_allowlisted_skips() {
     // the hook to skip due to allowlist BEFORE making the call.
     let url = format!("{}/preflight", server.uri());
     let hook = HttpHook {
+        if_pattern: None,
+        asynchronous: false,
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -76,6 +80,8 @@ async fn http_non_2xx_is_allow() {
         .await;
     let url = format!("{}/preflight", server.uri());
     let hook = HttpHook {
+        if_pattern: None,
+        asynchronous: false,
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -102,6 +108,8 @@ async fn http_updated_input_parses() {
 
     let url = format!("{}/rewrite", server.uri());
     let hook = HttpHook {
+        if_pattern: None,
+        asynchronous: false,
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -132,6 +140,8 @@ async fn http_matcher_skips_non_matching_tools() {
         .await;
     let url = format!("{}/wf", server.uri());
     let hook = HttpHook {
+        if_pattern: None,
+        asynchronous: false,
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
