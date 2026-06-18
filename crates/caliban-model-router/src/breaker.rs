@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -67,6 +68,12 @@ struct Inner {
     policy: BreakerPolicy,
     state: ArcSwap<BreakerState>,
     failures: Mutex<VecDeque<Instant>>,
+    /// `true` while a single HalfOpen recovery probe is in flight. Gates the
+    /// recovery window to one probe at a time (#183).
+    probe_inflight: AtomicBool,
+    /// Successful probes accumulated in the current HalfOpen window; the
+    /// breaker Closes once this reaches `policy.half_open_probes` (#183).
+    probe_successes: AtomicU32,
 }
 
 impl CircuitBreaker {
@@ -78,6 +85,8 @@ impl CircuitBreaker {
                 policy,
                 state: ArcSwap::from_pointee(BreakerState::Closed),
                 failures: Mutex::new(VecDeque::new()),
+                probe_inflight: AtomicBool::new(false),
+                probe_successes: AtomicU32::new(0),
             }),
         }
     }
@@ -94,12 +103,41 @@ impl CircuitBreaker {
         if let BreakerState::Tripped { since } = cur
             && now.duration_since(since) >= self.inner.policy.cooldown
         {
-            // Transition to HalfOpen. Use CAS-ish swap: only move if we
-            // still see the same Tripped state.
+            // Cooldown elapsed: begin a fresh recovery window. Reset the probe
+            // gate + success counter before exposing HalfOpen so the first
+            // caller can claim the single probe (#183).
+            self.inner.probe_successes.store(0, Ordering::SeqCst);
+            self.inner.probe_inflight.store(false, Ordering::SeqCst);
             self.inner.state.store(Arc::new(BreakerState::HalfOpen));
             return BreakerState::HalfOpen;
         }
         cur
+    }
+
+    /// Decide whether the caller may issue a request through this route, and
+    /// (in HalfOpen) claim the single recovery probe slot.
+    ///
+    /// - `Closed` → always `true` (no gating).
+    /// - `Tripped` → `false`.
+    /// - `HalfOpen` → `true` for exactly one caller until the probe resolves
+    ///   via [`observe_success`](Self::observe_success) /
+    ///   [`observe_failure`](Self::observe_failure); concurrent callers get
+    ///   `false` and should fall back (#183).
+    #[must_use]
+    pub fn try_admit(&self) -> bool {
+        self.try_admit_at(Instant::now())
+    }
+
+    fn try_admit_at(&self, now: Instant) -> bool {
+        match self.state_at(now) {
+            BreakerState::Closed => true,
+            BreakerState::Tripped { .. } => false,
+            BreakerState::HalfOpen => self
+                .inner
+                .probe_inflight
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok(),
+        }
     }
 
     /// Record a success.
@@ -108,11 +146,31 @@ impl CircuitBreaker {
     }
 
     fn observe_success_at(&self, now: Instant) {
-        // Any success closes the breaker and clears the failure window.
+        if matches!(self.state_at(now), BreakerState::HalfOpen) {
+            // A probe succeeded. Release the probe slot and count it; Close
+            // only once `half_open_probes` successes have accumulated (#183).
+            let needed = self.inner.policy.half_open_probes.max(1);
+            let prior = self.inner.probe_successes.fetch_add(1, Ordering::SeqCst);
+            self.inner.probe_inflight.store(false, Ordering::SeqCst);
+            if prior + 1 >= needed {
+                self.close();
+            }
+            return;
+        }
+        // Closed (or Tripped, treated as recovery): close + clear the window.
+        self.close();
+    }
+
+    /// Transition to `Closed` and clear all recovery/failure bookkeeping.
+    fn close(&self) {
         self.inner.state.store(Arc::new(BreakerState::Closed));
-        let mut f = self.inner.failures.lock().expect("breaker failures lock");
-        f.clear();
-        let _ = now; // silence unused when not in debug
+        self.inner.probe_successes.store(0, Ordering::SeqCst);
+        self.inner.probe_inflight.store(false, Ordering::SeqCst);
+        self.inner
+            .failures
+            .lock()
+            .expect("breaker failures lock")
+            .clear();
     }
 
     /// Record a failure. Trips the breaker if the failure count in the
@@ -128,8 +186,11 @@ impl CircuitBreaker {
         let window = self.inner.policy.window;
         let threshold = self.inner.policy.failure_threshold;
         let cur = self.state_at(now);
-        // Failure in HalfOpen re-trips immediately.
+        // Failure in HalfOpen re-trips immediately and discards any partial
+        // recovery progress / probe claim (#183).
         if matches!(cur, BreakerState::HalfOpen) {
+            self.inner.probe_successes.store(0, Ordering::SeqCst);
+            self.inner.probe_inflight.store(false, Ordering::SeqCst);
             self.inner
                 .state
                 .store(Arc::new(BreakerState::Tripped { since: now }));
@@ -246,6 +307,86 @@ mod tests {
             BreakerState::Tripped { since } => assert_eq!(since, t1),
             _ => panic!("expected Tripped after HalfOpen failure, got {s:?}"),
         }
+    }
+
+    #[test]
+    fn half_open_admits_only_one_probe() {
+        // #183: after cooldown, concurrent admits let exactly one probe through.
+        let b = CircuitBreaker::new(policy(1, 60_000, 5));
+        let t0 = Instant::now();
+        b.observe_failure_at(t0);
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(matches!(b.state_at(t1), BreakerState::HalfOpen));
+        assert!(b.try_admit_at(t1), "first probe is admitted");
+        assert!(!b.try_admit_at(t1), "second concurrent probe is denied");
+        assert!(!b.try_admit_at(t1), "third concurrent probe is denied");
+    }
+
+    #[test]
+    fn half_open_releases_slot_after_probe_resolves() {
+        // Once a probe resolves (without closing), the next probe may proceed.
+        let mut p = policy(1, 60_000, 5);
+        p.half_open_probes = 2;
+        let b = CircuitBreaker::new(p);
+        let t0 = Instant::now();
+        b.observe_failure_at(t0);
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(matches!(b.state_at(t1), BreakerState::HalfOpen));
+        assert!(b.try_admit_at(t1));
+        assert!(!b.try_admit_at(t1), "slot held while probe in flight");
+        b.observe_success_at(t1); // 1 of 2 — releases slot, stays HalfOpen
+        assert!(matches!(b.state_at(t1), BreakerState::HalfOpen));
+        assert!(b.try_admit_at(t1), "slot freed for the next probe");
+    }
+
+    #[test]
+    fn half_open_requires_configured_successes_to_close() {
+        // #183: half_open_probes = 3 needs three successes to Close.
+        let mut p = policy(1, 60_000, 5);
+        p.half_open_probes = 3;
+        let b = CircuitBreaker::new(p);
+        let t0 = Instant::now();
+        b.observe_failure_at(t0);
+        let t1 = t0 + Duration::from_millis(50);
+        for n in 1..=3 {
+            assert!(matches!(b.state_at(t1), BreakerState::HalfOpen));
+            assert!(b.try_admit_at(t1), "probe {n} admitted");
+            b.observe_success_at(t1);
+            if n < 3 {
+                assert!(
+                    matches!(b.state_at(t1), BreakerState::HalfOpen),
+                    "still recovering after {n}/3"
+                );
+            }
+        }
+        assert!(
+            matches!(b.state_at(t1), BreakerState::Closed),
+            "closed after 3/3 successful probes"
+        );
+    }
+
+    #[test]
+    fn half_open_failure_resets_probe_progress() {
+        let mut p = policy(1, 60_000, 5);
+        p.half_open_probes = 3;
+        let b = CircuitBreaker::new(p);
+        let t0 = Instant::now();
+        b.observe_failure_at(t0);
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(b.try_admit_at(t1));
+        b.observe_success_at(t1); // 1 of 3
+        assert!(b.try_admit_at(t1));
+        b.observe_failure_at(t1); // re-trips, discards progress
+        assert!(matches!(b.state_at(t1), BreakerState::Tripped { .. }));
+        // After the next cooldown, recovery starts from zero again.
+        let t2 = t1 + Duration::from_millis(50);
+        assert!(matches!(b.state_at(t2), BreakerState::HalfOpen));
+        assert!(b.try_admit_at(t2));
+        b.observe_success_at(t2); // would be 1 of 3, not 2
+        assert!(
+            matches!(b.state_at(t2), BreakerState::HalfOpen),
+            "progress reset: one success is not enough to close"
+        );
     }
 
     #[test]

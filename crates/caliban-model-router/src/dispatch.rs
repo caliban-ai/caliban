@@ -80,6 +80,29 @@ impl ModelRouter {
 
             if remaining == 1 || matches!(policy, HedgePolicy::Disabled) {
                 // Sequential single-attempt for this segment.
+                // HalfOpen single-probe gate (#183): if the breaker is in
+                // recovery and another probe already holds the slot, don't
+                // pile on — advance to the next candidate (or fail if last).
+                if !self
+                    .breakers
+                    .get(&route_id)
+                    .expect("breaker for route")
+                    .try_admit()
+                {
+                    tracing::debug!(
+                        target: caliban_common::tracing_targets::TARGET_ROUTER,
+                        route = %route_id,
+                        "breaker half-open: probe slot busy — advancing to next candidate",
+                    );
+                    if i + 1 < candidates.len() {
+                        self.stats.record_fallback_engaged(&route_id);
+                    }
+                    last_err = Some(ProviderError::ModelUnavailable(format!(
+                        "{route_id}: circuit breaker half-open, recovery probe already in flight"
+                    )));
+                    i += 1;
+                    continue;
+                }
                 let req = self.rewrite_for_route(&request, route, cross_route);
                 let provider = self
                     .providers

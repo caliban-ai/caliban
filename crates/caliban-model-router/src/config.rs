@@ -247,10 +247,27 @@ struct BreakerDefaults {
     half_open_probes: Option<u32>,
 }
 
+/// Failure threshold applied when a breaker block is explicitly configured
+/// (window/cooldown/probes set) but omits `failure_threshold`. Previously such
+/// a block silently defaulted to `u32::MAX` — i.e. a fully disabled breaker
+/// despite the operator clearly intending one (#183).
+pub(crate) const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
+
 impl BreakerDefaults {
     fn to_policy(&self) -> BreakerPolicy {
+        // If the operator configured *any* breaker field but no threshold,
+        // they meant to enable it — use a sane default instead of the disabled
+        // sentinel. An entirely empty block (all None) stays disabled.
+        let configured = self.window_secs.is_some()
+            || self.cooldown_secs.is_some()
+            || self.half_open_probes.is_some();
+        let fallback_threshold = if configured {
+            DEFAULT_FAILURE_THRESHOLD
+        } else {
+            u32::MAX
+        };
         BreakerPolicy {
-            failure_threshold: self.failure_threshold.unwrap_or(u32::MAX),
+            failure_threshold: self.failure_threshold.unwrap_or(fallback_threshold),
             window: Duration::from_secs(self.window_secs.unwrap_or(60)),
             cooldown: Duration::from_secs(self.cooldown_secs.unwrap_or(30)),
             half_open_probes: self.half_open_probes.unwrap_or(1),
@@ -261,6 +278,9 @@ impl BreakerDefaults {
         match override_wire {
             BreakerWire::Toggle(false) => BreakerPolicy::disabled(),
             BreakerWire::Toggle(true) => self.to_policy(),
+            // A per-route `breaker = { … }` table is always an explicit
+            // opt-in, so a missing `failure_threshold` uses the sane default
+            // rather than disabling the breaker (#183).
             BreakerWire::Table {
                 failure_threshold,
                 window_secs,
@@ -269,7 +289,7 @@ impl BreakerDefaults {
             } => BreakerPolicy {
                 failure_threshold: failure_threshold
                     .or(self.failure_threshold)
-                    .unwrap_or(u32::MAX),
+                    .unwrap_or(DEFAULT_FAILURE_THRESHOLD),
                 window: Duration::from_secs(window_secs.or(self.window_secs).unwrap_or(60)),
                 cooldown: Duration::from_secs(cooldown_secs.or(self.cooldown_secs).unwrap_or(30)),
                 half_open_probes: half_open_probes.or(self.half_open_probes).unwrap_or(1),
@@ -661,6 +681,51 @@ model = "gpt-5"
         assert!(matches!(cfg.routes[0].hedge, HedgePolicy::Race { .. }));
         assert!(!cfg.routes[0].breaker.is_disabled());
         assert_eq!(cfg.routes[0].breaker.failure_threshold, 5);
+    }
+
+    #[test]
+    fn breaker_block_without_threshold_is_enabled() {
+        // #183: an explicit [router.breaker] block with window/cooldown but no
+        // failure_threshold must not be silently disabled.
+        let body = r#"
+[router]
+default_purpose = "main_loop"
+
+[router.breaker]
+window_secs = 30
+cooldown_secs = 10
+
+[[router.route]]
+purpose = "main_loop"
+provider = "anthropic"
+model = "x"
+"#;
+        let cfg = parse_router_config(body).unwrap().unwrap();
+        assert!(
+            !cfg.routes[0].breaker.is_disabled(),
+            "an explicit [router.breaker] block must enable the breaker"
+        );
+        assert_eq!(
+            cfg.routes[0].breaker.failure_threshold,
+            DEFAULT_FAILURE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn no_breaker_config_stays_disabled() {
+        // A route with no breaker config and no [router.breaker] block is
+        // disabled by default (unchanged behavior).
+        let body = r#"
+[router]
+default_purpose = "main_loop"
+
+[[router.route]]
+purpose = "main_loop"
+provider = "anthropic"
+model = "x"
+"#;
+        let cfg = parse_router_config(body).unwrap().unwrap();
+        assert!(cfg.routes[0].breaker.is_disabled());
     }
 
     #[test]
