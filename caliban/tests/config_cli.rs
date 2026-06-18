@@ -56,3 +56,40 @@ fn config_migrate_dry_run_with_no_legacy_reports_nothing_to_do() {
     // Nothing should be written.
     assert!(!dir.path().join(".caliban/settings.json").exists());
 }
+
+#[test]
+fn config_migrate_dry_run_folds_legacy_permissions_toml() {
+    // #176: a workspace with a legacy .caliban/permissions.toml and an empty
+    // settings.json must migrate — the dry-run output carries a permissions
+    // block (previously the guard always reported "nothing to migrate").
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".caliban")).unwrap();
+    std::fs::write(
+        dir.path().join(".caliban/permissions.toml"),
+        "\n[[rule]]\ntool = \"Bash:rm *\"\naction = \"deny\"\n",
+    )
+    .unwrap();
+    let out = run(dir.path(), &["migrate", "--dry-run"]);
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("permissions.toml"),
+        "should report the permissions migration, got: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("dry-run emits the migrated settings JSON");
+    let deny = &v["permissions"]["deny"];
+    assert!(
+        deny.as_array()
+            .is_some_and(|a| a.iter().any(|x| x == "Bash:rm *")),
+        "migrated settings must carry the legacy deny rule, got: {v}"
+    );
+    // Dry-run writes nothing.
+    assert!(!dir.path().join(".caliban/settings.json").exists());
+}

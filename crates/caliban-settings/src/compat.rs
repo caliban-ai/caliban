@@ -72,6 +72,20 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
     }
 }
 
+/// Whether a real legacy `permissions.toml` (project or user scope) exists
+/// with rules. Unlike [`maybe_load_legacy_permissions`], this excludes the
+/// built-in `default_rules()` tail that `load_rules` always appends, so it does
+/// not false-positive when only the defaults are present. `config migrate`
+/// uses it to detect a genuine legacy source, since the runtime fold has
+/// already populated the effective settings (#176).
+#[must_use]
+pub fn legacy_permissions_present(workspace_root: &Path) -> bool {
+    match load_rules(Vec::new(), workspace_root) {
+        Ok(all) => all.len() > caliban_agent_core::default_rules().len(),
+        Err(_) => false,
+    }
+}
+
 /// Fold the project + user `permissions.toml` into
 /// `settings.permissions` **only when** the unified settings did not
 /// already define any permission rules.
