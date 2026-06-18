@@ -314,7 +314,9 @@ fn unix_mode(_md: &std::fs::Metadata) -> u32 {
 /// Canonicalise as much of `p` as exists, then append the leftover tail.
 /// Mirrors `caliban-tools-builtin::workspace::canonicalize_existing_ancestor`
 /// so capture decisions stay in lock-step with the resolver the tools use.
-fn canonicalize_existing_ancestor(p: &Path) -> PathBuf {
+/// Also used by [`crate::store::sanitize_cwd`] for a deterministic project
+/// hash that does not depend on whether the cwd fully exists (#181).
+pub(crate) fn canonicalize_existing_ancestor(p: &Path) -> PathBuf {
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     let mut cur = p;
     loop {
