@@ -4,7 +4,6 @@
 //! socket, accepts connections, reads newline-delimited JSON requests,
 //! and dispatches them against the [`crate::Registry`].
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,9 +31,6 @@ pub struct Supervisor {
     launcher: Arc<dyn WorkerLauncher>,
     /// Strategy for delivering termination signals to worker pids.
     signaller: Arc<dyn Signaller>,
-    /// Live worker pids, keyed by agent id. Inserted on launch, read by
-    /// `Kill`, removed by the per-child monitor task on exit.
-    procs: Arc<Mutex<HashMap<crate::proto::AgentId, u32>>>,
 }
 
 impl Supervisor {
@@ -72,7 +68,6 @@ impl Supervisor {
             agent_runtime_dir,
             launcher,
             signaller: Arc::new(OsSignaller),
-            procs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -195,17 +190,20 @@ impl Supervisor {
             Ok(handle) => {
                 let pid = handle.pid;
                 let mut child = handle.child;
-                self.procs.lock().await.insert(id.clone(), pid);
-                self.registry
-                    .lock()
-                    .await
-                    .set_status_if_running(&id, crate::proto::AgentStatus::Running);
+                // Track the pid and flip to Running in one registry critical
+                // section, so the pid and status never disagree (#140).
+                {
+                    let mut r = self.registry.lock().await;
+                    r.track_pid(&id, pid);
+                    r.set_status_if_running(&id, crate::proto::AgentStatus::Running);
+                }
                 let registry = Arc::clone(&self.registry);
-                let procs = Arc::clone(&self.procs);
                 // Once the worker exits, its per-agent socket is stale —
                 // unlink it (the worker can't reliably clean up on exit; #77).
                 let socket_path = rec.socket_path.clone();
                 tokio::spawn(async move {
+                    // The wait MUST stay outside the registry lock — holding it
+                    // across the child's lifetime would serialize the daemon.
                     let terminal = match child.wait().await {
                         Ok(s) if s.success() => crate::proto::AgentStatus::Done,
                         Ok(_) => crate::proto::AgentStatus::Failed,
@@ -214,8 +212,12 @@ impl Supervisor {
                             crate::proto::AgentStatus::Failed
                         }
                     };
-                    registry.lock().await.set_status_if_running(&id, terminal);
-                    procs.lock().await.remove(&id);
+                    // Record the terminal status and forget the pid together.
+                    {
+                        let mut r = registry.lock().await;
+                        r.set_status_if_running(&id, terminal);
+                        r.forget_pid(&id);
+                    }
                     let _ = tokio::fs::remove_file(&socket_path).await;
                 });
             }
@@ -232,24 +234,16 @@ impl Supervisor {
 
     /// Deliver `SIGTERM` to the live worker tracked for `id`, if any.
     ///
-    /// The `&Registry` argument is a witness that the caller holds the registry
-    /// lock: all `procs` access must happen inside the registry critical section
-    /// so a concurrent `Respawn` cannot supersede the worker between the signal
-    /// and the surrounding bookkeeping (#115, #138). Since the only way to
-    /// obtain a `&Registry` is by locking the registry mutex, this precondition
-    /// is enforced at the call site rather than left to comments.
-    async fn signal_worker(&self, _registry_held: &Registry, id: &crate::proto::AgentId) {
-        let pid = self.procs.lock().await.get(id).copied();
-        if let Some(pid) = pid {
+    /// The pid now lives inside the registry (#140), so the caller passes its
+    /// held `&Registry`: looking up the pid and signalling both happen within
+    /// the caller's registry critical section. A concurrent `Respawn` therefore
+    /// cannot supersede the worker between the signal and the surrounding
+    /// bookkeeping (#115, #138), and there is no separate pid lock to mis-order.
+    fn signal_worker(&self, registry: &Registry, id: &crate::proto::AgentId) {
+        if let Some(pid) = registry.pid_of(id) {
             let delivered = self.signaller.signal_term(pid);
             tracing::info!(agent = %id, pid, delivered, "sent SIGTERM to worker");
         }
-    }
-
-    /// Drop the tracked pid for `id` from the `procs` map. Same held-lock
-    /// witness contract as [`Self::signal_worker`].
-    async fn forget_worker(&self, _registry_held: &Registry, id: &crate::proto::AgentId) {
-        self.procs.lock().await.remove(id);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -289,13 +283,13 @@ impl Supervisor {
                 // Signal the owned child if we have its pid; then record the
                 // state transition. The monitor task observes the real exit but
                 // won't clobber `Killed` (guarded by `set_status_if_running`)
-                // and removes the pid from `procs`.
+                // and forgets the pid on exit.
                 //
-                // Signalling happens under the registry lock (see
-                // `signal_worker`) so a concurrent `Respawn` cannot supersede
-                // the worker between the signal and the status update (#115).
+                // The pid lives in the registry, so the signal and the status
+                // update share one critical section — a concurrent `Respawn`
+                // cannot supersede the worker between them (#115, #140).
                 let mut r = self.registry.lock().await;
-                self.signal_worker(&r, &id).await;
+                self.signal_worker(&r, &id);
                 match r.set_status(&id, crate::proto::AgentStatus::Killed) {
                     Ok(_) => CtlReply::Killed,
                     Err(e) => CtlReply::Error { error: e },
@@ -309,13 +303,10 @@ impl Supervisor {
                             error: SupervisorError::NotFound { id },
                         };
                     };
-                    // Drop the stale pid inside the registry critical section
-                    // (not before it) so a concurrent `Kill` sees a consistent
-                    // procs+registry snapshot and never signals a superseded
-                    // pid (#115).
-                    self.forget_worker(&r, &id).await;
                     // Drop old (force=true so it can be running) and
-                    // re-register with the same spec.
+                    // re-register with the same spec. `remove` also forgets the
+                    // old pid, all under this one registry lock — a concurrent
+                    // `Kill` cannot observe a torn pid/record state (#115, #140).
                     if let Err(e) = r.remove(&id, true) {
                         return CtlReply::Error { error: e };
                     }
@@ -337,23 +328,15 @@ impl Supervisor {
                 // running agent is refused by `remove` below, so we must
                 // not signal in that case.
                 //
-                // Take the registry lock up front so the signal, the registry
-                // removal, and the pid drop all happen in one critical section
-                // — otherwise a concurrent `Respawn` could supersede the agent
-                // between the signal and the removal, leaving us having
-                // SIGTERM'd a pid that was being respawned away (#138, same
-                // class as #115).
+                // Signal + registry removal (which also forgets the pid) share
+                // one critical section, so a concurrent `Respawn` cannot
+                // supersede the agent between them (#138, #140).
                 let mut r = self.registry.lock().await;
                 if force {
-                    self.signal_worker(&r, &id).await;
+                    self.signal_worker(&r, &id);
                 }
                 match r.remove(&id, force) {
-                    Ok(()) => {
-                        // Entry is gone; drop the pid proactively (the
-                        // monitor task also removes it on the child's exit).
-                        self.forget_worker(&r, &id).await;
-                        CtlReply::Removed
-                    }
+                    Ok(()) => CtlReply::Removed,
                     Err(e) => CtlReply::Error { error: e },
                 }
             }
