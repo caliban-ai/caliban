@@ -37,10 +37,12 @@ Auto-headless when stdin is non-TTY or stdout is piped, unless
   care about the answer + cost.
 - **stream-json:** NDJSON. First frame is `system/init` (model, tools,
   MCP servers, plugins, settings sources); per-turn frames are
-  `tool_use`, `tool_result`, `content_block_delta` (when
-  `--include-partial-messages`), `system/api_retry`, `user` (when
-  `--replay-user-messages`), `hook_event` (when
-  `--include-hook-events`); last frame is `type: result`.
+  `tool_use`, `tool_result`, `text` and `thinking` deltas (when
+  `--include-partial-messages`), `warning/<subtype>` (e.g. model
+  mismatch), `system/api_retry`, `user` (when `--replay-user-messages`),
+  `hook_event` (when `--include-hook-events`); last frame is
+  `type: result`. (The frame `type`s map 1:1 to the `EventKind`
+  enum in `caliban/src/headless/events.rs`.)
 
 Stream-json wraps closely around Claude Code's documented shape so
 downstream consumers can drop in. Divergences (provider-specific token

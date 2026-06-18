@@ -20,6 +20,10 @@ pub(crate) enum EventKind {
     System,
     /// Incremental assistant text delta.
     Text,
+    /// Incremental assistant reasoning delta (emitted under
+    /// `--include-partial-messages`). Previously absent here, so a consumer
+    /// deserializing the frame `type` into `EventKind` failed on it (#184 HL5).
+    Thinking,
     /// A tool-use block (assistant calling a tool).
     ToolUse,
     /// A tool-result block (tool reply to the assistant).
@@ -28,6 +32,9 @@ pub(crate) enum EventKind {
     Message,
     /// A `user` frame (only when `--replay-user-messages`).
     User,
+    /// A non-fatal `warning/<subtype>` frame (e.g. model mismatch). Previously
+    /// absent here, breaking `EventKind` deserialization (#184 HL5).
+    Warning,
     /// A `hook_event` frame (only when `--include-hook-events`).
     HookEvent,
     /// The final `result` frame (always last in stream-json).
@@ -575,6 +582,31 @@ impl InputFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_kind_deserializes_every_emitted_frame_type() {
+        // #184 HL5: a consumer classifying frames by `type` must be able to
+        // deserialize every type the driver emits — including thinking/warning.
+        for (s, want) in [
+            ("system", EventKind::System),
+            ("text", EventKind::Text),
+            ("thinking", EventKind::Thinking),
+            ("tool_use", EventKind::ToolUse),
+            ("tool_result", EventKind::ToolResult),
+            ("message", EventKind::Message),
+            ("user", EventKind::User),
+            ("warning", EventKind::Warning),
+            ("hook_event", EventKind::HookEvent),
+            ("result", EventKind::Result),
+        ] {
+            let got: EventKind = serde_json::from_value(serde_json::json!(s)).unwrap();
+            assert_eq!(got, want, "type {s:?} must deserialize");
+        }
+        // The actual emitted frames carry these `kind` strings.
+        assert_eq!(thinking_delta("x").kind, "thinking");
+        assert_eq!(warning_model_mismatch("a", "b").kind, "warning");
+        assert_eq!(text_delta("x").kind, "text");
+    }
 
     #[test]
     fn system_init_serializes_camelcase_setting_sources() {

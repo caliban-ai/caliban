@@ -953,12 +953,12 @@ pub(crate) async fn run_headless(
     let config = headless::HeadlessRunConfig {
         output_format,
         input_format: args.input_format,
-        // Translate `--max-turns 0` into "short-circuit and return 130".
-        max_turns: if args.print.is_some() || args.output_format.is_some() {
-            Some(args.max_turns)
-        } else {
-            None
-        },
+        // Enforce the turn cap on every headless path (`run_headless` only
+        // runs when headless is active — explicit `-p`/`--output-format` *or*
+        // auto-headless). Gating on `-p`/`--output-format` alone left the
+        // auto-headless path without the clean `--max-turns 0` short-circuit,
+        // so identical commands diverged on whether `-p` was typed (#184 HL2).
+        max_turns: Some(args.max_turns),
         budget: Arc::clone(&budget),
         json_schema,
         include_partial_messages: args.include_partial_messages,

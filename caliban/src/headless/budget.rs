@@ -118,8 +118,12 @@ impl BudgetTracker {
             self.test_override_micro_usd
                 .fetch_add(micro, Ordering::Relaxed);
         }
+        // `--max-budget-usd` is a ceiling: spending *up to and including* the
+        // limit is allowed; only going strictly over it trips `exceeded`
+        // (#184 HL7). With `>=`, a run landing exactly on the cap was demoted
+        // to budget_exceeded.
         if let Some(limit) = self.max_usd
-            && self.total_cost_usd() >= limit
+            && self.total_cost_usd() > limit
         {
             self.exceeded.store(true, Ordering::Relaxed);
         }
@@ -216,6 +220,17 @@ mod tests {
         assert!(!t.is_exceeded());
         t.record(&usage(10, 5), 0.006);
         assert!(t.is_exceeded(), "0.011 must exceed 0.01");
+    }
+
+    #[test]
+    fn cost_exactly_at_cap_is_not_exceeded() {
+        // #184 HL7: the cap is a ceiling — landing exactly on it is allowed;
+        // only strictly exceeding it trips `exceeded`.
+        let t = BudgetTracker::new(Some(0.01));
+        t.record(&usage(10, 5), 0.01);
+        assert!(!t.is_exceeded(), "0.01 == cap must not exceed");
+        t.record(&usage(10, 5), 0.0001);
+        assert!(t.is_exceeded(), "going over the cap trips it");
     }
 
     #[test]

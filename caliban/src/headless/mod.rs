@@ -792,14 +792,24 @@ impl<W: Write> HeadlessDriver<W> {
         // state machine local.
         self.pending_tool_calls.clear();
         let mut stream = agent.stream_until_done(messages, cancel);
+        // #184 (HL1): the budget can latch `exceeded` when the *final* turn's
+        // cost is recorded (TurnEnd), which is yielded just before the natural
+        // RunEnd{EndOfTurn}. Returning BudgetExceeded immediately there would
+        // mask a run that actually completed. Instead defer: only abort when
+        // the agent is about to start *another* turn (more work to bill). A
+        // natural completion ends the stream first, so success wins.
+        let mut budget_tripped = false;
         while let Some(event_result) = stream.next().await {
             let event = event_result.map_err(|e| HeadlessError::Run(e.to_string()))?;
+            if budget_tripped && matches!(&event, TurnEvent::TurnStart { .. }) {
+                return Ok(Some(TerminalStop::BudgetExceeded));
+            }
             if let Some(stop) = self.handle_event(event, final_text, turns, at_column_zero)? {
                 return Ok(Some(stop));
             }
             self.flush_hook_events()?;
             if self.config.budget.is_exceeded() {
-                return Ok(Some(TerminalStop::BudgetExceeded));
+                budget_tripped = true;
             }
         }
         Ok(None)
