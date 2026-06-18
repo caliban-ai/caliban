@@ -776,3 +776,110 @@ fn unknown_fallback_id_fails_at_build() {
     .unwrap_err();
     assert!(matches!(err, RouterError::UnknownFallbackId { .. }));
 }
+
+/// Records the `effort` of the last request it received, then delegates.
+/// `seen` is only read after a successful `complete`, so a plain
+/// `Option<Effort>` suffices (no "was it called" sentinel needed).
+struct EffortCapturingProvider {
+    inner: Arc<MockProvider>,
+    seen: Arc<std::sync::Mutex<Option<caliban_provider::Effort>>>,
+}
+#[async_trait]
+impl Provider for EffortCapturingProvider {
+    async fn complete(&self, req: CompletionRequest) -> ProviderResult<CompletionResponse> {
+        *self.seen.lock().unwrap() = req.effort;
+        self.inner.complete(req).await
+    }
+    async fn stream(&self, req: CompletionRequest) -> ProviderResult<MessageStream> {
+        self.inner.stream(req).await
+    }
+    fn capabilities(&self, m: &str) -> Capabilities {
+        self.inner.capabilities(m)
+    }
+    fn list_models(&self) -> Vec<ModelInfo> {
+        self.inner.list_models()
+    }
+    fn name(&self) -> &'static str {
+        "effort-capturing"
+    }
+}
+
+fn route_with_effort_default(level: Option<EffortLevel>) -> RouteEntry {
+    RouteEntry {
+        id: "r".into(),
+        purpose: RequestPurpose::MainLoop,
+        provider: "a".into(),
+        model: "m".into(),
+        requires: CapabilityRequirements::default(),
+        fallback: None,
+        hedge: HedgePolicy::Disabled,
+        breaker: BreakerPolicy::disabled(),
+        effort: level,
+        effort_map: EffortMap::default(),
+    }
+}
+
+async fn dispatch_capturing_effort(
+    route: RouteEntry,
+    request_effort: Option<caliban_provider::Effort>,
+) -> Option<caliban_provider::Effort> {
+    let mock = make_mock();
+    mock.enqueue_complete(Ok(ok_response("x")));
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let cap = Arc::new(EffortCapturingProvider {
+        inner: mock,
+        seen: seen.clone(),
+    });
+    let mut providers: HashMap<String, Arc<dyn Provider + Send + Sync>> = HashMap::new();
+    providers.insert("a".into(), cap);
+    let r = ModelRouter::from_config(
+        RouterConfig {
+            default_purpose: RequestPurpose::MainLoop,
+            routes: vec![route],
+        },
+        providers,
+    )
+    .unwrap();
+    let mut req = req_main_loop();
+    req.effort = request_effort;
+    r.complete(req).await.unwrap();
+    *seen.lock().unwrap()
+}
+
+#[tokio::test]
+async fn route_effort_default_reaches_provider() {
+    // #173: a route's pinned effort must be applied to the outgoing request
+    // when the request specifies none.
+    let got =
+        dispatch_capturing_effort(route_with_effort_default(Some(EffortLevel::High)), None).await;
+    assert_eq!(got, Some(caliban_provider::Effort::High));
+}
+
+#[tokio::test]
+async fn request_effort_wins_over_route_default() {
+    // An explicit request effort is preserved verbatim (route default ignored).
+    let got = dispatch_capturing_effort(
+        route_with_effort_default(Some(EffortLevel::High)),
+        Some(caliban_provider::Effort::Low),
+    )
+    .await;
+    assert_eq!(got, Some(caliban_provider::Effort::Low));
+}
+
+#[tokio::test]
+async fn request_max_effort_is_not_downgraded() {
+    // Max has no EffortLevel equivalent; it must survive routing unchanged.
+    let got = dispatch_capturing_effort(
+        route_with_effort_default(Some(EffortLevel::High)),
+        Some(caliban_provider::Effort::Max),
+    )
+    .await;
+    assert_eq!(got, Some(caliban_provider::Effort::Max));
+}
+
+#[tokio::test]
+async fn no_effort_anywhere_leaves_request_untouched() {
+    // No per-request effort and no route default => provider Auto preserved.
+    let got = dispatch_capturing_effort(route_with_effort_default(None), None).await;
+    assert_eq!(got, None);
+}

@@ -15,6 +15,7 @@ use caliban_provider::{
 use crate::ModelRouter;
 use crate::cache;
 use crate::config::{HedgePolicy, RouteEntry};
+use crate::effort::effort_level_to_provider;
 use crate::error::RouterError;
 use crate::fallback::is_fatal_for_route;
 use crate::hedging;
@@ -30,6 +31,18 @@ impl ModelRouter {
     ) -> CompletionRequest {
         let mut req = base.clone();
         req.model.clone_from(&route.model);
+        // #173: apply the route's pinned reasoning effort to the outgoing
+        // request. Previously the effort subsystem was only consulted by
+        // `router debug`, so a route's `effort` default never reached real
+        // calls. A request that already carries an explicit (non-Auto) effort
+        // is kept verbatim — it already reaches the adapter and may be `Max`,
+        // which `EffortLevel` cannot represent.
+        let request_has_effort = req
+            .effort
+            .is_some_and(|e| !matches!(e, caliban_provider::Effort::Auto));
+        if !request_has_effort && let Some(level) = route.effort {
+            req.effort = Some(effort_level_to_provider(level));
+        }
         if cross_route {
             let cleared = cache::strip_cache_markers(&mut req);
             if cleared > 0 {
