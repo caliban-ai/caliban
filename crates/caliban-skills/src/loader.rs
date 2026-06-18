@@ -11,10 +11,10 @@ use crate::skill::{Frontmatter, Skill};
 pub fn default_roots(workspace_root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(3);
     out.push(workspace_root.join(".caliban").join("skills"));
-    if let Some(d) = dirs::config_dir() {
+    if let Some(d) = caliban_common::paths::platform_config_dir() {
         out.push(d.join("caliban").join("skills"));
     }
-    if let Some(d) = dirs::data_local_dir() {
+    if let Some(d) = caliban_common::paths::platform_data_dir() {
         out.push(d.join("caliban").join("plugins"));
     }
     out
@@ -123,29 +123,9 @@ pub fn load_skills(roots: &[PathBuf]) -> Vec<Skill> {
 /// Returns a string description of the parse failure.
 pub fn load_one(path: &Path) -> Result<Skill, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("io: {e}"))?;
-    let body_start = "---\n";
-    let raw_trim = raw.trim_start_matches('\u{feff}');
-    if !raw_trim.starts_with(body_start) {
-        return Err("missing leading `---` frontmatter delimiter".into());
-    }
-    let after_start = &raw_trim[body_start.len()..];
-    let Some(end_idx) = after_start.find("\n---\n").or_else(|| {
-        // tolerate end-of-file without trailing newline
-        after_start.find("\n---").filter(|i| {
-            // verify it's actually the end marker, not "---" inside the body
-            // (close enough heuristic for our format)
-            after_start[*i..].starts_with("\n---")
-        })
-    }) else {
-        return Err("missing closing `---` frontmatter delimiter".into());
-    };
-    let yaml_chunk = &after_start[..end_idx];
-    let body_start_offset = end_idx + "\n---\n".len();
-    let body = if body_start_offset >= after_start.len() {
-        String::new()
-    } else {
-        after_start[body_start_offset..].to_string()
-    };
+    let (yaml_chunk, body) =
+        caliban_common::frontmatter::split(&raw).map_err(|e| e.reason().to_string())?;
+    let body = body.to_string();
 
     let fm: Frontmatter =
         serde_yaml::from_str(yaml_chunk).map_err(|e| format!("invalid frontmatter yaml: {e}"))?;

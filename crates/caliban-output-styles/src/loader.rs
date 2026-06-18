@@ -65,8 +65,10 @@ const BUILTINS: &[(&str, &str)] = &[
 #[must_use]
 pub fn default_roots(workspace_root: &Path) -> DiscoveryRoots {
     let project = workspace_root.join(".caliban").join("output-styles");
-    let user = dirs::config_dir().map(|d| d.join("caliban").join("output-styles"));
-    let plugins_root = dirs::data_local_dir().map(|d| d.join("caliban").join("plugins"));
+    let user = caliban_common::paths::platform_config_dir()
+        .map(|d| d.join("caliban").join("output-styles"));
+    let plugins_root =
+        caliban_common::paths::platform_data_dir().map(|d| d.join("caliban").join("plugins"));
     DiscoveryRoots {
         project,
         user,
@@ -262,34 +264,9 @@ fn parse_raw(
     expected_stem: &str,
     source: OutputStyleSource,
 ) -> Result<OutputStyle, OutputStyleError> {
-    let raw_trim = raw.trim_start_matches('\u{feff}');
-    let delim = "---\n";
-    if !raw_trim.starts_with(delim) {
-        return Err(OutputStyleError::Frontmatter(
-            "missing leading `---` frontmatter delimiter".into(),
-        ));
-    }
-    let after_start = &raw_trim[delim.len()..];
-    // Look for the closing `\n---` (with or without trailing newline / content).
-    let Some(end_idx) = find_closing(after_start) else {
-        return Err(OutputStyleError::Frontmatter(
-            "missing closing `---` frontmatter delimiter".into(),
-        ));
-    };
-    let yaml_chunk = &after_start[..end_idx];
-    // Body is whatever follows "\n---" (skipping the newline after, if any).
-    let after_close = &after_start[end_idx..];
-    // `after_close` starts with "\n---". Skip those four bytes and one
-    // optional trailing newline.
-    let mut body_start = "\n---".len();
-    if after_close.as_bytes().get(body_start).copied() == Some(b'\n') {
-        body_start += 1;
-    }
-    let body = if body_start >= after_close.len() {
-        String::new()
-    } else {
-        after_close[body_start..].to_string()
-    };
+    let (yaml_chunk, body) = caliban_common::frontmatter::split(raw)
+        .map_err(|e| OutputStyleError::Frontmatter(e.reason().into()))?;
+    let body = body.to_string();
 
     let fm: Frontmatter = serde_yaml::from_str(yaml_chunk)?;
 
@@ -314,22 +291,6 @@ fn parse_raw(
         force_for_plugin: fm.force_for_plugin,
         source,
     })
-}
-
-/// Returns the byte offset of the closing `\n---` marker in `s`, if any.
-///
-/// Tolerates both `\n---\n` (closing followed by body) and `\n---` at EOF.
-fn find_closing(s: &str) -> Option<usize> {
-    // Prefer the strict `\n---\n` form; fall back to a trailing `\n---` at EOF.
-    if let Some(i) = s.find("\n---\n") {
-        return Some(i);
-    }
-    if let Some(i) = s.rfind("\n---")
-        && s[i + "\n---".len()..].chars().all(char::is_whitespace)
-    {
-        return Some(i);
-    }
-    None
 }
 
 fn is_valid_name(name: &str) -> bool {

@@ -25,7 +25,8 @@ impl PluginRoots {
     #[must_use]
     pub fn default_for(workspace_root: &Path) -> Self {
         let project = Some(workspace_root.join(".caliban").join("plugins"));
-        let user = dirs::data_local_dir().map(|d| d.join("caliban").join("plugins"));
+        let user =
+            caliban_common::paths::platform_data_dir().map(|d| d.join("caliban").join("plugins"));
         let managed = Some(default_managed_dir());
         Self {
             project,

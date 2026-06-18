@@ -350,32 +350,11 @@ pub fn validate_slug(slug: &str) -> Result<()> {
 /// Split a raw file into frontmatter struct + body. Frontmatter delimiters are
 /// `---\n` opening and `\n---\n` (or `\n---` at EOF) closing.
 fn parse_frontmatter<'a>(raw: &'a str, path: &Path) -> Result<(RawFrontmatter, &'a str)> {
-    let trimmed = raw.trim_start_matches('\u{feff}');
-    let body_start = "---\n";
-    if !trimmed.starts_with(body_start) {
-        return Err(MemoryError::InvalidTopic {
+    let (yaml_chunk, body) =
+        caliban_common::frontmatter::split(raw).map_err(|e| MemoryError::InvalidTopic {
             path: path.to_path_buf(),
-            reason: "missing leading `---` frontmatter delimiter".into(),
-        });
-    }
-    let after_start = &trimmed[body_start.len()..];
-    let Some(end_idx) = after_start.find("\n---\n").or_else(|| {
-        after_start
-            .find("\n---")
-            .filter(|i| after_start[*i..].starts_with("\n---"))
-    }) else {
-        return Err(MemoryError::InvalidTopic {
-            path: path.to_path_buf(),
-            reason: "missing closing `---` frontmatter delimiter".into(),
-        });
-    };
-    let yaml_chunk = &after_start[..end_idx];
-    let body_start_offset = end_idx + "\n---\n".len();
-    let body = if body_start_offset >= after_start.len() {
-        ""
-    } else {
-        &after_start[body_start_offset..]
-    };
+            reason: e.reason().into(),
+        })?;
     let fm: RawFrontmatter =
         serde_yaml::from_str(yaml_chunk).map_err(|e| MemoryError::InvalidTopic {
             path: path.to_path_buf(),
