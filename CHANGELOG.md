@@ -9,6 +9,15 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-17
+
+This release pairs **extensibility** — config-defined hooks that now fire at
+runtime, a SessionStart context-injection surface, and a proactive skill nudge —
+with a **reliability pass on the background sub-agent supervisor**, hardening the
+EventHub and worker channels against panics, unbounded memory, blocked readers,
+and idle-timeout overshoot. It also adds a user-facing extended-thinking toggle
+and tightens the Google provider's fault classification.
+
 ### Added
 
 - **Config-defined hooks execute at runtime** (#121): `[[hooks.*]]` handlers in
@@ -29,6 +38,8 @@ the patch version for fixes.
   gated by `tools.skill_guidance`. (#105)
 - **User-facing extended-thinking toggle** (#100): control extended thinking
   independently of the effort level. (#110)
+- **Shared cross-cutting area labels** (#109): a shared "area core" label set
+  spanning the caliban-ai repos. (#123)
 
 ### Changed
 
@@ -37,8 +48,25 @@ the patch version for fixes.
 
 ### Fixed
 
+- **Inbound frame reader no longer blocks on a full worker channel** (#118): the
+  reader no longer stalls when the worker channel is full. (#134)
+- **Worker idle timeout uses a deadline** (#119): switch to a deadline to remove
+  idle-timeout overshoot. (#133)
+- **EventHub history is bounded** (#116): cap EventHub history to bound worker
+  memory. (#132)
+- **Inherited workers honor parent allow/deny rules** (#114): propagate the
+  parent runtime's allow/deny rules to inherited workers. (#131)
+- **Poisoned EventHub history lock recovers** (#113): recover the lock instead of
+  panicking. (#130)
+- **Google provider fault classification** (#111): classify 400 context-overflow
+  and in-band SSE faults. (#129)
+- **`/memory delete` gated behind `--force`** (#112): destructive memory deletion
+  now requires explicit confirmation. (#120)
 - **Skipped skills surfaced** (#107): skills that fail to load are now reported
   instead of being silently dropped. (#108)
+
+Docs: adopted the `docs/adr/` convention to match prospero + gonzalo (#125), and
+centralized GitHub Pages — ADR ingestion, shared theme, rustdoc (#128).
 
 ## [0.2.0] - 2026-06-13
 
@@ -103,6 +131,7 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/caliban-ai/caliban/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/caliban-ai/caliban/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/caliban-ai/caliban/releases/tag/v0.1.0
