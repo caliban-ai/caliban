@@ -6,6 +6,7 @@ pub mod cache;
 pub mod capabilities;
 pub mod effort;
 pub mod error;
+pub mod error_classify;
 pub mod message;
 pub mod provider;
 pub mod request;

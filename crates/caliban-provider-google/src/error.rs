@@ -51,6 +51,59 @@ pub enum GoogleError {
     InvalidRequest(String),
 }
 
+/// Context-window-overflow markers. Covers Gemini's native phrasing ("input
+/// token count (N) exceeds the maximum number of tokens allowed (M)") plus the
+/// OpenAI-compatible phrasings a proxy might surface.
+const CONTEXT_MARKERS: &[&str] = &[
+    "exceeds the maximum number of tokens",
+    "input token count",
+    "context_length_exceeded",
+    "Input tokens exceed",
+    "Please reduce the length",
+    "context window",
+    "maximum context length",
+];
+
+/// Server-side fault markers. Includes Gemini's generic server-fault phrasings
+/// (`INTERNAL`, overloaded, `UNAVAILABLE`) — safe because this only runs against
+/// server-authored error text, never user request content.
+const FAULT_MARKERS: &[&str] = &[
+    "Internal error",
+    "INTERNAL",
+    "overloaded",
+    "UNAVAILABLE",
+    "crashed",
+    "Exit code:",
+    "out of memory",
+    "Out of memory",
+    "OOMKilled",
+    "segmentation fault",
+    "Segmentation fault",
+    "killed by signal",
+    "Killed by signal",
+];
+
+/// Token-count markers: Gemini's parenthesized phrasing first, then the
+/// OpenAI-style "limit of … resulted in …" phrasing.
+const MAX_TOKEN_MARKERS: &[&str] = &["allowed (", "limit of "];
+const REQUESTED_TOKEN_MARKERS: &[&str] = &["token count (", "resulted in "];
+
+/// Classify a server-authored error body (a non-2xx body or an in-band SSE
+/// error payload): context overflow → `ContextTooLong` (fires reactive
+/// compaction), server-side fault → `UpstreamServerFault`, else `InvalidRequest`
+/// verbatim.
+fn classify_error_body(body: &str) -> ProviderError {
+    use caliban_provider::error_classify as ec;
+    ec::classify_context_too_long(
+        body,
+        CONTEXT_MARKERS,
+        MAX_TOKEN_MARKERS,
+        REQUESTED_TOKEN_MARKERS,
+    )
+    .or_else(|| ec::classify_upstream_server_fault(body, FAULT_MARKERS))
+    .unwrap_or_else(|| ProviderError::InvalidRequest(body.to_string()))
+}
+
 impl From<GoogleError> for ProviderError {
     fn from(e: GoogleError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -64,115 +117,20 @@ impl From<GoogleError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            GoogleError::BadStatus { status, ref body } => match status {
-                401 | 403 => ProviderError::Auth(body.clone()),
-                429 => ProviderError::RateLimit { retry_after: None },
-                // A Gemini 400 is normally request-shaped, but a context
-                // overflow also arrives as a 400 (INVALID_ARGUMENT) — route it
-                // to ContextTooLong so the agent loop's reactive-compaction
-                // recovery fires. Fall through to the server-fault classifier
-                // before the InvalidRequest default (order matches OpenAI).
-                400 => classify_context_length_exceeded(body)
-                    .or_else(|| classify_upstream_server_fault(body))
-                    .unwrap_or_else(|| ProviderError::InvalidRequest(body.clone())),
-                404 => ProviderError::ModelUnavailable(body.clone()),
-                _ if status >= 500 => ProviderError::ServerError {
-                    status,
-                    body: body.clone(),
-                },
-                _ => ProviderError::adapter(e),
-            },
+            GoogleError::BadStatus { status, ref body } => {
+                caliban_provider::error_classify::map_bad_status(status, body, classify_error_body)
+                    .unwrap_or_else(|| ProviderError::adapter(e))
+            }
             GoogleError::InvalidRequest(ref msg) => ProviderError::InvalidRequest(msg.clone()),
-            // In-band SSE error payload. The body is always server-authored
-            // error text (never user request content), so classify it the
-            // same way: context overflow → ContextTooLong (fires reactive
-            // compaction), server-side fault → UpstreamServerFault (attributes
-            // the fault to the server), else InvalidRequest verbatim.
-            GoogleError::UpstreamError(ref msg) => classify_context_length_exceeded(msg)
-                .or_else(|| classify_upstream_server_fault(msg))
-                .unwrap_or_else(|| ProviderError::InvalidRequest(msg.clone())),
+            // In-band SSE error payload — server-authored text, classified the
+            // same way as a non-2xx body.
+            GoogleError::UpstreamError(ref msg) => classify_error_body(msg),
             GoogleError::Deserialize(_)
             | GoogleError::StreamParse(_)
             | GoogleError::MissingConfig(_)
             | GoogleError::Transport(_) => ProviderError::adapter(e),
         }
     }
-}
-
-/// Inspect a 400 / in-band error body for context-window-exceeded patterns.
-/// Returns `Some(ContextTooLong { … })` when recognized so the agent loop's
-/// reactive-compaction recovery can fire. Covers both Gemini's native phrasing
-/// ("input token count (N) exceeds the maximum number of tokens allowed (M)")
-/// and the OpenAI-compatible phrasings a proxy might surface. Token counts are
-/// extracted best-effort (zero if not parseable); the agent loop only branches
-/// on the variant.
-fn classify_context_length_exceeded(body: &str) -> Option<ProviderError> {
-    let is_context_error = body.contains("exceeds the maximum number of tokens")
-        || body.contains("input token count")
-        || body.contains("context_length_exceeded")
-        || body.contains("Input tokens exceed")
-        || body.contains("Please reduce the length")
-        || body.contains("context window")
-        || body.contains("maximum context length");
-    if !is_context_error {
-        return None;
-    }
-    let (max_tokens, requested_tokens) = parse_token_counts(body);
-    Some(ProviderError::ContextTooLong {
-        max_tokens,
-        requested_tokens,
-    })
-}
-
-/// Inspect a server-authored error body for server-side fault patterns (model
-/// process crash, OOM kill, segfault, 500 `INTERNAL`, 503 overload). When
-/// matched, returns `Some(UpstreamServerFault { … })` so the user-visible error
-/// reads "upstream server fault: <msg>" rather than "invalid request: <msg>" —
-/// the failure is server-side, not request-side.
-///
-/// This only ever runs against error text the server produced (a non-2xx body
-/// or an in-band `error` object), never against user request content, so the
-/// marker set can include Gemini's generic server-fault phrasings without the
-/// false-positive risk a request-content matcher would carry.
-fn classify_upstream_server_fault(body: &str) -> Option<ProviderError> {
-    let is_fault = body.contains("Internal error")
-        || body.contains("INTERNAL")
-        || body.contains("overloaded")
-        || body.contains("UNAVAILABLE")
-        || body.contains("crashed")
-        || body.contains("Exit code:")
-        || body.contains("out of memory")
-        || body.contains("Out of memory")
-        || body.contains("OOMKilled")
-        || body.contains("segmentation fault")
-        || body.contains("Segmentation fault")
-        || body.contains("killed by signal")
-        || body.contains("Killed by signal");
-    if !is_fault {
-        return None;
-    }
-    Some(ProviderError::UpstreamServerFault(body.to_string()))
-}
-
-/// Best-effort extraction of (`max_tokens`, `requested_tokens`) from either
-/// Gemini's parenthesized phrasing ("input token count (281292) exceeds the
-/// maximum number of tokens allowed (272000)") or the OpenAI-style "limit of
-/// 272000 … resulted in 281292" phrasing. Missing markers default to 0.
-fn parse_token_counts(body: &str) -> (u32, u32) {
-    let max = extract_u32_after(body, "allowed (")
-        .or_else(|| extract_u32_after(body, "limit of "))
-        .unwrap_or(0);
-    let req = extract_u32_after(body, "token count (")
-        .or_else(|| extract_u32_after(body, "resulted in "))
-        .unwrap_or(0);
-    (max, req)
-}
-
-fn extract_u32_after(body: &str, marker: &str) -> Option<u32> {
-    let idx = body.find(marker)?;
-    let after = &body[idx + marker.len()..];
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
 }
 
 #[cfg(test)]

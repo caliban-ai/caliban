@@ -35,6 +35,21 @@ pub enum AnthropicError {
     Transport(Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// Context-window-overflow markers. Anthropic's shape is
+/// `{"error":{"type":"invalid_request_error","message":"prompt is too long: X tokens > Y maximum"}}`.
+const CONTEXT_MARKERS: &[&str] = &[
+    "prompt is too long",
+    "context window",
+    "maximum context length",
+    "context_length_exceeded",
+];
+
+/// Token-count markers for the "prompt is too long: 210000 tokens > 200000
+/// maximum" phrasing — the requested count follows "too long: ", the max
+/// follows "> ".
+const MAX_TOKEN_MARKERS: &[&str] = &["> "];
+const REQUESTED_TOKEN_MARKERS: &[&str] = &["too long: "];
+
 impl From<AnthropicError> for ProviderError {
     fn from(e: AnthropicError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -48,58 +63,28 @@ impl From<AnthropicError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            AnthropicError::BadStatus { status, ref body } => match status {
-                401 | 403 => ProviderError::Auth(body.clone()),
-                429 => ProviderError::RateLimit { retry_after: None },
-                400 => classify_context_length_exceeded(body)
-                    .unwrap_or_else(|| ProviderError::InvalidRequest(body.clone())),
-                404 => ProviderError::ModelUnavailable(body.clone()),
-                _ if status >= 500 => ProviderError::ServerError {
-                    status,
-                    body: body.clone(),
-                },
-                _ => ProviderError::adapter(e),
-            },
+            // Anthropic 400s are request-shaped; only a context-window overflow
+            // is reclassified (→ ContextTooLong) so reactive compaction fires.
+            // No upstream-fault classifier here (the first-party API does not
+            // surface model-process crashes as 400 bodies).
+            AnthropicError::BadStatus { status, ref body } => {
+                caliban_provider::error_classify::map_bad_status(status, body, |b| {
+                    caliban_provider::error_classify::classify_context_too_long(
+                        b,
+                        CONTEXT_MARKERS,
+                        MAX_TOKEN_MARKERS,
+                        REQUESTED_TOKEN_MARKERS,
+                    )
+                    .unwrap_or_else(|| ProviderError::InvalidRequest(b.to_string()))
+                })
+                .unwrap_or_else(|| ProviderError::adapter(e))
+            }
             AnthropicError::Deserialize(_)
             | AnthropicError::StreamParse(_)
             | AnthropicError::MissingConfig(_)
             | AnthropicError::Transport(_) => ProviderError::adapter(e),
         }
     }
-}
-
-/// Inspect a 400 error body for context-window-exceeded patterns and
-/// route to `ProviderError::ContextTooLong` so the agent loop's
-/// reactive-compaction recovery can fire. Anthropic's shape is
-/// `{"error":{"type":"invalid_request_error","message":"prompt is too long: X tokens > Y maximum"}}`.
-fn classify_context_length_exceeded(body: &str) -> Option<ProviderError> {
-    let is_context_error = body.contains("prompt is too long")
-        || body.contains("context window")
-        || body.contains("maximum context length")
-        || body.contains("context_length_exceeded");
-    if !is_context_error {
-        return None;
-    }
-    let (requested_tokens, max_tokens) = parse_anthropic_token_counts(body);
-    Some(ProviderError::ContextTooLong {
-        max_tokens,
-        requested_tokens,
-    })
-}
-
-/// Best-effort extraction of (`requested_tokens`, `max_tokens`) from an
-/// Anthropic-style "prompt is too long: 210000 tokens > 200000 maximum" body.
-fn parse_anthropic_token_counts(body: &str) -> (u32, u32) {
-    let req = extract_u32_after(body, "too long: ").unwrap_or(0);
-    let max = extract_u32_after(body, "> ").unwrap_or(0);
-    (req, max)
-}
-
-fn extract_u32_after(body: &str, marker: &str) -> Option<u32> {
-    let idx = body.find(marker)?;
-    let after = &body[idx + marker.len()..];
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
 }
 
 #[cfg(test)]

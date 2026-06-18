@@ -62,6 +62,56 @@ pub enum OpenAIError {
     Unsupported(String),
 }
 
+/// Context-window-overflow markers in OpenAI-compatible error bodies. Both
+/// HTTP 400 bodies and LM Studio's in-band SSE error bodies use these.
+const CONTEXT_MARKERS: &[&str] = &[
+    "context_length_exceeded",
+    "Input tokens exceed",
+    "Please reduce the length",
+    "context window",
+    "maximum context length",
+];
+
+/// Server-side fault markers (model-process crash, OOM kill, segfault, …).
+/// Conservative + case-sensitive: only well-anchored phrases unlikely to
+/// appear in a legitimate request-validation message. In particular the crash
+/// marker is the full "crashed without additional information" envelope, not a
+/// bare "crashed", so an ordinary error mentioning "crashed" stays
+/// `InvalidRequest`.
+const FAULT_MARKERS: &[&str] = &[
+    "crashed without additional information",
+    "Exit code:",
+    "out of memory",
+    "Out of memory",
+    "OOMKilled",
+    "segmentation fault",
+    "Segmentation fault",
+    "killed by signal",
+    "Killed by signal",
+];
+
+/// Token-count markers for the OpenAI-style "limit of 272000 … resulted in
+/// 281292" phrasing.
+const MAX_TOKEN_MARKERS: &[&str] = &["limit of "];
+const REQUESTED_TOKEN_MARKERS: &[&str] = &["resulted in "];
+
+/// Classify a server-authored error body (an HTTP 400 body or an in-band SSE
+/// error payload): a context-window overflow → `ContextTooLong` (so the agent
+/// loop's reactive-compaction recovery fires), a server-side fault →
+/// `UpstreamServerFault` (so the surface line attributes the fault to the
+/// server), else the body verbatim as `InvalidRequest`.
+fn classify_error_body(body: &str) -> ProviderError {
+    use caliban_provider::error_classify as ec;
+    ec::classify_context_too_long(
+        body,
+        CONTEXT_MARKERS,
+        MAX_TOKEN_MARKERS,
+        REQUESTED_TOKEN_MARKERS,
+    )
+    .or_else(|| ec::classify_upstream_server_fault(body, FAULT_MARKERS))
+    .unwrap_or_else(|| ProviderError::InvalidRequest(body.to_string()))
+}
+
 impl From<OpenAIError> for ProviderError {
     fn from(e: OpenAIError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -75,109 +125,21 @@ impl From<OpenAIError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            OpenAIError::BadStatus { status, ref body } => match status {
-                401 | 403 => ProviderError::Auth(body.clone()),
-                429 => ProviderError::RateLimit { retry_after: None },
-                400 => classify_context_length_exceeded(body)
-                    .unwrap_or_else(|| ProviderError::InvalidRequest(body.clone())),
-                404 => ProviderError::ModelUnavailable(body.clone()),
-                _ if status >= 500 => ProviderError::ServerError {
-                    status,
-                    body: body.clone(),
-                },
-                _ => ProviderError::adapter(e),
-            },
+            OpenAIError::BadStatus { status, ref body } => {
+                caliban_provider::error_classify::map_bad_status(status, body, classify_error_body)
+                    .unwrap_or_else(|| ProviderError::adapter(e))
+            }
             OpenAIError::Deserialize(_)
             | OpenAIError::StreamParse(_)
             | OpenAIError::MissingConfig(_)
             | OpenAIError::Transport(_)
             | OpenAIError::InvalidBaseUrl { .. }
             | OpenAIError::Unsupported(_) => ProviderError::adapter(e),
-            // Upstream-reported errors (in-band SSE error payload) are
-            // request-shaped problems most of the time (oversized prompt,
-            // missing model, malformed input). Map to InvalidRequest so
-            // the surface line reads cleanly; the message is the upstream
-            // text verbatim — unless the body looks like a context-window
-            // overflow (→ ContextTooLong, so the agent loop's reactive-
-            // compaction recovery fires) or a server-side fault like a
-            // model-process crash / OOM (→ UpstreamServerFault, so the
-            // user-visible line correctly attributes the fault to the
-            // server, not the request).
-            OpenAIError::UpstreamError(ref msg) => classify_context_length_exceeded(msg)
-                .or_else(|| classify_upstream_server_fault(msg))
-                .unwrap_or_else(|| ProviderError::InvalidRequest(msg.clone())),
+            // In-band SSE error payload — server-authored text, classified the
+            // same way as a non-2xx body.
+            OpenAIError::UpstreamError(ref msg) => classify_error_body(msg),
         }
     }
-}
-
-/// Inspect a 400/upstream error body for context-window-exceeded patterns.
-/// Returns `Some(ContextTooLong { … })` when recognized so the agent loop's
-/// reactive-compaction recovery can fire. Both OpenAI-compatible HTTP 400
-/// bodies and LM Studio's in-band SSE error bodies use the same patterns.
-/// Token counts are extracted best-effort (zero if not parseable); the
-/// agent loop only branches on the variant.
-fn classify_context_length_exceeded(body: &str) -> Option<ProviderError> {
-    let is_context_error = body.contains("context_length_exceeded")
-        || body.contains("Input tokens exceed")
-        || body.contains("Please reduce the length")
-        || body.contains("context window")
-        || body.contains("maximum context length");
-    if !is_context_error {
-        return None;
-    }
-    let (max_tokens, requested_tokens) = parse_token_counts(body);
-    Some(ProviderError::ContextTooLong {
-        max_tokens,
-        requested_tokens,
-    })
-}
-
-/// Inspect an upstream in-band error body for server-side fault patterns
-/// (model-process crash, OOM kill, segfault, etc.). When matched, returns
-/// `Some(UpstreamServerFault { … })` so the user-visible error reads
-/// "upstream server fault: <msg>" rather than "invalid request: <msg>" —
-/// the failure is server-side, not request-side.
-///
-/// Substring matching is intentionally conservative: only well-anchored
-/// fault markers we have seen verbatim in upstream payloads, plus a small
-/// set of generic crash/OOM phrases. False positives (a legitimate input
-/// validation error that happens to contain "crashed" verbatim) would be
-/// strictly worse than the existing `InvalidRequest` fallback.
-fn classify_upstream_server_fault(body: &str) -> Option<ProviderError> {
-    // LM Studio's verbatim envelope when the model process exits mid-stream:
-    //   "The model has crashed without additional information. (Exit code: null)"
-    // Plus a few generic markers for related fault modes (OOM kill, segfault,
-    // killed by the OS). All are case-sensitive and chosen to be unlikely to
-    // appear in a legitimate request-validation message.
-    let is_fault = body.contains("crashed without additional information")
-        || body.contains("Exit code:")
-        || body.contains("out of memory")
-        || body.contains("Out of memory")
-        || body.contains("OOMKilled")
-        || body.contains("segmentation fault")
-        || body.contains("Segmentation fault")
-        || body.contains("killed by signal")
-        || body.contains("Killed by signal");
-    if !is_fault {
-        return None;
-    }
-    Some(ProviderError::UpstreamServerFault(body.to_string()))
-}
-
-/// Best-effort extraction of (`max_tokens`, `requested_tokens`) from an
-/// OpenAI-style "Input tokens exceed the configured limit of 272000
-/// tokens. Your messages resulted in 281292 tokens" message.
-fn parse_token_counts(body: &str) -> (u32, u32) {
-    let max = extract_u32_after(body, "limit of ").unwrap_or(0);
-    let req = extract_u32_after(body, "resulted in ").unwrap_or(0);
-    (max, req)
-}
-
-fn extract_u32_after(body: &str, marker: &str) -> Option<u32> {
-    let idx = body.find(marker)?;
-    let after = &body[idx + marker.len()..];
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
 }
 
 #[cfg(test)]
