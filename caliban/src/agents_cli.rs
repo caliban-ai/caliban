@@ -158,14 +158,14 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
-            // Logs live at <agent-store>/<id>/session.json. The
-            // supervisor's `Attach` reply gives us the per-agent socket,
-            // but for now we tail session.json from the registry's
-            // `session_dir`.
+            // Logs live at <agent-store>/<id>/stdout.ndjson — the transcript
+            // the worker actually writes. The supervisor's `Attach` reply gives
+            // us the per-agent socket, but for now we read the persisted
+            // transcript from the registry's `session_dir`.
             match client.list().await {
                 Ok(agents) => {
                     if let Some(rec) = agents.into_iter().find(|a| a.id == *id) {
-                        let log_path = rec.session_dir.join("session.json");
+                        let log_path = agent_log_path(&rec.session_dir);
                         match std::fs::read_to_string(&log_path) {
                             Ok(body) => {
                                 println!("{body}");
@@ -362,9 +362,33 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
     }
 }
 
+/// Path to the transcript that `agents logs` prints for an agent, given its
+/// session dir. This MUST match the file the worker actually writes
+/// (`worker.rs`), so both reference [`caliban_supervisor::store::TRANSCRIPT_FILE`].
+fn agent_log_path(session_dir: &Path) -> PathBuf {
+    session_dir.join(caliban_supervisor::store::TRANSCRIPT_FILE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_log_path_points_at_worker_transcript() {
+        // Regression #143: `agents logs` read `session.json`, which the
+        // background worker never writes — it writes `stdout.ndjson`. The two
+        // must name the same file.
+        let dir = Path::new("/var/agents/abc123");
+        assert_eq!(
+            agent_log_path(dir),
+            dir.join(caliban_supervisor::store::TRANSCRIPT_FILE),
+            "agents logs must read the worker's transcript file"
+        );
+        assert_eq!(
+            agent_log_path(dir).file_name().and_then(|f| f.to_str()),
+            Some("stdout.ndjson"),
+        );
+    }
 
     #[test]
     fn discover_repo_root_walks_up() {
