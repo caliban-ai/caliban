@@ -15,6 +15,13 @@ use crate::store::AgentStore;
 #[derive(Debug)]
 pub struct Registry {
     by_id: HashMap<AgentId, AgentRecord>,
+    /// Live worker pids, keyed by agent id. Runtime-only — deliberately
+    /// **not** part of [`AgentRecord`] (the persisted/wire type), so a daemon
+    /// restart never resurrects a stale pid. Guarded by the same lock as
+    /// `by_id`, so a pid and its record always mutate atomically: there is no
+    /// separate lock to order, which retires the dual-lock invariant that
+    /// produced #115/#138.
+    pids: HashMap<AgentId, u32>,
     store: AgentStore,
 }
 
@@ -27,7 +34,28 @@ impl Registry {
                 by_id.insert(r.id.clone(), r);
             }
         }
-        Self { by_id, store }
+        Self {
+            by_id,
+            pids: HashMap::new(),
+            store,
+        }
+    }
+
+    /// Record the live worker pid for `id`. Called from `launch_and_monitor`
+    /// under the registry lock, atomically with the `Running` transition.
+    pub fn track_pid(&mut self, id: &str, pid: u32) {
+        self.pids.insert(id.to_string(), pid);
+    }
+
+    /// The live worker pid for `id`, if one is tracked.
+    #[must_use]
+    pub fn pid_of(&self, id: &str) -> Option<u32> {
+        self.pids.get(id).copied()
+    }
+
+    /// Drop the tracked pid for `id` (worker exited, respawned, or removed).
+    pub fn forget_pid(&mut self, id: &str) {
+        self.pids.remove(id);
     }
 
     /// Iterate over registered agents.
@@ -161,6 +189,8 @@ impl Registry {
             });
         }
         self.by_id.remove(id);
+        // The record is gone; its live pid must not outlive it.
+        self.pids.remove(id);
         if let Err(e) = self.store.remove(id) {
             tracing::warn!(error = %e, "session-dir cleanup failed during rm");
         }
@@ -345,6 +375,32 @@ mod tests {
         // A racing Running report from the resuming worker is refused.
         assert!(!r.report_status(&rec.id, AgentStatus::Running));
         assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Killed);
+    }
+
+    #[test]
+    fn tracked_pid_is_runtime_only_not_persisted() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s.clone());
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        r.track_pid(&rec.id, 4242);
+        assert_eq!(r.pid_of(&rec.id), Some(4242));
+        // A fresh registry over the same store reloads records but NOT pids:
+        // the live pid is runtime-only state, never persisted.
+        let r2 = Registry::new(s);
+        assert!(r2.get(&rec.id).is_some(), "record should reload from store");
+        assert_eq!(r2.pid_of(&rec.id), None, "pid must be runtime-only");
+    }
+
+    #[test]
+    fn remove_forgets_tracked_pid() {
+        let (_d, s) = store();
+        let mut r = Registry::new(s);
+        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        r.track_pid(&rec.id, 99);
+        r.remove(&rec.id, true).unwrap();
+        // Removing the agent drops its pid too — no orphaned pid can outlive
+        // its registry record (the drift the two-map design allowed).
+        assert_eq!(r.pid_of(&rec.id), None);
     }
 
     #[test]
