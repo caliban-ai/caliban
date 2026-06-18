@@ -73,7 +73,7 @@ pub fn caps_satisfy_route_requires(caps: Capabilities, requires: CapabilityRequi
     if requires.thinking && !caps.thinking {
         return false;
     }
-    if requires.tool_use && matches!(caps.tool_use, ToolUseCapability::None) {
+    if !requires.tool_use.satisfied_by(caps.tool_use) {
         return false;
     }
     true
@@ -97,7 +97,7 @@ pub fn route_requires_consistent_with_needs(
     if requires.thinking && !needs.thinking {
         return false;
     }
-    if requires.tool_use && !needs.tool_use {
+    if requires.tool_use.is_required() && !needs.tool_use {
         return false;
     }
     true
@@ -171,6 +171,65 @@ mod tests {
             effort: None,
             metadata: Default::default(),
         }
+    }
+
+    fn caps_with_tool_use(level: ToolUseCapability) -> Capabilities {
+        Capabilities {
+            max_input_tokens: 100_000,
+            max_output_tokens: 4096,
+            vision: true,
+            tool_use: level,
+            thinking: true,
+            prompt_caching: caliban_provider::PromptCachingCapability::None,
+            json_mode: false,
+            streaming: true,
+            stop_sequences: true,
+            top_k: false,
+            system_prompt: caliban_provider::SystemPromptCapability::SeparateField,
+            refusal_field: false,
+        }
+    }
+
+    #[test]
+    fn parallel_calls_requirement_filters_to_parallel_providers() {
+        // #172: a route requiring parallel_calls accepts only ParallelCalls
+        // providers — Basic and None are filtered out.
+        let requires = CapabilityRequirements {
+            tool_use: crate::config::ToolUseRequirement::ParallelCalls,
+            ..Default::default()
+        };
+        assert!(caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::ParallelCalls),
+            requires
+        ));
+        assert!(!caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::Basic),
+            requires
+        ));
+        assert!(!caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::None),
+            requires
+        ));
+    }
+
+    #[test]
+    fn basic_requirement_accepts_basic_and_parallel() {
+        let requires = CapabilityRequirements {
+            tool_use: crate::config::ToolUseRequirement::Basic,
+            ..Default::default()
+        };
+        assert!(caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::Basic),
+            requires
+        ));
+        assert!(caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::ParallelCalls),
+            requires
+        ));
+        assert!(!caps_satisfy_route_requires(
+            caps_with_tool_use(ToolUseCapability::None),
+            requires
+        ));
     }
 
     #[test]

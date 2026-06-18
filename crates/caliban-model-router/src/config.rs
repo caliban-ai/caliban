@@ -70,6 +70,67 @@ impl EffortMap {
     }
 }
 
+/// Level of tool-use a route requires. Deserializes from the documented
+/// string enum (`"basic"` / `"parallel_calls"`) and, for back-compat, from a
+/// bool (`true` → [`Basic`](ToolUseRequirement::Basic), `false` →
+/// [`None`](ToolUseRequirement::None)). See #172.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolUseRequirement {
+    /// No tool-use requirement.
+    #[default]
+    None,
+    /// Requires any tool use (single or parallel).
+    Basic,
+    /// Requires parallel tool calls specifically.
+    ParallelCalls,
+}
+
+impl ToolUseRequirement {
+    /// Whether this route imposes any tool-use requirement at all.
+    #[must_use]
+    pub fn is_required(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether a provider with `caps` tool-use level satisfies this requirement.
+    #[must_use]
+    pub fn satisfied_by(self, caps: caliban_provider::ToolUseCapability) -> bool {
+        use caliban_provider::ToolUseCapability as C;
+        match self {
+            Self::None => true,
+            Self::Basic => !matches!(caps, C::None),
+            Self::ParallelCalls => matches!(caps, C::ParallelCalls),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolUseRequirement {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Str(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Bool(true) => Ok(Self::Basic),
+            Raw::Bool(false) => Ok(Self::None),
+            Raw::Str(s) => match s.as_str() {
+                "none" => Ok(Self::None),
+                "basic" => Ok(Self::Basic),
+                "parallel_calls" => Ok(Self::ParallelCalls),
+                other => Err(serde::de::Error::custom(format!(
+                    "invalid tool_use requirement {other:?}; \
+                     expected a bool or \"basic\"/\"parallel_calls\""
+                ))),
+            },
+        }
+    }
+}
+
 /// Declared capability requirements a route imposes. Routes only see requests
 /// that satisfy these.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -80,9 +141,10 @@ pub struct CapabilityRequirements {
     /// Route only accepts requests with a thinking budget.
     #[serde(default)]
     pub thinking: bool,
-    /// Route only accepts requests with non-empty tool declarations.
+    /// Tool-use level this route requires (`"basic"`/`"parallel_calls"`, or a
+    /// bool for back-compat).
     #[serde(default)]
-    pub tool_use: bool,
+    pub tool_use: ToolUseRequirement,
 }
 
 /// Hedge policy: a configurable race-on-delay between the primary route and
@@ -450,6 +512,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_tool_use_parallel_calls_requirement() {
+        // #172: the router-spec example must parse; `tool_use` accepts the
+        // documented string enum, not just a bool.
+        let body = r#"
+[router]
+default_purpose = "main_loop"
+
+[[router.route]]
+id = "needs-parallel"
+purpose = "main_loop"
+provider = "anthropic"
+model = "claude"
+requires = { tool_use = "parallel_calls" }
+"#;
+        let cfg = parse_router_config(body)
+            .expect("parallel_calls requirement should parse")
+            .unwrap();
+        assert_eq!(
+            cfg.routes[0].requires.tool_use,
+            ToolUseRequirement::ParallelCalls
+        );
+    }
+
+    #[test]
+    fn tool_use_bool_true_is_basic_requirement() {
+        // Back-compat: a legacy `tool_use = true` still means "needs tools".
+        let body = r#"
+[router]
+default_purpose = "main_loop"
+
+[[router.route]]
+id = "needs-tools"
+purpose = "main_loop"
+provider = "anthropic"
+model = "claude"
+requires = { tool_use = true }
+"#;
+        let cfg = parse_router_config(body).unwrap().unwrap();
+        assert_eq!(cfg.routes[0].requires.tool_use, ToolUseRequirement::Basic);
+    }
+
+    #[test]
     fn parses_minimal_config() {
         let body = r#"
 [router]
@@ -551,7 +655,7 @@ model = "gpt-5"
             Some(&["main-openai".to_string()][..])
         );
         assert!(cfg.routes[0].requires.vision);
-        assert!(cfg.routes[0].requires.tool_use);
+        assert_eq!(cfg.routes[0].requires.tool_use, ToolUseRequirement::Basic);
         assert_eq!(cfg.routes[0].effort, Some(EffortLevel::High));
         // Inherits global hedge / breaker defaults.
         assert!(matches!(cfg.routes[0].hedge, HedgePolicy::Race { .. }));
