@@ -1010,7 +1010,6 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "caliban-common",
- "caliban-memory",
  "caliban-provider",
  "dirs",
  "futures",
