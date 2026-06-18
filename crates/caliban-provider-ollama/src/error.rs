@@ -52,17 +52,12 @@ impl From<OllamaError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            OllamaError::BadStatus { status, ref body } => match status {
-                401 | 403 => ProviderError::Auth(body.clone()),
-                429 => ProviderError::RateLimit { retry_after: None },
-                400 => ProviderError::InvalidRequest(body.clone()),
-                404 => ProviderError::ModelUnavailable(body.clone()),
-                _ if status >= 500 => ProviderError::ServerError {
-                    status,
-                    body: body.clone(),
-                },
-                _ => ProviderError::adapter(e),
-            },
+            OllamaError::BadStatus { status, ref body } => {
+                caliban_provider::error_classify::map_bad_status(status, body, |b| {
+                    ProviderError::InvalidRequest(b.to_string())
+                })
+                .unwrap_or_else(|| ProviderError::adapter(e))
+            }
             OllamaError::Deserialize(_)
             | OllamaError::StreamParse(_)
             | OllamaError::MissingConfig(_)
