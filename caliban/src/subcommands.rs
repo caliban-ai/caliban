@@ -139,15 +139,28 @@ pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
             Ok(0)
         }
         ConfigCommand::Migrate { dry_run } => {
-            let mut migrated = outcome.settings.clone();
+            // `outcome.settings` is the fully-resolved config and already has
+            // the legacy TOMLs folded in by the startup compat shim — so it is
+            // the correct migration *output*. But that also means the
+            // `maybe_load_legacy_*` guards (which no-op when the target already
+            // has rules) always trip against it, so we can't use them to detect
+            // *which* legacy files were present. Probe a fresh, empty Settings
+            // instead: its empty state passes the guards, so a `true` return
+            // means that legacy file exists and contributed (#176).
+            let migrated = outcome.settings.clone();
+            let mut probe = caliban_settings::Settings::default();
             let mut touched = Vec::new();
-            if caliban_settings::compat::maybe_load_legacy_mcp(&mut migrated, &workspace) {
+            if caliban_settings::compat::maybe_load_legacy_mcp(&mut probe, &workspace) {
                 touched.push("mcp.toml → settings.mcp_servers");
             }
-            if caliban_settings::compat::maybe_load_legacy_permissions(&mut migrated, &workspace) {
+            // `maybe_load_legacy_permissions` can't be used as a presence
+            // probe: its `load_rules()` always appends the built-in
+            // `default_rules()` tail, so it reports "found" even with no legacy
+            // file. `legacy_permissions_present` excludes that tail (#176).
+            if caliban_settings::compat::legacy_permissions_present(&workspace) {
                 touched.push("permissions.toml → settings.permissions");
             }
-            if caliban_settings::compat::maybe_load_legacy_hooks(&mut migrated, &workspace) {
+            if caliban_settings::compat::maybe_load_legacy_hooks(&mut probe, &workspace) {
                 touched.push("hooks.toml → settings.hooks");
             }
             if touched.is_empty() {
