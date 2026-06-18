@@ -1,5 +1,6 @@
 //! Streaming events.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -230,6 +231,11 @@ pub struct WatchedStream<S> {
     idle: Duration,
     last_chunk_at: Instant,
     warned: bool,
+    /// A single, resettable wakeup timer armed to the idle deadline. Reused
+    /// across polls (reset on each Pending, re-anchored on each chunk) so the
+    /// watchdog never spawns a fresh task per poll — see #117. Created lazily
+    /// on the first Pending so construction needs no runtime context.
+    wakeup: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S> WatchedStream<S> {
@@ -241,6 +247,7 @@ impl<S> WatchedStream<S> {
             idle,
             last_chunk_at: Instant::now(),
             warned: false,
+            wakeup: None,
         }
     }
 }
@@ -277,15 +284,22 @@ where
                         "recovery.stream_idle.warning"
                     );
                 }
-                // Schedule a wakeup at the remaining time so we can fire the
-                // abort even if `inner` stays Pending. The spawned future is
-                // a single sleep + wake; it self-terminates.
+                // Arm (or re-arm) a single resettable timer at the idle
+                // deadline so we can fire the abort even if `inner` stays
+                // Pending. Resetting an existing `Sleep` reuses its timer
+                // slot — unlike the previous `tokio::spawn`-per-poll, which
+                // leaked one detached sleep task for every poll under a
+                // slow-but-alive upstream (#117).
                 let remaining = self.idle.checked_sub(elapsed).unwrap_or(Duration::ZERO);
-                let waker = cx.waker().clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(remaining + Duration::from_millis(1)).await;
-                    waker.wake();
-                });
+                let deadline = tokio::time::Instant::now() + remaining + Duration::from_millis(1);
+                let wakeup = self
+                    .wakeup
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+                wakeup.as_mut().reset(deadline);
+                // Poll the timer so the *current* waker is registered against
+                // it; the return value is irrelevant (if it were already
+                // ready we'd have aborted above on the elapsed check).
+                let _ = wakeup.as_mut().poll(cx);
                 Poll::Pending
             }
         }
@@ -319,5 +333,31 @@ mod watched_tests {
         let mut w = WatchedStream::new(inner, Duration::from_millis(20));
         let r = w.next().await.expect("Some(_)");
         assert!(matches!(r, Err(Error::StreamIdle(_))));
+    }
+
+    /// A slow-but-alive upstream — each chunk arrives after a gap well under
+    /// the idle window — must reset the idle clock on every chunk and never
+    /// abort. This guards the "one resettable wakeup per stream" refactor
+    /// (#117): the watchdog must keep arming/resetting its timer across many
+    /// Pending→Ready cycles without ever firing `StreamIdle`.
+    #[tokio::test]
+    async fn resets_idle_clock_on_each_chunk() {
+        // Five chunks, each preceded by a 5ms Pending gap; idle is 100ms, so
+        // no single gap can trip the watchdog.
+        let inner = Box::pin(stream::unfold(0u32, |n| async move {
+            if n >= 5 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Some((Ok(StreamEvent::Ping), n + 1))
+        }));
+        let mut w = WatchedStream::new(inner, Duration::from_millis(100));
+        let mut seen = 0;
+        while let Some(item) = w.next().await {
+            // Every item must be a real chunk, never a StreamIdle abort.
+            assert!(matches!(item, Ok(StreamEvent::Ping)));
+            seen += 1;
+        }
+        assert_eq!(seen, 5);
     }
 }
