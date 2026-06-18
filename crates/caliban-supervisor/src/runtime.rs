@@ -40,10 +40,8 @@ pub fn default_runtime_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir).join("caliban");
+    if let Some(dir) = caliban_common::paths::xdg_runtime_home("caliban") {
+        return dir;
     }
     std::env::temp_dir().join("caliban-daemon")
 }

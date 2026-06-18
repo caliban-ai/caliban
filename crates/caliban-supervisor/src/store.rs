@@ -40,7 +40,7 @@ impl AgentStore {
     /// user has no data dir configured.
     #[must_use]
     pub fn default_for(repo_root: &Path) -> Self {
-        let sanitized = sanitize_path(repo_root);
+        let sanitized = caliban_common::paths::sanitize_cwd_for_path(repo_root);
         let data_root = dirs::data_dir()
             .map_or_else(std::env::temp_dir, |d| d.join("caliban"))
             .join("projects")
@@ -117,19 +117,6 @@ impl AgentStore {
         }
         Ok(out)
     }
-}
-
-fn sanitize_path(p: &Path) -> String {
-    let s = p.to_string_lossy().to_string();
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -369,20 +356,6 @@ mod tests {
             !sanitized_component.contains(' '),
             "got: {sanitized_component}"
         );
-    }
-
-    #[test]
-    fn sanitize_path_keeps_safe_chars_and_replaces_others() {
-        let out = sanitize_path(Path::new("/a-b_c.9/x y!z"));
-        // Slash, space, and '!' become '-'; alnum + . - _ are kept.
-        assert!(
-            out.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-        );
-        assert!(out.contains("a-b_c.9"));
-        assert!(!out.contains(' '));
-        assert!(!out.contains('/'));
-        assert!(!out.contains('!'));
     }
 
     // --- SpawnSpec.provider serde (#93) ---

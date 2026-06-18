@@ -1281,6 +1281,7 @@ name = "caliban-supervisor"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "caliban-common",
  "chrono",
  "dirs",
  "futures",
