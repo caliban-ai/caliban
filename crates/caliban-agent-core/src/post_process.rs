@@ -114,14 +114,23 @@ impl ToolResultCap {
             tokio::fs::create_dir_all(&session_dir).await?;
             let path = session_dir.join(format!("{}.txt", tr.tool_use_id));
             tokio::fs::write(&path, &full).await?;
-            let head: String = full.chars().take(HEAD_TAIL_CHARS).collect();
-            let tail_start = full_chars.saturating_sub(HEAD_TAIL_CHARS);
+            // Clamp the preview windows to half the cap so head and tail never
+            // overlap (which would duplicate the middle and could make the
+            // placeholder larger than the original — #182). `2 * each <=
+            // max_chars < full_chars`, so the windows are always disjoint.
+            let each = HEAD_TAIL_CHARS.min(self.max_chars / 2);
+            let head: String = full.chars().take(each).collect();
+            let tail_start = full_chars.saturating_sub(each);
             let tail: String = full.chars().skip(tail_start).collect();
+            let head_chars = head.chars().count();
+            let tail_chars = tail.chars().count();
             let placeholder = format!(
-                "[truncated: {} chars, full content at {}]\n\n--- head 2KB ---\n{}\n--- tail 2KB ---\n{}",
+                "[truncated: {} chars, full content at {}]\n\n--- head {} chars ---\n{}\n--- tail {} chars ---\n{}",
                 full_chars,
                 path.display(),
+                head_chars,
                 head,
+                tail_chars,
                 tail,
             );
             tr.content = vec![ContentBlock::Text(TextBlock {
@@ -144,5 +153,54 @@ mod tests {
         let out = p.process("hello world");
         assert_eq!(out, "hello world");
         assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    fn tool_result(text: &str) -> ContentBlock {
+        ContentBlock::ToolResult(caliban_provider::ToolResultBlock {
+            tool_use_id: "tid".into(),
+            content: vec![ContentBlock::Text(TextBlock {
+                text: text.into(),
+                cache_control: None,
+            })],
+            is_error: false,
+        })
+    }
+
+    fn placeholder_text(block: &ContentBlock) -> String {
+        let ContentBlock::ToolResult(tr) = block else {
+            panic!("expected tool result")
+        };
+        let Some(ContentBlock::Text(t)) = tr.content.first() else {
+            panic!("expected text block")
+        };
+        t.text.clone()
+    }
+
+    #[tokio::test]
+    async fn small_cap_does_not_overlap_or_enlarge() {
+        // #182: with a cap below 2*HEAD_TAIL_CHARS the head/tail windows used to
+        // overlap, duplicating the middle and producing a placeholder larger
+        // than the original. Marker sits in the dropped middle region.
+        let body = format!("{}MIDDLE_MARKER{}", "A".repeat(1400), "B".repeat(1587));
+        assert_eq!(body.chars().count(), 3000);
+        let dir = tempfile::tempdir().unwrap();
+        let cap = ToolResultCap {
+            max_chars: 2500,
+            overflow_dir: dir.path().to_path_buf(),
+            session_id: "s".into(),
+        };
+        let mut blocks = vec![tool_result(&body)];
+        let n = cap.cap(&mut blocks).await.unwrap();
+        assert_eq!(n, 1, "the oversized result should overflow");
+        let placeholder = placeholder_text(&blocks[0]);
+        assert!(
+            placeholder.chars().count() < 3000,
+            "placeholder ({} chars) must be smaller than the 3000-char original",
+            placeholder.chars().count()
+        );
+        assert!(
+            !placeholder.contains("MIDDLE_MARKER"),
+            "the dropped middle must not appear (no head/tail overlap)"
+        );
     }
 }
