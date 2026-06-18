@@ -176,7 +176,14 @@ pub struct MarketplaceClient {
 
 impl Default for MarketplaceClient {
     fn default() -> Self {
-        Self::new(reqwest::Client::new(), MarketplaceSettings::default())
+        // Untrusted plugin index/tarball downloads must run on the hardened
+        // shared client (finite timeout, caliban user-agent, rustls,
+        // hickory-dns) rather than a bare `reqwest::Client::new()` with no
+        // request timeout. See #158.
+        Self::new(
+            caliban_common::http::default_client(),
+            MarketplaceSettings::default(),
+        )
     }
 }
 
@@ -688,6 +695,45 @@ mod tests {
         let client = MarketplaceClient::new(reqwest::Client::new(), settings);
         assert!(client.settings().check_url("https://ok/idx").is_ok());
         assert!(client.settings().check_url("https://bad/idx").is_err());
+    }
+
+    /// Regression guard for #158: the marketplace download path must enforce a
+    /// finite request timeout (production `default()` now uses
+    /// `caliban_common::http::default_client()`, which sets `DEFAULT_TIMEOUT`).
+    /// `reqwest` doesn't expose the configured timeout for introspection, so we
+    /// assert the *behavior*: an index server slower than the client timeout
+    /// surfaces a transport error instead of hanging forever.
+    #[tokio::test]
+    async fn fetch_index_enforces_a_finite_timeout() {
+        let server = wiremock::MockServer::start().await;
+        let index_url = format!("{}/index.json", server.uri());
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/index.json"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(10))
+                    .set_body_string("{}"),
+            )
+            .mount(&server)
+            .await;
+
+        // Build the client through the shared hardened factory, layering on a
+        // short timeout so the test resolves quickly (mirrors how `default()`
+        // gets its timeout, just shorter).
+        let http = caliban_common::http::default_client_builder()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()
+            .unwrap();
+        let client = MarketplaceClient::new(http, MarketplaceSettings::default());
+
+        let err = client
+            .fetch_index(&index_url)
+            .await
+            .expect_err("slow server should trip the request timeout");
+        assert!(
+            matches!(err, PluginError::Http(_)),
+            "expected a transport (timeout) error, got {err:?}",
+        );
     }
 
     #[tokio::test]
