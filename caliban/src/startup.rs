@@ -885,9 +885,23 @@ pub(crate) async fn run_headless(
     let has_system = messages
         .first()
         .is_some_and(|m| m.role == caliban_provider::Role::System);
-    if !has_system && let Some(ref sp) = system_prompt {
-        let with_todos = system_prompt::append_todo_block(sp, &todo_snapshot);
-        messages.insert(0, caliban_provider::Message::system_text(with_todos));
+    if !has_system {
+        let base = system_prompt
+            .as_ref()
+            .map(|sp| system_prompt::append_todo_block(sp, &todo_snapshot));
+        // #174: --json-schema is validate-only unless we tell the model to
+        // emit only matching JSON, so a normal prose reply fails extraction.
+        // Inject the schema directive into the leading system message.
+        let schema_instruction = json_schema.as_ref().map(headless::JsonSchema::instruction);
+        let combined = match (base, schema_instruction) {
+            (Some(b), Some(s)) => Some(format!("{b}\n\n{s}")),
+            (Some(b), None) => Some(b),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        };
+        if let Some(text) = combined {
+            messages.insert(0, caliban_provider::Message::system_text(text));
+        }
     }
     if let PromptSource::Single(ref prompt_text) = prompt_source {
         messages.push(Message::user_text(prompt_text.clone()));
