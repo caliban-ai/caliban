@@ -52,7 +52,12 @@ pub fn ir_to_native_request(
                 .join("\n\n"),
         ))
     } else {
-        Some(NativeSystem::Blocks(system_blocks))
+        Some(NativeSystem::Blocks(
+            system_blocks
+                .into_iter()
+                .map(NativeContentBlock::Text)
+                .collect(),
+        ))
     };
 
     let native_messages: Vec<NativeMessage> = messages
@@ -466,11 +471,44 @@ mod tests {
         match native.system {
             Some(NativeSystem::Blocks(blocks)) => {
                 assert_eq!(blocks.len(), 1);
-                assert_eq!(blocks[0].text, "cached");
-                assert_eq!(blocks[0].cache_control, Some(NativeCacheControl::Ephemeral));
+                match &blocks[0] {
+                    NativeContentBlock::Text(tb) => {
+                        assert_eq!(tb.text, "cached");
+                        assert_eq!(tb.cache_control, Some(NativeCacheControl::Ephemeral));
+                    }
+                    other => panic!("expected Text block, got {other:?}"),
+                }
             }
             other => panic!("expected Blocks system, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn system_blocks_serialize_with_type_text() {
+        // Regression for #141: the Anthropic Messages API requires every system
+        // block to carry `"type": "text"`. The cache_control path routes through
+        // NativeSystem::Blocks, which must still emit the discriminator.
+        let system_msg = Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text(IrTextBlock {
+                text: "cached".into(),
+                cache_control: Some(CacheControl::Ephemeral),
+            })],
+        };
+        let req = req_with(vec![system_msg, Message::user_text("hi")], vec![]);
+        let native = ir_to_native_request(req, false);
+        let wire = serde_json::to_value(&native).expect("serialize request");
+        let system = wire.get("system").expect("system field present");
+        let first = system
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("system is a non-empty block array");
+        assert_eq!(
+            first.get("type").and_then(|t| t.as_str()),
+            Some("text"),
+            "system block missing `type: text`; got {first}"
+        );
+        assert_eq!(first.get("text").and_then(|t| t.as_str()), Some("cached"));
     }
 
     #[test]

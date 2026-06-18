@@ -53,8 +53,11 @@ pub struct NativeRequest {
 pub enum NativeSystem {
     /// Simple string system prompt.
     Text(String),
-    /// Structured text blocks (supports `cache_control`).
-    Blocks(Vec<NativeTextBlock>),
+    /// Structured content blocks (supports `cache_control`). Uses
+    /// `NativeContentBlock` so each block serializes with its `"type"`
+    /// discriminator (`{"type":"text",...}`), which the Messages API requires
+    /// on every system block. See #141.
+    Blocks(Vec<NativeContentBlock>),
 }
 
 /// A single conversation message.
