@@ -32,6 +32,7 @@ async fn http_200_with_deny_body_denies() {
     let hook = HttpHook {
         if_pattern: None,
         asynchronous: false,
+        allowed_env_vars: vec![],
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -57,6 +58,7 @@ async fn http_url_not_allowlisted_skips() {
     let hook = HttpHook {
         if_pattern: None,
         asynchronous: false,
+        allowed_env_vars: vec![],
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -83,6 +85,7 @@ async fn http_non_2xx_is_allow() {
     let hook = HttpHook {
         if_pattern: None,
         asynchronous: false,
+        allowed_env_vars: vec![],
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -111,6 +114,7 @@ async fn http_updated_input_parses() {
     let hook = HttpHook {
         if_pattern: None,
         asynchronous: false,
+        allowed_env_vars: vec![],
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
@@ -143,6 +147,7 @@ async fn http_matcher_skips_non_matching_tools() {
     let hook = HttpHook {
         if_pattern: None,
         asynchronous: false,
+        allowed_env_vars: vec![],
         url: url.clone(),
         headers: BTreeMap::new(),
         timeout: Duration::from_secs(5),
