@@ -1598,10 +1598,18 @@ pub(crate) fn check_enforce_gate(
     if args.auto_allow {
         return Err("permissions.enforce = true is set; --auto-allow is refused".into());
     }
-    // bypassPermissions startup mode requires the latch already, but the
-    // enforce flag overrides even the latch.
-    if args.permission_mode.as_deref() == Some("bypassPermissions") {
-        return Err("permissions.enforce = true is set; bypassPermissions mode is refused".into());
+    // Reject every startup mode that materially weakens permissions:
+    //  - bypassPermissions skips the rules entirely (latch is overridden here),
+    //  - dontAsk rewrites every Ask -> Allow,
+    //  - acceptEdits auto-allows all file edits.
+    // A neutral mode (default/plan/auto) is left to run. See #178.
+    if let Some(mode) = args.permission_mode.as_deref()
+        && matches!(mode, "bypassPermissions" | "dontAsk" | "acceptEdits")
+    {
+        return Err(format!(
+            "permissions.enforce = true is set; --permission-mode {mode} is refused \
+             (it would weaken the enforced policy)"
+        ));
     }
     Ok(())
 }
@@ -1630,6 +1638,41 @@ mod enforce_tests {
         let settings = caliban_settings::Settings::default();
         let args = Args::try_parse_from(["caliban", "--no-permissions"]).unwrap();
         assert!(check_enforce_gate(&args, &settings).is_ok());
+    }
+
+    #[test]
+    fn enforce_true_blocks_weakening_permission_modes() {
+        // #178: dontAsk rewrites every Ask->Allow and acceptEdits auto-allows
+        // file edits; both materially weaken permissions, so an enterprise
+        // enforce=true policy must refuse them like bypassPermissions.
+        for mode in ["dontAsk", "acceptEdits"] {
+            let mut settings = caliban_settings::Settings::default();
+            settings.permissions.enforce = Some(true);
+            let args = Args::try_parse_from(["caliban", "--permission-mode", mode]).unwrap();
+            let result = check_enforce_gate(&args, &settings);
+            assert!(
+                result.is_err(),
+                "enforce=true must refuse --permission-mode {mode}"
+            );
+            assert!(
+                result.unwrap_err().contains(mode),
+                "refusal message should name the {mode} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_true_allows_neutral_permission_modes() {
+        // default/plan do not weaken permissions and must still start.
+        for mode in ["default", "plan"] {
+            let mut settings = caliban_settings::Settings::default();
+            settings.permissions.enforce = Some(true);
+            let args = Args::try_parse_from(["caliban", "--permission-mode", mode]).unwrap();
+            assert!(
+                check_enforce_gate(&args, &settings).is_ok(),
+                "enforce=true should still allow --permission-mode {mode}"
+            );
+        }
     }
 }
 
