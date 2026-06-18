@@ -118,6 +118,21 @@ pub(crate) fn exit_code_for(err: &HeadlessError) -> i32 {
     }
 }
 
+/// One-line stderr diagnostic for a non-success terminal stop in `--output-format
+/// text`, which otherwise prints nothing (no result frame). Mirrors the TUI's
+/// `[caliban: …]` [`StopCondition`] notices. Returns `None` for `Success` (normal
+/// completion prints the assistant text) and `Error` (the failure message is
+/// already surfaced via the returned `HeadlessError`). See #175.
+pub(crate) fn text_mode_stop_note(subtype: ResultSubtype, turns: u32) -> Option<String> {
+    match subtype {
+        ResultSubtype::MaxTurns => Some(format!("[caliban: max-turns ({turns}) reached]")),
+        ResultSubtype::Cancelled => Some("[caliban: cancelled]".to_string()),
+        ResultSubtype::BudgetExceeded => Some("[caliban: budget exceeded]".to_string()),
+        ResultSubtype::MaxTokens => Some("[caliban: max output tokens reached]".to_string()),
+        ResultSubtype::Success | ResultSubtype::Error => None,
+    }
+}
+
 /// All headless-specific knobs distilled into a single struct so the
 /// driver is independent of `clap` parsing.
 #[derive(Debug, Clone)]
@@ -1033,6 +1048,12 @@ impl<W: Write> HeadlessDriver<W> {
                 self.writer
                     .flush()
                     .map_err(|e| HeadlessError::Io(e.to_string()))?;
+                // Text mode prints no result frame, so a non-success terminal
+                // stop (max-turns, cancelled, budget) is otherwise completely
+                // silent. Surface a one-line diagnostic on stderr (#175).
+                if let Some(note) = text_mode_stop_note(s.subtype, s.turns) {
+                    eprintln!("{note}");
+                }
             }
             OutputFormat::Json => {
                 let json =
@@ -1179,6 +1200,30 @@ fn assistant_text(msg: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_mode_stop_note_for_non_success_terminal_stops() {
+        // #175: text mode must surface a notice for otherwise-silent terminal
+        // stops; Success/Error stay silent here.
+        assert_eq!(
+            text_mode_stop_note(ResultSubtype::MaxTurns, 3).as_deref(),
+            Some("[caliban: max-turns (3) reached]")
+        );
+        assert_eq!(
+            text_mode_stop_note(ResultSubtype::Cancelled, 0).as_deref(),
+            Some("[caliban: cancelled]")
+        );
+        assert_eq!(
+            text_mode_stop_note(ResultSubtype::BudgetExceeded, 0).as_deref(),
+            Some("[caliban: budget exceeded]")
+        );
+        assert_eq!(
+            text_mode_stop_note(ResultSubtype::MaxTokens, 0).as_deref(),
+            Some("[caliban: max output tokens reached]")
+        );
+        assert_eq!(text_mode_stop_note(ResultSubtype::Success, 1), None);
+        assert_eq!(text_mode_stop_note(ResultSubtype::Error, 1), None);
+    }
 
     #[test]
     fn exit_codes_match_adr_table() {
