@@ -135,6 +135,30 @@ impl Input {
         self.cursor += 1;
     }
 
+    /// Backslash-continuation: when the text immediately before the cursor
+    /// ends with an *unescaped* backslash (an odd-length run of `\`), drop
+    /// that backslash and insert a newline in its place, returning `true`.
+    /// An even-length run (`\\`, `\\\\`, …) is an escaped literal and leaves
+    /// the buffer untouched, returning `false`. Used so `\`+Enter continues
+    /// a line instead of submitting (caliban-ai/caliban#101).
+    pub(crate) fn take_line_continuation(&mut self) -> bool {
+        let trailing = self.buffer[..self.cursor]
+            .chars()
+            .rev()
+            .take_while(|&c| c == '\\')
+            .count();
+        if trailing % 2 == 0 {
+            return false;
+        }
+        // The unescaped backslash sits at the byte just before the cursor
+        // (`\` is single-byte ASCII), so removing it and inserting `\n`
+        // keeps the cursor at the continuation point.
+        self.cursor -= 1;
+        self.buffer.remove(self.cursor);
+        self.insert_newline();
+        true
+    }
+
     pub(crate) fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
@@ -392,6 +416,73 @@ mod tests {
             i.insert_char(c);
         }
         assert!(i.active_at_token().is_none());
+    }
+
+    #[test]
+    fn line_continuation_strips_trailing_backslash_and_inserts_newline() {
+        let mut i = Input::new();
+        for c in "foo\\".chars() {
+            i.insert_char(c);
+        }
+        assert!(i.take_line_continuation());
+        assert_eq!(i.buffer, "foo\n");
+        assert_eq!(i.cursor, 4);
+    }
+
+    #[test]
+    fn line_continuation_ignores_escaped_backslash() {
+        let mut i = Input::new();
+        for c in "foo\\\\".chars() {
+            i.insert_char(c);
+        }
+        assert!(!i.take_line_continuation());
+        assert_eq!(i.buffer, "foo\\\\");
+        assert_eq!(i.cursor, 5);
+    }
+
+    #[test]
+    fn line_continuation_handles_odd_run_of_backslashes() {
+        let mut i = Input::new();
+        for c in "foo\\\\\\".chars() {
+            i.insert_char(c);
+        }
+        assert!(i.take_line_continuation());
+        assert_eq!(i.buffer, "foo\\\\\n");
+        assert_eq!(i.cursor, 6);
+    }
+
+    #[test]
+    fn line_continuation_noop_without_trailing_backslash() {
+        let mut i = Input::new();
+        for c in "foo".chars() {
+            i.insert_char(c);
+        }
+        assert!(!i.take_line_continuation());
+        assert_eq!(i.buffer, "foo");
+        assert_eq!(i.cursor, 3);
+    }
+
+    #[test]
+    fn line_continuation_noop_on_empty_buffer() {
+        let mut i = Input::new();
+        assert!(!i.take_line_continuation());
+        assert_eq!(i.buffer, "");
+        assert_eq!(i.cursor, 0);
+    }
+
+    #[test]
+    fn line_continuation_uses_text_before_cursor() {
+        let mut i = Input::new();
+        for c in "foo\\bar".chars() {
+            i.insert_char(c);
+        }
+        // Move the cursor back to sit immediately after the backslash.
+        for _ in 0..3 {
+            i.cursor_left();
+        }
+        assert!(i.take_line_continuation());
+        assert_eq!(i.buffer, "foo\nbar");
+        assert_eq!(i.cursor, 4);
     }
 
     #[test]

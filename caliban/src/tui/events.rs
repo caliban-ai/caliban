@@ -974,6 +974,12 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             app.input.insert_newline();
         }
         (KeyCode::Enter, _) => {
+            // Backslash-continuation: a line ending in an unescaped `\`
+            // inserts a newline instead of submitting, so plain Enter can
+            // build a multi-line prompt (caliban-ai/caliban#101).
+            if app.input.take_line_continuation() {
+                return;
+            }
             let prompt = app.input.buffer.trim().to_string();
             if prompt.is_empty() {
                 return;
@@ -2083,6 +2089,25 @@ mod tests {
     // high-friction (many required handles), so we test the pure
     // helper that `handle_agent_event` delegates to.
     // -------------------------------------------------------------------
+
+    /// #101: plain Enter on a buffer ending in an unescaped `\` continues
+    /// the line (drops the backslash, inserts a newline) instead of
+    /// submitting. Driven through `handle_key` so the wiring in the Enter
+    /// arm is exercised, not just the `Input` helper.
+    #[test]
+    fn plain_enter_continues_line_on_trailing_backslash() {
+        let mut app = crate::tui::App::for_tests();
+        app.input.buffer = "first line\\".into();
+        app.input.cursor = app.input.buffer.len();
+        let mut stream = None;
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut stream,
+        );
+        assert_eq!(app.input.buffer, "first line\n");
+        assert_eq!(app.input.cursor, "first line\n".len());
+    }
 
     #[test]
     fn end_of_turn_is_silent() {
