@@ -465,6 +465,28 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_current_generation_models_priced() {
+        // Regression for #142: the rate-card globs must cover the model ids
+        // caliban actually defaults to / ships, not just one pinned generation.
+        // `default_model_for(Anthropic)` is `claude-sonnet-4-6` (caliban/src/args.rs);
+        // the current flagship is `claude-opus-4-8`. Both must resolve to non-zero.
+        let card = RateCard::embedded().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
+
+        let sonnet = card
+            .resolve("anthropic", "claude-sonnet-4-6", today)
+            .expect("default model claude-sonnet-4-6 must be priced");
+        assert!((sonnet.input_per_mtok - 3.0).abs() < 1e-9);
+        assert!((sonnet.output_per_mtok - 15.0).abs() < 1e-9);
+
+        let opus = card
+            .resolve("anthropic", "claude-opus-4-8", today)
+            .expect("flagship claude-opus-4-8 must be priced");
+        assert!((opus.input_per_mtok - 15.0).abs() < 1e-9);
+        assert!((opus.output_per_mtok - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn openai_gpt5_pricing() {
         let card = RateCard::embedded().unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
