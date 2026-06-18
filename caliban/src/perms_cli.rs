@@ -83,6 +83,68 @@ fn action_str(a: caliban_agent_core::Action) -> &'static str {
     }
 }
 
+/// Append the built-in `default_rules()` tail to a config rule list, mirroring
+/// the runtime gate (`startup.rs`). The predictors (`test`/`explain`, and
+/// `list --effective`) must evaluate the same list the runtime does, otherwise
+/// a tool covered only by the defaults (e.g. `Bash` under a Read-only config)
+/// is mispredicted as "no match" when the runtime would `Ask` (#179).
+fn with_default_rules(mut rules: Vec<caliban_agent_core::Rule>) -> Vec<caliban_agent_core::Rule> {
+    rules.extend(caliban_agent_core::default_rules());
+    rules
+}
+
+/// Render a lossless, order-preserving export of `rules` in `toml` or `json`.
+/// Both formats emit the canonical `permissions.rules` ordered array
+/// (`RuleSpec`), preserving `comment`/`reason`/`expires_at` and source order so
+/// export→import round-trips (#179). Returns `Err` for an unknown format.
+fn render_export(rules: &[caliban_agent_core::Rule], format: &str) -> Result<String, String> {
+    let specs: Vec<caliban_settings::RuleSpec> = rules
+        .iter()
+        .map(|r| caliban_settings::RuleSpec {
+            pattern: r.tool.clone(),
+            action: action_str(r.action).to_owned(),
+            comment: r.comment.clone(),
+            reason: r.reason.clone(),
+            expires_at: r.expires_at,
+            tool: None,
+        })
+        .collect();
+    match format {
+        "toml" => {
+            use std::fmt::Write as _;
+            let mut out = String::new();
+            for s in &specs {
+                out.push_str("\n[[permissions.rules]]\n");
+                let _ = writeln!(out, "pattern = {}", toml_quote(&s.pattern));
+                let _ = writeln!(out, "action  = {}", toml_quote(&s.action));
+                if let Some(c) = &s.comment {
+                    let _ = writeln!(out, "comment = {}", toml_quote(c));
+                }
+                if let Some(r) = &s.reason {
+                    let _ = writeln!(out, "reason  = {}", toml_quote(r));
+                }
+                if let Some(e) = &s.expires_at {
+                    let _ = writeln!(out, "expires_at = {}", toml_quote(&e.to_rfc3339()));
+                }
+            }
+            Ok(out)
+        }
+        "json" => {
+            let root = serde_json::json!({ "permissions": { "rules": specs } });
+            serde_json::to_string_pretty(&root).map_err(|e| format!("serialization error: {e}"))
+        }
+        other => Err(format!(
+            "unknown format {other:?}; expected 'toml' or 'json'"
+        )),
+    }
+}
+
+/// Quote and escape a string as a TOML basic string.
+fn toml_quote(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 // ---------------------------------------------------------------------------
 // Task 6.2: list / test / explain
 // ---------------------------------------------------------------------------
@@ -103,7 +165,12 @@ fn cmd_list(scope: Option<&str>, effective: bool, json: bool) -> i32 {
         eprintln!("[caliban perms] failed to load settings");
         return 1;
     };
-    let rules = loaded.settings.permission_rules();
+    // `--effective` mirrors the runtime gate, which appends default_rules().
+    let rules = if effective {
+        with_default_rules(loaded.settings.permission_rules())
+    } else {
+        loaded.settings.permission_rules()
+    };
     if json {
         match serde_json::to_string_pretty(&rules) {
             Ok(s) => println!("{s}"),
@@ -131,7 +198,7 @@ fn cmd_test(tool: &str, input: &serde_json::Value) -> i32 {
         eprintln!("[caliban perms] failed to load settings");
         return 1;
     };
-    let rules = loaded.settings.permission_rules();
+    let rules = with_default_rules(loaded.settings.permission_rules());
     let ctx = caliban_agent_core::ToolCtx {
         turn_index: 0,
         tool_use_id: "test",
@@ -159,7 +226,7 @@ fn cmd_explain(tool: &str, input: &serde_json::Value) -> i32 {
         eprintln!("[caliban perms] failed to load settings");
         return 1;
     };
-    let rules = loaded.settings.permission_rules();
+    let rules = with_default_rules(loaded.settings.permission_rules());
     let ctx = caliban_agent_core::ToolCtx {
         turn_index: 0,
         tool_use_id: "test",
@@ -309,47 +376,18 @@ fn cmd_export(scope: Option<&str>, format: &str) -> i32 {
         return 1;
     };
     let rules = loaded.settings.permission_rules();
-    match format {
-        "toml" => {
-            for r in &rules {
-                println!();
-                println!("[[permissions.rules]]");
-                println!("pattern = \"{}\"", r.tool.replace('"', "\\\""));
-                println!("action  = \"{}\"", action_str(r.action));
-            }
+    match render_export(&rules, format) {
+        Ok(s) => {
+            println!("{s}");
             0
         }
-        "json" => {
-            let by_action = serde_json::json!({
-                "permissions": {
-                    "allow": rules.iter()
-                        .filter(|r| r.action == caliban_agent_core::Action::Allow)
-                        .map(|r| r.tool.clone())
-                        .collect::<Vec<_>>(),
-                    "ask": rules.iter()
-                        .filter(|r| r.action == caliban_agent_core::Action::Ask)
-                        .map(|r| r.tool.clone())
-                        .collect::<Vec<_>>(),
-                    "deny": rules.iter()
-                        .filter(|r| r.action == caliban_agent_core::Action::Deny)
-                        .map(|r| r.tool.clone())
-                        .collect::<Vec<_>>(),
-                }
-            });
-            match serde_json::to_string_pretty(&by_action) {
-                Ok(s) => {
-                    println!("{s}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("[caliban perms] serialization error: {e}");
-                    1
-                }
-            }
-        }
-        other => {
-            eprintln!("[caliban perms] unknown format {other:?}; expected 'toml' or 'json'");
+        Err(e) if e.starts_with("unknown format") => {
+            eprintln!("[caliban perms] {e}");
             2
+        }
+        Err(e) => {
+            eprintln!("[caliban perms] {e}");
+            1
         }
     }
 }
@@ -444,5 +482,106 @@ fn cmd_lint(scope: Option<&str>) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caliban_agent_core::{Action, Rule};
+
+    fn rule(tool: &str, action: Action) -> Rule {
+        Rule {
+            tool: tool.into(),
+            action,
+            comment: None,
+            reason: None,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn predictor_appends_default_rules_so_bash_predicts_ask() {
+        // #179: a Read-only config must still predict the runtime decision for
+        // an uncovered tool — the default_rules() `*` catch-all Asks.
+        let rules = with_default_rules(vec![rule("Read", Action::Allow)]);
+        let ctx = caliban_agent_core::ToolCtx {
+            turn_index: 0,
+            tool_use_id: "t",
+            tool_name: "Bash",
+            input: &serde_json::json!({"command": "ls"}),
+        };
+        let matched =
+            caliban_agent_core::evaluate_rules(&rules, &ctx).expect("default catch-all must match");
+        assert_eq!(
+            matched.action,
+            Action::Ask,
+            "Bash under a Read-only config should predict Ask, not fall through"
+        );
+    }
+
+    fn sample_rules() -> Vec<Rule> {
+        vec![
+            Rule {
+                tool: "Bash:rm *".into(),
+                action: Action::Deny,
+                comment: Some("dangerous".into()),
+                reason: Some("no destructive shell".into()),
+                expires_at: None,
+            },
+            Rule {
+                tool: "Read".into(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: Some(
+                    chrono::DateTime::parse_from_rfc3339("2030-01-02T03:04:05Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                ),
+            },
+        ]
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Root {
+        permissions: caliban_settings::Permissions,
+    }
+
+    #[test]
+    fn export_json_roundtrips_fields_and_order() {
+        let out = render_export(&sample_rules(), "json").unwrap();
+        let root: Root = serde_json::from_str(&out).unwrap();
+        let specs = &root.permissions.rules;
+        assert_eq!(specs.len(), 2);
+        // Order preserved: Deny before Allow.
+        assert_eq!(specs[0].pattern, "Bash:rm *");
+        assert_eq!(specs[0].action, "deny");
+        assert_eq!(specs[0].comment.as_deref(), Some("dangerous"));
+        assert_eq!(specs[0].reason.as_deref(), Some("no destructive shell"));
+        assert_eq!(specs[1].pattern, "Read");
+        assert!(specs[1].expires_at.is_some(), "expires_at must survive");
+    }
+
+    #[test]
+    fn export_toml_roundtrips_fields_and_order() {
+        let out = render_export(&sample_rules(), "toml").unwrap();
+        let root: Root = toml::from_str(&out).unwrap();
+        let specs = &root.permissions.rules;
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].pattern, "Bash:rm *");
+        assert_eq!(specs[0].action, "deny");
+        assert_eq!(specs[0].comment.as_deref(), Some("dangerous"));
+        assert_eq!(specs[0].reason.as_deref(), Some("no destructive shell"));
+        assert_eq!(specs[1].pattern, "Read");
+        assert_eq!(
+            specs[1].expires_at.unwrap().to_rfc3339(),
+            "2030-01-02T03:04:05+00:00"
+        );
+    }
+
+    #[test]
+    fn export_unknown_format_errs() {
+        assert!(render_export(&[], "yaml").is_err());
     }
 }

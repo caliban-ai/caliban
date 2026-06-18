@@ -202,11 +202,11 @@ action = "ask"
 }
 
 #[test]
-fn perms_test_no_match_exits_zero_with_fallthrough() {
-    // With an explicit v2 ruleset, `permission_rules()` returns the
-    // ordered rules *without* appending the built-in `("*", ask)`
-    // catch-all. Testing a tool no rule matches exercises the no-match
-    // fall-through branch (exit 0).
+fn perms_test_predicts_ask_via_default_catchall() {
+    // #179: the predictor mirrors the runtime gate, which appends
+    // default_rules(). A Read-only config therefore predicts `Ask` (exit 2)
+    // for an otherwise-uncovered tool via the built-in `("*", ask)` catch-all,
+    // not a "fall through" that can never happen at runtime.
     let dir = tempfile::tempdir().unwrap();
     write_settings_with_rules(
         dir.path(),
@@ -217,8 +217,8 @@ action = "allow"
 "#,
     );
     let out = perms(dir.path(), &["test", "Bash", r#"{"command":"ls"}"#]);
-    assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("fall through"));
+    assert_eq!(out.status.code(), Some(2), "Bash should predict Ask");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("MATCH"));
 }
 
 #[test]
@@ -272,7 +272,9 @@ action = "allow"
 }
 
 #[test]
-fn perms_export_json_format_is_grouped_by_action() {
+fn perms_export_json_is_ordered_rules() {
+    // #179: JSON export emits the canonical ordered `permissions.rules` array
+    // (lossless, order-preserving) rather than re-bucketing by action.
     let dir = tempfile::tempdir().unwrap();
     write_settings_with_rules(
         dir.path(),
@@ -280,12 +282,16 @@ fn perms_export_json_format_is_grouped_by_action() {
 [[permissions.rules]]
 pattern = "Bash:rm *"
 action = "deny"
+comment = "dangerous"
 "#,
     );
     let out = perms(dir.path(), &["export", "--format", "json"]);
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    assert!(v["permissions"]["deny"].is_array());
+    let rules = v["permissions"]["rules"].as_array().expect("rules array");
+    assert_eq!(rules[0]["pattern"], "Bash:rm *");
+    assert_eq!(rules[0]["action"], "deny");
+    assert_eq!(rules[0]["comment"], "dangerous");
 }
 
 #[test]
