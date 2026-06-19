@@ -128,6 +128,11 @@ pub struct HooksConfig {
     pub allowed_http_hook_urls: Vec<String>,
     /// Env-var allowlist for `${VAR}` expansion in HTTP/command handlers.
     pub http_hook_allowed_env_vars: Vec<String>,
+    /// Opt-in allowing HTTP hooks to target loopback/private addresses (for a
+    /// genuinely-local hook server). Link-local / cloud-metadata stays blocked
+    /// regardless. Off by default — a hostile config must not reach internal
+    /// services (#217).
+    pub allow_local_http_hook_targets: bool,
     /// Event-name → ordered handler list. Event names are the `PascalCase`
     /// taxonomy from the ADR (e.g. `"SessionStart"`).
     pub events: BTreeMap<String, Vec<HookHandlerConfig>>,
@@ -194,6 +199,7 @@ impl HooksConfig {
             allow_managed_hooks_only: raw.allow_managed_hooks_only,
             allowed_http_hook_urls: raw.allowed_http_hook_urls,
             http_hook_allowed_env_vars: raw.http_hook_allowed_env_vars,
+            allow_local_http_hook_targets: raw.allow_local_http_hook_targets,
             events: BTreeMap::new(),
         };
         for (event_name, groups) in raw.hooks {
@@ -220,6 +226,8 @@ impl HooksConfig {
         project.disable_all_hooks = project.disable_all_hooks || user.disable_all_hooks;
         project.allow_managed_hooks_only =
             project.allow_managed_hooks_only || user.allow_managed_hooks_only;
+        project.allow_local_http_hook_targets =
+            project.allow_local_http_hook_targets || user.allow_local_http_hook_targets;
         // Array fields: project entries take priority but user entries append.
         for u in user.allowed_http_hook_urls {
             if !project.allowed_http_hook_urls.contains(&u) {
@@ -261,6 +269,7 @@ struct RawConfig {
     allow_managed_hooks_only: bool,
     allowed_http_hook_urls: Vec<String>,
     http_hook_allowed_env_vars: Vec<String>,
+    allow_local_http_hook_targets: bool,
     hooks: BTreeMap<String, Vec<RawMatcherGroup>>,
 }
 
