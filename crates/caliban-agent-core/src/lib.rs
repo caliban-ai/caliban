@@ -70,7 +70,8 @@ pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
 pub use stream::{
-    InputProvider, RunOutcome, RunSettings, StopCondition, TurnEvent, TurnEventStream, TurnOutcome,
+    InputProvider, RunOutcome, RunSettings, StopCondition, StopLevel, StopSurface, TurnEvent,
+    TurnEventStream, TurnOutcome,
 };
 pub use todos::{SharedTodos, Todo, TodoStatus, new_shared_todos};
 pub use tool::{Tool, ToolContext, ToolError};

@@ -16,6 +16,7 @@ mod refreshing_provider;
 mod router;
 mod settings_cli;
 mod startup;
+mod stream_decode;
 mod subcommands;
 mod system_prompt;
 mod tui;

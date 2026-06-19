@@ -12,7 +12,6 @@
 //! - [`run_and_render`] — single-prompt agent driver.
 //! - [`run_headless`] — `-p` / `--print` agent driver.
 
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -515,9 +514,8 @@ pub(crate) async fn run_and_render(
     use caliban_agent_core::TurnEvent;
 
     let requested_model = agent.active_model().as_str().to_string();
-    let mut seen_mismatches: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut decoder = crate::stream_decode::StreamDecoder::new();
     let mut stream = agent.stream_until_done(messages, cancel);
-    let mut tool_inputs: HashMap<String, String> = HashMap::new();
     let mut at_column_zero = true;
     let mut final_messages: Vec<Message> = Vec::new();
     let mut total_usage = Usage::default();
@@ -534,20 +532,13 @@ pub(crate) async fn run_and_render(
 
     while let Some(event) = stream.next().await {
         match event? {
-            TurnEvent::TurnStart { model: actual, .. }
-                if !actual.is_empty() && actual != requested_model =>
-            {
+            TurnEvent::TurnStart { model: actual, .. } => {
                 // F4: surface silent model substitution by LM Studio /
-                // similar OpenAI-compatible servers. The response's
-                // `model` field is the actually-served model ID; if it
-                // doesn't match the requested model, write one line to
-                // stderr the first time we see it (deduped per pair so
-                // a multi-turn run doesn't spam).
-                let key = format!("{requested_model}=>{actual}");
-                if seen_mismatches.insert(key) {
-                    eprintln!(
-                        "[caliban] warning: model mismatch — requested {requested_model:?} but provider responded with {actual:?}"
-                    );
+                // similar OpenAI-compatible servers. The response's `model`
+                // field is the actually-served model ID; warn once per pair
+                // (the shared decoder dedups so a multi-turn run doesn't spam).
+                if let Some(warning) = decoder.model_mismatch_warning(&requested_model, &actual) {
+                    eprintln!("{warning}");
                 }
             }
             TurnEvent::AssistantTextDelta { text, .. } => {
@@ -564,7 +555,7 @@ pub(crate) async fn run_and_render(
                 if !at_column_zero {
                     eprintln!();
                 }
-                tool_inputs.insert(tool_use_id.clone(), String::new());
+                decoder.tool_started(tool_use_id.clone(), name.clone());
                 eprint!("\u{1f527} {name}(");
             }
             TurnEvent::ToolCallInputDelta {
@@ -572,10 +563,7 @@ pub(crate) async fn run_and_render(
                 partial_json,
                 ..
             } => {
-                tool_inputs
-                    .entry(tool_use_id)
-                    .or_default()
-                    .push_str(&partial_json);
+                decoder.tool_input_delta(tool_use_id, &partial_json);
             }
             TurnEvent::ToolCallEnd {
                 tool_use_id,
@@ -583,7 +571,10 @@ pub(crate) async fn run_and_render(
                 content,
                 ..
             } if !quiet => {
-                let input_str = tool_inputs.remove(&tool_use_id).unwrap_or_default();
+                let input_str = decoder
+                    .take_tool_input(&tool_use_id)
+                    .map(|t| t.json)
+                    .unwrap_or_default();
                 let input_summary = summarize(&input_str, 80);
                 let result_summary = summarize_blocks(&content, 80);
                 let prefix = if is_error { "(error) " } else { "" };
@@ -679,28 +670,12 @@ pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition)
 /// headless drivers' surfacing of the lmstudio probe's Findings 5 + 9,
 /// closing the previously-missed `run_and_render` path.
 ///
-/// Kept separate from `tui::events::stopped_for_surface` (which carries
-/// a `level` color hint) so this stays free of tui-specific types and
-/// can be unit-tested in isolation.
+/// Delegates to the canonical [`caliban_agent_core::StopCondition::surface`]
+/// (this driver wants only the line, not the `level` color hint), so the
+/// single-prompt CLI shares the exact wording with the TUI and headless
+/// drivers instead of keeping a third drifted copy (#154).
 fn stopped_for_surface_line(stopped_for: &caliban_agent_core::StopCondition) -> Option<String> {
-    use caliban_agent_core::StopCondition;
-    match stopped_for {
-        StopCondition::EndOfTurn => None,
-        StopCondition::ProviderError(msg) => Some(format!("[caliban: provider error: {msg}]")),
-        StopCondition::HookDenied(msg) => Some(format!("[caliban: hook denied: {msg}]")),
-        StopCondition::CompactionFailed(msg) => {
-            Some(format!("[caliban: compaction failed: {msg}]"))
-        }
-        StopCondition::MaxTurnsReached(n) => Some(format!("[caliban: max-turns ({n}) reached]")),
-        StopCondition::Cancelled => Some("[caliban: cancelled]".to_string()),
-        StopCondition::MaxTokensExhausted => Some(
-            "[caliban: max-tokens recovery exhausted — try /effort low to reduce reasoning budget]"
-                .to_string(),
-        ),
-        StopCondition::Refusal(msg) => Some(format!("[caliban: model refusal: {msg}]")),
-        StopCondition::ContentFilter(msg) => Some(format!("[caliban: content filter: {msg}]")),
-        StopCondition::StreamIdle(d) => Some(format!("[caliban: stream idle for {d:?}]")),
-    }
+    stopped_for.surface().map(|s| s.line)
 }
 
 /// Return `true` when the last `Assistant` message in `messages` has at
