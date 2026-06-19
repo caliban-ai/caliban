@@ -843,7 +843,10 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             });
             let prompt = match hook_decision {
                 Ok(caliban_agent_core::HookDecision::Allow) => prompt,
-                Ok(caliban_agent_core::HookDecision::Deny(msg)) => {
+                Ok(
+                    caliban_agent_core::HookDecision::Deny(msg)
+                    | caliban_agent_core::HookDecision::AskDenied(msg),
+                ) => {
                     app.toast = Some(toast::Toast::error(format!(
                         "prompt rejected by hook: {msg}"
                     )));

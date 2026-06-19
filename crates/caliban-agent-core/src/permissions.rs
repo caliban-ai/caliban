@@ -350,7 +350,10 @@ impl AskHandler for NonInteractiveAskHandler {
         if self.auto_allow {
             HookDecision::Allow
         } else {
-            HookDecision::Deny(non_interactive_deny_message(ctx.tool_name))
+            // A distinct variant (not plain Deny) so acceptEdits/dontAsk can
+            // flip exactly this synthesized-Ask case to Allow without sniffing
+            // the reason text (#216).
+            HookDecision::AskDenied(non_interactive_deny_message(ctx.tool_name))
         }
     }
 }
@@ -498,7 +501,7 @@ impl Hooks for PermissionsHook {
                     tracing::warn!(error = %e, "permission_request hook error (non-fatal)");
                 }
                 let decision = self.ask.prompt(ctx).await;
-                if matches!(decision, HookDecision::Deny(_))
+                if matches!(decision, HookDecision::Deny(_) | HookDecision::AskDenied(_))
                     && let Err(e) = self.inner.permission_denied(&perm_ctx).await
                 {
                     tracing::warn!(error = %e, "permission_denied hook error (non-fatal)");
@@ -758,7 +761,9 @@ mod tests {
         let h = hook(default_rules());
         let i = serde_json::json!({"command": "x"});
         let d = h.before_tool(&ctx("Bash", &i)).await.unwrap();
-        assert!(matches!(d, HookDecision::Deny(_)));
+        // A synthesized non-interactive Ask→deny is the typed AskDenied variant
+        // (#216), not a plain Deny.
+        assert!(matches!(d, HookDecision::AskDenied(_)));
     }
 
     /// File-edit tools should suggest `--permission-mode acceptEdits` because
@@ -769,8 +774,8 @@ mod tests {
         let h = hook(default_rules());
         let i = serde_json::json!({"file_path": "/tmp/x", "content": "y"});
         let d = h.before_tool(&ctx("Write", &i)).await.unwrap();
-        let HookDecision::Deny(msg) = d else {
-            panic!("expected Deny, got {d:?}");
+        let HookDecision::AskDenied(msg) = d else {
+            panic!("expected AskDenied, got {d:?}");
         };
         assert!(msg.contains("--permission-mode acceptEdits"), "got: {msg}");
         assert!(msg.contains("'Write'"), "got: {msg}");
@@ -784,8 +789,8 @@ mod tests {
         let h = hook(default_rules());
         let i = serde_json::json!({"command": "ls"});
         let d = h.before_tool(&ctx("Bash", &i)).await.unwrap();
-        let HookDecision::Deny(msg) = d else {
-            panic!("expected Deny, got {d:?}");
+        let HookDecision::AskDenied(msg) = d else {
+            panic!("expected AskDenied, got {d:?}");
         };
         assert!(msg.contains("--allow 'Bash"), "got: {msg}");
         assert!(msg.contains("dangerous"), "got: {msg}");
@@ -805,8 +810,8 @@ mod tests {
         let h = hook(rules);
         let i = serde_json::json!({"url": "https://example.com"});
         let d = h.before_tool(&ctx("WebFetch", &i)).await.unwrap();
-        let HookDecision::Deny(msg) = d else {
-            panic!("expected Deny, got {d:?}");
+        let HookDecision::AskDenied(msg) = d else {
+            panic!("expected AskDenied, got {d:?}");
         };
         assert!(msg.contains("--allow '<Tool>'"), "got: {msg}");
         assert!(

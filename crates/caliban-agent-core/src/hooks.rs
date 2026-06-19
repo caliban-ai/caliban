@@ -24,6 +24,15 @@ pub enum HookDecision {
     Allow,
     /// Reject the dispatch / submission; the reason is surfaced to the user.
     Deny(String),
+    /// A denial that originated from a *synthesized* non-interactive `Ask` —
+    /// the [`NonInteractiveAskHandler`](crate::permissions::NonInteractiveAskHandler)
+    /// turning an `Ask` rule into a deny because there's no TTY. It carries the
+    /// same human-readable reason and behaves exactly like
+    /// [`Deny`](HookDecision::Deny) everywhere, but is a distinct variant so
+    /// `acceptEdits`/`dontAsk` can flip *only* a synthesized Ask back to
+    /// `Allow` — without sniffing the reason text, which let a static `Deny`
+    /// whose reason merely contained the sentinel phrase be flipped too (#216).
+    AskDenied(String),
     /// Rewrite the input JSON (for `before_tool`) or the prompt envelope (for
     /// `user_prompt_submit`) before dispatch. The new value is threaded through
     /// composed hooks so subsequent layers see the rewritten value.
@@ -713,6 +722,7 @@ impl Hooks for CompositeHooks {
             match h.before_tool(&layer_ctx).await? {
                 HookDecision::Allow => {}
                 HookDecision::Deny(msg) => return Ok(HookDecision::Deny(msg)),
+                HookDecision::AskDenied(msg) => return Ok(HookDecision::AskDenied(msg)),
                 HookDecision::UpdatedInput(new_input) => {
                     latest_input = Some(new_input);
                 }
@@ -777,6 +787,7 @@ impl Hooks for CompositeHooks {
             match h.user_prompt_submit(&layer_ctx).await? {
                 HookDecision::Allow => {}
                 HookDecision::Deny(msg) => return Ok(HookDecision::Deny(msg)),
+                HookDecision::AskDenied(msg) => return Ok(HookDecision::AskDenied(msg)),
                 HookDecision::UpdatedInput(new_input) => {
                     // Only string rewrites are meaningful for prompts.
                     if let Some(s) = new_input.as_str() {

@@ -87,7 +87,7 @@ impl ModeFilter {
 #[async_trait]
 impl Hooks for ModeFilter {
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        match self.mode.load() {
+        let decision = match self.mode.load() {
             PermissionMode::BypassPermissions => {
                 if self.bypass_latch {
                     tracing::warn!(
@@ -151,7 +151,12 @@ impl Hooks for ModeFilter {
                 Ok(rewrite_ask_to_allow(inner))
             }
             PermissionMode::Default => self.inner.before_tool(ctx).await,
-        }
+        };
+        // Contain the internal AskDenied marker: any synthesized Ask→Deny the
+        // active mode did NOT flip to Allow leaves the permission layer as a
+        // plain Deny, so outer layers only ever see Allow/Deny/UpdatedInput
+        // (#216).
+        decision.map(normalize_ask_denied)
     }
 
     async fn after_tool(
@@ -303,23 +308,29 @@ impl ModeFilter {
 }
 
 fn rewrite_ask_to_allow(decision: HookDecision) -> HookDecision {
-    // Today, PermissionsHook resolves Ask synchronously into Allow/Deny via
-    // its installed AskHandler before this code sees it. There is no
-    // `HookDecision::Ask` enum variant exposed to outer layers — the inner
-    // hook converts Ask into a concrete Allow/Deny. `dontAsk` mode flips
-    // any non-interactive Deny that was synthesized by the
-    // NonInteractiveAskHandler back into Allow (the spec's "every Ask
-    // becomes Allow" semantics).
+    // PermissionsHook resolves Ask synchronously into a concrete decision via
+    // its installed AskHandler before this code sees it. A synthesized
+    // non-interactive Ask→Deny arrives as `HookDecision::AskDenied`; `dontAsk`
+    // (and `acceptEdits`, for file-edit tools) flips exactly that case back to
+    // Allow — the spec's "every Ask becomes Allow" semantics.
     //
-    // We detect that synthesized-Ask case by the textual marker
-    // `"requires interactive approval"` in the Deny reason — this is the
-    // exact message NonInteractiveAskHandler emits. Real, rule-based
-    // Denies have a different reason ("permission denied for tool …") and
-    // pass through.
+    // This is keyed on the typed variant, not the reason text: a real,
+    // rule-based `Deny` always passes through unchanged, even if its configured
+    // `reason` happens to contain the non-interactive sentinel phrase (#216 —
+    // the old `Deny(reason).contains("requires interactive approval")` sniff
+    // misclassified such a Deny as a synthesized Ask and flipped it to Allow).
     match decision {
-        HookDecision::Deny(reason) if reason.contains("requires interactive approval") => {
-            HookDecision::Allow
-        }
+        HookDecision::AskDenied(_) => HookDecision::Allow,
+        other => other,
+    }
+}
+
+/// Normalize a synthesized [`HookDecision::AskDenied`] into a plain
+/// [`HookDecision::Deny`] for the mode branches that do *not* flip Ask→Allow,
+/// so the internal marker never escapes the mode filter to outer layers.
+fn normalize_ask_denied(decision: HookDecision) -> HookDecision {
+    match decision {
+        HookDecision::AskDenied(reason) => HookDecision::Deny(reason),
         other => other,
     }
 }
@@ -566,6 +577,66 @@ mod tests {
         assert!(
             matches!(d, HookDecision::Deny(_)),
             "dontAsk must NOT override an explicit rule-based Deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn dont_ask_preserves_static_deny_whose_reason_contains_sentinel() {
+        // #216: a real rule-based Deny whose configured `reason` happens to
+        // contain the non-interactive sentinel phrase must NOT be misclassified
+        // as a synthesized Ask and flipped to Allow under dontAsk.
+        let mut rules = vec![Rule {
+            tool: "Write".into(),
+            action: Action::Deny,
+            comment: None,
+            reason: Some(
+                "blocked: this action requires interactive approval from a human reviewer".into(),
+            ),
+            expires_at: None,
+        }];
+        rules.extend(crate::permissions::default_rules());
+        let inner = permissions_hook(
+            rules,
+            Arc::new(NonInteractiveAskHandler { auto_allow: false }),
+        );
+        let mode = SharedPermissionMode::new(PermissionMode::DontAsk);
+        let filter = ModeFilter::new(mode, inner, None, false);
+
+        let d = filter
+            .before_tool(&ctx("Write", &json!({"path": "/repo/x", "content": ""})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(d, HookDecision::Deny(_)),
+            "a static Deny whose reason contains the sentinel must still deny under dontAsk (#216)"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_edits_preserves_static_deny_whose_reason_contains_sentinel() {
+        // Same as above for acceptEdits (which targets file-edit Ask rules).
+        let mut rules = vec![Rule {
+            tool: "Write".into(),
+            action: Action::Deny,
+            comment: None,
+            reason: Some("requires interactive approval — do not auto-apply".into()),
+            expires_at: None,
+        }];
+        rules.extend(crate::permissions::default_rules());
+        let inner = permissions_hook(
+            rules,
+            Arc::new(NonInteractiveAskHandler { auto_allow: false }),
+        );
+        let mode = SharedPermissionMode::new(PermissionMode::AcceptEdits);
+        let filter = ModeFilter::new(mode, inner, None, false);
+
+        let d = filter
+            .before_tool(&ctx("Write", &json!({"path": "/repo/x", "content": ""})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(d, HookDecision::Deny(_)),
+            "a static Deny whose reason contains the sentinel must still deny under acceptEdits (#216)"
         );
     }
 

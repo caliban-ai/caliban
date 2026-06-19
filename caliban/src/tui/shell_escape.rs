@@ -96,7 +96,7 @@ pub(crate) async fn run_shell_escape(
         // user-driven, single-shot run; rewriting the command via hooks is
         // not supported in v1.
         Ok(HookDecision::Allow | HookDecision::UpdatedInput(_)) => {}
-        Ok(HookDecision::Deny(msg)) => {
+        Ok(HookDecision::Deny(msg) | HookDecision::AskDenied(msg)) => {
             return ShellEscapeOutcome {
                 command,
                 output: String::new(),
