@@ -25,7 +25,6 @@ pub(crate) mod input;
 pub(crate) mod schema;
 pub(crate) mod session_loader;
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -128,7 +127,10 @@ pub(crate) fn text_mode_stop_note(subtype: ResultSubtype, turns: u32) -> Option<
         ResultSubtype::MaxTurns => Some(format!("[caliban: max-turns ({turns}) reached]")),
         ResultSubtype::Cancelled => Some("[caliban: cancelled]".to_string()),
         ResultSubtype::BudgetExceeded => Some("[caliban: budget exceeded]".to_string()),
-        ResultSubtype::MaxTokens => Some("[caliban: max output tokens reached]".to_string()),
+        ResultSubtype::MaxTokens => Some(
+            "[caliban: max-tokens recovery exhausted \u{2014} try /effort low to reduce reasoning budget]"
+                .to_string(),
+        ),
         ResultSubtype::Success | ResultSubtype::Error => None,
     }
 }
@@ -264,23 +266,15 @@ pub(crate) struct HeadlessRunSummary {
 /// the frame was emitted at `ToolCallStart` time with `input: null`,
 /// which read like "the tool was called with no arguments" even though
 /// the matching `tool_result` would later confirm the real input.
-#[derive(Debug, Default)]
-struct ToolCallBuf {
-    /// Tool name, captured at `ToolCallStart`.
-    name: String,
-    /// Accumulated JSON fragments from `ToolCallInputDelta` events.
-    input_json: String,
-}
-
 /// Stateful headless driver. Owns the writer and the run config; takes
 /// ownership of the message vector and the agent.
 pub(crate) struct HeadlessDriver<W: Write> {
     writer: W,
     config: HeadlessRunConfig,
-    /// In-flight tool calls awaiting their full input JSON. Cleared at
-    /// the start of each `run_single_pass`; entries are removed on
-    /// `ToolCallEnd`.
-    pending_tool_calls: HashMap<String, ToolCallBuf>,
+    /// Shared stream-decode state: in-flight tool-input accumulation (cleared
+    /// at the start of each `run_single_pass`, removed per `ToolCallEnd`) plus
+    /// run-level model-mismatch dedup (#154).
+    decoder: crate::stream_decode::StreamDecoder,
     /// Running tally of `ToolCallEnd` events seen across the entire run.
     /// Surfaced in non-`success` `result` frames (F7 follow-up) so consumers
     /// can distinguish an empty assistant reply from a genuine tool loop.
@@ -296,10 +290,6 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// session under `--session NAME` (F1 follow-up). Empty until the
     /// stream produces a `RunEnd` event.
     final_messages: Vec<Message>,
-    /// Model-mismatch warnings already emitted this run, keyed by the
-    /// `(requested, actual)` pair. Dedups so a multi-turn run against a
-    /// hot-swapped server doesn't spam the same warning every turn (F4).
-    seen_model_mismatches: std::collections::HashSet<(String, String)>,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -330,11 +320,10 @@ impl<W: Write> HeadlessDriver<W> {
         Self {
             writer,
             config,
-            pending_tool_calls: HashMap::new(),
+            decoder: crate::stream_decode::StreamDecoder::new(),
             tool_calls_seen: 0,
             last_assistant_text: String::new(),
             final_messages: Vec::new(),
-            seen_model_mismatches: std::collections::HashSet::new(),
         }
     }
 
@@ -597,13 +586,7 @@ impl<W: Write> HeadlessDriver<W> {
                 // emitted at `ToolCallEnd` time so it can carry the fully
                 // streamed input JSON instead of `null`.
                 if self.buffers_tool_io() {
-                    self.pending_tool_calls.insert(
-                        tool_use_id,
-                        ToolCallBuf {
-                            name,
-                            input_json: String::new(),
-                        },
-                    );
+                    self.decoder.tool_started(tool_use_id, name);
                 }
             }
             TurnEvent::ToolCallInputDelta {
@@ -611,10 +594,8 @@ impl<W: Write> HeadlessDriver<W> {
                 partial_json,
                 ..
             } => {
-                if self.buffers_tool_io()
-                    && let Some(buf) = self.pending_tool_calls.get_mut(&tool_use_id)
-                {
-                    buf.input_json.push_str(&partial_json);
+                if self.buffers_tool_io() {
+                    self.decoder.tool_input_delta(tool_use_id, &partial_json);
                 }
             }
             TurnEvent::ToolCallEnd {
@@ -634,8 +615,8 @@ impl<W: Write> HeadlessDriver<W> {
                         // the input JSON has finished streaming. Parse the
                         // accumulated JSON; on parse failure fall back to a
                         // string so the frame is never silently dropped.
-                        if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
-                            let input = parse_tool_input(&buf.input_json);
+                        if let Some(buf) = self.decoder.take_tool_input(&tool_use_id) {
+                            let input = parse_tool_input(&buf.json);
                             self.write_ndjson(&events::tool_use(&tool_use_id, &buf.name, input))?;
                         }
                         let content_value = content_blocks_to_json(&content);
@@ -650,8 +631,8 @@ impl<W: Write> HeadlessDriver<W> {
                     // pipes/`$(...)` capture is unaffected). Mirrors the
                     // driver's existing stderr convention for warnings.
                     OutputFormat::Text if self.config.verbose => {
-                        if let Some(buf) = self.pending_tool_calls.remove(&tool_use_id) {
-                            let input = parse_tool_input(&buf.input_json);
+                        if let Some(buf) = self.decoder.take_tool_input(&tool_use_id) {
+                            let input = parse_tool_input(&buf.json);
                             let block =
                                 render_verbose_tool_io(&buf.name, &input, is_error, &content);
                             eprintln!("{block}");
@@ -726,7 +707,8 @@ impl<W: Write> HeadlessDriver<W> {
                     }
                     StopCondition::StreamIdle(d) => {
                         return Ok(Some(TerminalStop::RunError(format!(
-                            "stream idle for {d:?}"
+                            "stream idle for {}s",
+                            d.as_secs()
                         ))));
                     }
                 }
@@ -741,12 +723,7 @@ impl<W: Write> HeadlessDriver<W> {
                 // line warning the first time each (requested, actual) pair
                 // is seen this run.
                 let requested = self.config.requested_model.clone();
-                if !actual.is_empty()
-                    && actual != requested
-                    && self
-                        .seen_model_mismatches
-                        .insert((requested.clone(), actual.clone()))
-                {
+                if self.decoder.note_model_mismatch(&requested, &actual) {
                     match self.config.output_format {
                         OutputFormat::StreamJson => {
                             let frame = events::warning_model_mismatch(&requested, &actual);
@@ -754,7 +731,8 @@ impl<W: Write> HeadlessDriver<W> {
                         }
                         OutputFormat::Text | OutputFormat::Json => {
                             eprintln!(
-                                "[caliban] warning: model mismatch — requested {requested:?} but provider responded with {actual:?}"
+                                "{}",
+                                crate::stream_decode::model_mismatch_text(&requested, &actual)
                             );
                         }
                     }
@@ -789,8 +767,8 @@ impl<W: Write> HeadlessDriver<W> {
     ) -> Result<Option<TerminalStop>, HeadlessError> {
         // Drop any stale pending tool-call buffers from a prior pass. New
         // IDs are unique per run in practice, but clearing here keeps the
-        // state machine local.
-        self.pending_tool_calls.clear();
+        // state machine local. (Run-level mismatch dedup is preserved.)
+        self.decoder.clear_tool_inputs();
         let mut stream = agent.stream_until_done(messages, cancel);
         // #184 (HL1): the budget can latch `exceeded` when the *final* turn's
         // cost is recorded (TurnEnd), which is yielded just before the natural
@@ -1229,7 +1207,9 @@ mod tests {
         );
         assert_eq!(
             text_mode_stop_note(ResultSubtype::MaxTokens, 0).as_deref(),
-            Some("[caliban: max output tokens reached]")
+            Some(
+                "[caliban: max-tokens recovery exhausted \u{2014} try /effort low to reduce reasoning budget]"
+            )
         );
         assert_eq!(text_mode_stop_note(ResultSubtype::Success, 1), None);
         assert_eq!(text_mode_stop_note(ResultSubtype::Error, 1), None);

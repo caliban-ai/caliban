@@ -247,6 +247,63 @@ impl StopCondition {
                 | Self::StreamIdle(_)
         )
     }
+
+    /// The canonical user-facing surface — one framed `[caliban: …]` line plus
+    /// a severity — for a non-`EndOfTurn` stop, or `None` for the natural
+    /// `EndOfTurn`.
+    ///
+    /// Single source of truth for the drivers that report *why* a run ended:
+    /// the TUI (line + `level`→color), the single-prompt CLI (line on stderr),
+    /// and headless text mode. These had drifted into three separate copies of
+    /// this mapping with divergent wording (#154) — notably `MaxTokensExhausted`
+    /// and `StreamIdle`.
+    #[must_use]
+    pub fn surface(&self) -> Option<StopSurface> {
+        let (body, level) = match self {
+            Self::EndOfTurn => return None,
+            Self::ProviderError(msg) => (format!("provider error: {msg}"), StopLevel::Error),
+            Self::HookDenied(msg) => (format!("hook denied: {msg}"), StopLevel::Error),
+            Self::CompactionFailed(msg) => (format!("compaction failed: {msg}"), StopLevel::Error),
+            Self::MaxTurnsReached(n) => (format!("max-turns ({n}) reached"), StopLevel::Info),
+            Self::Cancelled => ("cancelled".to_string(), StopLevel::Info),
+            Self::MaxTokensExhausted => (
+                "max-tokens recovery exhausted \u{2014} try /effort low to reduce reasoning budget"
+                    .to_string(),
+                StopLevel::Error,
+            ),
+            Self::Refusal(msg) => (format!("model refusal: {msg}"), StopLevel::Error),
+            Self::ContentFilter(msg) => (format!("content filter: {msg}"), StopLevel::Error),
+            Self::StreamIdle(d) => (
+                format!("stream idle for {}s", d.as_secs()),
+                StopLevel::Error,
+            ),
+        };
+        Some(StopSurface {
+            line: format!("[caliban: {body}]"),
+            level,
+        })
+    }
+}
+
+/// Severity of a [`StopSurface`] line — drives whether a front end renders it
+/// as an error (red transcript line / toast / stderr) or a neutral info line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopLevel {
+    /// A failure: provider error, hook denial, compaction failure, refusal,
+    /// content filter, max-tokens exhaustion, or stream-idle timeout.
+    Error,
+    /// A non-failure stop: max-turns reached or caller cancellation.
+    Info,
+}
+
+/// One framed, user-facing line describing a non-`EndOfTurn` [`StopCondition`],
+/// plus its severity. Produced by [`StopCondition::surface`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopSurface {
+    /// The message, framed `[caliban: …]`.
+    pub line: String,
+    /// Whether to render as an error or a neutral info line.
+    pub level: StopLevel,
 }
 
 #[cfg(test)]

@@ -28,74 +28,21 @@ use super::transcript_viewer;
 
 // === Agent event handlers ===
 
-/// Severity of a [`StoppedForSurface`] — controls whether the surface
-/// renders as a red transcript [`TranscriptLine::Error`] + toast or a
-/// neutral [`TranscriptLine::Info`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoppedForLevel {
-    /// Provider error / hook denial / compaction failure.
-    Error,
-    /// Max-turns / cancelled.
-    Info,
-}
-
-/// One-line description of a non-`EndOfTurn` [`caliban_agent_core::StopCondition`]
-/// suitable for the transcript / toast surface. Pure (no `App` dependency)
-/// so the mapping is unit-testable.
-#[derive(Debug, Clone)]
-pub(crate) struct StoppedForSurface {
-    /// The user-visible message, wrapped in `[caliban: …]` framing per the
-    /// 2026-05-25 LM Studio probe Findings 5 + 9.
-    pub(crate) line: String,
-    /// Whether to render this as a red error or a neutral info line.
-    pub(crate) level: StoppedForLevel,
-}
+/// The TUI consumes the canonical agent-core stop surface (#154); these
+/// aliases preserve the local names the renderer + tests use.
+pub(crate) use caliban_agent_core::{
+    StopLevel as StoppedForLevel, StopSurface as StoppedForSurface,
+};
 
 /// Map a `StopCondition` to a transcript / toast surface. Returns `None`
 /// for `EndOfTurn` (the default natural stop) so callers can no-op.
+///
+/// Thin delegate to [`caliban_agent_core::StopCondition::surface`] — the single
+/// source of truth shared with the single-prompt and headless drivers.
 pub(crate) fn stopped_for_surface(
     stopped_for: &caliban_agent_core::StopCondition,
 ) -> Option<StoppedForSurface> {
-    use caliban_agent_core::StopCondition;
-    match stopped_for {
-        StopCondition::EndOfTurn => None,
-        StopCondition::ProviderError(msg) => Some(StoppedForSurface {
-            line: format!("[caliban: provider error: {msg}]"),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::HookDenied(msg) => Some(StoppedForSurface {
-            line: format!("[caliban: hook denied: {msg}]"),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::CompactionFailed(msg) => Some(StoppedForSurface {
-            line: format!("[caliban: compaction failed: {msg}]"),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::MaxTurnsReached(n) => Some(StoppedForSurface {
-            line: format!("[caliban: max-turns ({n}) reached]"),
-            level: StoppedForLevel::Info,
-        }),
-        StopCondition::Cancelled => Some(StoppedForSurface {
-            line: "[caliban: cancelled]".to_string(),
-            level: StoppedForLevel::Info,
-        }),
-        StopCondition::MaxTokensExhausted => Some(StoppedForSurface {
-            line: "[caliban: max output tokens exhausted — try /effort low]".to_string(),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::Refusal(msg) => Some(StoppedForSurface {
-            line: format!("[caliban: model refusal: {msg}]"),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::ContentFilter(msg) => Some(StoppedForSurface {
-            line: format!("[caliban: content filter: {msg}]"),
-            level: StoppedForLevel::Error,
-        }),
-        StopCondition::StreamIdle(d) => Some(StoppedForSurface {
-            line: format!("[caliban: stream idle for {}s]", d.as_secs()),
-            level: StoppedForLevel::Error,
-        }),
-    }
+    stopped_for.surface()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2777,9 +2724,10 @@ mod tests {
         let s = stopped_for_surface(&StopCondition::MaxTokensExhausted)
             .expect("max-tokens-exhausted must surface");
         assert_eq!(s.level, StoppedForLevel::Error);
+        // Canonical wording, shared with the single-prompt + headless drivers (#154).
         assert_eq!(
             s.line,
-            "[caliban: max output tokens exhausted — try /effort low]",
+            "[caliban: max-tokens recovery exhausted — try /effort low to reduce reasoning budget]",
         );
     }
 
