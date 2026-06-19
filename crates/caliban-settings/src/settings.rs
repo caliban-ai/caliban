@@ -236,6 +236,10 @@ pub struct Settings {
     pub allowed_http_hook_urls: Vec<String>,
     /// HTTP-hook env-var allowlist.
     pub http_hook_allowed_env_vars: Vec<String>,
+    /// Opt-in allowing HTTP hooks to target loopback/private addresses (a
+    /// genuinely-local hook server). Link-local / cloud-metadata stays blocked
+    /// regardless. Off by default (#217).
+    pub allow_local_http_hook_targets: Option<bool>,
 
     // ----- MCP --------------------------------------------------------------
     /// Map of server name → server settings.
@@ -466,6 +470,7 @@ impl Settings {
             allow_managed_hooks_only: self.allow_managed_hooks_only.unwrap_or(false),
             allowed_http_hook_urls: self.allowed_http_hook_urls.clone(),
             http_hook_allowed_env_vars: self.http_hook_allowed_env_vars.clone(),
+            allow_local_http_hook_targets: self.allow_local_http_hook_targets.unwrap_or(false),
             events: std::collections::BTreeMap::new(),
         }
     }

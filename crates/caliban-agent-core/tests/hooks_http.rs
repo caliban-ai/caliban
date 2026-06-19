@@ -39,6 +39,7 @@ async fn http_200_with_deny_body_denies() {
         allowed_url_globs: vec!["*".into()],
         event_name: "PreToolUse".into(),
         matcher: "*".into(),
+        allow_local_targets: true, // wiremock binds 127.0.0.1
         client: reqwest::Client::new(),
     };
     let input = serde_json::json!({});
@@ -66,6 +67,7 @@ async fn http_url_not_allowlisted_skips() {
         allowed_url_globs: vec!["*.example.com/*".into()],
         event_name: "PreToolUse".into(),
         matcher: "*".into(),
+        allow_local_targets: true, // wiremock binds 127.0.0.1
         client: reqwest::Client::new(),
     };
     let input = serde_json::json!({});
@@ -92,6 +94,7 @@ async fn http_non_2xx_is_allow() {
         allowed_url_globs: vec!["*".into()],
         event_name: "PreToolUse".into(),
         matcher: "*".into(),
+        allow_local_targets: true, // wiremock binds 127.0.0.1
         client: reqwest::Client::new(),
     };
     let input = serde_json::json!({});
@@ -121,6 +124,7 @@ async fn http_updated_input_parses() {
         allowed_url_globs: vec!["*".into()],
         event_name: "PreToolUse".into(),
         matcher: "*".into(),
+        allow_local_targets: true, // wiremock binds 127.0.0.1
         client: reqwest::Client::new(),
     };
     let input = serde_json::json!({"command": "rm -rf /"});
@@ -154,6 +158,7 @@ async fn http_matcher_skips_non_matching_tools() {
         allowed_url_globs: vec!["*".into()],
         event_name: "PreToolUse".into(),
         matcher: "WebFetch".into(),
+        allow_local_targets: true, // wiremock binds 127.0.0.1
         client: reqwest::Client::new(),
     };
     let input = serde_json::json!({});

@@ -211,6 +211,7 @@ pub fn build_config_hooks(
                         if_pattern: h.if_pattern.clone(),
                         asynchronous: h.asynchronous,
                         allowed_env_vars: cfg.http_hook_allowed_env_vars.clone(),
+                        allow_local_targets: cfg.allow_local_http_hook_targets,
                         client: http_client.clone(),
                     }));
                 }
@@ -549,6 +550,9 @@ pub struct HttpHook {
     /// Env vars allowed for `${VAR}` expansion in the URL / headers, from
     /// `http_hook_allowed_env_vars` (#185 H5).
     pub allowed_env_vars: Vec<String>,
+    /// Opt-in (`allow_local_http_hook_targets`) permitting loopback/private
+    /// targets. Link-local / cloud-metadata is blocked regardless (#217).
+    pub allow_local_targets: bool,
     /// Shared `reqwest::Client` (lets callers reuse a connection pool).
     pub client: reqwest::Client,
 }
@@ -589,11 +593,139 @@ fn expand_env_vars(s: &str, allowed: &[String]) -> String {
     out
 }
 
+/// Match one allow-list `pattern` against a parsed target URL by **component**
+/// (scheme / host / path), not a substring glob over the whole URL string.
+///
+/// The old whole-URL glob let a leading-`*` pattern like `*.example.com/*`
+/// match `http://attacker.com/?x=.example.com/evil` because `*` crossed `/`,
+/// `:` and `@` (#217 part 2). Matching the host as its own component means a
+/// glob can never reach across into the path or query.
+///
+/// Pattern grammar: `[scheme://]host[:port][/path-glob]`. A missing scheme
+/// matches any scheme; a missing path matches any path. Globs (`*`,`?`) are
+/// honored within each component.
+fn url_glob_matches(pattern: &str, target: &reqwest::Url) -> bool {
+    use crate::permissions::matches_glob;
+
+    // Optional scheme.
+    let (scheme_pat, rest) = match pattern.split_once("://") {
+        Some((s, r)) => (Some(s), r),
+        None => (None, pattern),
+    };
+    if let Some(sp) = scheme_pat
+        && !matches_glob(sp, target.scheme())
+    {
+        return false;
+    }
+
+    // rest = authority[/path]
+    let (authority, path_pat) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(format!("/{p}"))),
+        None => (rest, None),
+    };
+
+    // authority = host[:port]; strip an optional `:port` (host-only globs are
+    // the common case — domains never contain ':'). IPv6 literal patterns are
+    // not supported here.
+    let host_pat = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    let Some(target_host) = target.host_str() else {
+        return false;
+    };
+    if !matches_glob(host_pat, target_host) {
+        return false;
+    }
+
+    // Path: a missing or `/`-only pattern matches any path.
+    match path_pat {
+        None => true,
+        Some(p) if p == "/" => true,
+        Some(p) => matches_glob(&p, target.path()),
+    }
+}
+
+/// SSRF guard: reject a target whose scheme isn't http/https, or whose host is
+/// an internal address (#217 part 3).
+///
+/// Link-local / cloud-metadata (`169.254.0.0/16`, `fe80::/10`) is **always**
+/// rejected. Loopback / private / CGNAT / unspecified targets are rejected
+/// unless `allow_local` is set (the `allow_local_http_hook_targets` opt-in for
+/// users who genuinely run a hook server on localhost). Returns `Some(reason)`
+/// when the target must be blocked.
+fn ssrf_blocked_reason(target: &reqwest::Url, allow_local: bool) -> Option<&'static str> {
+    if !matches!(target.scheme(), "http" | "https") {
+        return Some("scheme is not http/https");
+    }
+    let host = target.host_str()?;
+    // `host_str` brackets IPv6 literals (`[::1]`); strip them before parsing.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = bare.to_ascii_lowercase();
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        if ip_is_link_local(ip) {
+            return Some("link-local / cloud-metadata address");
+        }
+        if !allow_local && ip_is_internal(ip) {
+            return Some("loopback / private address");
+        }
+    } else if !allow_local && (lower == "localhost" || lower.ends_with(".localhost")) {
+        return Some("loopback host (localhost)");
+    }
+    None
+}
+
+/// `true` for IPv4 `169.254.0.0/16` (incl. the `169.254.169.254` cloud-metadata
+/// address) and IPv6 `fe80::/10` link-local.
+fn ip_is_link_local(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_link_local();
+            }
+            (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// `true` if `ip` is a non-public address an HTTP hook should not reach by
+/// default: loopback, private, link-local, CGNAT, unspecified, broadcast,
+/// documentation, or multicast.
+fn ip_is_internal(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    if ip_is_link_local(ip) {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                // CGNAT 100.64.0.0/10
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_internal(IpAddr::V4(v4));
+            }
+            let s0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // ULA fc00::/7
+                || (s0 & 0xfe00) == 0xfc00
+        }
+    }
+}
+
 impl HttpHook {
-    fn is_url_allowed(&self, url: &str) -> bool {
+    fn is_url_allowed(&self, target: &reqwest::Url) -> bool {
         self.allowed_url_globs
             .iter()
-            .any(|g| crate::permissions::matches_glob(g, url))
+            .any(|g| url_glob_matches(g, target))
     }
 
     /// POST the envelope, returning the response body on a 2xx. `None` when the
@@ -602,14 +734,31 @@ impl HttpHook {
         // Expand `${VAR}` (allowlist-gated) before the allow-check so the URL
         // actually contacted is the one validated against the globs (#185 H5).
         let url = expand_env_vars(&self.url, &self.allowed_env_vars);
-        if !self.is_url_allowed(&url) {
+        let parsed = match reqwest::Url::parse(&url) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "http hook: unparseable URL; skipping (Allow)");
+                return None;
+            }
+        };
+        if !self.is_url_allowed(&parsed) {
             tracing::warn!(
                 url = %url,
                 "http hook: URL not in allowed_http_hook_urls; skipping (Allow)"
             );
             return None;
         }
-        let mut req = self.client.post(&url).json(&envelope);
+        // SSRF guard (#217): even an allow-listed URL must not target a
+        // loopback/link-local/private address or a non-http(s) scheme.
+        if let Some(reason) = ssrf_blocked_reason(&parsed, self.allow_local_targets) {
+            tracing::warn!(
+                url = %url,
+                reason,
+                "http hook: SSRF-blocked target; skipping (Allow)"
+            );
+            return None;
+        }
+        let mut req = self.client.post(parsed).json(&envelope);
         for (k, v) in &self.headers {
             req = req.header(k, expand_env_vars(v, &self.allowed_env_vars));
         }
@@ -861,6 +1010,86 @@ mod tests {
 
     fn test_client() -> reqwest::Client {
         reqwest::Client::builder().build().unwrap()
+    }
+
+    fn u(s: &str) -> reqwest::Url {
+        reqwest::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn url_glob_matches_host_component_not_substring() {
+        // #217 part 2: a host glob matches the URL's host component, never a
+        // substring of the whole URL.
+        let allow = "*.example.com/*";
+        assert!(
+            url_glob_matches(allow, &u("https://api.example.com/hook")),
+            "legit subdomain must match"
+        );
+        assert!(
+            !url_glob_matches(allow, &u("http://attacker.com/?x=.example.com/evil")),
+            "attacker.com host must not match *.example.com (#217)"
+        );
+        assert!(
+            !url_glob_matches(allow, &u("http://example.com.attacker.net/x")),
+            "suffix-style spoof must not match"
+        );
+    }
+
+    #[test]
+    fn url_glob_matches_scheme_and_path_components() {
+        let allow = "https://hooks.example.com/cb";
+        assert!(url_glob_matches(allow, &u("https://hooks.example.com/cb")));
+        assert!(
+            !url_glob_matches(allow, &u("http://hooks.example.com/cb")),
+            "scheme mismatch must fail"
+        );
+        assert!(
+            !url_glob_matches(allow, &u("https://evil.com/cb")),
+            "host mismatch must fail"
+        );
+        // Path glob.
+        assert!(url_glob_matches(
+            "https://hooks.example.com/*",
+            &u("https://hooks.example.com/anything/here")
+        ));
+    }
+
+    #[test]
+    fn ssrf_blocks_loopback_link_local_and_bad_scheme() {
+        // #217 part 3.
+        for blocked in [
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost/x",
+            "http://sub.localhost/x",
+            "http://[::1]/x",
+            "http://10.0.0.5/x",
+            "http://192.168.1.1/x",
+            "http://172.16.5.4/x",
+            "http://100.64.1.2/x",
+            "http://0.0.0.0/x",
+            "file:///etc/passwd",
+            "gopher://127.0.0.1/x",
+        ] {
+            assert!(
+                ssrf_blocked_reason(&u(blocked), false).is_some(),
+                "{blocked} must be SSRF-blocked"
+            );
+        }
+        // A normal public https host passes the synchronous guard.
+        assert!(ssrf_blocked_reason(&u("https://api.example.com/x"), false).is_none());
+        assert!(ssrf_blocked_reason(&u("http://93.184.216.34/x"), false).is_none());
+
+        // With the opt-in, loopback/private are permitted, but link-local /
+        // cloud-metadata and a bad scheme stay blocked.
+        assert!(ssrf_blocked_reason(&u("http://127.0.0.1/x"), true).is_none());
+        assert!(ssrf_blocked_reason(&u("http://localhost/x"), true).is_none());
+        assert!(ssrf_blocked_reason(&u("http://10.0.0.5/x"), true).is_none());
+        assert!(
+            ssrf_blocked_reason(&u("http://169.254.169.254/latest/"), true).is_some(),
+            "link-local / metadata must stay blocked even with the local opt-in"
+        );
+        assert!(ssrf_blocked_reason(&u("file:///etc/passwd"), true).is_some());
     }
 
     #[test]
