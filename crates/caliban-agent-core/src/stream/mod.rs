@@ -1139,7 +1139,10 @@ impl Agent {
                     };
 
                     match decision {
-                        HookDecision::Deny(msg) => {
+                        // AskDenied (a synthesized non-interactive Ask→Deny) is
+                        // handled identically to Deny; the mode filter normally
+                        // normalizes it away, but treat it as a denial defensively.
+                        HookDecision::Deny(msg) | HookDecision::AskDenied(msg) => {
                             let content = vec![ContentBlock::Text(TextBlock {
                                 text: format!("Tool call denied: {msg}"),
                                 cache_control: None,

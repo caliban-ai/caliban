@@ -156,7 +156,7 @@ impl Hooks for DecisionRecorder {
         if self.enabled {
             let action_str = match &d {
                 HookDecision::Allow | HookDecision::UpdatedInput(_) => "allow",
-                HookDecision::Deny(_) => "deny",
+                HookDecision::Deny(_) | HookDecision::AskDenied(_) => "deny",
             };
             self.writer.record(ctx, action_str, None);
         }

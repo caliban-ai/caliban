@@ -114,24 +114,30 @@ pub fn matches_with_workspace(
         // which silently produced an empty target and made every
         // `Tool:<glob>` rule a no-op for MultiEdit/NotebookEdit).
         let raw = first_arg(ctx).unwrap_or_default();
+        // `workspace_normalize` lexically resolves `.`/`..` so a traversal in
+        // the input can't slip past the anchored glob below (#216).
         let target = workspace_normalize(&raw, workspace);
         let spec_path = std::path::Path::new(spec);
-        // If the pattern is absolute, match directly.
-        // If relative, prepend `**/` so `src/**/*.rs` matches at any depth
-        // in the repo (e.g. `/repo/crates/x/src/y.rs`).
-        let glob_pat: String = if spec_path.is_absolute() {
-            spec.to_owned()
-        } else {
-            // Strip a leading `./`, then anchor to the workspace root so the
-            // pattern stays *inside* the repo. `<ws>/**/<stripped>` still lets
-            // `src/**` match at any depth within the workspace, but a leading
-            // `**/` alone would also match `/etc/src/...` outside it (#177).
-            // Escape the workspace prefix so a literal path containing glob
-            // metacharacters isn't reinterpreted.
-            let stripped = spec.strip_prefix("./").unwrap_or(spec);
-            let ws = globset::escape(&workspace.to_string_lossy());
-            format!("{ws}/**/{stripped}")
-        };
+        if spec_path.is_absolute() {
+            // Absolute pattern: match directly against the normalized target.
+            return glob_match_path(spec, &target);
+        }
+        // Relative (workspace-scoped) pattern. The normalized target must stay
+        // *inside* the workspace — a `..` escape (e.g. `../../etc/passwd`) that
+        // resolves outside it must never match a workspace-scoped rule (#216,
+        // gap in #177). #177 only blocked a same-named subtree elsewhere; it
+        // didn't resolve `..`, so `<ws>/../../etc/passwd` still matched a
+        // `<ws>/**`-anchored glob.
+        if !target.starts_with(workspace) {
+            return false;
+        }
+        // Strip a leading `./`, then anchor to the workspace root so the
+        // pattern stays inside the repo. `<ws>/**/<stripped>` lets `src/**`
+        // match at any depth within the workspace. Escape the workspace prefix
+        // so a literal path containing glob metacharacters isn't reinterpreted.
+        let stripped = spec.strip_prefix("./").unwrap_or(spec);
+        let ws = globset::escape(&workspace.to_string_lossy());
+        let glob_pat = format!("{ws}/**/{stripped}");
         return glob_match_path(&glob_pat, &target);
     }
 
@@ -179,11 +185,40 @@ fn kv_match(kv: &str, input: &serde_json::Value) -> bool {
 
 fn workspace_normalize(p: &str, workspace: &std::path::Path) -> std::path::PathBuf {
     let path = std::path::Path::new(p);
-    if path.is_absolute() {
-        return path.to_path_buf();
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let stripped: &std::path::Path = path.strip_prefix("./").unwrap_or(path);
+        workspace.join(stripped)
+    };
+    lexical_normalize(&joined)
+}
+
+/// Resolve `.` and `..` components purely lexically (no filesystem access, so
+/// it works for paths that don't exist and never follows symlinks). A leading
+/// `..` that can't be popped is preserved so the result still lies outside any
+/// absolute prefix — that's what lets the caller detect a workspace escape
+/// (#216).
+fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                // Pop a preceding normal component …
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // … otherwise keep the `..` (root / leading `..` / `..` chain)
+                // so the result still lies outside the prefix we joined onto —
+                // that's what lets the caller detect a workspace escape (#216).
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
     }
-    let stripped: &std::path::Path = path.strip_prefix("./").unwrap_or(path);
-    workspace.join(stripped)
+    out
 }
 
 #[cfg(test)]
@@ -235,6 +270,36 @@ mod tests {
         assert!(
             matches_with_workspace("Edit:src/**/*.rs", &ctx("Edit", &inside), ws),
             "relative pattern must still match src/** anywhere under the workspace"
+        );
+    }
+
+    #[test]
+    fn dotdot_traversal_does_not_escape_workspace() {
+        // Security (#216, gap in #177): a `..` traversal in the input path must
+        // not let a workspace-scoped Allow match a file outside the workspace.
+        let ws = std::path::Path::new("/repo");
+        let escape = json!({"path": "../../../../etc/passwd"});
+        assert!(
+            !matches_with_workspace("Edit:**", &ctx("Edit", &escape), ws),
+            "workspace-scoped Edit:** must not match a ../ traversal outside the workspace"
+        );
+        // An absolute-but-traversing input normalizes and is rejected too.
+        let escape_abs = json!({"path": "/repo/../../etc/passwd"});
+        assert!(
+            !matches_with_workspace("Edit:**", &ctx("Edit", &escape_abs), ws),
+            "a path that lexically escapes the workspace must not match a workspace-scoped rule"
+        );
+        // Sanity: an in-workspace relative path still matches.
+        let inside = json!({"path": "src/main.rs"});
+        assert!(
+            matches_with_workspace("Edit:**", &ctx("Edit", &inside), ws),
+            "in-workspace relative path still matches Edit:**"
+        );
+        // And `..` that stays inside the workspace is fine.
+        let inside_dotdot = json!({"path": "crates/x/../y/z.rs"});
+        assert!(
+            matches_with_workspace("Edit:**", &ctx("Edit", &inside_dotdot), ws),
+            "a `..` that resolves to a path still inside the workspace matches"
         );
     }
 
