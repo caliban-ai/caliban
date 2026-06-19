@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use caliban_provider::{CompletionRequest, Provider};
 use caliban_provider_vertex::{
     AuthRefresh, VertexConfig, VertexError, VertexProvider,
-    models::{strip_platform_suffix, vendored_vertex_models},
+    models::{list_models_remote, strip_platform_suffix, vendored_vertex_models},
 };
 use gcp_auth::{Error as GcpError, Token, TokenProvider};
 use wiremock::matchers::{header, method, path};
@@ -217,8 +217,14 @@ async fn list_models_remote_parses_publishers_response() {
         .mount(&server)
         .await;
 
-    let p = make_provider().await;
-    let models = p.list_models_at(&server.uri()).await.expect("list");
+    // Exercise the live-discovery code path directly (the same fetch+parse
+    // `refresh_models` runs), pointed at wiremock via the public
+    // `list_models_remote` against a caller-supplied base URL.
+    let (token_provider, _) = fixed_token();
+    let client = caliban_common::http::default_client();
+    let models = list_models_remote(&client, &token_provider, &server.uri())
+        .await
+        .expect("list");
     assert_eq!(models.len(), 2);
     assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
 }
@@ -232,9 +238,9 @@ async fn list_models_remote_surfaces_http_error() {
         .mount(&server)
         .await;
 
-    let p = make_provider().await;
-    let err = p
-        .list_models_at(&server.uri())
+    let (token_provider, _) = fixed_token();
+    let client = caliban_common::http::default_client();
+    let err = list_models_remote(&client, &token_provider, &server.uri())
         .await
         .expect_err("should error");
     assert!(matches!(err, VertexError::InvalidConfig(_)));

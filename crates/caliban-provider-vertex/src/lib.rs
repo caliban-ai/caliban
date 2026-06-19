@@ -6,9 +6,9 @@
 //! - A [`VertexConfig`] with a `from_env` constructor.
 //! - An [`AuthRefresh`] background task that periodically refreshes the
 //!   GCP bearer token via `gcp_auth::TokenProvider`.
-//! - A `list_models` that calls
-//!   `https://{region}-aiplatform.googleapis.com/v1/publishers/anthropic/models`
-//!   and falls back to a vendored list on failure.
+//! - A `refresh_models` (the `Provider` trait's live-discovery hook) that calls
+//!   `https://{region}-aiplatform.googleapis.com/v1/publishers/anthropic/models`;
+//!   the sync `list_models` returns the vendored fallback.
 //! - `name() -> "vertex"` so the model router and telemetry attribute it
 //!   correctly.
 //!
@@ -27,7 +27,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use caliban_provider::{
-    Capabilities, CompletionRequest, CompletionResponse, MessageStream, ModelInfo, Provider, Result,
+    Capabilities, CompletionRequest, CompletionResponse, Error, MessageStream, ModelInfo, Provider,
+    Result,
 };
 use caliban_provider_anthropic::AnthropicProvider;
 use caliban_provider_anthropic::config::VertexConfig as InnerVertexConfig;
@@ -122,32 +123,6 @@ impl VertexProvider {
     pub fn config(&self) -> &VertexConfig {
         &self.config
     }
-
-    /// Fetch the live model list from Vertex. On error, returns the
-    /// vendored fallback.
-    pub async fn list_models_live(&self) -> Vec<ModelInfo> {
-        let base = models::default_base_url(&self.config.region);
-        match models::list_models_remote(&self.list_client, &self.token_provider, &base).await {
-            Ok(models) => models,
-            Err(e) => {
-                tracing::warn!(
-                    target: caliban_common::tracing_targets::TARGET_PROVIDER_VERTEX,
-                    error = %e,
-                    "list_models live fetch failed; falling back to vendored list"
-                );
-                models::vendored_vertex_models()
-            }
-        }
-    }
-
-    /// Fetch the live model list from Vertex using a caller-supplied base
-    /// URL (for tests that point at `wiremock`).
-    pub async fn list_models_at(
-        &self,
-        base_url: &str,
-    ) -> std::result::Result<Vec<ModelInfo>, VertexError> {
-        models::list_models_remote(&self.list_client, &self.token_provider, base_url).await
-    }
 }
 
 #[async_trait]
@@ -165,9 +140,18 @@ impl Provider for VertexProvider {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        // The Provider trait is sync; we surface the vendored list here and
-        // expose `list_models_live` for callers that want to hit Vertex.
+        // Offline view: the vendored catalog. Live callers use `refresh_models`.
         models::vendored_vertex_models()
+    }
+
+    async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        // The real publisher catalog from Vertex, replacing the vendored list
+        // the sync `list_models` must return. Errors propagate so the caller
+        // (e.g. the #34 refresh path) can decide whether to fall back.
+        let base = models::default_base_url(&self.config.region);
+        models::list_models_remote(&self.list_client, &self.token_provider, &base)
+            .await
+            .map_err(Error::adapter)
     }
 
     fn name(&self) -> &'static str {
