@@ -81,8 +81,7 @@ impl Tool for ReadTool {
     /// the path is empty. Returns [`ToolError::Execution`] if the file cannot
     /// be read or exceeds the 5 MB cap.
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: ReadInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: ReadInput = crate::parse_input(input)?;
 
         let path = self.root.resolve(&parsed.path)?;
         let metadata = tokio::fs::metadata(&path)

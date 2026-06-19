@@ -328,8 +328,7 @@ impl Tool for WebSearchTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: WebSearchInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: WebSearchInput = crate::parse_input(input)?;
         if parsed.query.trim().is_empty() {
             return Err(ToolError::invalid_input("query must be non-empty"));
         }

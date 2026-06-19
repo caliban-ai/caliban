@@ -230,8 +230,7 @@ impl Tool for AgentTool {
 
     #[allow(clippy::too_many_lines)]
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: AgentToolInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: AgentToolInput = crate::parse_input(input)?;
 
         // Background handoff path (ADR 0037). When the operator requests
         // `background: true` and the binary installed a spawner, we

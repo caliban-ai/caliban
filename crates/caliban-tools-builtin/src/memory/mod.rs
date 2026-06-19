@@ -65,8 +65,7 @@ impl Tool for ReadMemoryTopicTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: ReadInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: ReadInput = crate::parse_input(input)?;
         let topic = self.loader.read(&parsed.name).map_err(|e| match e {
             caliban_memory::MemoryError::InvalidSlug { .. } => {
                 ToolError::invalid_input(e.to_string())
@@ -160,8 +159,7 @@ impl Tool for WriteMemoryTopicTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: WriteInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: WriteInput = crate::parse_input(input)?;
         let kind = TopicKind::parse(&parsed.kind).ok_or_else(|| {
             ToolError::invalid_input(format!(
                 "type must be one of user|feedback|project|reference (got '{}')",

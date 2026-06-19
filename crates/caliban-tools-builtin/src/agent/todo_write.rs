@@ -92,8 +92,7 @@ impl Tool for TodoWriteTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: TodoWriteInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: TodoWriteInput = crate::parse_input(input)?;
 
         if parsed.todos.len() > MAX_TODOS {
             return Err(ToolError::invalid_input(format!(
