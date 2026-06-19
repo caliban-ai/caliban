@@ -68,6 +68,23 @@ pub fn default_client() -> reqwest::Client {
         .expect("default reqwest::Client builds")
 }
 
+/// Build a [`reqwest::Client`] with the shared defaults and a caller-supplied
+/// per-request timeout.
+///
+/// Equivalent to `default_client_builder().timeout(timeout).build()`. Provider
+/// transports use this instead of repeating the
+/// builder → `.timeout(...)` → `.build()` → `.map_err(...)` dance in every
+/// adapter `new()`; the [`reqwest::Error`] is returned so the caller can wrap
+/// it in its own adapter error variant (typically `…Error::Http`).
+///
+/// # Errors
+///
+/// Returns the underlying [`reqwest::Error`] if the TLS / DNS backend fails to
+/// initialize (a broken environment, not a configuration error).
+pub fn build_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    default_client_builder().timeout(timeout).build()
+}
+
 /// Build a [`reqwest::Client`] that does **not** follow redirects.
 ///
 /// Used by `web_fetch` to enforce its own same-host redirect policy.
@@ -118,6 +135,17 @@ mod tests {
     fn no_redirect_client_constructs() {
         // Smoke test: Policy::none() variant builds.
         let _client = no_redirect_client();
+    }
+
+    #[test]
+    fn build_client_applies_timeout_override() {
+        // build_client layers the caller's timeout onto the shared defaults.
+        let client = build_client(Duration::from_secs(90)).expect("build_client builds");
+        let dbg = format!("{client:?}");
+        assert!(
+            dbg.contains("90"),
+            "expected debug repr {dbg:?} to mention the 90s timeout",
+        );
     }
 
     #[test]

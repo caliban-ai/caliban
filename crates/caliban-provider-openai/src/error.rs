@@ -16,6 +16,8 @@ pub enum OpenAIError {
         status: u16,
         /// The response body text.
         body: String,
+        /// The parsed `Retry-After` hint, when the server sent one (429s).
+        retry_after: Option<std::time::Duration>,
     },
 
     /// JSON deserialization failed.
@@ -112,6 +114,22 @@ fn classify_error_body(body: &str) -> ProviderError {
     .unwrap_or_else(|| ProviderError::InvalidRequest(body.to_string()))
 }
 
+impl OpenAIError {
+    /// Build [`OpenAIError::BadStatus`] from the shared
+    /// [`caliban_provider::transport::BadResponse`] that
+    /// [`caliban_provider::transport::check_status`] produces — the single
+    /// place this adapter turns a non-2xx response (status, body, and parsed
+    /// `Retry-After`) into its error variant.
+    #[must_use]
+    pub(crate) fn bad_status(resp: caliban_provider::transport::BadResponse) -> Self {
+        Self::BadStatus {
+            status: resp.status,
+            body: resp.body,
+            retry_after: resp.retry_after,
+        }
+    }
+}
+
 impl From<OpenAIError> for ProviderError {
     fn from(e: OpenAIError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -125,10 +143,17 @@ impl From<OpenAIError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            OpenAIError::BadStatus { status, ref body } => {
-                caliban_provider::error_classify::map_bad_status(status, body, classify_error_body)
-                    .unwrap_or_else(|| ProviderError::adapter(e))
-            }
+            OpenAIError::BadStatus {
+                status,
+                ref body,
+                retry_after,
+            } => caliban_provider::error_classify::map_bad_status(
+                status,
+                body,
+                retry_after,
+                classify_error_body,
+            )
+            .unwrap_or_else(|| ProviderError::adapter(e)),
             OpenAIError::Deserialize(_)
             | OpenAIError::StreamParse(_)
             | OpenAIError::MissingConfig(_)
@@ -150,6 +175,7 @@ mod tests {
         let e = OpenAIError::BadStatus {
             status: 400,
             body: body.to_string(),
+            retry_after: None,
         };
         match ProviderError::from(e) {
             ProviderError::ContextTooLong {
@@ -193,6 +219,7 @@ mod tests {
         let e = OpenAIError::BadStatus {
             status: 400,
             body: body.to_string(),
+            retry_after: None,
         };
         match ProviderError::from(e) {
             ProviderError::InvalidRequest(s) => assert!(s.contains("temperature")),

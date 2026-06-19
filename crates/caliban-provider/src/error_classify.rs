@@ -14,11 +14,17 @@
 //! the recovery-driving classification can no longer silently diverge.
 
 use crate::Error as ProviderError;
+use std::time::Duration;
 
 /// Map a non-2xx HTTP status onto the provider-agnostic [`ProviderError`]
 /// arms shared by every adapter, returning `None` for statuses with no shared
 /// mapping so the caller can apply its own adapter-specific fallback (which
 /// typically wraps the original adapter error via `ProviderError::adapter`).
+///
+/// `retry_after` is the parsed `Retry-After` hint
+/// ([`crate::transport::parse_retry_after`]); it populates the 429
+/// [`ProviderError::RateLimit`] so the agent-core retry loop honors the
+/// server's requested backoff. Pass `None` when no hint was present.
 ///
 /// `on_400` builds the error for a `400` body — adapters differ here (some
 /// classify context-overflow / upstream-fault, some return a plain
@@ -29,11 +35,12 @@ use crate::Error as ProviderError;
 pub fn map_bad_status(
     status: u16,
     body: &str,
+    retry_after: Option<Duration>,
     on_400: impl FnOnce(&str) -> ProviderError,
 ) -> Option<ProviderError> {
     match status {
         401 | 403 => Some(ProviderError::Auth(body.to_string())),
-        429 => Some(ProviderError::RateLimit { retry_after: None }),
+        429 => Some(ProviderError::RateLimit { retry_after }),
         400 => Some(on_400(body)),
         404 => Some(ProviderError::ModelUnavailable(body.to_string())),
         _ if status >= 500 => Some(ProviderError::ServerError {
@@ -121,32 +128,45 @@ mod tests {
     fn map_bad_status_shared_arms() {
         let mk400 = |_: &str| ProviderError::InvalidRequest("x".into());
         assert!(matches!(
-            map_bad_status(401, "no", mk400),
+            map_bad_status(401, "no", None, mk400),
             Some(ProviderError::Auth(_))
         ));
         assert!(matches!(
-            map_bad_status(403, "no", mk400),
+            map_bad_status(403, "no", None, mk400),
             Some(ProviderError::Auth(_))
         ));
         assert!(matches!(
-            map_bad_status(429, "", mk400),
+            map_bad_status(429, "", None, mk400),
             Some(ProviderError::RateLimit { retry_after: None })
         ));
         assert!(matches!(
-            map_bad_status(404, "gone", mk400),
+            map_bad_status(404, "gone", None, mk400),
             Some(ProviderError::ModelUnavailable(_))
         ));
         assert!(matches!(
-            map_bad_status(503, "down", mk400),
+            map_bad_status(503, "down", None, mk400),
             Some(ProviderError::ServerError { status: 503, .. })
         ));
         // Unmapped status → None so the caller applies its own fallback.
-        assert!(map_bad_status(418, "teapot", mk400).is_none());
+        assert!(map_bad_status(418, "teapot", None, mk400).is_none());
+    }
+
+    #[test]
+    fn map_bad_status_429_carries_retry_after() {
+        // The Retry-After hint must flow into RateLimit so the retry loop can
+        // honor the server's requested backoff.
+        let mk400 = |_: &str| ProviderError::InvalidRequest("x".into());
+        assert!(matches!(
+            map_bad_status(429, "", Some(Duration::from_secs(7)), mk400),
+            Some(ProviderError::RateLimit {
+                retry_after: Some(d),
+            }) if d == Duration::from_secs(7)
+        ));
     }
 
     #[test]
     fn map_bad_status_400_delegates_to_on_400() {
-        let got = map_bad_status(400, "too big", |b| {
+        let got = map_bad_status(400, "too big", None, |b| {
             classify_context_too_long(b, &["too big"], &[], &[])
                 .unwrap_or_else(|| ProviderError::InvalidRequest(b.to_string()))
         });

@@ -17,6 +17,74 @@
 //! under the shared `caliban_provider::transport` target) and apply the
 //! returned class, wrapping their own adapter error for the `Network`/`Adapter`
 //! cases so the `HTTP request failed: …` Display prefix is preserved.
+//!
+//! It also owns the **non-2xx status check** ([`check_status`]) that every
+//! adapter's `send`/`stream` repeats verbatim, and the `Retry-After` parsing
+//! ([`parse_retry_after`]) that feeds the 429 backoff hint into
+//! [`crate::Error::RateLimit`].
+
+use std::time::Duration;
+
+/// A non-2xx HTTP response captured by [`check_status`] for the caller to turn
+/// into its adapter-specific `BadStatus` error variant.
+///
+/// Carries the `Retry-After` hint (parsed from the response header *before* the
+/// body is consumed) so the 429 path can populate
+/// [`crate::Error::RateLimit`]'s `retry_after` and the agent-core retry loop can
+/// honor the server's requested backoff instead of falling back to exponential
+/// backoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadResponse {
+    /// The HTTP status code.
+    pub status: u16,
+    /// The response body text (best-effort; empty if it could not be read).
+    pub body: String,
+    /// The `Retry-After` delay, when the server sent a delta-seconds header.
+    pub retry_after: Option<Duration>,
+}
+
+/// Parse a `Retry-After` header in its delta-seconds form into a [`Duration`].
+///
+/// Only the integer-seconds form (`Retry-After: 30`) is honored — the rarer
+/// HTTP-date form returns `None`, since 429 responses in practice use
+/// delta-seconds and a missing hint simply falls back to the retry policy's
+/// exponential backoff. Returns `None` when the header is absent, non-ASCII, or
+/// not a bare integer.
+#[must_use]
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
+/// Check a response's HTTP status: return it unchanged on 2xx, or consume the
+/// body and build an adapter error via `mk_err` on any non-2xx status.
+///
+/// This replaces the `if !status.is_success() { … BadStatus { … } }` block that
+/// had been copy-pasted across every adapter's `send`/`stream`. The
+/// `Retry-After` header is captured into [`BadResponse`] *before* the body is
+/// read, so adapters get the 429 backoff hint for free.
+///
+/// # Errors
+///
+/// Returns `Err(mk_err(BadResponse { … }))` for any non-2xx status.
+pub async fn check_status<E>(
+    resp: reqwest::Response,
+    mk_err: impl FnOnce(BadResponse) -> E,
+) -> Result<reqwest::Response, E> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    // Capture the header before `text()` consumes the response.
+    let retry_after = parse_retry_after(resp.headers());
+    let body = resp.text().await.unwrap_or_default();
+    Err(mk_err(BadResponse {
+        status: status.as_u16(),
+        body,
+        retry_after,
+    }))
+}
 
 /// Which [`crate::Error`] an adapter's `reqwest`-backed `Http` error maps to.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -111,7 +179,45 @@ pub fn classify_reqwest_error(provider: &str, err: &reqwest::Error) -> Transport
 
 #[cfg(test)]
 mod tests {
-    use super::{TransportErrorClass, classify_flags, render_source_chain};
+    use super::{TransportErrorClass, classify_flags, parse_retry_after, render_source_chain};
+    use std::time::Duration;
+
+    fn headers_with(name: &'static str, value: &str) -> reqwest::header::HeaderMap {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(name, reqwest::header::HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds() {
+        let h = headers_with("retry-after", "30");
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn retry_after_tolerates_surrounding_whitespace() {
+        let h = headers_with("retry-after", "  5 ");
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn retry_after_absent_is_none() {
+        let h = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn retry_after_http_date_form_is_none() {
+        // The HTTP-date form is intentionally not parsed — falls back to backoff.
+        let h = headers_with("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT");
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn retry_after_non_numeric_is_none() {
+        let h = headers_with("retry-after", "soon");
+        assert_eq!(parse_retry_after(&h), None);
+    }
 
     #[test]
     fn body_error_classifies_as_stream_interrupted() {

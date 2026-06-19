@@ -29,10 +29,8 @@ impl AzureTransport {
     ///
     /// Returns `Err(OpenAIError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: AzureConfig) -> Result<Self, OpenAIError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(OpenAIError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(OpenAIError::Http)?;
         Ok(Self { client, config })
     }
 
@@ -96,14 +94,7 @@ impl Transport for AzureTransport {
             .send()
             .await
             .map_err(OpenAIError::Http)?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(OpenAIError::BadStatus {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OpenAIError::bad_status).await?;
         Ok(resp
             .json::<NativeResponse>()
             .await
@@ -128,14 +119,7 @@ impl Transport for AzureTransport {
             .send()
             .await
             .map_err(OpenAIError::Http)?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(OpenAIError::BadStatus {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OpenAIError::bad_status).await?;
         let s = resp.bytes_stream().map(|c| c.map_err(OpenAIError::Http));
         Ok(Box::pin(s))
     }

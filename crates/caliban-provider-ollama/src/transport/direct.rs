@@ -23,10 +23,8 @@ impl DirectTransport {
     ///
     /// Returns `Err(OllamaError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: DirectConfig) -> Result<Self, OllamaError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(OllamaError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(OllamaError::Http)?;
         Ok(Self { client, config })
     }
 
@@ -54,14 +52,7 @@ impl Transport for DirectTransport {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(OllamaError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
         Ok(resp.json::<NativeResponse>().await?)
     }
 
@@ -76,14 +67,7 @@ impl Transport for DirectTransport {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(OllamaError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
         let s = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(OllamaError::Http));
@@ -99,13 +83,7 @@ impl Transport for DirectTransport {
 
     async fn running_models(&self) -> Result<Vec<RunningModel>, OllamaError> {
         let resp = self.client.get(self.api_url("/api/ps")).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(OllamaError::BadStatus {
-                status: status.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
         Ok(resp.json::<RunningModelList>().await?.models)
     }
 
@@ -117,13 +95,7 @@ impl Transport for DirectTransport {
             .json(&serde_json::json!({ "model": model }))
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(OllamaError::BadStatus {
-                status: status.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
         Ok(Some(resp.json::<ModelShow>().await?))
     }
 }

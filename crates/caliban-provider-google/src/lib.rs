@@ -82,7 +82,7 @@ impl<T: Transport> Provider for GoogleProvider<T> {
         let native = ir_convert::ir_to_native_request(req, allow_urls)?;
         let native_resp = self
             .transport
-            .send(&wire_model, &native)
+            .send(&wire_model, native)
             .await
             .map_err(Error::from)?;
         ir_convert::native_response_to_ir(native_resp)
@@ -96,7 +96,7 @@ impl<T: Transport> Provider for GoogleProvider<T> {
         let native = ir_convert::ir_to_native_request(req, allow_urls)?;
         let bytes_stream = self
             .transport
-            .stream(&wire_model, &native)
+            .stream(&wire_model, native)
             .await
             .map_err(Error::from)?;
         Ok(stream_parse::map_gemini_sse_to_events(bytes_stream))

@@ -16,6 +16,8 @@ pub enum AnthropicError {
         status: u16,
         /// The response body text.
         body: String,
+        /// The parsed `Retry-After` hint, when the server sent one (429s).
+        retry_after: Option<std::time::Duration>,
     },
 
     /// JSON deserialization failed.
@@ -50,6 +52,22 @@ const CONTEXT_MARKERS: &[&str] = &[
 const MAX_TOKEN_MARKERS: &[&str] = &["> "];
 const REQUESTED_TOKEN_MARKERS: &[&str] = &["too long: "];
 
+impl AnthropicError {
+    /// Build [`AnthropicError::BadStatus`] from the shared
+    /// [`caliban_provider::transport::BadResponse`] that
+    /// [`caliban_provider::transport::check_status`] produces — the single
+    /// place this adapter turns a non-2xx response (status, body, and parsed
+    /// `Retry-After`) into its error variant.
+    #[must_use]
+    pub(crate) fn bad_status(resp: caliban_provider::transport::BadResponse) -> Self {
+        Self::BadStatus {
+            status: resp.status,
+            body: resp.body,
+            retry_after: resp.retry_after,
+        }
+    }
+}
+
 impl From<AnthropicError> for ProviderError {
     fn from(e: AnthropicError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -67,18 +85,20 @@ impl From<AnthropicError> for ProviderError {
             // is reclassified (→ ContextTooLong) so reactive compaction fires.
             // No upstream-fault classifier here (the first-party API does not
             // surface model-process crashes as 400 bodies).
-            AnthropicError::BadStatus { status, ref body } => {
-                caliban_provider::error_classify::map_bad_status(status, body, |b| {
-                    caliban_provider::error_classify::classify_context_too_long(
-                        b,
-                        CONTEXT_MARKERS,
-                        MAX_TOKEN_MARKERS,
-                        REQUESTED_TOKEN_MARKERS,
-                    )
-                    .unwrap_or_else(|| ProviderError::InvalidRequest(b.to_string()))
-                })
-                .unwrap_or_else(|| ProviderError::adapter(e))
-            }
+            AnthropicError::BadStatus {
+                status,
+                ref body,
+                retry_after,
+            } => caliban_provider::error_classify::map_bad_status(status, body, retry_after, |b| {
+                caliban_provider::error_classify::classify_context_too_long(
+                    b,
+                    CONTEXT_MARKERS,
+                    MAX_TOKEN_MARKERS,
+                    REQUESTED_TOKEN_MARKERS,
+                )
+                .unwrap_or_else(|| ProviderError::InvalidRequest(b.to_string()))
+            })
+            .unwrap_or_else(|| ProviderError::adapter(e)),
             AnthropicError::Deserialize(_)
             | AnthropicError::StreamParse(_)
             | AnthropicError::MissingConfig(_)
@@ -97,6 +117,7 @@ mod tests {
         let e = AnthropicError::BadStatus {
             status: 400,
             body: body.to_string(),
+            retry_after: None,
         };
         match ProviderError::from(e) {
             ProviderError::ContextTooLong {
@@ -116,6 +137,7 @@ mod tests {
         let e = AnthropicError::BadStatus {
             status: 400,
             body: body.to_string(),
+            retry_after: None,
         };
         match ProviderError::from(e) {
             ProviderError::InvalidRequest(s) => assert!(s.contains("invalid messages")),

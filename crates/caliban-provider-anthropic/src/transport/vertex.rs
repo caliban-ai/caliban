@@ -40,10 +40,8 @@ impl VertexTransport {
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed.
     pub fn new(config: VertexConfig) -> Result<Self, AnthropicError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(AnthropicError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(AnthropicError::Http)?;
         Ok(Self {
             client,
             token_provider: config.token_provider,
@@ -105,14 +103,8 @@ impl Transport for VertexTransport {
             .await
             .map_err(AnthropicError::Http)?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AnthropicError::BadStatus {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
+        let resp =
+            caliban_provider::transport::check_status(resp, AnthropicError::bad_status).await?;
         resp.json::<NativeResponse>()
             .await
             .map_err(AnthropicError::Http)
@@ -137,14 +129,8 @@ impl Transport for VertexTransport {
             .await
             .map_err(AnthropicError::Http)?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AnthropicError::BadStatus {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
+        let resp =
+            caliban_provider::transport::check_status(resp, AnthropicError::bad_status).await?;
         let s = resp.bytes_stream().map(|c| c.map_err(AnthropicError::Http));
         Ok(Box::pin(s))
     }
