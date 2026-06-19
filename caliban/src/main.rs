@@ -452,23 +452,18 @@ async fn main() -> Result<()> {
         sess.messages[0] = caliban_provider::Message::system_text(with_todos);
     }
 
-    // --- Headless / print-mode dispatch (ADR 0025).
-    //
-    // Three triggers:
-    // 1. Explicit `-p` / `--print` or `--output-format`.
-    // 2. Auto-headless: a prompt is given AND (stdout is piped OR stdin
-    //    is not a TTY), unless `--no-auto-print` is passed.
-    //
-    // Implicit auto-headless never fires for the TUI path (no prompt +
-    // stdin TTY) — that case is unambiguously interactive.
+    // --- Headless / print-mode dispatch (ADR 0025). See
+    // `args::is_headless_active` for the trigger rules (explicit print /
+    // output-format, stream-json input, or auto-headless with a prompt).
     let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
-    let auto_headless = {
+    let headless_active = {
         use std::io::IsTerminal as _;
-        !args.no_auto_print
-            && has_prompt
-            && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
+        args::is_headless_active(
+            &args,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
     };
-    let headless_active = args.print.is_some() || args.output_format.is_some() || auto_headless;
     if headless_active {
         let cancel = CancellationToken::new();
         {

@@ -762,6 +762,23 @@ pub(crate) fn validate_stream_json_input(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Decide whether to run in headless / print mode (ADR 0025).
+///
+/// Headless fires when any of these hold:
+/// - explicit `-p` / `--print` or `--output-format`;
+/// - `--input-format stream-json` — the canonical no-prompt scripting
+///   entrypoint, where stdin *is* the NDJSON frame stream (#218);
+/// - auto-headless: a prompt is given and stdin or stdout is piped, unless
+///   `--no-auto-print`.
+pub(crate) fn is_headless_active(args: &Args, stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
+    let has_prompt = args.prompt.is_some() || args.prompt_flag.is_some();
+    let auto_headless = !args.no_auto_print && has_prompt && (!stdin_is_tty || !stdout_is_tty);
+    args.print.is_some()
+        || args.output_format.is_some()
+        || matches!(args.input_format, headless::InputFormat::StreamJson)
+        || auto_headless
+}
+
 pub(crate) fn read_prompt(args: &Args) -> Result<String> {
     use std::io::Read as _;
     let raw = args
@@ -813,6 +830,43 @@ mod tests {
         let mut argv: Vec<&str> = vec!["caliban"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn stream_json_input_activates_headless_without_prompt() {
+        // #218: `printf '{...}' | caliban --input-format stream-json` (no -p,
+        // no --output-format, no prompt) must run headless, not fall to the TUI
+        // path and bail with "no prompt given and stdin is not a TTY".
+        let args = parse(&["--input-format", "stream-json"]);
+        assert!(
+            is_headless_active(&args, /*stdin_tty*/ false, /*stdout_tty*/ false),
+            "stream-json input must activate headless even with no prompt (#218)"
+        );
+        // Also holds when stdout happens to be a TTY.
+        assert!(is_headless_active(&args, false, true));
+    }
+
+    #[test]
+    fn no_prompt_no_stream_json_is_not_headless() {
+        let args = parse(&[]);
+        assert!(
+            !is_headless_active(&args, true, true),
+            "interactive TUI case"
+        );
+        assert!(
+            !is_headless_active(&args, false, false),
+            "piped but no prompt / stream-json → still not headless"
+        );
+    }
+
+    #[test]
+    fn explicit_print_or_output_format_is_headless() {
+        assert!(is_headless_active(&parse(&["-p", "hi"]), true, true));
+        assert!(is_headless_active(
+            &parse(&["--output-format", "json", "hi"]),
+            true,
+            true
+        ));
     }
 
     #[test]
