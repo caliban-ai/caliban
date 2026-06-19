@@ -646,6 +646,179 @@ async fn hedge_fires_after_configured_delay_and_winner_returns() {
     assert_eq!(stats.per_route["secondary"].hedge_wins, 1);
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn fast_primary_does_not_charge_phantom_hedge_metrics() {
+    // #215 bug 3: when the primary wins before `hedge_after`, the hedge
+    // candidate is never launched — no hedge_win/hedge_loss may be charged.
+    let primary = make_mock();
+    primary.enqueue_complete(Ok(ok_response("primary")));
+    // The secondary must never be touched; enqueue nothing.
+    let secondary = make_mock();
+
+    let routes_cfg = vec![
+        RouteEntry {
+            id: "primary".into(),
+            purpose: RequestPurpose::MainLoop,
+            provider: "a".into(),
+            model: "x".into(),
+            requires: CapabilityRequirements::default(),
+            fallback: None,
+            hedge: HedgePolicy::Race {
+                hedge_after: std::time::Duration::from_millis(50),
+                max_hedges: 1,
+            },
+            breaker: BreakerPolicy::disabled(),
+            effort: None,
+            effort_map: EffortMap::default(),
+        },
+        RouteEntry {
+            id: "secondary".into(),
+            purpose: RequestPurpose::MainLoop,
+            provider: "b".into(),
+            model: "y".into(),
+            requires: CapabilityRequirements::default(),
+            fallback: None,
+            hedge: HedgePolicy::Disabled,
+            breaker: BreakerPolicy::disabled(),
+            effort: None,
+            effort_map: EffortMap::default(),
+        },
+    ];
+    let mut providers: HashMap<String, Arc<dyn Provider + Send + Sync>> = HashMap::new();
+    providers.insert("a".into(), primary); // not slow — resolves immediately
+    providers.insert("b".into(), secondary);
+    let r = ModelRouter::from_config(
+        RouterConfig {
+            default_purpose: RequestPurpose::MainLoop,
+            routes: routes_cfg,
+        },
+        providers,
+    )
+    .unwrap();
+
+    let resp = r.complete(req_main_loop()).await.unwrap();
+    assert_eq!(resp.model, "primary");
+    let stats = r.stats();
+    assert_eq!(
+        stats.per_route["primary"].hedge_wins, 0,
+        "no hedge actually raced — primary won before hedge_after"
+    );
+    assert_eq!(
+        stats
+            .per_route
+            .get("secondary")
+            .map_or(0, |s| s.hedge_losses),
+        0,
+        "a never-launched hedge candidate must not be charged a hedge_loss"
+    );
+    assert_eq!(stats.per_route["primary"].call_count, 1);
+}
+
+#[tokio::test]
+async fn hedge_path_honors_single_probe_gate() {
+    // #215 bug 4: a HalfOpen route whose single recovery-probe slot is already
+    // held must not be probed again when it appears in a hedge segment.
+    let breaker = BreakerPolicy {
+        failure_threshold: 1,
+        window: std::time::Duration::from_secs(60),
+        // Direct policy (bypasses the config cooldown floor) keeps the test fast.
+        cooldown: std::time::Duration::from_millis(1),
+        half_open_probes: 1,
+    };
+    let primary = make_mock();
+    primary.enqueue_complete(Err(ProviderError::ServerError {
+        status: 503,
+        body: "down".into(),
+    })); // trips the breaker
+    // A second response that must NOT be consumed while the probe slot is held.
+    primary.enqueue_complete(Ok(ok_response("primary-probe")));
+    let secondary = make_mock();
+    secondary.enqueue_complete(Ok(ok_response("secondary-1"))); // serves the trip-time fallback
+    secondary.enqueue_complete(Ok(ok_response("secondary-2"))); // serves the gated dispatch
+
+    let routes_cfg = vec![
+        RouteEntry {
+            id: "primary".into(),
+            purpose: RequestPurpose::MainLoop,
+            provider: "a".into(),
+            model: "x".into(),
+            requires: CapabilityRequirements::default(),
+            fallback: None,
+            hedge: HedgePolicy::Race {
+                hedge_after: std::time::Duration::from_millis(50),
+                max_hedges: 1,
+            },
+            breaker,
+            effort: None,
+            effort_map: EffortMap::default(),
+        },
+        RouteEntry {
+            id: "secondary".into(),
+            purpose: RequestPurpose::MainLoop,
+            provider: "b".into(),
+            model: "y".into(),
+            requires: CapabilityRequirements::default(),
+            fallback: None,
+            hedge: HedgePolicy::Disabled,
+            breaker: BreakerPolicy::disabled(),
+            effort: None,
+            effort_map: EffortMap::default(),
+        },
+    ];
+    let mut providers: HashMap<String, Arc<dyn Provider + Send + Sync>> = HashMap::new();
+    providers.insert("a".into(), primary);
+    providers.insert("b".into(), secondary);
+    let r = ModelRouter::from_config(
+        RouterConfig {
+            default_purpose: RequestPurpose::MainLoop,
+            routes: routes_cfg,
+        },
+        providers,
+    )
+    .unwrap();
+
+    // 1. Trip primary (it fails; secondary serves the fallback).
+    let _ = r.complete(req_main_loop()).await.unwrap();
+    assert!(matches!(
+        r.breaker("primary").unwrap().state(),
+        BreakerState::Tripped { .. }
+    ));
+
+    // 2. Let the cooldown elapse, then claim the single recovery probe so the
+    //    slot is busy.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(matches!(
+        r.breaker("primary").unwrap().state(),
+        BreakerState::HalfOpen
+    ));
+    assert!(
+        r.breaker("primary").unwrap().try_admit(),
+        "claim the probe slot"
+    );
+
+    // 3. Dispatch again: primary is HalfOpen with its probe slot held, so the
+    //    hedge path must gate it out — secondary serves and primary is NOT
+    //    probed a second time.
+    let resp = r.complete(req_main_loop()).await.unwrap();
+    assert_eq!(
+        resp.model, "secondary-2",
+        "secondary served; the held probe slot gated the primary"
+    );
+    let stats = r.stats();
+    // `call_count` only counts successful responses. Primary's sole call was
+    // the trip-time failure, and the gated probe never ran — so a gated primary
+    // has zero successful calls. Under the old (ungated) code the probe would
+    // have succeeded (`primary-probe`) and bumped this to 1.
+    assert_eq!(
+        stats.per_route["primary"].call_count, 0,
+        "primary must not be re-probed while its single probe slot is held (#215 bug 4)"
+    );
+    assert_eq!(
+        stats.per_route["primary"].failures, 1,
+        "only the trip-time failure — no second probe was issued"
+    );
+}
+
 /// Wraps a provider to inject a delay before its `complete` resolves.
 struct SlowProvider {
     inner: Arc<MockProvider>,

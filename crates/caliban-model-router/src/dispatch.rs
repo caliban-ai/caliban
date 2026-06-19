@@ -162,16 +162,27 @@ impl ModelRouter {
                 let routes_arc: Arc<Vec<RouteEntry>> = Arc::new(self.routes.clone());
                 let segment_indices_arc = Arc::new(segment_indices.clone());
                 let rewritten_arc = Arc::new(rewritten);
+                let breakers_arc = Arc::clone(&self.breakers);
 
-                let (winner_segment_idx, result, losers) =
+                let (winner_segment_idx, result, losers, launched) =
                     hedging::race_hedged(policy, segment_len, |k, tok| {
                         let providers = Arc::clone(&providers);
                         let routes_arc = Arc::clone(&routes_arc);
                         let segment_indices_arc = Arc::clone(&segment_indices_arc);
                         let rewritten_arc = Arc::clone(&rewritten_arc);
+                        let breakers_arc = Arc::clone(&breakers_arc);
                         async move {
                             let ridx = segment_indices_arc[k];
                             let route = &routes_arc[ridx];
+                            // Single-probe gate on the hedge path (#215 bug 4):
+                            // a HalfOpen route admits exactly one recovery probe.
+                            // If the slot is already held, yield a Cancelled
+                            // (non-cost) miss instead of piling a second probe on
+                            // a recovering route. A Closed route always admits.
+                            let breaker = breakers_arc.get(&route.id).expect("breaker for route");
+                            if !breaker.try_admit() {
+                                return Err(ProviderError::Cancelled);
+                            }
                             let provider = providers
                                 .get(&route.provider)
                                 .expect("router build validates provider names")
@@ -179,6 +190,10 @@ impl ModelRouter {
                             let req = rewritten_arc[k].clone();
                             tokio::select! {
                                 _ = tok.cancelled() => {
+                                    // Lost the race and got cancelled in flight —
+                                    // release the probe slot we claimed so the
+                                    // route isn't stuck HalfOpen (#215 bug 4).
+                                    breaker.release_probe();
                                     Err(ProviderError::Cancelled)
                                 }
                                 res = provider.complete(req) => res,
@@ -206,13 +221,25 @@ impl ModelRouter {
                             .get(&winner_id)
                             .expect("breaker for route")
                             .observe_success();
-                        if segment_len > 1 {
+                        // Hedge metrics charge only attempts that actually ran
+                        // and incurred cost (#215 bug 3/4): the launched set
+                        // (`0..launched`) excludes candidates never spawned (the
+                        // primary won before `hedge_after`); within it, attempts
+                        // gated out by the breaker reported `Cancelled` (no
+                        // provider call) and are excluded too.
+                        let gated: std::collections::HashSet<usize> = losers
+                            .iter()
+                            .filter(|l| matches!(l.result, Err(ProviderError::Cancelled)))
+                            .map(|l| l.idx)
+                            .collect();
+                        let loss_ids: Vec<String> = (0..launched)
+                            .filter(|k| *k != winner_segment_idx && !gated.contains(k))
+                            .map(|k| self.routes[segment_indices[k]].id.clone())
+                            .collect();
+                        if !loss_ids.is_empty() {
                             self.stats.record_hedge_win(&winner_id);
-                            for (k, _) in segment_indices.iter().enumerate() {
-                                if k != winner_segment_idx {
-                                    let lid = self.routes[segment_indices[k]].id.clone();
-                                    self.stats.record_hedge_loss(&lid);
-                                }
+                            for lid in &loss_ids {
+                                self.stats.record_hedge_loss(lid);
                             }
                         }
                         return Ok(resp);
@@ -228,7 +255,11 @@ impl ModelRouter {
                                 .expect("breaker")
                                 .observe_failure();
                         }
-                        if is_fatal_for_route(&e) {
+                        // A `Cancelled` result here means every attempt in the
+                        // segment was gated out by its breaker (single-probe
+                        // gate, #215 bug 4) — advance past the segment like a
+                        // fatal-for-route miss rather than surfacing Cancelled.
+                        if is_fatal_for_route(&e) || matches!(e, ProviderError::Cancelled) {
                             // Move past the whole hedge segment.
                             if i + segment_len < candidates.len() {
                                 self.stats.record_fallback_engaged(&winner_id);

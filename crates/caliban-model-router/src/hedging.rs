@@ -30,9 +30,13 @@ pub(crate) struct AttemptOutcome {
 /// Race the primary against up to `max_hedges` hedges over the first
 /// `candidate_count` candidates of the dispatch chain.
 ///
-/// Returns `(winner_idx, winner_result, losers)`. `losers` are reported in
-/// completion order; the driver may use them when classifying the winner's
-/// fatal-for-route status. A non-`Ok` winner means every attempt failed.
+/// Returns `(winner_idx, winner_result, losers, launched)`. `losers` are
+/// reported in completion order; the driver may use them when classifying the
+/// winner's fatal-for-route status. `launched` is the number of attempts
+/// actually spawned (segment positions `0..launched`) — candidates never
+/// launched (the primary won before `hedge_after`) are excluded, so the caller
+/// can charge hedge metrics only to attempts that actually ran (#215 bug 3). A
+/// non-`Ok` winner means every attempt failed.
 pub(crate) async fn race_hedged<S, F>(
     policy: HedgePolicy,
     candidate_count: usize,
@@ -41,6 +45,7 @@ pub(crate) async fn race_hedged<S, F>(
     usize,
     ProviderResult<CompletionResponse>,
     Vec<AttemptOutcome>,
+    usize,
 )
 where
     S: Fn(usize, CancellationToken) -> F,
@@ -94,11 +99,12 @@ where
                                 0,
                                 Err(ProviderError::adapter(ChannelClosed)),
                                 losers,
+                                launched,
                             );
                         };
                         if outcome.result.is_ok() {
                             cancel_others(&tokens, outcome.idx);
-                            return (outcome.idx, outcome.result, losers);
+                            return (outcome.idx, outcome.result, losers, launched);
                         }
                         losers.push(outcome);
                         if losers.len() == launched {
@@ -115,7 +121,7 @@ where
                                 }
                             } else {
                                 let last = losers.pop().expect("we just pushed");
-                                return (last.idx, last.result, losers);
+                                return (last.idx, last.result, losers, launched);
                             }
                         }
                     }
@@ -134,16 +140,21 @@ where
             }
             None => {
                 let Some(outcome) = rx.recv().await else {
-                    return (0, Err(ProviderError::adapter(ChannelClosed)), losers);
+                    return (
+                        0,
+                        Err(ProviderError::adapter(ChannelClosed)),
+                        losers,
+                        launched,
+                    );
                 };
                 if outcome.result.is_ok() {
                     cancel_others(&tokens, outcome.idx);
-                    return (outcome.idx, outcome.result, losers);
+                    return (outcome.idx, outcome.result, losers, launched);
                 }
                 losers.push(outcome);
                 if losers.len() == launched {
                     let last = losers.pop().expect("we just pushed");
-                    return (last.idx, last.result, losers);
+                    return (last.idx, last.result, losers, launched);
                 }
             }
         }
@@ -187,7 +198,7 @@ mod tests {
             hedge_after: Duration::from_millis(100),
             max_hedges: 1,
         };
-        let (idx, result, losers) = race_hedged(policy, 2, |i, _tok| async move {
+        let (idx, result, losers, _launched) = race_hedged(policy, 2, |i, _tok| async move {
             if i == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 Ok(resp("a"))
@@ -208,7 +219,7 @@ mod tests {
             hedge_after: Duration::from_millis(50),
             max_hedges: 1,
         };
-        let (idx, result, _losers) = race_hedged(policy, 2, |i, _tok| async move {
+        let (idx, result, _losers, _launched) = race_hedged(policy, 2, |i, _tok| async move {
             if i == 0 {
                 tokio::time::sleep(Duration::from_millis(10_000)).await;
                 Ok(resp("a"))
@@ -230,7 +241,7 @@ mod tests {
         };
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancelled2 = cancelled.clone();
-        let (idx, _result, _losers) = race_hedged(policy, 2, move |i, tok| {
+        let (idx, _result, _losers, _launched) = race_hedged(policy, 2, move |i, tok| {
             let cancelled = cancelled2.clone();
             async move {
                 if i == 0 {
@@ -263,7 +274,7 @@ mod tests {
             hedge_after: Duration::from_secs(60),
             max_hedges: 1,
         };
-        let (idx, result, _losers) = race_hedged(policy, 2, |i, _tok| async move {
+        let (idx, result, _losers, _launched) = race_hedged(policy, 2, |i, _tok| async move {
             if i == 0 {
                 Err(ProviderError::ServerError {
                     status: 503,
@@ -285,7 +296,7 @@ mod tests {
             hedge_after: Duration::from_millis(10),
             max_hedges: 1,
         };
-        let (_idx, result, _losers) = race_hedged(policy, 2, |_i, _tok| async move {
+        let (_idx, result, _losers, _launched) = race_hedged(policy, 2, |_i, _tok| async move {
             Err::<CompletionResponse, _>(ProviderError::ModelUnavailable("nope".into()))
         })
         .await;

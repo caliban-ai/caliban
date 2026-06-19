@@ -99,19 +99,28 @@ impl CircuitBreaker {
     }
 
     fn state_at(&self, now: Instant) -> BreakerState {
-        let cur = **self.inner.state.load();
-        if let BreakerState::Tripped { since } = cur
+        let cur_guard = self.inner.state.load();
+        if let BreakerState::Tripped { since } = **cur_guard
             && now.duration_since(since) >= self.inner.policy.cooldown
         {
-            // Cooldown elapsed: begin a fresh recovery window. Reset the probe
-            // gate + success counter before exposing HalfOpen so the first
-            // caller can claim the single probe (#183).
-            self.inner.probe_successes.store(0, Ordering::SeqCst);
-            self.inner.probe_inflight.store(false, Ordering::SeqCst);
-            self.inner.state.store(Arc::new(BreakerState::HalfOpen));
-            return BreakerState::HalfOpen;
+            // Cooldown elapsed: atomically flip Tripped→HalfOpen with a single
+            // CAS keyed on the exact pointer we observed. A plain `store` would
+            // let a stale reader resurrect HalfOpen over a breaker another
+            // thread already Closed, and — together with the old read-path
+            // probe-gate reset — let two readers racing the transition each
+            // claim the single recovery probe (#215 bug 1, gap in #183 under
+            // concurrency). The probe gate is reset when the breaker trips, so
+            // the read path must NOT touch probe_inflight here.
+            let half_open = Arc::new(BreakerState::HalfOpen);
+            let prev = self.inner.state.compare_and_swap(&cur_guard, half_open);
+            if Arc::ptr_eq(&prev, &cur_guard) {
+                return BreakerState::HalfOpen;
+            }
+            // Lost the CAS: another thread already transitioned the breaker —
+            // report whatever state it installed rather than asserting HalfOpen.
+            return **self.inner.state.load();
         }
-        cur
+        **cur_guard
     }
 
     /// Decide whether the caller may issue a request through this route, and
@@ -146,19 +155,28 @@ impl CircuitBreaker {
     }
 
     fn observe_success_at(&self, now: Instant) {
-        if matches!(self.state_at(now), BreakerState::HalfOpen) {
-            // A probe succeeded. Release the probe slot and count it; Close
-            // only once `half_open_probes` successes have accumulated (#183).
-            let needed = self.inner.policy.half_open_probes.max(1);
-            let prior = self.inner.probe_successes.fetch_add(1, Ordering::SeqCst);
-            self.inner.probe_inflight.store(false, Ordering::SeqCst);
-            if prior + 1 >= needed {
+        match self.state_at(now) {
+            BreakerState::HalfOpen => {
+                // A probe succeeded. Release the probe slot and count it; Close
+                // only once `half_open_probes` successes have accumulated (#183).
+                let needed = self.inner.policy.half_open_probes.max(1);
+                let prior = self.inner.probe_successes.fetch_add(1, Ordering::SeqCst);
+                self.inner.probe_inflight.store(false, Ordering::SeqCst);
+                if prior + 1 >= needed {
+                    self.close();
+                }
+            }
+            BreakerState::Closed => {
+                // A success on a healthy route clears the failure window.
                 self.close();
             }
-            return;
+            BreakerState::Tripped { .. } => {
+                // A late success from a request admitted *before* the route
+                // tripped must not reopen the breaker — the spec has no
+                // Tripped→Closed edge. Dropping it keeps the breaker open for
+                // the full cooldown (#215 bug 2).
+            }
         }
-        // Closed (or Tripped, treated as recovery): close + clear the window.
-        self.close();
     }
 
     /// Transition to `Closed` and clear all recovery/failure bookkeeping.
@@ -171,6 +189,16 @@ impl CircuitBreaker {
             .lock()
             .expect("breaker failures lock")
             .clear();
+    }
+
+    /// Release the single recovery-probe slot without recording an outcome.
+    ///
+    /// Used when a HalfOpen probe is cancelled in flight (e.g. it lost a hedge
+    /// race before completing) so the slot isn't leaked and the route can be
+    /// probed again. A no-op for Closed/Tripped routes (the slot is already
+    /// clear there), so it's safe to call unconditionally (#215 bug 4).
+    pub(crate) fn release_probe(&self) {
+        self.inner.probe_inflight.store(false, Ordering::SeqCst);
     }
 
     /// Record a failure. Trips the breaker if the failure count in the
@@ -205,6 +233,13 @@ impl CircuitBreaker {
         }
         f.push_back(now);
         if f.len() as u32 >= threshold {
+            // Reset the recovery gate as the breaker trips so the eventual
+            // Tripped→HalfOpen read path never has to touch probe_inflight —
+            // that read-path reset is what allowed a concurrent double-admit
+            // (#215 bug 1). In Closed these are already cleared; resetting here
+            // makes the "gate is clear whenever Tripped" invariant explicit.
+            self.inner.probe_successes.store(0, Ordering::SeqCst);
+            self.inner.probe_inflight.store(false, Ordering::SeqCst);
             self.inner
                 .state
                 .store(Arc::new(BreakerState::Tripped { since: now }));
@@ -386,6 +421,68 @@ mod tests {
         assert!(
             matches!(b.state_at(t2), BreakerState::HalfOpen),
             "progress reset: one success is not enough to close"
+        );
+    }
+
+    #[test]
+    fn concurrent_admits_after_cooldown_admit_exactly_one_probe() {
+        // #215 bug 1: the Tripped→HalfOpen transition must be atomic and must
+        // not reset the probe gate on the read path, or two threads both
+        // catching the transition can each claim the single recovery probe.
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicU32;
+        use std::thread;
+        for round in 0..200 {
+            let b = CircuitBreaker::new(policy(1, 60_000, 5));
+            let t0 = Instant::now();
+            b.observe_failure_at(t0);
+            // A *fixed* post-cooldown instant shared by every thread keeps the
+            // timing deterministic regardless of scheduler load — the only
+            // variable under test is the concurrency of the transition itself.
+            let probe_at = t0 + Duration::from_millis(50);
+            let n = 8;
+            let barrier = Arc::new(Barrier::new(n));
+            let admits = Arc::new(AtomicU32::new(0));
+            let mut handles = Vec::new();
+            for _ in 0..n {
+                let bc = b.clone();
+                let bar = Arc::clone(&barrier);
+                let ac = Arc::clone(&admits);
+                handles.push(thread::spawn(move || {
+                    bar.wait();
+                    if bc.try_admit_at(probe_at) {
+                        ac.fetch_add(1, Ordering::SeqCst);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(
+                admits.load(Ordering::SeqCst),
+                1,
+                "round {round}: exactly one probe must be admitted under concurrency"
+            );
+        }
+    }
+
+    #[test]
+    fn success_observed_while_tripped_does_not_reopen() {
+        // #215 bug 2: a late success from a request admitted before the route
+        // tripped must not reopen the breaker — the spec has no Tripped→Closed
+        // edge. The breaker must stay Tripped for the full cooldown.
+        let b = CircuitBreaker::new(policy(1, 60_000, 10_000));
+        let t0 = Instant::now();
+        b.observe_failure_at(t0);
+        assert!(matches!(b.state_at(t0), BreakerState::Tripped { .. }));
+        // A straggler success arrives while still Tripped (cooldown not yet up).
+        b.observe_success_at(t0 + Duration::from_millis(5));
+        assert!(
+            matches!(
+                b.state_at(t0 + Duration::from_millis(5)),
+                BreakerState::Tripped { .. }
+            ),
+            "a success observed while Tripped must not close the breaker"
         );
     }
 
