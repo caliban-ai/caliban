@@ -16,6 +16,8 @@ pub enum OllamaError {
         status: u16,
         /// The response body text.
         body: String,
+        /// The parsed `Retry-After` hint, when the server sent one (429s).
+        retry_after: Option<std::time::Duration>,
     },
 
     /// JSON deserialization failed.
@@ -39,6 +41,22 @@ pub enum OllamaError {
     Unsupported(String),
 }
 
+impl OllamaError {
+    /// Build [`OllamaError::BadStatus`] from the shared
+    /// [`caliban_provider::transport::BadResponse`] that
+    /// [`caliban_provider::transport::check_status`] produces — the single
+    /// place this adapter turns a non-2xx response (status, body, and parsed
+    /// `Retry-After`) into its error variant.
+    #[must_use]
+    pub(crate) fn bad_status(resp: caliban_provider::transport::BadResponse) -> Self {
+        Self::BadStatus {
+            status: resp.status,
+            body: resp.body,
+            retry_after: resp.retry_after,
+        }
+    }
+}
+
 impl From<OllamaError> for ProviderError {
     fn from(e: OllamaError) -> Self {
         use caliban_provider::TransportErrorClass;
@@ -52,12 +70,14 @@ impl From<OllamaError> for ProviderError {
                     TransportErrorClass::Adapter => ProviderError::adapter(e),
                 }
             }
-            OllamaError::BadStatus { status, ref body } => {
-                caliban_provider::error_classify::map_bad_status(status, body, |b| {
-                    ProviderError::InvalidRequest(b.to_string())
-                })
-                .unwrap_or_else(|| ProviderError::adapter(e))
-            }
+            OllamaError::BadStatus {
+                status,
+                ref body,
+                retry_after,
+            } => caliban_provider::error_classify::map_bad_status(status, body, retry_after, |b| {
+                ProviderError::InvalidRequest(b.to_string())
+            })
+            .unwrap_or_else(|| ProviderError::adapter(e)),
             OllamaError::Deserialize(_)
             | OllamaError::StreamParse(_)
             | OllamaError::MissingConfig(_)

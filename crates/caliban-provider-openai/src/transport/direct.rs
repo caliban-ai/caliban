@@ -24,10 +24,8 @@ impl DirectTransport {
     ///
     /// Returns `Err(OpenAIError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: DirectConfig) -> Result<Self, OpenAIError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(OpenAIError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(OpenAIError::Http)?;
         Ok(Self { client, config })
     }
 
@@ -75,14 +73,7 @@ impl Transport for DirectTransport {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(OpenAIError::BadStatus {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OpenAIError::bad_status).await?;
         Ok(resp.json::<NativeResponse>().await?)
     }
 
@@ -101,14 +92,7 @@ impl Transport for DirectTransport {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(OpenAIError::BadStatus {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, OpenAIError::bad_status).await?;
         let s = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(OpenAIError::Http));

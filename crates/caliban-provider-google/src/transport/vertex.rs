@@ -43,10 +43,8 @@ impl VertexTransport {
     ///
     /// Returns `Err(GoogleError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: VertexConfig) -> Result<Self, GoogleError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(GoogleError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(GoogleError::Http)?;
         Ok(Self {
             client,
             token_provider: config.token_provider,
@@ -91,25 +89,18 @@ impl VertexTransport {
 
 #[async_trait]
 impl Transport for VertexTransport {
-    async fn send(&self, model: &str, body: &NativeRequest) -> Result<NativeResponse, GoogleError> {
+    async fn send(&self, model: &str, body: NativeRequest) -> Result<NativeResponse, GoogleError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client
             .post(self.endpoint(model, false))
             .headers(headers)
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(GoogleError::Http)?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(GoogleError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, GoogleError::bad_status).await?;
         resp.json::<NativeResponse>()
             .await
             .map_err(GoogleError::Http)
@@ -118,26 +109,19 @@ impl Transport for VertexTransport {
     async fn stream(
         &self,
         model: &str,
-        body: &NativeRequest,
+        body: NativeRequest,
     ) -> Result<BoxStream<'static, Result<Bytes, GoogleError>>, GoogleError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client
             .post(self.endpoint(model, true))
             .headers(headers)
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(GoogleError::Http)?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(GoogleError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, GoogleError::bad_status).await?;
         let s = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(GoogleError::Http));

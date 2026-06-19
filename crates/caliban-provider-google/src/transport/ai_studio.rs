@@ -31,10 +31,8 @@ impl AIStudioTransport {
     ///
     /// Returns `Err(GoogleError::Http)` if the `reqwest` client cannot be built.
     pub fn new(config: AIStudioConfig) -> Result<Self, GoogleError> {
-        let client = caliban_common::http::default_client_builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(GoogleError::Http)?;
+        let client =
+            caliban_common::http::build_client(config.timeout).map_err(GoogleError::Http)?;
         Ok(Self { client, config })
     }
 
@@ -55,47 +53,33 @@ impl AIStudioTransport {
 
 #[async_trait]
 impl Transport for AIStudioTransport {
-    async fn send(&self, model: &str, body: &NativeRequest) -> Result<NativeResponse, GoogleError> {
+    async fn send(&self, model: &str, body: NativeRequest) -> Result<NativeResponse, GoogleError> {
         let url = self.generate_content_url(model);
         let resp = self
             .client
             .post(&url)
             .header("content-type", "application/json")
-            .json(body)
+            .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(GoogleError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, GoogleError::bad_status).await?;
         Ok(resp.json::<NativeResponse>().await?)
     }
 
     async fn stream(
         &self,
         model: &str,
-        body: &NativeRequest,
+        body: NativeRequest,
     ) -> Result<BoxStream<'static, Result<bytes::Bytes, GoogleError>>, GoogleError> {
         let url = self.stream_generate_content_url(model);
         let resp = self
             .client
             .post(&url)
             .header("content-type", "application/json")
-            .json(body)
+            .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(GoogleError::BadStatus {
-                status: status.as_u16(),
-                body: body_text,
-            });
-        }
+        let resp = caliban_provider::transport::check_status(resp, GoogleError::bad_status).await?;
         let s = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(GoogleError::Http));

@@ -94,3 +94,41 @@ async fn o1_uses_developer_role() {
         .unwrap();
     let _ = provider.complete(req).await.unwrap();
 }
+
+#[tokio::test]
+async fn rate_limit_429_captures_retry_after_header() {
+    // A 429 carrying a delta-seconds Retry-After must surface on RateLimit so
+    // the agent-core retry loop honors the server's requested backoff. This
+    // exercises the shared `check_status` path end-to-end: header parse off a
+    // real reqwest response → BadStatus → From → RateLimit.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "42"))
+        .mount(&server)
+        .await;
+
+    let cfg = DirectConfig {
+        api_key: SecretString::new("k".into()),
+        base_url: Url::parse(&format!("{}/v1", server.uri())).unwrap(),
+        organization: None,
+        project: None,
+        timeout: std::time::Duration::from_secs(10),
+    };
+    let provider = OpenAIProvider::direct(cfg).unwrap();
+    let req = CompletionRequest::builder("gpt-4o")
+        .user_text("Hi!")
+        .max_tokens(64)
+        .build()
+        .unwrap();
+
+    let err = provider.complete(req).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            caliban_provider::Error::RateLimit { retry_after: Some(d) }
+                if d == std::time::Duration::from_secs(42)
+        ),
+        "expected RateLimit with retry_after=42s, got {err:?}",
+    );
+}
