@@ -719,6 +719,65 @@ enum PromptSource {
     StreamJson(String),
 }
 
+/// Assemble the leading `System` message for a headless run.
+///
+/// A fresh run has no system message yet, so the base system prompt and the
+/// optional `--json-schema` directive are combined into a new leading `System`
+/// message. A sessioned/continued run already carries a `System` message
+/// (rebuilt in `main.rs` from the system prompt + todos), so the schema
+/// directive must be *appended* to it — skipping it there is what made
+/// `--json-schema` silently degrade to validate-only under
+/// `--session`/`--continue`/`--resume` (#214, gap in #174).
+fn apply_system_and_schema(
+    messages: &mut Vec<Message>,
+    base_system: Option<String>,
+    schema_instruction: Option<String>,
+) {
+    let has_system = messages
+        .first()
+        .is_some_and(|m| m.role == caliban_provider::Role::System);
+    if has_system {
+        // The base prompt is already present in the existing system message;
+        // only the schema directive may be missing. Append it to the first
+        // text block so the model is actually instructed to emit JSON (#214).
+        if let Some(instruction) = schema_instruction {
+            append_to_system_message(messages, &instruction);
+        }
+        return;
+    }
+    let combined = match (base_system, schema_instruction) {
+        (Some(b), Some(s)) => Some(format!("{b}\n\n{s}")),
+        (Some(b), None) => Some(b),
+        (None, Some(s)) => Some(s),
+        (None, None) => None,
+    };
+    if let Some(text) = combined {
+        messages.insert(0, Message::system_text(text));
+    }
+}
+
+/// Append `instruction` to the first text block of the leading message,
+/// matching the `\n\n` join the fresh-run path uses. Falls back to inserting a
+/// new text block if the leading message has no text block.
+fn append_to_system_message(messages: &mut [Message], instruction: &str) {
+    let Some(first) = messages.first_mut() else {
+        return;
+    };
+    for block in &mut first.content {
+        if let caliban_provider::ContentBlock::Text(tb) = block {
+            tb.text = format!("{}\n\n{instruction}", tb.text);
+            return;
+        }
+    }
+    first.content.insert(
+        0,
+        caliban_provider::ContentBlock::Text(caliban_provider::TextBlock {
+            text: instruction.to_string(),
+            cache_control: None,
+        }),
+    );
+}
+
 /// Drive the agent loop in headless (`-p` / `--print`) mode and exit with
 /// the appropriate process exit code (ADR 0025).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -857,27 +916,14 @@ pub(crate) async fn run_headless(
         .as_ref()
         .map(|s| s.messages.clone())
         .unwrap_or_default();
-    let has_system = messages
-        .first()
-        .is_some_and(|m| m.role == caliban_provider::Role::System);
-    if !has_system {
-        let base = system_prompt
-            .as_ref()
-            .map(|sp| system_prompt::append_todo_block(sp, &todo_snapshot));
-        // #174: --json-schema is validate-only unless we tell the model to
-        // emit only matching JSON, so a normal prose reply fails extraction.
-        // Inject the schema directive into the leading system message.
-        let schema_instruction = json_schema.as_ref().map(headless::JsonSchema::instruction);
-        let combined = match (base, schema_instruction) {
-            (Some(b), Some(s)) => Some(format!("{b}\n\n{s}")),
-            (Some(b), None) => Some(b),
-            (None, Some(s)) => Some(s),
-            (None, None) => None,
-        };
-        if let Some(text) = combined {
-            messages.insert(0, caliban_provider::Message::system_text(text));
-        }
-    }
+    // Assemble the leading system message. The base prompt is only needed when
+    // no system message exists yet; the --json-schema directive must apply in
+    // both cases (a sessioned run already has a system message — #174/#214).
+    let base_system = system_prompt
+        .as_ref()
+        .map(|sp| system_prompt::append_todo_block(sp, &todo_snapshot));
+    let schema_instruction = json_schema.as_ref().map(headless::JsonSchema::instruction);
+    apply_system_and_schema(&mut messages, base_system, schema_instruction);
     if let PromptSource::Single(ref prompt_text) = prompt_source {
         messages.push(Message::user_text(prompt_text.clone()));
     }
@@ -2157,13 +2203,82 @@ fn apply_memory_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        debug_enabled, last_assistant_thinking_only, missing_key_err, resolve_debug_log_path,
-        stop_condition_exit_code, stopped_for_surface_line,
+        apply_system_and_schema, debug_enabled, last_assistant_thinking_only, missing_key_err,
+        resolve_debug_log_path, stop_condition_exit_code, stopped_for_surface_line,
     };
     use crate::args::Args;
     use caliban_agent_core::StopCondition;
     use caliban_provider::{ContentBlock, Message, Role, TextBlock, ThinkingBlock};
     use clap::Parser as _;
+
+    /// Concatenate the text blocks of a message (for asserting system content).
+    fn system_text_of(m: &Message) -> String {
+        m.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(tb) => Some(tb.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn schema_directive_injected_when_no_system_message() {
+        // Fresh run: no system message yet — base prompt + schema directive are
+        // combined into a new leading System message.
+        let mut messages: Vec<Message> = vec![];
+        apply_system_and_schema(
+            &mut messages,
+            Some("BASE PROMPT".to_string()),
+            Some("RESPOND WITH JSON ONLY".to_string()),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::System);
+        let t = system_text_of(&messages[0]);
+        assert!(t.contains("BASE PROMPT"), "base prompt present: {t}");
+        assert!(
+            t.contains("RESPOND WITH JSON ONLY"),
+            "schema directive present: {t}"
+        );
+    }
+
+    #[test]
+    fn schema_directive_appended_when_system_message_exists() {
+        // Regression for #214: a sessioned/continued run already has a System
+        // message (built in main.rs). --json-schema must still take effect —
+        // the directive is appended rather than dropped.
+        let mut messages = vec![Message::system_text("SESSION SYSTEM PROMPT")];
+        apply_system_and_schema(
+            &mut messages,
+            Some("SESSION SYSTEM PROMPT".to_string()),
+            Some("RESPOND WITH JSON ONLY".to_string()),
+        );
+        assert_eq!(messages.len(), 1, "no extra system message inserted");
+        assert_eq!(messages[0].role, Role::System);
+        let t = system_text_of(&messages[0]);
+        assert!(
+            t.contains("SESSION SYSTEM PROMPT"),
+            "base prompt preserved: {t}"
+        );
+        assert!(
+            t.contains("RESPOND WITH JSON ONLY"),
+            "schema directive must apply even with an existing system message (#214); got: {t}"
+        );
+    }
+
+    #[test]
+    fn no_schema_leaves_existing_system_message_untouched() {
+        // Without --json-schema, an existing system message is left as-is.
+        let mut messages = vec![Message::system_text("SESSION SYSTEM PROMPT")];
+        apply_system_and_schema(
+            &mut messages,
+            Some("SESSION SYSTEM PROMPT".to_string()),
+            None,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(system_text_of(&messages[0]), "SESSION SYSTEM PROMPT");
+    }
 
     /// Parse an `Args` from the given extra flags (always with `caliban` as
     /// argv[0]). Mirrors the helper in `args.rs`'s own test module.
