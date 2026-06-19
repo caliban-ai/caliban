@@ -74,39 +74,24 @@ impl Tool for WriteTool {
     /// the path is empty. Returns [`ToolError::Execution`] if the file cannot
     /// be written (e.g., permission denied).
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: WriteInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: WriteInput = crate::parse_input(input)?;
 
         let path = self.root.resolve(&parsed.path)?;
 
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(ToolError::execution)?;
-        }
-
         let existed_before = tokio::fs::metadata(&path).await.is_ok();
 
-        tokio::fs::write(&path, &parsed.content)
-            .await
+        // Atomic, crash-safe write (creates parent dirs) — shared with
+        // Edit/MultiEdit/NotebookEdit via `caliban_common::fs::write_atomic`.
+        caliban_common::fs::write_atomic(&path, parsed.content.as_bytes())
             .map_err(ToolError::execution)?;
 
         // Fire FileChanged on success (best-effort).
-        if let Some(hooks) = cx.hooks.as_ref() {
-            let kind = if existed_before {
-                caliban_agent_core::FileChangeKind::Modified
-            } else {
-                caliban_agent_core::FileChangeKind::Created
-            };
-            let fc_ctx = caliban_agent_core::FileChangedCtx {
-                path: &path,
-                kind,
-                tool: "Write",
-            };
-            if let Err(e) = hooks.file_changed(&fc_ctx).await {
-                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
-            }
-        }
+        let kind = if existed_before {
+            caliban_agent_core::FileChangeKind::Modified
+        } else {
+            caliban_agent_core::FileChangeKind::Created
+        };
+        cx.fire_file_changed(&path, kind, "Write").await;
 
         Ok(vec![ContentBlock::Text(TextBlock {
             text: format!(

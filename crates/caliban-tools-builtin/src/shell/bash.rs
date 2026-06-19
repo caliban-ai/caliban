@@ -114,17 +114,10 @@ enum RawOutcome {
 #[allow(unsafe_code)] // libc::kill is a stable, well-defined FFI call; required to signal a process group (negative PID) which the safe API in std doesn't expose
 async fn kill_process_tree(child_pid: Option<u32>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    if let Some(pid) = child_pid
-        && let Ok(pid_i32) = i32::try_from(pid)
-    {
-        // SAFETY: `libc::kill` takes two integer arguments and returns an
-        // integer; no pointer dereferences, no aliasing concerns. A negative
-        // first argument signals the entire process group with PGID = our
-        // child's PID (because we called `process_group(0)` on Command).
-        // ESRCH on an already-dead group is fine; we ignore the return.
-        unsafe {
-            libc::kill(-pid_i32, libc::SIGKILL);
-        }
+    if let Some(pid) = child_pid {
+        // Process-group SIGKILL (PGID == child PID via process_group(0)) —
+        // see `shell::signal_process_group`.
+        super::signal_process_group(pid, libc::SIGKILL);
     }
     // start_kill is a no-op if the process already exited, otherwise it
     // sends SIGKILL to the leader (redundant with the group kill above,
@@ -174,8 +167,7 @@ impl Tool for BashTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: BashInput =
-            serde_json::from_value(input).map_err(|e| ToolError::invalid_input(format!("{e}")))?;
+        let parsed: BashInput = crate::parse_input(input)?;
 
         let cwd = match parsed.cwd {
             Some(ref c) => self.root.resolve(c)?,

@@ -78,8 +78,7 @@ impl Tool for EnterPlanModeTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: EnterInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: EnterInput = crate::parse_input(input)?;
         self.handle.store(true, Ordering::Relaxed);
         let body = format!(
             "→ Plan mode entered. Operator must approve before tools that mutate state will run.\n\n{}",
@@ -143,8 +142,7 @@ impl Tool for ExitPlanModeTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: ExitInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: ExitInput = crate::parse_input(input)?;
         if !parsed.confirm {
             return Err(ToolError::invalid_input(
                 "ExitPlanMode requires confirm=true".to_string(),

@@ -32,6 +32,28 @@ impl std::fmt::Debug for ToolContext {
     }
 }
 
+impl ToolContext {
+    /// Fire the `FileChanged` hook for a successful filesystem mutation,
+    /// best-effort. A missing hooks handle is a no-op and a hook error is
+    /// logged (never propagated), so the tool's own result is unaffected.
+    ///
+    /// Centralizes the block the mutating `fs` tools (`Write` / `Edit` /
+    /// `MultiEdit` / `NotebookEdit`) used to copy-paste verbatim.
+    pub async fn fire_file_changed(
+        &self,
+        path: &std::path::Path,
+        kind: crate::hooks::FileChangeKind,
+        tool: &'static str,
+    ) {
+        if let Some(hooks) = self.hooks.as_ref() {
+            let ctx = crate::hooks::FileChangedCtx { path, kind, tool };
+            if let Err(e) = hooks.file_changed(&ctx).await {
+                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
+            }
+        }
+    }
+}
+
 /// Errors a `Tool::invoke` can return.
 #[derive(thiserror::Error, Debug)]
 pub enum ToolError {

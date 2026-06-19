@@ -128,10 +128,50 @@ fn canonicalize_existing_ancestor(p: &Path) -> PathBuf {
     }
 }
 
+/// Build a recursive directory walker with the built-in tools' shared ignore
+/// policy: skip hidden entries and honor `.gitignore`. Grep and Glob had each
+/// rebuilt this `WalkBuilder` with identical options.
+#[must_use]
+pub fn walk(root: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .build()
+}
+
+/// The plural suffix for `count`: empty when exactly one, otherwise `plural`.
+///
+/// Unifies the `if n == 1 { "" } else { … }` pluralization Grep ("match"/
+/// "matches", `plural_suffix(n, "es")`) and Glob ("file"/"files",
+/// `plural_suffix(n, "s")`) each open-coded.
+#[must_use]
+pub fn plural_suffix(count: usize, plural: &'static str) -> &'static str {
+    if count == 1 { "" } else { plural }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn plural_suffix_singular_is_empty() {
+        assert_eq!(plural_suffix(1, "es"), "");
+    }
+
+    #[test]
+    fn plural_suffix_plural_uses_suffix() {
+        assert_eq!(plural_suffix(0, "s"), "s");
+        assert_eq!(plural_suffix(2, "es"), "es");
+    }
+
+    #[test]
+    fn walk_visits_files_under_root() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+        let count = walk(tmp.path()).filter_map(Result::ok).count();
+        assert!(count >= 1);
+    }
 
     #[test]
     fn resolve_relative() {

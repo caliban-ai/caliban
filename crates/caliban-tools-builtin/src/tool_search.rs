@@ -111,8 +111,7 @@ impl Tool for ToolSearchTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: Input =
-            serde_json::from_value(input).map_err(|e| ToolError::invalid_input(e.to_string()))?;
+        let parsed: Input = crate::parse_input(input)?;
         let max = parsed
             .max_results
             .unwrap_or(MAX_DEFAULT_RESULTS)

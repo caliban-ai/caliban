@@ -16,6 +16,7 @@
 
 pub mod agent;
 pub mod fs;
+pub mod input;
 pub mod memory;
 pub(crate) mod parallel;
 pub mod plan;
@@ -30,6 +31,7 @@ pub use agent::{
     IsolationMode, TodoWriteTool, WorktreeOptions,
 };
 pub use fs::{EditTool, MultiEditTool, NotebookEditTool, ReadTool, WriteTool};
+pub use input::parse_input;
 pub use memory::{ReadMemoryTopicTool, WriteMemoryTopicTool};
 pub use plan::{EnterPlanModeTool, ExitPlanModeTool};
 pub use search::{GlobTool, GrepTool};

@@ -2,8 +2,6 @@
 //! replace_all?}` edits to a single file, atomically. If any edit fails to
 //! match, the entire operation is rolled back and the file is unchanged.
 
-use std::io::Write as _;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -79,24 +77,6 @@ fn apply_edits(text: String, edits: &[EditOp]) -> Result<(String, Vec<usize>), T
     Ok((current, counts))
 }
 
-/// Atomic write: write to a tempfile in the same directory, then rename.
-fn atomic_write(path: &Path, contents: &str) -> Result<(), ToolError> {
-    let parent = path.parent().ok_or_else(|| {
-        ToolError::execution(std::io::Error::other("path has no parent directory"))
-    })?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(ToolError::execution)?;
-    tmp.write_all(contents.as_bytes())
-        .map_err(ToolError::execution)?;
-    tmp.flush().map_err(ToolError::execution)?;
-    tmp.persist(path).map_err(|e| {
-        ToolError::execution(std::io::Error::other(format!(
-            "atomic rename failed: {}",
-            e.error
-        )))
-    })?;
-    Ok(())
-}
-
 #[async_trait]
 impl Tool for MultiEditTool {
     fn name(&self) -> &'static str {
@@ -138,8 +118,7 @@ impl Tool for MultiEditTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: MultiEditInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: MultiEditInput = crate::parse_input(input)?;
         if parsed.edits.is_empty() {
             return Err(ToolError::invalid_input("edits array must be non-empty"));
         }
@@ -153,20 +132,20 @@ impl Tool for MultiEditTool {
 
         let path_clone = path.clone();
         let body = final_text.clone();
-        tokio::task::spawn_blocking(move || atomic_write(&path_clone, &body))
-            .await
-            .map_err(|e| ToolError::execution(std::io::Error::other(format!("{e}"))))??;
+        // Atomic, crash-safe write — shared via `caliban_common::fs::write_atomic`.
+        tokio::task::spawn_blocking(move || {
+            caliban_common::fs::write_atomic(&path_clone, body.as_bytes())
+                .map_err(ToolError::execution)
+        })
+        .await
+        .map_err(|e| ToolError::execution(std::io::Error::other(format!("{e}"))))??;
 
-        if let Some(hooks) = cx.hooks.as_ref() {
-            let fc_ctx = caliban_agent_core::FileChangedCtx {
-                path: &path,
-                kind: caliban_agent_core::FileChangeKind::Modified,
-                tool: "MultiEdit",
-            };
-            if let Err(e) = hooks.file_changed(&fc_ctx).await {
-                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
-            }
-        }
+        cx.fire_file_changed(
+            &path,
+            caliban_agent_core::FileChangeKind::Modified,
+            "MultiEdit",
+        )
+        .await;
 
         let total: usize = counts.iter().sum();
         Ok(vec![ContentBlock::Text(TextBlock {

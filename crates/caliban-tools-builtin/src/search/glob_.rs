@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use caliban_agent_core::{Tool, ToolContext, ToolError};
 use caliban_provider::{ContentBlock, TextBlock};
 use globset::GlobBuilder;
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -76,8 +75,7 @@ impl Tool for GlobTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: GlobInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: GlobInput = crate::parse_input(input)?;
 
         let search_root: PathBuf = match parsed.path {
             Some(ref p) => self.root.resolve(p)?,
@@ -90,10 +88,7 @@ impl Tool for GlobTool {
             .map_err(|e| ToolError::invalid_input(format!("invalid glob pattern: {e}")))?
             .compile_matcher();
 
-        let walk = WalkBuilder::new(&search_root)
-            .hidden(true)
-            .git_ignore(true)
-            .build();
+        let walk = crate::workspace::walk(&search_root);
 
         let mut matches = Vec::new();
         let mut truncated = false;
@@ -120,7 +115,7 @@ impl Tool for GlobTool {
 
         matches.sort();
 
-        let suffix = if matches.len() == 1 { "" } else { "s" };
+        let suffix = crate::workspace::plural_suffix(matches.len(), "s");
         let mut text = format!(
             "→ Glob '{}' matched {} file{}:\n",
             parsed.pattern,

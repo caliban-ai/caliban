@@ -10,7 +10,6 @@ use caliban_provider::{ContentBlock, TextBlock};
 use globset::Glob;
 use grep_regex::RegexMatcher;
 use grep_searcher::{Searcher, Sink, SinkMatch};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write;
@@ -106,8 +105,7 @@ impl Tool for GrepTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: GrepInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: GrepInput = crate::parse_input(input)?;
 
         let search_root: PathBuf = match parsed.path {
             Some(p) => self.root.resolve(&p)?,
@@ -131,10 +129,7 @@ impl Tool for GrepTool {
             None => None,
         };
 
-        let walk = WalkBuilder::new(&search_root)
-            .hidden(true)
-            .git_ignore(true)
-            .build();
+        let walk = crate::workspace::walk(&search_root);
 
         let mut results: Vec<String> = Vec::with_capacity(max_matches);
         let mut truncated = false;
@@ -179,7 +174,7 @@ impl Tool for GrepTool {
             "→ Grep '{}': {} match{}\n",
             parsed.pattern,
             results.len(),
-            if results.len() == 1 { "" } else { "es" }
+            crate::workspace::plural_suffix(results.len(), "es")
         );
         for line in &results {
             writeln!(text, "{line}").map_err(ToolError::execution)?;

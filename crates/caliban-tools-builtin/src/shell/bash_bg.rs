@@ -340,20 +340,16 @@ pub fn global_registry() -> Arc<BashBgRegistry> {
 fn kill_job_now(job: &BashJob, force_kill: bool) {
     let pid = *job.pid.lock().unwrap();
     #[cfg(unix)]
-    if let Some(p) = pid
-        && let Ok(p_i32) = i32::try_from(p)
-    {
-        // SAFETY: libc::kill takes two ints; negative pid signals pgroup.
-        unsafe {
-            libc::kill(
-                -p_i32,
-                if force_kill {
-                    libc::SIGKILL
-                } else {
-                    libc::SIGTERM
-                },
-            );
-        }
+    if let Some(p) = pid {
+        // Process-group SIGTERM/SIGKILL — see `shell::signal_process_group`.
+        super::signal_process_group(
+            p,
+            if force_kill {
+                libc::SIGKILL
+            } else {
+                libc::SIGTERM
+            },
+        );
     }
     #[cfg(not(unix))]
     let _ = pid;
@@ -574,8 +570,7 @@ impl Tool for BashOutputTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: BashOutputInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: BashOutputInput = crate::parse_input(input)?;
         let job = self.registry.get(&parsed.shell_id).ok_or_else(|| {
             ToolError::execution(std::io::Error::other(format!(
                 "no background shell with id {}",
@@ -671,8 +666,7 @@ impl Tool for KillShellTool {
     }
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: KillShellInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: KillShellInput = crate::parse_input(input)?;
         let job = self.registry.get(&parsed.shell_id).ok_or_else(|| {
             ToolError::execution(std::io::Error::other(format!(
                 "no background shell with id {}",

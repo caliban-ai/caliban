@@ -445,8 +445,7 @@ impl Tool for WebFetchTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: FetchInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: FetchInput = crate::parse_input(input)?;
         let initial = validate_url(&parsed.url).map_err(ToolError::invalid_input)?;
         let timeout = Duration::from_secs(
             parsed

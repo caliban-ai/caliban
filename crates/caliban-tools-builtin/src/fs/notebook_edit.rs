@@ -265,8 +265,7 @@ impl Tool for NotebookEditTool {
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
-        let parsed: NotebookEditInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::invalid_input(format!("invalid input: {e}")))?;
+        let parsed: NotebookEditInput = crate::parse_input(input)?;
 
         let path = self.root.resolve(&parsed.path)?;
         let body = tokio::fs::read_to_string(&path)
@@ -287,16 +286,12 @@ impl Tool for NotebookEditTool {
                 .map_err(|e| ToolError::execution(std::io::Error::other(format!("{e}"))))??;
 
         // Fire FileChanged on success (best-effort).
-        if let Some(hooks) = cx.hooks.as_ref() {
-            let fc_ctx = caliban_agent_core::FileChangedCtx {
-                path: &path,
-                kind: caliban_agent_core::FileChangeKind::Modified,
-                tool: "NotebookEdit",
-            };
-            if let Err(e) = hooks.file_changed(&fc_ctx).await {
-                tracing::warn!(error = %e, "file_changed hook error (non-fatal)");
-            }
-        }
+        cx.fire_file_changed(
+            &path,
+            caliban_agent_core::FileChangeKind::Modified,
+            "NotebookEdit",
+        )
+        .await;
 
         Ok(vec![ContentBlock::Text(TextBlock {
             text: format!(
