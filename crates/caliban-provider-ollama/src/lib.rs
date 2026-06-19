@@ -164,6 +164,29 @@ impl<T: Transport> Provider for OllamaProvider<T> {
         models::models()
     }
 
+    async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        // Probe the server's loaded models (`/api/ps`) and overlay each live
+        // context window onto the static catalog, so the trait returns
+        // server-detected data instead of the static table. Also seeds the
+        // ctx cache the sync `capabilities` reader overlays (#60) — folding the
+        // probe that used to be a `complete`/`stream` side effect into the
+        // trait surface (the #34 refresh hook).
+        let running = self.transport.running_models().await.map_err(Error::from)?;
+        let mut models = models::models();
+        for info in &mut models {
+            if let Some(ctx) = running
+                .iter()
+                .find(|m| m.matches(&info.native_id))
+                .and_then(|m| m.context_length)
+                && ctx > 0
+            {
+                info.capabilities.max_input_tokens = ctx;
+                self.store_ctx(&info.id, ctx);
+            }
+        }
+        Ok(models)
+    }
+
     fn name(&self) -> &'static str {
         "ollama"
     }

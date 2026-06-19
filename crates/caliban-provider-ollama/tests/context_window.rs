@@ -176,3 +176,31 @@ async fn static_fallback_when_endpoints_absent() {
         STATIC_FALLBACK
     );
 }
+
+#[tokio::test]
+async fn refresh_models_overlays_live_context_window() {
+    // `refresh_models` is the trait's live-discovery hook (#161): it probes
+    // `/api/ps` and overlays each loaded model's real window onto the static
+    // catalog, instead of returning the static table verbatim. `qwen3.5` is a
+    // catalog entry; report a live, non-default window for it.
+    const LIVE_CTX: u32 = 200_000;
+    let server = MockServer::start().await;
+    mount_ps(
+        &server,
+        json!({ "models": [
+            { "name": "qwen3.5", "model": "qwen3.5", "context_length": LIVE_CTX }
+        ] }),
+    )
+    .await;
+    let provider = provider_for(&server);
+
+    let models = provider.refresh_models().await.expect("refresh");
+    let q = models
+        .iter()
+        .find(|m| m.id == "qwen3.5")
+        .expect("qwen3.5 present in catalog");
+    assert_eq!(q.capabilities.max_input_tokens, LIVE_CTX);
+
+    // The probe also seeds the cache the sync `capabilities` reader overlays.
+    assert_eq!(provider.capabilities("qwen3.5").max_input_tokens, LIVE_CTX);
+}

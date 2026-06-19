@@ -117,6 +117,12 @@ impl<P: Provider + 'static> Provider for RefreshingProvider<P> {
         self.inner.load().list_models()
     }
 
+    async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        // Delegate live discovery to the inner provider so the trait's
+        // refresh hook keeps working through the key-refresh wrapper.
+        self.inner.load_full().refresh_models().await
+    }
+
     fn name(&self) -> &'static str {
         self.static_name
     }
