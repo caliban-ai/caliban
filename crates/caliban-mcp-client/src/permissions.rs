@@ -100,16 +100,26 @@ pub fn merge_with_global(
     if server_rules.is_empty() {
         return global_rules;
     }
-    // Split `global_rules` at the first non-deny rule: everything up to and
-    // including the trailing global denies stays at the head; the per-server
-    // block follows; then the rest (ask/allow/default).
-    let split_at = global_rules
-        .iter()
-        .position(|r| !matches!(r.action, Action::Deny))
-        .unwrap_or(global_rules.len());
-    let mut out: Vec<Rule> = global_rules[..split_at].to_vec();
+    // Partition `global_rules` by action class — *all* global denies (not just
+    // a contiguous head run) move ahead of the per-server block, then the rest
+    // (ask/allow/default) follow. A positional "first non-deny" split is wrong:
+    // the real chain is `[cli allow…, cli/settings deny…, default_rules…]`, so a
+    // non-Deny rule routinely precedes a global deny (e.g. `deny:mcp__*`), and a
+    // positional split would splice the server block — including server `allow`s
+    // — ahead of that deny, letting a server allow beat it (QA R3 #213).
+    // Relative order within each class is preserved (stable partition).
+    let mut global_deny: Vec<Rule> = Vec::new();
+    let mut global_rest: Vec<Rule> = Vec::new();
+    for r in global_rules {
+        if matches!(r.action, Action::Deny) {
+            global_deny.push(r);
+        } else {
+            global_rest.push(r);
+        }
+    }
+    let mut out: Vec<Rule> = global_deny;
     out.extend(server_rules);
-    out.extend_from_slice(&global_rules[split_at..]);
+    out.extend(global_rest);
     out
 }
 
@@ -194,5 +204,66 @@ mod tests {
         assert_eq!(merged[1].tool, "mcp__linear__read_*");
         // Then the global ask.
         assert_eq!(merged.last().unwrap().tool, "*");
+    }
+
+    #[test]
+    fn merge_with_global_keeps_deny_priority_when_a_non_deny_precedes_it() {
+        // Regression for QA R3 #213: the real global chain is
+        // `[cli allow…, cli/settings deny…, default_rules…]`, so a non-Deny
+        // rule (e.g. a CLI `--allow`) sits *ahead* of the global `deny:mcp__*`.
+        // The old positional split stopped at that first non-Deny and spliced
+        // the per-server block — including server `allow`s — ahead of the
+        // global deny, letting a server allow beat `deny mcp__*`.
+        let global = vec![
+            Rule {
+                tool: "Read".to_string(),
+                action: Action::Allow,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            },
+            Rule {
+                tool: "mcp__*".to_string(),
+                action: Action::Deny,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            },
+            Rule {
+                tool: "*".to_string(),
+                action: Action::Ask,
+                comment: None,
+                reason: None,
+                expires_at: None,
+            },
+        ];
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "linear".to_string(),
+            server_with_permissions(ServerPermissions {
+                allow: vec!["read_*".to_string()],
+                deny: vec![],
+                ask: vec![],
+            }),
+        );
+        let merged = merge_with_global(global, &servers);
+        // The global `deny:mcp__*` must precede the server `allow` so that
+        // first-match-wins blocks `mcp__linear__read_issue`.
+        let deny_idx = merged
+            .iter()
+            .position(|r| r.tool == "mcp__*" && r.action == Action::Deny)
+            .expect("global deny present");
+        let server_allow_idx = merged
+            .iter()
+            .position(|r| r.tool == "mcp__linear__read_*")
+            .expect("server allow present");
+        assert!(
+            deny_idx < server_allow_idx,
+            "global deny (idx {deny_idx}) must come before server allow (idx {server_allow_idx}); merged={:?}",
+            merged
+                .iter()
+                .map(|r| (&r.tool, r.action))
+                .collect::<Vec<_>>(),
+        );
     }
 }
