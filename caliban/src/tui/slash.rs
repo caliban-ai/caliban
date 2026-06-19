@@ -57,14 +57,8 @@ pub(crate) enum SlashOutcome {
     Continue,
     /// Exit caliban cleanly.
     Quit,
-    /// Pre-fill the next prompt with this text.
-    #[allow(dead_code)] // wired in the typeahead refactor (ADR 0040 follow-up).
-    InsertText(String),
     /// Open the named overlay.
     Overlay(crate::tui::Overlay),
-    /// Reload settings / skills / hooks / mcp from disk.
-    #[allow(dead_code)] // wired alongside the Settings hierarchy spec.
-    Reload,
     /// Show an ephemeral one-line status message in the transcript.
     StatusMessage(String),
 }
