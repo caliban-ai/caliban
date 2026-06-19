@@ -1006,6 +1006,11 @@ impl<W: Write> HeadlessDriver<W> {
     }
 
     fn emit_result(&mut self, s: &HeadlessRunSummary) -> Result<(), HeadlessError> {
+        // Drain any buffered hook events *before* the terminal `result` frame so
+        // it stays the last frame in the NDJSON stream (ADR-0025). Without this,
+        // a hook event flushed after the result (e.g. SessionEnd) would trail it
+        // and violate "the last frame is `type: result`" (#218).
+        self.flush_hook_events()?;
         let last_assistant_text_override =
             if matches!(s.subtype, ResultSubtype::Success) || self.last_assistant_text.is_empty() {
                 None
@@ -1444,6 +1449,65 @@ mod tests {
             init_count, 1,
             "expected exactly one system/init frame per stream-json run, got {init_count}.\n\
              Output was:\n{text}",
+        );
+    }
+
+    #[test]
+    fn result_frame_is_last_even_with_buffered_hook_events() {
+        // #218: a hook event buffered before the result (e.g. a trailing
+        // SessionEnd) must be flushed *before* the terminal `result` frame, so
+        // the NDJSON stream always ends with `type: result` (ADR-0025).
+        let buf = new_event_buffer();
+        buf.lock().unwrap().push(events::hook_event(
+            "SessionEnd",
+            serde_json::json!({"reason": "end"}),
+        ));
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.include_hook_events = true;
+        config.hook_buffer = Some(Arc::clone(&buf));
+
+        let mut driver = HeadlessDriver::new(Vec::<u8>::new(), config);
+        let summary = HeadlessRunSummary {
+            subtype: ResultSubtype::Success,
+            final_text: "done".into(),
+            turns: 1,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost_usd: 0.0,
+            structured_output: None,
+            error: None,
+            tool_calls_seen: 0,
+            final_messages: Vec::new(),
+        };
+        driver.emit_result(&summary).expect("emit_result");
+
+        let text = String::from_utf8(driver.writer).expect("utf-8");
+        let types: Vec<String> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(ToString::to_string)
+            })
+            .collect();
+        let hook_idx = types
+            .iter()
+            .position(|t| t == "hook_event")
+            .expect("hook_event frame present");
+        let result_idx = types
+            .iter()
+            .position(|t| t == "result")
+            .expect("result frame present");
+        assert!(
+            hook_idx < result_idx,
+            "buffered hook event must precede the result frame; got {types:?}"
+        );
+        assert_eq!(
+            result_idx,
+            types.len() - 1,
+            "the result frame must be the final frame; got {types:?}"
         );
     }
 

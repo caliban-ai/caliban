@@ -1066,7 +1066,12 @@ pub(crate) async fn run_headless(
         if let Err(e) = agent.hooks().session_end(&session_ctx, &outcome_ctx).await {
             tracing::warn!(target: caliban_common::tracing_targets::TARGET_HOOKS, error = %e, "session_end hook error (non-fatal)");
         }
-        let _ = driver.flush_hook_events();
+        // The SessionEnd *hook* fires above (its observers/side-effects run), but
+        // its stream-json `hook_event` frame is intentionally NOT flushed here:
+        // `driver.run()` already emitted the terminal `result` frame, and a
+        // post-result frame would violate ADR-0025's "last frame is `type:
+        // result`" (#218). Earlier hook events (incl. SessionStart) are flushed
+        // before the result via `emit_result`'s leading `flush_hook_events`.
     }
 
     // Save session back if requested.
