@@ -211,6 +211,17 @@ impl BreakerPolicy {
     pub fn is_disabled(&self) -> bool {
         self.failure_threshold == u32::MAX
     }
+
+    /// Floor an *enabled* breaker's cooldown so a tripped route stays out of
+    /// rotation for a non-zero interval (#215 bug 5). The disabled sentinel is
+    /// returned unchanged.
+    #[must_use]
+    pub(crate) fn floored(mut self) -> Self {
+        if !self.is_disabled() && self.cooldown < MIN_ENABLED_COOLDOWN {
+            self.cooldown = MIN_ENABLED_COOLDOWN;
+        }
+        self
+    }
 }
 
 impl Default for BreakerPolicy {
@@ -253,6 +264,12 @@ struct BreakerDefaults {
 /// despite the operator clearly intending one (#183).
 pub(crate) const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
 
+/// Minimum cooldown for an *enabled* breaker. A zero cooldown lets a tripped
+/// breaker transition straight to HalfOpen on the very next state read, so the
+/// failing route is never actually removed from rotation (#215 bug 5). An
+/// enabled breaker's cooldown is floored to this.
+pub(crate) const MIN_ENABLED_COOLDOWN: Duration = Duration::from_secs(1);
+
 impl BreakerDefaults {
     fn to_policy(&self) -> BreakerPolicy {
         // If the operator configured *any* breaker field but no threshold,
@@ -272,6 +289,7 @@ impl BreakerDefaults {
             cooldown: Duration::from_secs(self.cooldown_secs.unwrap_or(30)),
             half_open_probes: self.half_open_probes.unwrap_or(1),
         }
+        .floored()
     }
 
     fn merge_with(&self, override_wire: &BreakerWire) -> BreakerPolicy {
@@ -293,7 +311,8 @@ impl BreakerDefaults {
                 window: Duration::from_secs(window_secs.or(self.window_secs).unwrap_or(60)),
                 cooldown: Duration::from_secs(cooldown_secs.or(self.cooldown_secs).unwrap_or(30)),
                 half_open_probes: half_open_probes.or(self.half_open_probes).unwrap_or(1),
-            },
+            }
+            .floored(),
         }
     }
 }
@@ -530,6 +549,50 @@ pub fn parse_caliban_config(body: &str) -> Result<CalibanConfig, toml::de::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabled_breaker_with_zero_cooldown_is_floored() {
+        // #215 bug 5: a zero cooldown on an enabled breaker would let a tripped
+        // route flip to HalfOpen on the next read, so it's never removed from
+        // rotation. The cooldown must be floored to a non-zero value.
+        let defaults = BreakerDefaults {
+            failure_threshold: Some(3),
+            window_secs: Some(60),
+            cooldown_secs: Some(0),
+            half_open_probes: Some(1),
+        };
+        let policy = defaults.to_policy();
+        assert!(!policy.is_disabled(), "threshold 3 is an enabled breaker");
+        assert!(
+            policy.cooldown >= MIN_ENABLED_COOLDOWN && !policy.cooldown.is_zero(),
+            "enabled breaker cooldown must be floored, got {:?}",
+            policy.cooldown
+        );
+    }
+
+    #[test]
+    fn per_route_breaker_table_zero_cooldown_is_floored() {
+        // The per-route `breaker = { cooldown_secs = 0 }` override path floors too.
+        let defaults = BreakerDefaults::default();
+        let policy = defaults.merge_with(&BreakerWire::Table {
+            failure_threshold: Some(2),
+            window_secs: Some(30),
+            cooldown_secs: Some(0),
+            half_open_probes: Some(1),
+        });
+        assert!(!policy.is_disabled());
+        assert!(
+            !policy.cooldown.is_zero(),
+            "per-route zero cooldown floored"
+        );
+    }
+
+    #[test]
+    fn disabled_breaker_keeps_zero_cooldown() {
+        // The disabled sentinel is left untouched — flooring only applies to
+        // enabled breakers.
+        assert!(BreakerPolicy::disabled().cooldown.is_zero());
+    }
 
     #[test]
     fn parses_tool_use_parallel_calls_requirement() {
