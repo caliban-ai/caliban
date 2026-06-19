@@ -24,11 +24,56 @@ impl SlashCommand for UsageCommand {
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
-        for line in crate::tui::render_usage_lines(ctx.app) {
-            ctx.app.transcript.push(TranscriptLine::Info(line));
+        let app = &mut *ctx.app;
+        let mut lines = format_usage_lines(&app.cost_accumulator);
+        if let Some(sess) = app.session.as_ref() {
+            lines.push(format!(
+                "  session {} \u{2014} {} turns, {} input + {} output tokens",
+                sess.name,
+                sess.turn_count(),
+                sess.total_usage.input_tokens,
+                sess.total_usage.output_tokens,
+            ));
+        }
+        for line in lines {
+            app.transcript.push(TranscriptLine::Info(line));
         }
         Ok(SlashOutcome::Continue)
     }
+}
+
+/// Pure formatter for `/usage`. Split out so the rendering is unit-testable
+/// without constructing a full `App`. (Lives with the `/usage` command per
+/// ADR 0040; previously a free function in `tui/events.rs`.)
+pub(crate) fn format_usage_lines(cost: &caliban_telemetry::CostAccumulator) -> Vec<String> {
+    let bd = cost.breakdown();
+    let mut lines = vec![format!(
+        "usage \u{2014} total ${:.4}",
+        rust_decimal::prelude::ToPrimitive::to_f64(&bd.total_usd).unwrap_or(0.0),
+    )];
+    if bd.by_model.is_empty() {
+        lines.push("  (no provider calls yet this session)".into());
+    } else {
+        lines.push("  by model:".into());
+        for mc in &bd.by_model {
+            let usd_f = rust_decimal::prelude::ToPrimitive::to_f64(&mc.usd).unwrap_or(0.0);
+            lines.push(format!(
+                "    {}/{}  in {}  out {}  cache_r {}  cache_w {}  ${:.4}",
+                mc.provider,
+                mc.model,
+                mc.input_tokens,
+                mc.output_tokens,
+                mc.cache_read_tokens,
+                mc.cache_creation_tokens,
+                usd_f,
+            ));
+        }
+    }
+    if bd.cache_savings_usd > rust_decimal::Decimal::ZERO {
+        let sav = rust_decimal::prelude::ToPrimitive::to_f64(&bd.cache_savings_usd).unwrap_or(0.0);
+        lines.push(format!("  cache savings vs no-cache: ${sav:.4}"));
+    }
+    lines
 }
 
 /// `/context` — context window utilization (ADR 0033) + top-N largest
@@ -47,7 +92,7 @@ impl SlashCommand for ContextCommand {
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
-        for line in crate::tui::render_context_lines(ctx.app) {
+        for line in format_context_lines(&ctx.app.context_window) {
             ctx.app.transcript.push(TranscriptLine::Info(line));
         }
         // ADR-0046: when lazy_mcp is enabled, surface the activation set.
@@ -88,6 +133,42 @@ impl SlashCommand for ContextCommand {
         }
         Ok(SlashOutcome::Continue)
     }
+}
+
+/// Pure formatter for `/context`. Split out so the rendering is unit-testable
+/// without constructing a full `App`. (Lives with the `/context` command per
+/// ADR 0040; previously a free function in `tui/events.rs`.)
+pub(crate) fn format_context_lines(window: &caliban_telemetry::ContextWindow) -> Vec<String> {
+    let bd = window.breakdown();
+    let pct = if bd.capacity == 0 {
+        0
+    } else {
+        // utilization_bp is 0..=10_000 (bp); convert to percent.
+        u32::from(window.utilization_bp()) / 100
+    };
+    let mut lines = Vec::new();
+    if bd.capacity == 0 {
+        lines.push(
+            "context window \u{2014} no capacity reported by provider (start a turn first)".into(),
+        );
+        return lines;
+    }
+    lines.push(format!(
+        "context window \u{2014} {}-token window, {pct}% used ({} of {})",
+        bd.capacity, bd.used, bd.capacity,
+    ));
+    let mut bins: Vec<_> = bd.bins.iter().filter(|b| b.tokens > 0).collect();
+    bins.sort_by_key(|b| std::cmp::Reverse(b.tokens));
+    for b in &bins {
+        lines.push(format!("  {:<18} {:>8}", b.kind.label(), b.tokens));
+    }
+    if bins.is_empty() {
+        lines.push("  (no messages yet)".into());
+    }
+    if pct >= 80 {
+        lines.push("  warning: \u{2265} 80% of context used \u{2014} consider /compact".into());
+    }
+    lines
 }
 
 /// Pure helpers for `/context` so the largest-block computation is
@@ -215,7 +296,47 @@ impl SlashCommand for CompactCommand {
         }
     }
     async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
-        crate::tui::handle_compact_command(ctx.app);
+        let app = &mut *ctx.app;
+        if app.messages.is_empty() {
+            app.transcript.push(TranscriptLine::Info(
+                "compact: no messages to compact".into(),
+            ));
+            return Ok(SlashOutcome::Continue);
+        }
+        let model = app.args.model.clone().unwrap_or_else(|| {
+            crate::default_model_for(crate::resolved_provider(&app.args)).to_string()
+        });
+        let caps = app.agent.provider().capabilities(&model);
+        let before = caliban_agent_core::estimate_tokens(&app.messages);
+        let before_count = app.messages.len();
+        let compactor = app.agent.compactor();
+        let messages = app.messages.clone();
+        let result = compactor.compact(&messages, &caps).await;
+        match result {
+            Err(e) => app
+                .transcript
+                .push(TranscriptLine::Error(format!("compact failed: {e}"))),
+            Ok(None) => app.transcript.push(TranscriptLine::Info(format!(
+                "compact: no-op (strategy {} kept {before_count} messages, ~{before} tokens)",
+                compactor.strategy_name(),
+            ))),
+            Ok(Some(new)) => {
+                let after = caliban_agent_core::estimate_tokens(&new);
+                let after_count = new.len();
+                let dropped = before_count.saturating_sub(after_count);
+                app.messages.clone_from(&new);
+                if let Some(sess) = app.session.as_mut() {
+                    sess.messages.clone_from(&new);
+                }
+                // Refresh context window from the post-compact history.
+                app.context_window.record_history(&new);
+                app.transcript.push(TranscriptLine::Info(format!(
+                    "compact (strategy {}): {before_count} \u{2192} {after_count} messages \
+                     ({dropped} dropped/summarized), ~{before} \u{2192} ~{after} tokens",
+                    compactor.strategy_name(),
+                )));
+            }
+        }
         Ok(SlashOutcome::Continue)
     }
 }

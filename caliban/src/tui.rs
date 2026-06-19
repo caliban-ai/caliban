@@ -8,8 +8,7 @@
 //!   status bar) and the wrap-math helpers.
 //! - [`overlay`] — [`Overlay`] enum + per-overlay line builders +
 //!   [`render_overlay`].
-//! - [`events`] — keyboard / mouse / agent-event / slash-command dispatch
-//!   and the `/usage`, `/context`, `/compact` helpers.
+//! - [`events`] — keyboard / mouse / agent-event / slash-command dispatch.
 //!
 //! Existing siblings (`slash`, `ask`, `attach`, etc.) stay where they are.
 
@@ -34,7 +33,6 @@ mod transcript_viewer;
 
 pub(crate) use app::{App, TranscriptLine};
 pub(crate) use ask::TuiAskHandler;
-pub(crate) use events::{handle_compact_command, render_context_lines, render_usage_lines};
 pub(crate) use overlay::{Overlay, ViewState};
 
 // The slash typeahead suggester used to consult a hard-coded
@@ -378,12 +376,10 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
     use super::app::{App, TranscriptLine};
-    use super::events::{
-        apply_slash_outcome, format_context_lines, format_usage_lines, handle_slash_command,
-        next_permission_mode,
-    };
+    use super::events::{apply_slash_outcome, handle_slash_command, next_permission_mode};
     use super::overlay::{Overlay, ViewState, slash_help_lines};
     use super::render::{format_cache_suffix, wrap_lines_to_width};
+    use super::slash::observe::{format_context_lines, format_usage_lines};
     use super::{input, is_esc_chord, slash};
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -504,7 +500,7 @@ mod tests {
     fn noop_compactor_reports_no_op() {
         // /compact must report a no-op cleanly when the strategy decides
         // there's nothing to compact. Exercises the same Compactor path
-        // handle_compact_command consumes.
+        // the CompactCommand slash handler consumes.
         use caliban_agent_core::{Compactor as _, NoopCompactor};
         let comp = NoopCompactor;
         let caps = caliban_provider::Capabilities {
@@ -965,14 +961,6 @@ mod tests {
         // Transcript also picks it up so the operator sees it.
         let info = last_info(&app).expect("info recorded");
         assert_eq!(info, "hi");
-    }
-
-    #[test]
-    fn slash_outcome_insert_text_prefills_buffer() {
-        let mut app = make_test_app();
-        apply_slash_outcome(slash::SlashOutcome::InsertText("/clear ".into()), &mut app);
-        assert_eq!(app.input.buffer, "/clear ");
-        assert_eq!(app.input.cursor, "/clear ".len());
     }
 
     #[test]
