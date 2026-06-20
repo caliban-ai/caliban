@@ -386,6 +386,59 @@ mod tests {
         }
     }
 
+    /// M-7 (#240): a whitespace-tier `replace_all=true` edit with MULTIPLE
+    /// uniform-delta windows round-trips through `EditTool::invoke` and writes
+    /// every site at the correct indentation, reporting one replacement per
+    /// window. Both blocks share the same +4 delta (`old_string` is unindented),
+    /// so the reindented replacement is identical and may be spliced into both.
+    #[tokio::test]
+    async fn replace_all_whitespace_tier_uniform_windows_reindents_all_sites() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file.txt");
+        // Two +4-indented copies of the same block, separated by a marker line.
+        std::fs::write(
+            &path,
+            "    if x {\n        y();\n    }\nMID\n    if x {\n        y();\n    }\n",
+        )
+        .unwrap();
+
+        let tool = EditTool::new(WorkspaceRoot::new(tmp.path()));
+        let out = tool
+            .invoke(
+                json!({
+                    "path": "file.txt",
+                    "old_string": "if x {\n    y();\n}",
+                    "new_string": "if x {\n    z();\n}",
+                    "replace_all": true
+                }),
+                ctx(),
+            )
+            .await
+            .unwrap();
+
+        let ContentBlock::Text(t) = &out[0] else {
+            panic!("expected Text block")
+        };
+        // Success count == number of windows (2).
+        assert!(t.text.contains("2 replacements"), "output: {}", t.text);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        // Both sites reindented +4: every non-blank line keeps 4-space indent.
+        assert_eq!(
+            written,
+            "    if x {\n        z();\n    }\nMID\n    if x {\n        z();\n    }\n"
+        );
+        for line in written
+            .lines()
+            .filter(|l| !l.trim().is_empty() && *l != "MID")
+        {
+            assert!(
+                line.starts_with("    "),
+                "line should keep 4-space indent: {line:?}"
+            );
+        }
+    }
+
     /// A genuine miss (no exact or whitespace match) returns an error whose
     /// message is the near-miss diff, NOT the bare `old_string not found in file`.
     #[tokio::test]

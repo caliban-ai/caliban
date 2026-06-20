@@ -319,10 +319,24 @@ fn locate_whitespace(text: &str, old: &str, new: &str, replace_all: bool) -> Opt
         });
     }
 
-    // `replacement` applies to every returned range. In the `replace_all`
-    // multi-window case each window's delta is recomputed independently; if they
-    // diverge we keep the first (the uniform-delta case is overwhelmingly the
-    // norm, and trailing-ws/exact-shape windows reindent to the same string).
+    // `replacement` applies verbatim to every returned range. In the
+    // `replace_all` multi-window case each window's delta is recomputed
+    // independently: the uniform-delta case (every window reindents `new` the
+    // same way) is overwhelmingly the norm, so a single replacement is correct.
+    // But if the windows' reindented replacements DIVERGE (different uniform
+    // indent deltas), splicing the first into all would silently misindent the
+    // rest. Refuse to guess — report `Ambiguous` so the caller can disambiguate.
+    if matches.iter().any(|(_, r)| *r != matches[0].1) {
+        let locations = matches
+            .iter()
+            .map(|(r, _)| byte_range_to_line_span(text, r))
+            .collect();
+        return Some(MatchOutcome::Ambiguous {
+            count: matches.len(),
+            locations,
+        });
+    }
+
     let replacement = matches[0].1.clone();
     let ranges = matches.into_iter().map(|(r, _)| r).collect();
 
@@ -641,17 +655,54 @@ mod tests {
     }
 
     // Contract 8b: Tier-2 ambiguity resolved by replace_all.
+    //
+    // Both windows share the SAME uniform delta (+2), so their reindented
+    // replacements are identical and replace_all may safely splice both.
     #[test]
     fn tier2_ambiguity_replace_all() {
         let text = "  a()\n  b()\nMID\n  a()\n  b()\n";
         let old = "a()\nb()";
         let out = locate(text, old, "x()\ny()", true);
         match out {
-            MatchOutcome::Located { ranges, tier, .. } => {
+            MatchOutcome::Located {
+                ranges,
+                replacement,
+                tier,
+            } => {
                 assert_eq!(tier, MatchTier::Whitespace);
                 assert_eq!(ranges.len(), 2);
+                // Uniform +2 delta on both windows → identical reindent.
+                assert_eq!(replacement, "  x()\n  y()");
+                // Both ranges, spliced in reverse, land at +2 indentation.
+                let mut spliced = text.to_string();
+                for r in ranges.iter().rev() {
+                    spliced.replace_range(r.clone(), &replacement);
+                }
+                assert_eq!(spliced, "  x()\n  y()\nMID\n  x()\n  y()\n");
             }
             other => panic!("expected Located, got {other:?}"),
+        }
+    }
+
+    // Contract 8c (#240, I-1): two whitespace-tier windows requiring DIFFERENT
+    // uniform deltas (+2 vs +6) under replace_all. Reindenting `new` by each
+    // delta yields divergent replacement strings, so splicing the first
+    // window's replacement into BOTH would silently misindent the second.
+    // The matcher must refuse to guess and report `Ambiguous` instead.
+    #[test]
+    fn tier2_replace_all_divergent_deltas_is_ambiguous() {
+        // old is unindented (so Exact never matches); window 1 is +2 indented,
+        // window 2 is +6 indented. Same body, different uniform delta.
+        let text = "  a()\n  b()\nMID\n      a()\n      b()\n";
+        let old = "a()\nb()";
+        let new = "x()\ny()";
+        let out = locate(text, old, new, true);
+        match out {
+            MatchOutcome::Ambiguous { count, locations } => {
+                assert_eq!(count, 2);
+                assert_eq!(locations, vec![(1, 2), (4, 5)]);
+            }
+            other => panic!("expected Ambiguous (divergent deltas must not splice), got {other:?}"),
         }
     }
 
