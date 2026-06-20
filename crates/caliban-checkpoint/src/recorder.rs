@@ -264,14 +264,19 @@ impl CheckpointRecorder {
     pub async fn close_prompt(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;
         if let Some(open) = guard.take() {
+            let active_prompt = self.store.prompt_dir(open.manifest.prompt_index);
             self.store.save_manifest(&open.manifest)?;
             // Enforce the per-project blob byte-cap now that this prompt's
             // blobs have landed (#180). Best-effort: a sweep failure must not
             // fail the prompt. `session_dir`'s parent is the project's
-            // `checkpoints/` root that the cap spans.
+            // `checkpoints/` root that the cap spans. Exclude the prompt we just
+            // wrote so a single over-cap prompt can't evict its own blobs
+            // (#220 issue 1).
             if let Some(checkpoints_root) = self.store.session_dir().parent() {
                 let cap = crate::prune::checkpoint_max_bytes();
-                if let Err(e) = crate::prune::enforce_byte_cap(checkpoints_root, cap) {
+                if let Err(e) =
+                    crate::prune::enforce_byte_cap(checkpoints_root, cap, Some(&active_prompt))
+                {
                     tracing::warn!(error = %e, "checkpoint byte-cap sweep failed (non-fatal)");
                 }
             }

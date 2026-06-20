@@ -44,9 +44,22 @@ struct PromptBlobs {
     created_at: DateTime<Utc>,
 }
 
+/// `true` only if `path` is a *real* directory — not a symlink to one. Using
+/// `symlink_metadata` keeps the byte-cap sweep from following a symlink out of
+/// the checkpoint tree, where it would count foreign bytes or risk deleting
+/// outside the tree (#220 issue 4).
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
 /// Sum the size of the regular files directly inside `dir` (the per-prompt
-/// `blobs/` directory). Returns 0 if the directory is missing.
+/// `blobs/` directory). Returns 0 if the directory is missing or is a symlink.
+/// `DirEntry::metadata()` does not traverse symlinked entries, and the `dir`
+/// itself is gated by [`is_real_dir`], so no symlink is ever followed (#220).
 fn dir_file_bytes(dir: &Path) -> u64 {
+    if !is_real_dir(dir) {
+        return 0;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -73,13 +86,28 @@ fn read_manifest(prompt_dir: &Path) -> Option<Manifest> {
 /// [`ManifestKind::Cleared`] with empty `entries` — until the total is back
 /// under the cap. Returns the number of prompts cleared.
 ///
+/// `exclude` names a prompt directory that must never be swept — the caller
+/// passes the prompt it just wrote, so a single prompt larger than the cap
+/// can't self-destruct (the sweep ran in `close_prompt` right after writing it
+/// with no exclusion: #220 issue 1). Pass `None` to consider every prompt.
+///
 /// Implements the documented `CALIBAN_CHECKPOINT_MAX_BYTES` behavior that was
 /// previously inert (#180): pruning was age-only, so blob storage grew
 /// unbounded.
 ///
+/// Note (#220 issue 3): the cap spans the project-wide `checkpoints/` root
+/// across all sessions with no inter-process lock, so concurrent sub-agents /
+/// `/fork` / parallel TUI sweeps can mis-account or race manifest rewrites. The
+/// sweep is therefore best-effort; precise cross-session accounting needs a
+/// root-level lock, tracked as follow-up before the hook is wired.
+///
 /// # Errors
 /// I/O errors deleting a `blobs/` directory or rewriting a manifest.
-pub fn enforce_byte_cap(checkpoints_root: &Path, max_bytes: u64) -> Result<usize> {
+pub fn enforce_byte_cap(
+    checkpoints_root: &Path,
+    max_bytes: u64,
+    exclude: Option<&Path>,
+) -> Result<usize> {
     let sessions = match std::fs::read_dir(checkpoints_root) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -89,7 +117,7 @@ pub fn enforce_byte_cap(checkpoints_root: &Path, max_bytes: u64) -> Result<usize
     let mut total: u64 = 0;
     for session in sessions.flatten() {
         let sdir = session.path();
-        if !sdir.is_dir() {
+        if !is_real_dir(&sdir) {
             continue;
         }
         let Ok(prompt_dirs) = std::fs::read_dir(&sdir) else {
@@ -97,8 +125,11 @@ pub fn enforce_byte_cap(checkpoints_root: &Path, max_bytes: u64) -> Result<usize
         };
         for pd in prompt_dirs.flatten() {
             let pdir = pd.path();
-            if !pdir.is_dir() {
+            if !is_real_dir(&pdir) {
                 continue;
+            }
+            if exclude.is_some_and(|ex| ex == pdir) {
+                continue; // never evict the prompt the caller just wrote
             }
             let bytes = dir_file_bytes(&pdir.join("blobs"));
             if bytes == 0 {
@@ -131,7 +162,14 @@ pub fn enforce_byte_cap(checkpoints_root: &Path, max_bytes: u64) -> Result<usize
         if total <= max_bytes {
             break;
         }
-        std::fs::remove_dir_all(p.prompt_dir.join("blobs")).map_err(CheckpointError::Io)?;
+        let blobs = p.prompt_dir.join("blobs");
+        // `is_real_dir` already gated accounting; re-check before deleting so a
+        // `blobs/` swapped for a symlink between scan and delete is never
+        // followed by `remove_dir_all` (#220 issue 4).
+        if !is_real_dir(&blobs) {
+            continue;
+        }
+        std::fs::remove_dir_all(&blobs).map_err(CheckpointError::Io)?;
         total = total.saturating_sub(p.bytes);
         if let Some(mut m) = read_manifest(&p.prompt_dir) {
             m.kind = ManifestKind::Cleared;
@@ -284,7 +322,7 @@ mod tests {
 
         // Total 6000 bytes; cap 4000 → evict only the oldest prompt.
         let checkpoints_root = cp.session_dir().parent().unwrap();
-        let cleared = enforce_byte_cap(checkpoints_root, 4000).unwrap();
+        let cleared = enforce_byte_cap(checkpoints_root, 4000, None).unwrap();
         assert_eq!(cleared, 1, "exactly the oldest prompt is cleared");
 
         // Prompt 1: blobs gone, manifest rewritten to Cleared with no entries.
@@ -298,7 +336,64 @@ mod tests {
         assert_eq!(cp.load_manifest(2).unwrap().kind, ManifestKind::Files);
 
         // Idempotent: a second sweep under the cap clears nothing.
-        assert_eq!(enforce_byte_cap(checkpoints_root, 4000).unwrap(), 0);
+        assert_eq!(enforce_byte_cap(checkpoints_root, 4000, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn byte_cap_never_evicts_the_excluded_active_prompt() {
+        // #220 issue 1: a single prompt larger than the cap must not be evicted
+        // when it is the active (just-written) prompt.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let cp = CheckpointStore::open_in(&root, Path::new("/cwd/cap1"), "sess-1").unwrap();
+        cp.write_blob(1, "aaaa", &vec![1u8; 9000]).unwrap();
+        cp.save_manifest(&Manifest::new(1, ManifestKind::Files, "only"))
+            .unwrap();
+
+        let checkpoints_root = cp.session_dir().parent().unwrap();
+        // Cap 4000, but prompt-001 is the excluded active prompt → nothing evicted.
+        let cleared = enforce_byte_cap(checkpoints_root, 4000, Some(&cp.prompt_dir(1))).unwrap();
+        assert_eq!(
+            cleared, 0,
+            "the active over-cap prompt is never self-evicted"
+        );
+        assert!(cp.blobs_dir(1).exists(), "active prompt blobs preserved");
+
+        // Without the exclusion the same prompt *would* be swept.
+        let cleared_unguarded = enforce_byte_cap(checkpoints_root, 4000, None).unwrap();
+        assert_eq!(cleared_unguarded, 1);
+    }
+
+    #[test]
+    fn byte_cap_ignores_symlinked_blobs_dir() {
+        // #220 issue 4: a symlinked `blobs/` must not be followed (counted or
+        // deleted) by the sweep.
+        #[cfg(unix)]
+        {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path().to_path_buf();
+            let cp = CheckpointStore::open_in(&root, Path::new("/cwd/sym"), "sess-sym").unwrap();
+            cp.ensure_prompt_dir(1).unwrap();
+            cp.save_manifest(&Manifest::new(1, ManifestKind::Files, "p"))
+                .unwrap();
+            // Point prompt-001/blobs at a foreign directory full of big files.
+            let foreign = tmp.path().join("foreign");
+            std::fs::create_dir_all(&foreign).unwrap();
+            std::fs::write(foreign.join("big.bin"), vec![7u8; 100_000]).unwrap();
+            let blobs_link = cp.prompt_dir(1).join("blobs");
+            let _ = std::fs::remove_dir_all(&blobs_link);
+            std::os::unix::fs::symlink(&foreign, &blobs_link).unwrap();
+
+            let checkpoints_root = cp.session_dir().parent().unwrap();
+            // Tiny cap: if the symlink were followed, the 100 KiB foreign file
+            // would blow the cap and the sweep would try to delete it.
+            let cleared = enforce_byte_cap(checkpoints_root, 10, None).unwrap();
+            assert_eq!(
+                cleared, 0,
+                "symlinked blobs are neither counted nor deleted"
+            );
+            assert!(foreign.join("big.bin").exists(), "foreign tree untouched");
+        }
     }
 
     fn backdate_recursively(dir: &Path, days: u64) {

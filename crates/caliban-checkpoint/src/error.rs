@@ -49,4 +49,25 @@ pub enum CheckpointError {
         /// Underlying I/O cause.
         source: io::Error,
     },
+
+    /// A blob read back at restore time did not match the manifest's
+    /// content-address (sha256 / size) — a corrupt or truncated blob. The
+    /// live file is left untouched rather than overwritten with bad data
+    /// (#220 issue 5).
+    #[error(
+        "blob integrity check failed for {path}: expected sha {expected_sha} ({expected_size} bytes), \
+         got {actual_sha} ({actual_size} bytes)"
+    )]
+    BlobIntegrity {
+        /// Path that would have been restored.
+        path: PathBuf,
+        /// sha256 recorded in the manifest.
+        expected_sha: String,
+        /// sha256 of the blob bytes actually read back.
+        actual_sha: String,
+        /// Size recorded in the manifest.
+        expected_size: u64,
+        /// Size of the blob bytes actually read back.
+        actual_size: u64,
+    },
 }

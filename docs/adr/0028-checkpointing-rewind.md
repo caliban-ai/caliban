@@ -48,7 +48,7 @@ unchanged.
 
 For each touched file, record the pre-image once (keyed by sha256)
 with metadata in `prompt-N/manifest.json` and blobs under
-`prompt-N/objects/<sha256>`. Newly-created files record with
+`prompt-N/blobs/<sha256>.bin`. Newly-created files record with
 `exists_pre: false` — restore deletes them. Blob storage (not git,
 not a database) because operators already trust the filesystem,
 it's trivially inspectable, and cross-prompt dedup can be added

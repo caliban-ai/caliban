@@ -108,11 +108,16 @@ impl Hooks for CheckpointHook {
             })
             .unwrap_or_default();
         let trimmed: String = title.chars().take(80).collect();
-        if let Err(e) = self
-            .recorder
-            .open_prompt(ctx.prompt_index.max(1), kind, trimmed)
-            .await
-        {
+        // Resolve a *monotonic* prompt index from the store, not a blindly-
+        // trusted `ctx.prompt_index`. If the caller passes a stale/constant
+        // index (e.g. always 1), every prompt would otherwise overwrite
+        // `prompt-001` and collapse rewind history to one slot (#220 issue 2).
+        // Take the larger of the caller's index and the next free slot so a
+        // correctly-incrementing caller is still honored. (A read-then-act race
+        // under concurrent sub-agents remains — tracked alongside issue 3.)
+        let next_free = self.recorder.store().next_prompt_index().unwrap_or(1);
+        let prompt_index = ctx.prompt_index.max(next_free).max(1);
+        if let Err(e) = self.recorder.open_prompt(prompt_index, kind, trimmed).await {
             tracing::warn!(error = %e, "CheckpointHook::before_run: open_prompt failed");
         }
         Ok(())
@@ -201,6 +206,41 @@ mod tests {
         assert!(rec.snapshot_manifest().await.is_none());
         // Manifest file exists.
         assert!(rec.store().load_manifest(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn monotonic_index_does_not_overwrite_prompt_001() {
+        // #220 issue 2: even when the caller passes a constant prompt_index,
+        // successive runs must land in distinct prompt dirs (monotonic), not
+        // collapse onto prompt-001.
+        let (_tmp, hook, rec) = fixture();
+        let outcome = RunHookOutcome {
+            turn_count: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            success: true,
+        };
+        for _ in 0..3 {
+            let ctx = RunCtx {
+                session_id: "sess-1",
+                workspace_root: Path::new("/"),
+                user_message: None,
+                prompt_index: 1, // stale/constant caller index
+                cancel: CancellationToken::new(),
+            };
+            hook.before_run(&ctx).await.unwrap();
+            hook.after_run(&ctx, &outcome).await.unwrap();
+        }
+        // Three distinct manifests must exist (prompt-001..003), not one.
+        assert!(rec.store().load_manifest(1).is_ok());
+        assert!(
+            rec.store().load_manifest(2).is_ok(),
+            "second run must not overwrite prompt-001"
+        );
+        assert!(
+            rec.store().load_manifest(3).is_ok(),
+            "third run must not overwrite either"
+        );
     }
 
     #[tokio::test]
