@@ -116,6 +116,19 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
             continue;
         }
         let bytes = store.read_blob(prompt_index, &entry.blob_sha256)?;
+        // Content-addressed integrity check before overwriting the live file:
+        // a corrupt/truncated blob must not be silently restored (#220 issue 5).
+        let actual_sha = crate::recorder::sha256_hex(&bytes);
+        let actual_size = bytes.len() as u64;
+        if actual_sha != entry.blob_sha256 || actual_size != entry.size {
+            return Err(CheckpointError::BlobIntegrity {
+                path: entry.path.clone(),
+                expected_sha: entry.blob_sha256.clone(),
+                actual_sha,
+                expected_size: entry.size,
+                actual_size,
+            });
+        }
         atomic_overwrite(&entry.path, &bytes, entry.mode)?;
         outcome.files_restored += 1;
     }
@@ -653,6 +666,38 @@ mod tests {
             matches!(err, CheckpointError::BlobMissing { .. }),
             "missing blob should surface BlobMissing, got {err:?}"
         );
+    }
+
+    #[test]
+    fn restore_files_only_rejects_corrupt_blob() {
+        // #220 issue 5: a blob whose bytes don't match the manifest's
+        // content-address must not be restored over the live file.
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        let file = canonical_ws.join("a.txt");
+        std::fs::write(&file, "LIVE").unwrap();
+        // Store a blob under a sha label that does NOT match its content.
+        store.write_blob(1, "aaaa", &[1u8, 2, 3]).unwrap();
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(ManifestEntry {
+            path: file.clone(),
+            blob_sha256: "aaaa".into(),
+            mode: 0o644,
+            size: 3,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu_1".into(),
+            error: None,
+        });
+        store.save_manifest(&m).unwrap();
+        let err = restore_files_only(&store, 1).unwrap_err();
+        assert!(
+            matches!(err, CheckpointError::BlobIntegrity { .. }),
+            "corrupt blob should surface BlobIntegrity, got {err:?}"
+        );
+        // The live file must be left untouched.
+        assert_eq!(std::fs::read(&file).unwrap(), b"LIVE");
     }
 
     #[test]
