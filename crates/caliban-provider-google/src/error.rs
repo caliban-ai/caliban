@@ -67,8 +67,10 @@ const CONTEXT_MARKERS: &[&str] = &[
 ];
 
 /// Server-side fault markers. Includes Gemini's generic server-fault phrasings
-/// (`INTERNAL`, overloaded, `UNAVAILABLE`) — safe because this only runs against
-/// server-authored error text, never user request content.
+/// (`INTERNAL`, overloaded, `UNAVAILABLE`). Only applied to genuinely
+/// server-authored error text — in-band SSE `error` payloads — never to a 400
+/// body, which is a client error and may echo these tokens as user content
+/// (#221).
 const FAULT_MARKERS: &[&str] = &[
     "Internal error",
     "INTERNAL",
@@ -103,6 +105,24 @@ fn classify_error_body(body: &str) -> ProviderError {
         REQUESTED_TOKEN_MARKERS,
     )
     .or_else(|| ec::classify_upstream_server_fault(body, FAULT_MARKERS))
+    .unwrap_or_else(|| ProviderError::InvalidRequest(body.to_string()))
+}
+
+/// Classify a **400** body specifically. A 400 is a client error, so the
+/// generic [`FAULT_MARKERS`] must NOT run: a request-validation 400 that echoes
+/// a fault token (e.g. an `INVALID_ARGUMENT` mentioning an `INTERNAL` enum
+/// value, or user content containing "crashed"/"overloaded") would otherwise be
+/// mislabeled `UpstreamServerFault` instead of `InvalidRequest` (#221). Context
+/// overflow is still recognized — Gemini reports it as a 400 `INVALID_ARGUMENT`
+/// — so reactive compaction keeps firing.
+fn classify_bad_request_body(body: &str) -> ProviderError {
+    use caliban_provider::error_classify as ec;
+    ec::classify_context_too_long(
+        body,
+        CONTEXT_MARKERS,
+        MAX_TOKEN_MARKERS,
+        REQUESTED_TOKEN_MARKERS,
+    )
     .unwrap_or_else(|| ProviderError::InvalidRequest(body.to_string()))
 }
 
@@ -143,7 +163,8 @@ impl From<GoogleError> for ProviderError {
                 status,
                 body,
                 retry_after,
-                classify_error_body,
+                // 400 bodies skip the fault-marker classification (#221).
+                classify_bad_request_body,
             )
             .unwrap_or_else(|| ProviderError::adapter(e)),
             GoogleError::InvalidRequest(ref msg) => ProviderError::InvalidRequest(msg.clone()),
@@ -200,6 +221,28 @@ mod tests {
         match from_400(body) {
             ProviderError::InvalidRequest(s) => assert!(s.contains("temperature")),
             other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemini_400_echoing_fault_token_stays_invalid_request() {
+        // #221: a 400 INVALID_ARGUMENT whose body echoes a generic fault token
+        // (e.g. "INTERNAL" as an enum value or field name) must stay
+        // InvalidRequest — a 400 is a client error, never an upstream fault.
+        let body = r#"{"error":{"code":400,"message":"Invalid enum value INTERNAL for field 'mode'; the model crashed handling is not a valid option","status":"INVALID_ARGUMENT"}}"#;
+        match from_400(body) {
+            ProviderError::InvalidRequest(s) => assert!(s.contains("INTERNAL")),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_in_band_internal_fault_still_routes_to_server_fault() {
+        // The fault classifier still applies to in-band SSE error payloads —
+        // only the 400 path drops it (#221).
+        match from_upstream("Internal error encountered. The model crashed.") {
+            ProviderError::UpstreamServerFault(_) => {}
+            other => panic!("expected UpstreamServerFault, got {other:?}"),
         }
     }
 

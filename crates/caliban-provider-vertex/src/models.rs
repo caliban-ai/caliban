@@ -87,9 +87,11 @@ pub(crate) fn default_base_url(region: &str) -> String {
 
 /// Fetch the live `publishers/anthropic/models` list from Vertex AI.
 ///
-/// Falls back to the vendored list on any error (network, auth, or
-/// non-Anthropic response). Returned models are filtered to those whose
-/// `name` starts with `publishers/anthropic/models/`.
+/// Returns [`VertexError`] on a token/auth failure, a network error, or a
+/// non-2xx response — it does **not** fall back to the vendored list itself;
+/// the caller decides whether to (there is no production caller yet —
+/// `refresh_models` is test-only). Successful responses are filtered to models
+/// whose `name` starts with `publishers/anthropic/models/`.
 pub async fn list_models_remote(
     client: &reqwest::Client,
     token_provider: &Arc<dyn TokenProvider>,
