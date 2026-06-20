@@ -52,7 +52,7 @@ pub fn is_retryable(e: &ProviderError) -> bool {
             | ProviderError::Network(_)
             | ProviderError::StreamInterrupted(_)
             | ProviderError::ServerError {
-                status: 502..=599,
+                status: 500..=599,
                 ..
             },
     )
@@ -130,6 +130,7 @@ where
                     return Err(e);
                 }
                 let sleep_d = sleep_for(policy, &e, attempt);
+                tracing::warn!(attempt, backoff_ms = u64::try_from(sleep_d.as_millis()).unwrap_or(u64::MAX), error = %e, "provider call failed; retrying");
                 last_err = Some(e);
                 tokio::select! {
                     () = tokio::time::sleep(sleep_d) => {}

@@ -35,7 +35,7 @@ fn retryable_classification() {
     assert!(is_retryable(&ProviderError::StreamInterrupted(
         "connection reset by peer".into()
     )));
-    assert!(!is_retryable(&ProviderError::ServerError {
+    assert!(is_retryable(&ProviderError::ServerError {
         status: 500,
         body: String::new()
     }));
@@ -136,4 +136,57 @@ async fn cancellation_during_backoff_returns_cancelled() {
     })
     .await;
     assert!(matches!(result, Err(ProviderError::Cancelled)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn server_error_500_retries_then_succeeds() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let cancel = CancellationToken::new();
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        initial_backoff: Duration::from_millis(0),
+        jitter: false,
+        ..Default::default()
+    };
+    let counter_clone = counter.clone();
+    let result: Result<u32, ProviderError> = with_retry(&policy, &cancel, move || {
+        let c = counter_clone.clone();
+        async move {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(ProviderError::ServerError {
+                    status: 500,
+                    body: "Internal Server Error".into(),
+                })
+            } else {
+                Ok(7)
+            }
+        }
+    })
+    .await;
+    assert_eq!(result.unwrap(), 7);
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_request_does_not_retry() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let cancel = CancellationToken::new();
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        initial_backoff: Duration::from_millis(0),
+        jitter: false,
+        ..Default::default()
+    };
+    let counter_clone = counter.clone();
+    let result: Result<u32, ProviderError> = with_retry(&policy, &cancel, move || {
+        let c = counter_clone.clone();
+        async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::InvalidRequest("bad param".into()))
+        }
+    })
+    .await;
+    assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
