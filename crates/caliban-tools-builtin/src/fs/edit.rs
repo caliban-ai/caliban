@@ -213,11 +213,61 @@ mod tests {
 
         assert!(matches!(err, ToolError::Execution(_)));
         // After the match_old integration, a miss returns either a near-miss
-        // diff (which contains "match found" / "closest match") or the bare
-        // "old_string not found in file" when no near-miss is available.
-        // The invariant that matters is that it is an Execution error.
+        // diff (NearMiss::render begins with "closest match near line …") or
+        // the bare "old_string not found in file" fallback when no near-miss
+        // is available.  Either is acceptable; anything else indicates
+        // regression in the error path.
         let msg = format!("{err}");
-        assert!(!msg.is_empty(), "error message should be non-empty: {msg}");
+        assert!(
+            msg.contains("closest match") || msg.contains("old_string not found in file"),
+            "unexpected error message format: {msg}"
+        );
+    }
+
+    /// When `old_string` has MORE lines than the file, `nearest_window` returns
+    /// `None` (the guard that prevents an out-of-bounds slice), so the error
+    /// message must be the bare `"old_string not found in file"` fallback — NOT
+    /// a near-miss diff.  This test exercises that path end-to-end through
+    /// `EditTool::invoke` rather than calling `match_old::locate` directly.
+    #[tokio::test]
+    async fn not_found_near_none_when_old_longer_than_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file.txt");
+        // 1-line file; old_string spans 3 lines → window cannot fit → near: None.
+        std::fs::write(&path, "hello\n").unwrap();
+
+        let tool = EditTool::new(WorkspaceRoot::new(tmp.path()));
+        let err = tool
+            .invoke(
+                json!({
+                    "path": "file.txt",
+                    "old_string": "aaa\nbbb\nccc",
+                    "new_string": "replaced"
+                }),
+                ctx(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::Execution(_)));
+        let msg = format!("{err}");
+        // Must be the bare fallback — near-miss scan returns None when old is
+        // longer than the file, so "closest match" must NOT appear.
+        assert!(
+            msg.contains("old_string not found in file"),
+            "expected bare not-found message, got: {msg}"
+        );
+        assert!(
+            !msg.contains("closest match"),
+            "near-miss should be None for over-long old_string, got: {msg}"
+        );
+
+        // File must be unchanged.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents, "hello\n",
+            "file should be unchanged after failed edit"
+        );
     }
 
     #[tokio::test]
