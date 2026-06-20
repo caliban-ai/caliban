@@ -178,8 +178,10 @@ pub enum TurnEvent {
         stopped_for: StopCondition,
         /// High-water mark of consecutive turns observed without a successful
         /// edit-class (non-read-only) tool call (#239).
+        #[serde(default)]
         turns_without_edit: u32,
         /// Whether the no-edit-progress nudge fired at least once this run (#239).
+        #[serde(default)]
         no_edit_nudge_emitted: bool,
     },
 }
