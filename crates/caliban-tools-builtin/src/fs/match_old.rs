@@ -424,6 +424,13 @@ fn nearest_window(text: &str, old: &str) -> Option<NearMiss> {
         .map(|s| norm_text_line(text, s).trim_end().to_string())
         .collect();
 
+    // Guard: if `old` has more lines than the file, no window can fit.
+    // Without this, `saturating_sub` clamps `upper` to 0 but the loop body
+    // still executes once (for w=0) and slices file_lines[0..win] out-of-bounds.
+    if win > file_lines.len() {
+        return None;
+    }
+
     let old_joined = old_lines.join("\n");
     let old_key = old_joined.trim().to_string();
 
@@ -715,6 +722,40 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    // Regression: nearest_window must not panic when old has more lines than the
+    // file. Before the guard, `saturating_sub` set upper=0 but the loop still
+    // ran once and sliced file_lines[0..win] out-of-bounds.
+    //
+    // The bug report example locate("x", "aaaa\nbbbb\ncccc", "y", false) has
+    // the arguments in wrong order for our signature (text, old, new). The actual
+    // panic is triggered when old has MORE lines than the file:
+    // old = "aaaa\nbbbb\ncccc" (3 lines), file = "x" (1 line).
+    #[test]
+    fn not_found_old_longer_than_file_no_panic() {
+        // old has 3 lines; file has 1 line — window cannot fit, must not panic.
+        let out = locate("x", "aaaa\nbbbb\ncccc", "y", false);
+        assert!(
+            matches!(out, MatchOutcome::NotFound { near: None }),
+            "expected NotFound{{near: None}}, got {out:?}"
+        );
+    }
+
+    // Regression: single-line old longer than a 1-line file must not panic.
+    #[test]
+    fn not_found_old_two_lines_single_line_file_no_panic() {
+        // old has 2 lines; file has only 1 — window cannot fit.
+        let out = locate(
+            "only_one_line",
+            "missing_a\nmissing_b",
+            "replacement",
+            false,
+        );
+        assert!(
+            matches!(out, MatchOutcome::NotFound { near: None }),
+            "expected NotFound{{near: None}}, got {out:?}"
+        );
     }
 
     #[test]
