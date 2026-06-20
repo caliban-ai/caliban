@@ -1,6 +1,7 @@
 //! Filesystem tools — `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`.
 
 pub mod edit;
+pub(crate) mod match_old;
 pub mod multi_edit;
 pub mod notebook_edit;
 pub mod read;

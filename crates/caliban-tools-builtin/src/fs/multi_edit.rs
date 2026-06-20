@@ -11,6 +11,7 @@ use caliban_provider::{ContentBlock, TextBlock};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::fs::match_old::{self, MatchOutcome};
 use crate::workspace::WorkspaceRoot;
 
 /// `MultiEdit` tool — sequential atomic replacements on one file.
@@ -53,26 +54,47 @@ fn apply_edits(text: String, edits: &[EditOp]) -> Result<(String, Vec<usize>), T
     let mut current = text;
     let mut counts = Vec::with_capacity(edits.len());
     for (idx, e) in edits.iter().enumerate() {
-        let n = current.matches(&e.old_string).count();
-        if n == 0 {
-            return Err(ToolError::execution(std::io::Error::other(format!(
-                "edit #{}: old_string not found in current contents (rolling back)",
-                idx + 1
-            ))));
+        let n = idx + 1; // 1-based edit number for error messages
+        let outcome = match_old::locate(&current, &e.old_string, &e.new_string, e.replace_all);
+        match outcome {
+            MatchOutcome::Located {
+                ranges,
+                replacement,
+                tier,
+            } => {
+                if tier == match_old::MatchTier::Whitespace {
+                    tracing::debug!(
+                        edit = n,
+                        "MultiEdit: edit #{n} matched via whitespace-tolerant tier"
+                    );
+                }
+                let count = ranges.len();
+                // Apply ranges in reverse byte order so earlier offsets stay valid.
+                for range in ranges.iter().rev() {
+                    current.replace_range(range.clone(), &replacement);
+                }
+                counts.push(count);
+            }
+            MatchOutcome::Ambiguous { count, locations } => {
+                let locs: Vec<String> = locations
+                    .iter()
+                    .map(|(s, e)| format!("lines {s}-{e}"))
+                    .collect();
+                return Err(ToolError::execution(std::io::Error::other(format!(
+                    "edit #{n}: old_string matched {count} times; expected exactly one (use replace_all=true). Locations: {}",
+                    locs.join(", ")
+                ))));
+            }
+            MatchOutcome::NotFound { near } => {
+                let body = match near {
+                    Some(nm) => nm.render(),
+                    None => "old_string not found in current contents (rolling back)".to_string(),
+                };
+                return Err(ToolError::execution(std::io::Error::other(format!(
+                    "edit #{n}: {body}"
+                ))));
+            }
         }
-        if !e.replace_all && n > 1 {
-            return Err(ToolError::execution(std::io::Error::other(format!(
-                "edit #{}: old_string matched {} times; expected exactly one (use replace_all=true)",
-                idx + 1,
-                n
-            ))));
-        }
-        current = if e.replace_all {
-            current.replace(&e.old_string, &e.new_string)
-        } else {
-            current.replacen(&e.old_string, &e.new_string, 1)
-        };
-        counts.push(if e.replace_all { n } else { 1 });
     }
     Ok((current, counts))
 }
@@ -375,5 +397,123 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "got: {err:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Whitespace-tolerant matching tests (match_old integration)
+    // ------------------------------------------------------------------
+
+    /// A whitespace-only-different edit within a sequence applies: the second
+    /// edit has trailing whitespace the file doesn't, but the matcher's
+    /// whitespace-tolerant tier should match it and apply the replacement.
+    #[test]
+    fn whitespace_tolerant_edit_in_sequence_applies() {
+        let edits = vec![
+            EditOp {
+                old_string: "alpha".into(),
+                new_string: "ALPHA".into(),
+                replace_all: false,
+            },
+            // old_string has trailing spaces; the running text won't (after first edit).
+            EditOp {
+                old_string: "beta   \ngamma".into(), // trailing ws on first line
+                new_string: "BETA\nGAMMA".into(),
+                replace_all: false,
+            },
+        ];
+        let text = "alpha\nbeta\ngamma\n".to_string();
+        let (out, counts) = apply_edits(text, &edits).unwrap();
+        assert_eq!(out, "ALPHA\nBETA\nGAMMA\n");
+        assert_eq!(counts, vec![1, 1]);
+    }
+
+    /// A missing edit (not found, near-miss available) rolls back the WHOLE file:
+    /// - error message is prefixed `edit #N:`
+    /// - error message contains near-miss diff markers
+    /// - file on disk is unchanged
+    #[tokio::test]
+    async fn missing_edit_rolls_back_file_and_error_has_near_miss() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file.txt");
+        let original = "fn alpha() {\n    do_thing();\n}\n";
+        tokio::fs::write(&path, original).await.unwrap();
+
+        let tool = MultiEditTool::new(WorkspaceRoot::new(tmp.path()));
+        let err = tool
+            .invoke(
+                json!({
+                    "path": "file.txt",
+                    "edits": [
+                        // First edit succeeds.
+                        {"old_string": "fn alpha", "new_string": "fn alpha"},
+                        // Second edit: close but wrong — do_OTHER vs do_thing → near-miss.
+                        {
+                            "old_string": "fn alpha() {\n    do_OTHER();\n}",
+                            "new_string": "fn alpha() {}"
+                        }
+                    ]
+                }),
+                ctx(),
+            )
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err}");
+        // Must be prefixed edit #2.
+        assert!(msg.contains("edit #2"), "expected 'edit #2' prefix: {msg}");
+        // Must contain near-miss diff markers.
+        assert!(
+            msg.contains("- ") || msg.contains("+ "),
+            "expected diff in near-miss: {msg}"
+        );
+        assert!(
+            msg.contains("do_OTHER") || msg.contains("do_thing"),
+            "expected diff content: {msg}"
+        );
+        // File must be unchanged (rollback).
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, original, "file must be unchanged after rollback");
+    }
+
+    /// When `old_string` is longer than the file, near-miss scan returns None and
+    /// the error message uses the bare fallback text (not a diff), still prefixed
+    /// `edit #N:`.
+    #[tokio::test]
+    async fn not_found_near_none_bare_message_with_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file.txt");
+        // 1-line file; old_string spans 3 lines → window cannot fit → near: None.
+        tokio::fs::write(&path, "hello\n").await.unwrap();
+
+        let tool = MultiEditTool::new(WorkspaceRoot::new(tmp.path()));
+        let err = tool
+            .invoke(
+                json!({
+                    "path": "file.txt",
+                    "edits": [
+                        {"old_string": "aaa\nbbb\nccc", "new_string": "replaced"}
+                    ]
+                }),
+                ctx(),
+            )
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err}");
+        // Must have edit #1 prefix.
+        assert!(msg.contains("edit #1"), "expected 'edit #1' prefix: {msg}");
+        // Must use bare fallback (no near-miss diff).
+        assert!(
+            msg.contains("old_string not found in current contents"),
+            "expected bare not-found message: {msg}"
+        );
+        assert!(
+            !msg.contains("closest match"),
+            "should not have near-miss when old longer than file: {msg}"
+        );
+
+        // File must be unchanged.
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, "hello\n", "file must be unchanged after failed edit");
     }
 }

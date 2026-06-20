@@ -587,6 +587,7 @@ pub(crate) async fn run_and_render(
                 total_usage: tu,
                 turn_count,
                 stopped_for,
+                ..
             } => {
                 if !at_column_zero {
                     println!();

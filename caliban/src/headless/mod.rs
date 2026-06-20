@@ -259,6 +259,12 @@ pub(crate) struct HeadlessRunSummary {
     /// the session store under `--session` (F1 follow-up). Empty for
     /// runs that exit before any message lands.
     pub(crate) final_messages: Vec<Message>,
+    /// High-water mark of consecutive turns without a successful edit-class
+    /// (non-read-only) tool call (#239). Captured from `TurnEvent::RunEnd`.
+    pub(crate) turns_without_edit: u32,
+    /// Whether the no-edit-progress nudge fired at least once this run
+    /// (#239). Captured from `TurnEvent::RunEnd`.
+    pub(crate) no_edit_nudge_emitted: bool,
 }
 
 /// Per-call buffer used to defer the stream-json `tool_use` frame until
@@ -290,6 +296,12 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// session under `--session NAME` (F1 follow-up). Empty until the
     /// stream produces a `RunEnd` event.
     final_messages: Vec<Message>,
+    /// High-water mark of consecutive turns without a successful edit-class
+    /// (non-read-only) tool call (#239). Captured from `TurnEvent::RunEnd`.
+    turns_without_edit: u32,
+    /// Whether the no-edit-progress nudge fired at least once this run
+    /// (#239). Captured from `TurnEvent::RunEnd`.
+    no_edit_nudge_emitted: bool,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -324,6 +336,8 @@ impl<W: Write> HeadlessDriver<W> {
             tool_calls_seen: 0,
             last_assistant_text: String::new(),
             final_messages: Vec::new(),
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
         }
     }
 
@@ -463,6 +477,8 @@ impl<W: Write> HeadlessDriver<W> {
                 error: None,
                 tool_calls_seen: 0,
                 final_messages: messages,
+                turns_without_edit: 0,
+                no_edit_nudge_emitted: false,
             };
             self.emit_result(&summary)?;
             return Err(HeadlessError::MaxTurnsExceeded(0));
@@ -520,6 +536,8 @@ impl<W: Write> HeadlessDriver<W> {
             error: schema_error.clone(),
             tool_calls_seen: self.tool_calls_seen,
             final_messages: self.final_messages.clone(),
+            turns_without_edit: self.turns_without_edit,
+            no_edit_nudge_emitted: self.no_edit_nudge_emitted,
         };
         self.emit_result(&summary)?;
         if let Some(e) = schema_error {
@@ -671,6 +689,8 @@ impl<W: Write> HeadlessDriver<W> {
             TurnEvent::RunEnd {
                 final_messages,
                 stopped_for,
+                turns_without_edit,
+                no_edit_nudge_emitted,
                 ..
             } => {
                 // Capture the full conversation history so the binary can
@@ -679,6 +699,9 @@ impl<W: Write> HeadlessDriver<W> {
                 // `RunOutcome.final_messages` consumed by the TUI/single-prompt
                 // path; the driver had been silently dropping it.
                 self.final_messages = final_messages;
+                // Capture no-edit telemetry (#239) for the result frame.
+                self.turns_without_edit = turns_without_edit;
+                self.no_edit_nudge_emitted = no_edit_nudge_emitted;
                 // Each non-EndOfTurn variant terminates the run. We hand the
                 // matching `TerminalStop` up to the caller so a single final
                 // `result` frame can be emitted (correct for both single-frame
@@ -827,6 +850,8 @@ impl<W: Write> HeadlessDriver<W> {
             error,
             tool_calls_seen: self.tool_calls_seen,
             final_messages: self.final_messages.clone(),
+            turns_without_edit: self.turns_without_edit,
+            no_edit_nudge_emitted: self.no_edit_nudge_emitted,
         };
         self.emit_result(&summary)?;
         match stop {
@@ -903,6 +928,8 @@ impl<W: Write> HeadlessDriver<W> {
                         error: Some(msg.clone()),
                         tool_calls_seen: self.tool_calls_seen,
                         final_messages: self.final_messages.clone(),
+                        turns_without_edit: self.turns_without_edit,
+                        no_edit_nudge_emitted: self.no_edit_nudge_emitted,
                     };
                     self.emit_result(&summary)?;
                     return Err(HeadlessError::InputParse(msg));
@@ -960,6 +987,8 @@ impl<W: Write> HeadlessDriver<W> {
                 error: Some("no user frame found in stream-json stdin input".to_string()),
                 tool_calls_seen: self.tool_calls_seen,
                 final_messages: self.final_messages.clone(),
+                turns_without_edit: self.turns_without_edit,
+                no_edit_nudge_emitted: self.no_edit_nudge_emitted,
             };
             self.emit_result(&summary)?;
             return Err(HeadlessError::NoUserInput);
@@ -997,6 +1026,8 @@ impl<W: Write> HeadlessDriver<W> {
             error: schema_error.clone(),
             tool_calls_seen: self.tool_calls_seen,
             final_messages: self.final_messages.clone(),
+            turns_without_edit: self.turns_without_edit,
+            no_edit_nudge_emitted: self.no_edit_nudge_emitted,
         };
         self.emit_result(&summary)?;
         if let Some(e) = schema_error {
@@ -1029,6 +1060,8 @@ impl<W: Write> HeadlessDriver<W> {
             s.error.clone(),
             last_assistant_text_override,
             s.tool_calls_seen,
+            s.turns_without_edit,
+            s.no_edit_nudge_emitted,
         );
         match self.config.output_format {
             OutputFormat::Text => {
@@ -1478,6 +1511,8 @@ mod tests {
             error: None,
             tool_calls_seen: 0,
             final_messages: Vec::new(),
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
         };
         driver.emit_result(&summary).expect("emit_result");
 
@@ -2734,5 +2769,62 @@ mod tests {
         assert_eq!(nested[0]["id"], short_tool_use[0]["id"]);
         assert_eq!(nested[0]["name"], short_tool_use[0]["name"]);
         assert_eq!(nested[0]["input"], short_tool_use[0]["input"]);
+    }
+
+    // -------------------------------------------------------------------
+    // #239 — no-edit telemetry surfaced on the result frame.
+    //
+    // The `turns_without_edit` and `no_edit_nudge_emitted` fields must
+    // appear (snake_case) in every result frame JSON, regardless of
+    // subtype. Their values are captured from `TurnEvent::RunEnd`.
+    // -------------------------------------------------------------------
+
+    /// A benign single-turn run (no tools, no edits) must still carry
+    /// `turns_without_edit` and `no_edit_nudge_emitted` in the `result`
+    /// frame JSON with the correct `snake_case` field names (#239).
+    #[tokio::test]
+    async fn result_frame_carries_no_edit_telemetry_fields() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let summary = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        // Summary exposes the fields.
+        // The agent completed one text-only turn with no edit-class tool call,
+        // so turns_without_edit should be 1 (the high-water mark) and
+        // no_edit_nudge_emitted should be false (threshold not reached in 1 turn).
+        assert_eq!(summary.turns_without_edit, 1);
+        assert!(!summary.no_edit_nudge_emitted);
+
+        // The result frame JSON must carry both fields with snake_case names.
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "success");
+        assert!(
+            frame.get("turns_without_edit").is_some(),
+            "result frame must carry `turns_without_edit` field, got {frame}",
+        );
+        assert!(
+            frame.get("no_edit_nudge_emitted").is_some(),
+            "result frame must carry `no_edit_nudge_emitted` field, got {frame}",
+        );
+        assert_eq!(
+            frame["turns_without_edit"], 1,
+            "one text-only turn → turns_without_edit = 1, got {frame}",
+        );
+        assert_eq!(
+            frame["no_edit_nudge_emitted"], false,
+            "nudge not emitted in a single short run, got {frame}",
+        );
     }
 }
