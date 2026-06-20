@@ -18,12 +18,6 @@
 //! 3. **Near-miss** — neither tier matched; report the closest window as a
 //!    `- expected` / `+ found` diff to guide the caller.
 
-// The public surface of this module (`locate`, `MatchOutcome`, `NearMiss`,
-// `MatchTier`) is consumed by `edit.rs` / `multi_edit.rs` in follow-up tasks;
-// it is intentionally unused at this point, so silence dead-code lints rather
-// than prematurely wiring callers.
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 /// Which tier produced a [`MatchOutcome::Located`] result.
