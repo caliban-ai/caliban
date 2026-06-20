@@ -206,6 +206,7 @@ pub(crate) fn handle_agent_event(evt: caliban_agent_core::TurnEvent, app: &mut A
             total_usage,
             turn_count,
             stopped_for,
+            ..
         } => {
             // Surface non-EndOfTurn stop conditions so the user sees *why*
             // the turn ended (Findings 5 + 9 from the 2026-05-25 LM Studio
@@ -3081,6 +3082,8 @@ mod tests {
                 },
                 turn_count: 3,
                 stopped_for: StopCondition::Cancelled,
+                turns_without_edit: 0,
+                no_edit_nudge_emitted: false,
             },
             &mut app,
         );
@@ -3115,6 +3118,8 @@ mod tests {
                 total_usage: caliban_provider::Usage::default(),
                 turn_count: 1,
                 stopped_for: StopCondition::ProviderError("boom".into()),
+                turns_without_edit: 0,
+                no_edit_nudge_emitted: false,
             },
             &mut app,
         );

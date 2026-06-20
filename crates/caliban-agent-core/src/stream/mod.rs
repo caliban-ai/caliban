@@ -176,6 +176,11 @@ pub enum TurnEvent {
         turn_count: u32,
         /// Why the run terminated.
         stopped_for: StopCondition,
+        /// High-water mark of consecutive turns observed without a successful
+        /// edit-class (non-read-only) tool call (#239).
+        turns_without_edit: u32,
+        /// Whether the no-edit-progress nudge fired at least once this run (#239).
+        no_edit_nudge_emitted: bool,
     },
 }
 
@@ -205,6 +210,12 @@ pub struct RunOutcome {
     pub total_usage: Usage,
     /// Why the run terminated.
     pub stopped_for: StopCondition,
+    /// High-water mark of consecutive turns observed without a successful
+    /// edit-class (non-read-only) tool call (#239). Consumed by the headless
+    /// driver for progress telemetry.
+    pub turns_without_edit: u32,
+    /// Whether the no-edit-progress nudge fired at least once this run (#239).
+    pub no_edit_nudge_emitted: bool,
 }
 
 /// The reason a multi-turn run stopped.
@@ -392,6 +403,8 @@ mod serde_tests {
             total_usage: Usage::default(),
             turn_count: 3,
             stopped_for: StopCondition::MaxTurnsReached(3),
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
         };
         let json = round_trips(&ev);
         assert_eq!(json["type"], "RunEnd");
@@ -579,6 +592,8 @@ impl Agent {
                         total_usage,
                         turn_count: 0,
                         stopped_for: StopCondition::HookDenied(format!("before_run: {e}")),
+                        turns_without_edit: 0,
+                        no_edit_nudge_emitted: false,
                     };
                     return;
                 }
@@ -611,6 +626,17 @@ impl Agent {
                 disabled: bool,
             }
             let mut auto_tracking = AutoCompactTracking::default();
+
+            // #239 — no-edit-progress tracking (per-run):
+            // `turns_since_last_edit` counts consecutive completed turns with
+            // no successful non-read-only tool call; it resets to 0 (re-arming
+            // the nudge) the moment one succeeds. `turns_without_edit` is the
+            // high-water mark reported on RunOutcome/RunEnd. `no_edit_nudge_*`
+            // ensure at most one nudge per no-edit streak.
+            let mut turns_since_last_edit: u32 = 0;
+            let mut turns_without_edit: u32 = 0;
+            let mut no_edit_nudge_armed = true;
+            let mut no_edit_nudge_emitted = false;
 
             'outer: for turn_index in 0..max_turns {
                 // The inner loop lets recovery flows (Stage A budget
@@ -1051,6 +1077,14 @@ impl Agent {
 
                 // ---- Phase 1: plan (serial before_tool gate) ----
                 let mut plans: Vec<DispatchPlan> = Vec::new();
+                // #239: tool_use_ids of dispatched non-read-only ("edit-class")
+                // calls this turn. After dispatch we check which of these
+                // produced a *successful* result to decide whether the turn
+                // counts as edit progress. Denied calls never enter this set
+                // (they always error), so a denied edit can't reset the
+                // no-edit counter.
+                let mut non_read_only_tool_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for (idx, block) in assistant_message.content.iter().enumerate() {
                     if cancel.is_cancelled() {
                         stopped_for = StopCondition::Cancelled;
@@ -1178,6 +1212,9 @@ impl Agent {
                             });
                         }
                         HookDecision::Allow => {
+                            if !tool_is_read_only {
+                                non_read_only_tool_ids.insert(tu.id.clone());
+                            }
                             let conflict_key = self
                                 .tools
                                 .get(&tu.name)
@@ -1191,6 +1228,9 @@ impl Agent {
                             });
                         }
                         HookDecision::UpdatedInput(new_input) => {
+                            if !tool_is_read_only {
+                                non_read_only_tool_ids.insert(tu.id.clone());
+                            }
                             tracing::info!(
                                 tool = %tu.name,
                                 tool_use_id = %tu.id,
@@ -1333,7 +1373,14 @@ impl Agent {
 
                 // ---- Phase 3: collect results in assistant-message order ----
                 let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+                // #239: a turn counts as edit progress iff at least one
+                // dispatched non-read-only tool call returned a *successful*
+                // (non-error) result.
+                let mut had_successful_edit_this_turn = false;
                 for slot in ordered_results.into_iter().flatten() {
+                    if !slot.is_error && non_read_only_tool_ids.contains(&slot.tool_use_id) {
+                        had_successful_edit_this_turn = true;
+                    }
                     tool_result_blocks.push(ContentBlock::ToolResult(slot));
                 }
 
@@ -1488,6 +1535,37 @@ impl Agent {
 
                 total_usage.merge(turn_usage);
                 turns_completed += 1;
+
+                // ---- #239: no-edit-progress tracking + neutral nudge ----
+                if had_successful_edit_this_turn {
+                    // A successful edit-class call resets the streak and re-arms
+                    // the nudge (so a later streak can fire again).
+                    turns_since_last_edit = 0;
+                    no_edit_nudge_armed = true;
+                } else {
+                    turns_since_last_edit += 1;
+                    turns_without_edit = turns_without_edit.max(turns_since_last_edit);
+                    let threshold = self.config.no_edit_nudge_threshold;
+                    if threshold > 0
+                        && turns_since_last_edit >= threshold
+                        && no_edit_nudge_armed
+                    {
+                        tracing::info!(turns_since_last_edit, "no-edit nudge injected");
+                        history.push(Message::user_text(format!(
+                            "You have taken {turns_since_last_edit} turns without editing \
+                             any files. If you have already identified the change you need \
+                             to make, make the edit now rather than continuing to \
+                             investigate. If you are still investigating, you can \
+                             disregard this note."
+                        )));
+                        no_edit_nudge_emitted = true;
+                        no_edit_nudge_armed = false;
+                        // Re-arm Stage A for the nudged turn and advance.
+                        stage_a_attempted_this_turn = false;
+                        override_max_tokens_for_request = None;
+                        break 'inner; // take another turn with the nudge in scope
+                    }
+                }
 
                 // ---- T11: TurnDecision from `after_turn` ----
                 match after_turn_decision_for_loop {
@@ -1669,6 +1747,8 @@ impl Agent {
                 total_usage,
                 turn_count: turns_completed,
                 stopped_for,
+                turns_without_edit,
+                no_edit_nudge_emitted,
             };
         })
     }

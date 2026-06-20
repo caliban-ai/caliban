@@ -87,6 +87,14 @@ pub struct AgentConfig {
     /// Soft LRU cap on the activation set. `0` is treated as
     /// `lazy_mcp = false` by callers. Default `24`.
     pub max_active_schemas: usize,
+    // ── #239 (no-edit-progress nudge) ────────────────────────────
+    /// Number of consecutive turns with **zero** successful edit-class
+    /// (non-[`crate::Tool::is_read_only`]) tool calls after which the loop
+    /// injects a single neutral nudge encouraging the model to make the
+    /// edit it has identified. At most one nudge fires per no-edit streak;
+    /// the counter (and the nudge arming) resets the moment a non-read-only
+    /// tool call succeeds. `0` disables the nudge entirely. Default `10`.
+    pub no_edit_nudge_threshold: u32,
 }
 
 impl Default for AgentConfig {
@@ -122,6 +130,8 @@ impl Default for AgentConfig {
             // ADR-0046
             lazy_mcp: false,
             max_active_schemas: 24,
+            // #239
+            no_edit_nudge_threshold: 10,
         }
     }
 }
@@ -140,6 +150,7 @@ mod recovery_config_tests {
         // safely default-on. See stream/mod.rs Stage A hoist + the
         // stage_a_retry_does_not_double_count_turn regression test.
         assert!(cfg.max_tokens_recovery);
+        assert_eq!(cfg.no_edit_nudge_threshold, 10);
     }
 }
 

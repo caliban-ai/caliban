@@ -71,6 +71,8 @@ impl Agent {
                 total_usage,
                 turn_count,
                 stopped_for,
+                turns_without_edit,
+                no_edit_nudge_emitted,
             } = event?
             {
                 return Ok(RunOutcome {
@@ -78,6 +80,8 @@ impl Agent {
                     turn_count,
                     total_usage,
                     stopped_for,
+                    turns_without_edit,
+                    no_edit_nudge_emitted,
                 });
             }
         }
