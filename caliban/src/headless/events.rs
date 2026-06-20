@@ -309,6 +309,13 @@ pub(crate) struct ResultFrame {
     /// idle one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tool_calls_seen: Option<u32>,
+    /// High-water mark of consecutive turns without a successful edit-class
+    /// (non-read-only) tool call (#239). Always present; `0` means the
+    /// agent made at least one successful non-read-only call every turn.
+    pub(crate) turns_without_edit: u32,
+    /// Whether the no-edit-progress nudge fired at least once this run
+    /// (#239). Always present.
+    pub(crate) no_edit_nudge_emitted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +483,8 @@ pub(crate) fn result_frame(
     error: Option<String>,
     last_assistant_text: Option<String>,
     tool_calls_seen: u32,
+    turns_without_edit: u32,
+    no_edit_nudge_emitted: bool,
 ) -> ResultFrame {
     let is_success = matches!(subtype, ResultSubtype::Success);
     let result_text: String = result_text.into();
@@ -509,6 +518,8 @@ pub(crate) fn result_frame(
         error,
         last_assistant_text,
         tool_calls_seen,
+        turns_without_edit,
+        no_edit_nudge_emitted,
     }
 }
 
@@ -745,6 +756,8 @@ mod tests {
             None,
             None,
             0,
+            0,
+            false,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "result");
@@ -783,6 +796,8 @@ mod tests {
                 None,
                 Some("last clean reply".into()),
                 7,
+                0,
+                false,
             );
             let json = serde_json::to_value(&frame).unwrap();
             assert_eq!(json["type"], "result");
@@ -815,6 +830,8 @@ mod tests {
             None,
             None,
             0,
+            0,
+            false,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["last_assistant_text"], "partial assistant text");
@@ -838,6 +855,8 @@ mod tests {
             None,
             None,
             0,
+            0,
+            false,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert!(
