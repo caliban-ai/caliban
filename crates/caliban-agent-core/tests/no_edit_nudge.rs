@@ -285,7 +285,57 @@ async fn no_nudge_when_edit_resets_the_counter() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — threshold = 0 disables the nudge entirely.
+// Test 3 — after a nudge fires and disarms, a successful edit re-arms it so
+// a SECOND nudge can fire on a later no-edit streak.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn nudge_rearms_after_edit_following_a_nudge() {
+    // Sequence (threshold = 2):
+    //   turn 0: peek → turns_since_last_edit = 1
+    //   turn 1: peek → turns_since_last_edit = 2 → nudge #1 fires, disarms
+    //   turn 2: edit → resets to 0, re-arms
+    //   turn 3: peek → turns_since_last_edit = 1
+    //   turn 4: peek → turns_since_last_edit = 2 → nudge #2 fires, disarms
+    //   turn 5: text (end_turn)
+    //
+    // max_turns must cover all 6 provider turns plus two extra forced by nudge
+    // injection (break 'inner advances turn_index). Set it to 20 to be safe.
+    let mock = Arc::new(MockProvider::new());
+    mock.enqueue_stream(tool_use_stream("m0", "c0", "peek"));
+    mock.enqueue_stream(tool_use_stream("m1", "c1", "peek"));
+    mock.enqueue_stream(tool_use_stream("m2", "c2", "edit"));
+    mock.enqueue_stream(tool_use_stream("m3", "c3", "peek"));
+    mock.enqueue_stream(tool_use_stream("m4", "c4", "peek"));
+    mock.enqueue_stream(text_stream("m_end", "done", StopReason::EndTurn));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadOnlyTool));
+    registry.register(Arc::new(EditTool));
+    let agent = build_agent(Arc::clone(&mock), registry, 2);
+
+    let outcome = agent
+        .run_until_done(
+            vec![Message::user_text("investigate and fix")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(
+        count_nudge_messages(&outcome.final_messages),
+        2,
+        "exactly two no-edit nudges must appear: one before the edit, one after the post-edit no-edit streak; got {}",
+        count_nudge_messages(&outcome.final_messages),
+    );
+    assert!(
+        outcome.no_edit_nudge_emitted,
+        "no_edit_nudge_emitted must be true when at least one nudge fires"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 — threshold = 0 disables the nudge entirely.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
