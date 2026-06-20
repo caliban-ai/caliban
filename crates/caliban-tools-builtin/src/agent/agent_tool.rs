@@ -133,10 +133,12 @@ impl std::fmt::Debug for AgentTool {
         f.debug_struct("AgentTool")
             .field(
                 "parent_system_prompt",
+                // Truncate on a char boundary — a fixed-byte slice panics when
+                // byte 40 splits a multibyte char (#219, #185 H7 sibling).
                 &self
                     .parent_system_prompt
                     .as_deref()
-                    .map(|s| &s[..s.len().min(40)]),
+                    .map(|s| s.chars().take(40).collect::<String>()),
             )
             .finish_non_exhaustive()
     }
@@ -370,3 +372,25 @@ impl Tool for AgentTool {
 
 #[doc(hidden)]
 pub const __SUB_AGENT_MAX_TURNS: u32 = SUB_AGENT_MAX_TURNS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_does_not_panic_on_multibyte_system_prompt() {
+        // #219 (#185 H7 sibling): byte 40 splits the 4-byte emoji, so a
+        // fixed-byte slice panics. Debug-formatting must stay panic-free.
+        let prompt = format!("{}\u{1F600} trailing instructions", "x".repeat(39));
+        assert!(
+            !prompt.is_char_boundary(40),
+            "test vector must split byte 40"
+        );
+        let factory: AgentFactory =
+            Arc::new(|_: &AgentToolInput| unreachable!("factory is never called by Debug"));
+        let tool = AgentTool::new(factory, Some(prompt));
+        // Must not panic.
+        let rendered = format!("{tool:?}");
+        assert!(rendered.contains("AgentTool"));
+    }
+}
