@@ -33,6 +33,7 @@ use crate::tool::{ToolContext, ToolError};
 #[instrument(skip(agent, input, cancel), fields(tool = tool_name, id = tool_use_id))]
 pub(crate) async fn dispatch_tool(
     agent: &Agent,
+    session_id: &str,
     turn_index: u32,
     tool_use_id: &str,
     tool_name: &str,
@@ -45,6 +46,7 @@ pub(crate) async fn dispatch_tool(
 
     // Borrow `input` for the after_tool ctx; cloned into the invoke call below.
     let tool_ctx = ToolCtx {
+        session_id,
         turn_index,
         tool_use_id,
         tool_name,

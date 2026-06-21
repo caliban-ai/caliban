@@ -1468,6 +1468,7 @@ fn run_permissions_test(app: &mut App) {
     let input: serde_json::Value =
         serde_json::from_str(&tp.input_json).unwrap_or_else(|_| serde_json::json!({}));
     let ctx = caliban_agent_core::ToolCtx {
+        session_id: "",
         turn_index: 0,
         tool_use_id: "test",
         tool_name: &tp.tool_name,
@@ -1684,6 +1685,7 @@ fn action_str(a: caliban_agent_core::Action) -> &'static str {
 pub(crate) fn drain_ask_queue(app: &mut App) {
     while let Some(req) = app.ask_queue.pop_front() {
         let ctx = caliban_agent_core::ToolCtx {
+            session_id: "",
             turn_index: 0,
             tool_use_id: "",
             tool_name: &req.tool_name,
@@ -2632,6 +2634,7 @@ mod tests {
         // identical command, so the gate won't re-prompt.
         let input = serde_json::json!({"command": "ls -F"});
         let ctx = caliban_agent_core::ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "t",
             tool_name: "Bash",

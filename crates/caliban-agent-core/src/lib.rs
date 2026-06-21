@@ -42,14 +42,16 @@ pub use compact::{
 pub use error::{Error, Result};
 pub use hooks::{
     CompactCtx, CompactOutcome, CompositeHooks, ConfigChangeCtx, CwdChangedCtx, FileChangeKind,
-    FileChangedCtx, HookDecision, Hooks, NoopHooks, NotificationCtx, NotificationLevel, PermCtx,
-    PromptCtx, RunCtx, RunHookOutcome, SessionCtx, SessionOutcome, SessionStartOutcome,
-    SubagentCtx, SubagentOutcome, TaskCtx, TaskOutcome, ToolCtx, TurnCtx, TurnDecision,
-    build_envelope, envelope_with_cwd,
+    FileChangedCtx, HookDecision, Hooks, LifecycleObserver, NoopHooks, NotificationCtx,
+    NotificationLevel, PermCtx, PromptCtx, PromptGate, RunCtx, RunHookOutcome, SessionCtx,
+    SessionOutcome, SessionStartOutcome, SubagentCtx, SubagentOutcome, TaskCtx, TaskOutcome,
+    ToolCtx, ToolGate, TurnCtx, TurnDecision, TurnObserver, build_envelope, envelope_with_cwd,
+    pre_tool_envelope, session_start_envelope,
 };
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
 pub use hooks_router::{
-    AgentHook, HttpHook, McpHook, PromptHook, ShellCommandHook, build_config_hooks,
+    AgentHook, ExternalHook, ExternalTransport, HookGate, HttpHook, McpHook, PromptHook,
+    ShellCommandHook, build_config_hooks,
 };
 pub use mode_filter::ModeFilter;
 pub use permission_mode::{

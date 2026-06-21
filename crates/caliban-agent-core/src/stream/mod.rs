@@ -1141,6 +1141,7 @@ impl Agent {
                     }
 
                     let tool_ctx = ToolCtx {
+                        session_id: &settings.session_id,
                         turn_index,
                         tool_use_id: &tu.id,
                         tool_name: &tu.name,
@@ -1299,6 +1300,7 @@ impl Agent {
                             dispatched_count += 1;
                             let sem_for_tool = Arc::clone(&sem);
                             let cancel_for_tool = cancel.clone();
+                            let session_for_tool = settings.session_id.clone();
                             let lock_for_tool = conflict_key
                                 .as_ref()
                                 .and_then(|k| conflict_locks.get(k).map(Arc::clone));
@@ -1324,6 +1326,7 @@ impl Agent {
                                     .expect("semaphore not closed");
                                 let res = dispatch_tool(
                                     agent_ref,
+                                    &session_for_tool,
                                     turn_index,
                                     &id,
                                     &name,

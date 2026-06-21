@@ -33,6 +33,10 @@ impl RecorderHooks {
 
 #[async_trait]
 impl Hooks for RecorderHooks {
+    async fn before_run(&self, ctx: &caliban_agent_core::RunCtx<'_>) -> Result<()> {
+        self.push(format!("before_run:{}", ctx.session_id));
+        Ok(())
+    }
     async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
         self.push(format!("session_start:{}", ctx.session_id));
         Ok(SessionStartOutcome::default())
@@ -316,6 +320,7 @@ async fn composite_before_tool_short_circuits_on_first_deny() {
     ]);
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "x",
         tool_name: "Bash",
@@ -353,6 +358,7 @@ async fn composite_threads_updated_input_through_layers() {
     ]);
     let input = serde_json::json!({"original": true});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "x",
         tool_name: "Bash",
@@ -374,6 +380,7 @@ async fn composite_empty_returns_allow() {
     assert_eq!(composite.len(), 0);
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "x",
         tool_name: "Bash",
@@ -853,6 +860,7 @@ async fn composite_all_noop_returns_default_without_calling_members() {
 
     let input = serde_json::json!({});
     let tool_ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t",
         tool_name: "Bash",
@@ -1025,5 +1033,69 @@ async fn composite_mixed_noop_and_real_calls_the_real_one() {
             "notification:warn".to_string()
         ],
         "real hook must have been called on every event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #153 AC2 regression: PermissionsHook now forwards the run/turn-failure
+// lifecycle events to its inner (was a latent gap — they fell through to the
+// trait no-op before the forward_all_hooks_except! conversion).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn permissions_hook_forwards_before_run_to_inner() {
+    use caliban_agent_core::{NonInteractiveAskHandler, PermissionsHook, RunCtx, default_rules};
+    use tokio_util::sync::CancellationToken;
+
+    // `inner` records every event it receives.
+    let recorder = Arc::new(RecorderHooks::default());
+    let hook = PermissionsHook::new(
+        default_rules(),
+        Arc::new(NonInteractiveAskHandler { auto_allow: false }),
+        Arc::clone(&recorder) as Arc<dyn Hooks>,
+    );
+
+    let workspace = PathBuf::from("/tmp/ws");
+    let run_ctx = RunCtx {
+        session_id: "sess-153",
+        workspace_root: &workspace,
+        user_message: None,
+        prompt_index: 0,
+        cancel: CancellationToken::new(),
+    };
+    hook.before_run(&run_ctx).await.unwrap();
+
+    let snapshot = recorder.snapshot();
+    assert!(
+        snapshot.iter().any(|e| e.starts_with("before_run")),
+        "before_run must reach PermissionsHook's inner (was the latent #153 bug); got {snapshot:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #153 AC3 regression: a PreToolUse external envelope now carries the real,
+// non-empty session_id from ToolCtx (was hardcoded "").
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pre_tool_envelope_carries_session_id() {
+    let input = serde_json::json!({"command": "ls"});
+    let ctx = ToolCtx {
+        session_id: "sess-abc-123",
+        turn_index: 4,
+        tool_use_id: "tu_9",
+        tool_name: "Bash",
+        input: &input,
+        is_read_only: false,
+    };
+    let env = caliban_agent_core::pre_tool_envelope("PreToolUse", &ctx);
+    assert_eq!(env["hookEventName"], "PreToolUse");
+    assert_eq!(
+        env["session_id"], "sess-abc-123",
+        "PreToolUse envelope must carry the real session_id (#153), got {env:?}"
+    );
+    assert_ne!(
+        env["session_id"], "",
+        "session_id must not be the old hardcoded empty string"
     );
 }

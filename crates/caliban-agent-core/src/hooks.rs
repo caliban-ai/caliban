@@ -120,6 +120,11 @@ pub struct TurnCtx<'a> {
 /// Per-tool context passed to tool hooks.
 #[derive(Debug)]
 pub struct ToolCtx<'a> {
+    /// Opaque session identifier (the caliban binary supplies a UUID-ish
+    /// string; tests pass an arbitrary placeholder). Threaded into the
+    /// external-handler envelopes (`PreToolUse` / `PostToolUse`) so they carry
+    /// the real session id (#153).
+    pub session_id: &'a str,
     /// Zero-based turn index within the current run.
     pub turn_index: u32,
     /// The model-assigned `tool_use_id` for this invocation.
@@ -528,6 +533,331 @@ pub trait Hooks: Send + Sync {
     }
 }
 
+// ---------------------------------------------------------------------------
+// forward_all_hooks_except! — single-inner decorator de-duplication (#153 AC2)
+// ---------------------------------------------------------------------------
+
+/// Emit [`Hooks`] forwarding methods to `self.$inner`, generated from a
+/// caller-supplied list of method names. Each named method forwards verbatim to
+/// the inner `Arc<dyn Hooks>`; the wrapper hand-writes the events it overrides
+/// and simply omits them from this list.
+///
+/// Used by the single-inner decorators (`PermissionsHook`, `ModeFilter`,
+/// `DecisionRecorder`): each overrides `before_tool` and forwards the other 23
+/// events via this macro. The macro owns the full per-method *signature table*
+/// (the desugared `async_trait` shapes), so a wrapper lists only bare method
+/// names — never their argument/return types.
+///
+/// Invocation (inside an `impl Hooks for Wrapper` block; `$inner` is the bare
+/// field name of the `Arc<dyn Hooks>`, dispatched on `self`):
+/// ```ignore
+/// forward_all_hooks_except!(inner; forward:
+///     before_run, after_run, /* … 21 more … */ task_completed);
+/// ```
+///
+/// ### Why a `forward:` list rather than an `except: before_tool` list
+///
+/// The except-form requires comparing the table's method name against the skip
+/// list inside the macro, i.e. testing two captured `:ident`s for equality.
+/// `macro_rules!` forbids that (a matcher may not re-bind a metavariable →
+/// "duplicate matcher binding"), and there is no equality primitive for two
+/// *captured* idents. The forward-list form sidesteps it entirely: each name in
+/// the caller's list is a *literal token* that selects its signature via a
+/// literal-matched arm (`( … before_run … ) => { … }`), which is legal. Adding a
+/// new `Hooks` event still touches every wrapper's list (one name each), but the
+/// signature shape lives in exactly one place — this table.
+///
+/// Each generated method is hand-desugared to the `async_trait` future shape
+/// (`fn … -> Pin<Box<dyn Future…>>`) because a `macro_rules!`-generated
+/// `async fn` is invisible to the `#[async_trait]` attribute (it runs before
+/// this macro expands), so a raw `async fn` would fail to match the desugared
+/// trait signature (E0195).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! forward_all_hooks_except {
+    // Public entry: forward each named method to `$inner`.
+    ( $inner:ident ; forward: $($method:ident),+ $(,)? ) => {
+        $( $crate::forward_all_hooks_except!(@one $inner $method); )+
+    };
+
+    // --- Per-method signature table (the single source of truth) ----------
+    // `fwd` helpers return `Result<()>`; `ret` helpers return `Result<$ret>`.
+    ( @one $inner:ident before_run ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner before_run
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::RunCtx<'l2>));
+    };
+    ( @one $inner:ident after_run ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner after_run
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::RunCtx<'l2>, outcome: &'l3 $crate::hooks::RunHookOutcome));
+    };
+    ( @one $inner:ident after_run_failure ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner after_run_failure
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::RunCtx<'l2>, outcome: &'l3 $crate::hooks::RunHookOutcome));
+    };
+    ( @one $inner:ident before_turn ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner before_turn
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::TurnCtx<'l2>));
+    };
+    ( @one $inner:ident after_turn ) => {
+        $crate::forward_all_hooks_except!(@ret $inner after_turn $crate::hooks::TurnDecision;
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::TurnCtx<'l2>, outcome: &'l3 $crate::TurnOutcome));
+    };
+    ( @one $inner:ident after_turn_failure ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner after_turn_failure
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::TurnCtx<'l2>, outcome: &'l3 $crate::TurnOutcome));
+    };
+    ( @one $inner:ident before_tool ) => {
+        $crate::forward_all_hooks_except!(@ret $inner before_tool $crate::hooks::HookDecision;
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::ToolCtx<'l2>));
+    };
+    ( @one $inner:ident after_tool ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner after_tool
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::ToolCtx<'l2>, result: &'l3 ::std::result::Result<::std::vec::Vec<$crate::ContentBlock>, $crate::tool::ToolError>));
+    };
+    ( @one $inner:ident session_start ) => {
+        $crate::forward_all_hooks_except!(@ret $inner session_start $crate::hooks::SessionStartOutcome;
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::SessionCtx<'l2>));
+    };
+    ( @one $inner:ident session_end ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner session_end
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::SessionCtx<'l2>, outcome: &'l3 $crate::hooks::SessionOutcome));
+    };
+    ( @one $inner:ident user_prompt_submit ) => {
+        $crate::forward_all_hooks_except!(@ret $inner user_prompt_submit $crate::hooks::HookDecision;
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::PromptCtx<'l2>));
+    };
+    ( @one $inner:ident pre_compact ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner pre_compact
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::CompactCtx<'l2>));
+    };
+    ( @one $inner:ident post_compact ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner post_compact
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::CompactCtx<'l2>, outcome: &'l3 $crate::hooks::CompactOutcome));
+    };
+    ( @one $inner:ident config_change ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner config_change
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::ConfigChangeCtx<'l2>));
+    };
+    ( @one $inner:ident cwd_changed ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner cwd_changed
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::CwdChangedCtx<'l2>));
+    };
+    ( @one $inner:ident file_changed ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner file_changed
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::FileChangedCtx<'l2>));
+    };
+    ( @one $inner:ident permission_request ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner permission_request
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::PermCtx<'l2>));
+    };
+    ( @one $inner:ident permission_denied ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner permission_denied
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::PermCtx<'l2>));
+    };
+    ( @one $inner:ident notification ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner notification
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::NotificationCtx<'l2>));
+    };
+    ( @one $inner:ident subagent_start ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner subagent_start
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::SubagentCtx<'l2>));
+    };
+    ( @one $inner:ident subagent_stop ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner subagent_stop
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::SubagentCtx<'l2>, outcome: &'l3 $crate::hooks::SubagentOutcome));
+    };
+    ( @one $inner:ident task_created ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner task_created
+            <'l1,'l2>(ctx: &'l1 $crate::hooks::TaskCtx<'l2>));
+    };
+    ( @one $inner:ident task_completed ) => {
+        $crate::forward_all_hooks_except!(@fwd $inner task_completed
+            <'l1,'l2,'l3>(ctx: &'l1 $crate::hooks::TaskCtx<'l2>, outcome: &'l3 $crate::hooks::TaskOutcome));
+    };
+
+    // --- Method emitters ---------------------------------------------------
+    // @fwd: forwarding method whose return is `Result<()>`.
+    ( @fwd $inner:ident $method:ident
+      < $($life:lifetime),* > ( $($arg:ident : $ty:ty),* $(,)? )
+    ) => {
+        fn $method<'life0, $($life,)* 'async_trait>(
+            &'life0 self,
+            $($arg: $ty),*
+        ) -> ::core::pin::Pin<Box<
+            dyn ::core::future::Future<Output = $crate::Result<()>>
+                + ::core::marker::Send + 'async_trait,
+        >>
+        where
+            'life0: 'async_trait,
+            $($life: 'async_trait,)*
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                $crate::hooks::Hooks::$method(&*self.$inner, $($arg),*).await
+            })
+        }
+    };
+
+    // @ret: forwarding method whose return is `Result<$ret>` (non-unit).
+    ( @ret $inner:ident $method:ident $ret:ty;
+      < $($life:lifetime),* > ( $($arg:ident : $ty:ty),* $(,)? )
+    ) => {
+        fn $method<'life0, $($life,)* 'async_trait>(
+            &'life0 self,
+            $($arg: $ty),*
+        ) -> ::core::pin::Pin<Box<
+            dyn ::core::future::Future<Output = $crate::Result<$ret>>
+                + ::core::marker::Send + 'async_trait,
+        >>
+        where
+            'life0: 'async_trait,
+            $($life: 'async_trait,)*
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                $crate::hooks::Hooks::$method(&*self.$inner, $($arg),*).await
+            })
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Role-focused view traits (ISP — interface segregation, #153 AC1)
+// ---------------------------------------------------------------------------
+//
+// Each is a narrow consumer-facing view over the full [`Hooks`] surface. They
+// are blanket-implemented over every `T: Hooks + ?Sized`, forwarding verbatim
+// to the canonical `Hooks::method`, so any existing `Hooks` impl (including
+// `dyn Hooks`) is automatically a `ToolGate` / `TurnObserver` / etc. with no
+// new impls. The blanket impls target the NEW traits — not `Hooks` — so they
+// stay coherence-valid (no overlap; no other impls exist for these traits).
+//
+// These are purely additive: no call site is migrated to them here. They let a
+// component that only needs, say, the tool gate depend on `ToolGate` instead of
+// the 24-method `Hooks`.
+
+/// Narrow view exposing only the tool-dispatch gate
+/// ([`Hooks::before_tool`] / [`Hooks::after_tool`]).
+#[async_trait]
+pub trait ToolGate: Send + Sync {
+    /// See [`Hooks::before_tool`].
+    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision>;
+    /// See [`Hooks::after_tool`].
+    async fn after_tool(
+        &self,
+        ctx: &ToolCtx<'_>,
+        result: &std::result::Result<Vec<ContentBlock>, ToolError>,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl<T: Hooks + ?Sized> ToolGate for T {
+    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
+        Hooks::before_tool(self, ctx).await
+    }
+    async fn after_tool(
+        &self,
+        ctx: &ToolCtx<'_>,
+        result: &std::result::Result<Vec<ContentBlock>, ToolError>,
+    ) -> Result<()> {
+        Hooks::after_tool(self, ctx, result).await
+    }
+}
+
+/// Narrow view exposing only the per-turn observer events
+/// ([`Hooks::before_turn`] / [`Hooks::after_turn`] /
+/// [`Hooks::after_turn_failure`]).
+#[async_trait]
+pub trait TurnObserver: Send + Sync {
+    /// See [`Hooks::before_turn`].
+    async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()>;
+    /// See [`Hooks::after_turn`].
+    async fn after_turn(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<TurnDecision>;
+    /// See [`Hooks::after_turn_failure`].
+    async fn after_turn_failure(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl<T: Hooks + ?Sized> TurnObserver for T {
+    async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()> {
+        Hooks::before_turn(self, ctx).await
+    }
+    async fn after_turn(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<TurnDecision> {
+        Hooks::after_turn(self, ctx, outcome).await
+    }
+    async fn after_turn_failure(
+        &self,
+        ctx: &TurnCtx<'_>,
+        outcome: &crate::TurnOutcome,
+    ) -> Result<()> {
+        Hooks::after_turn_failure(self, ctx, outcome).await
+    }
+}
+
+/// Narrow view exposing only the run/session lifecycle observer events
+/// ([`Hooks::before_run`] / [`Hooks::after_run`] /
+/// [`Hooks::after_run_failure`] / [`Hooks::session_start`] /
+/// [`Hooks::session_end`]).
+#[async_trait]
+pub trait LifecycleObserver: Send + Sync {
+    /// See [`Hooks::before_run`].
+    async fn before_run(&self, ctx: &RunCtx<'_>) -> Result<()>;
+    /// See [`Hooks::after_run`].
+    async fn after_run(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()>;
+    /// See [`Hooks::after_run_failure`].
+    async fn after_run_failure(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()>;
+    /// See [`Hooks::session_start`].
+    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome>;
+    /// See [`Hooks::session_end`].
+    async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()>;
+}
+
+#[async_trait]
+impl<T: Hooks + ?Sized> LifecycleObserver for T {
+    async fn before_run(&self, ctx: &RunCtx<'_>) -> Result<()> {
+        Hooks::before_run(self, ctx).await
+    }
+    async fn after_run(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
+        Hooks::after_run(self, ctx, outcome).await
+    }
+    async fn after_run_failure(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
+        Hooks::after_run_failure(self, ctx, outcome).await
+    }
+    async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
+        Hooks::session_start(self, ctx).await
+    }
+    async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()> {
+        Hooks::session_end(self, ctx, outcome).await
+    }
+}
+
+/// Narrow view exposing only the prompt-submission gate
+/// ([`Hooks::user_prompt_submit`]).
+#[async_trait]
+pub trait PromptGate: Send + Sync {
+    /// See [`Hooks::user_prompt_submit`].
+    async fn user_prompt_submit(&self, ctx: &PromptCtx<'_>) -> Result<HookDecision>;
+}
+
+#[async_trait]
+impl<T: Hooks + ?Sized> PromptGate for T {
+    async fn user_prompt_submit(&self, ctx: &PromptCtx<'_>) -> Result<HookDecision> {
+        Hooks::user_prompt_submit(self, ctx).await
+    }
+}
+
 /// Default no-op hooks. Use this when you don't need observability callbacks.
 #[derive(Debug, Default)]
 pub struct NoopHooks;
@@ -623,47 +953,95 @@ impl CompositeHooks {
     }
 }
 
+/// Generate a trivial `CompositeHooks` fan-out method that iterates layers
+/// **top → bottom** (forward), calls `$method(ctx, …)` on each, and propagates
+/// the first error via `?`. Emits the `all_noop` short-circuit guard returning
+/// `Ok(())`. Used for the `before_*` / fire-everyone observer events whose only
+/// logic is "call each layer in order" (#153 AC2).
+///
+/// The body is hand-desugared to `Box::pin(async move { … })` rather than
+/// written as an `async fn`. A `macro_rules!`-generated `async fn` cannot live
+/// inside an `#[async_trait]` impl: the proc-macro attribute runs on the impl
+/// block *before* this inner macro expands, so it never rewrites the generated
+/// method, and the raw `async fn` then fails to match the desugared trait
+/// signature (E0195). Emitting the already-desugared future shape sidesteps the
+/// ordering entirely while staying object-safe.
+///
+/// Caller supplies fully-explicit reference lifetimes for every argument (each
+/// bound `: 'async_trait` below) so the generated signature matches
+/// `async_trait`'s desugaring of the corresponding `Hooks` trait method exactly.
+macro_rules! composite_fanout_fwd {
+    (
+        $method:ident < $($life:lifetime),* >
+        ( $($arg:ident : $ty:ty),* $(,)? )
+    ) => {
+        fn $method<'life0, $($life,)* 'async_trait>(
+            &'life0 self,
+            $($arg: $ty),*
+        ) -> ::core::pin::Pin<Box<
+            dyn ::core::future::Future<Output = Result<()>> + ::core::marker::Send + 'async_trait,
+        >>
+        where
+            'life0: 'async_trait,
+            $($life: 'async_trait,)*
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if self.all_noop {
+                    return Ok(());
+                }
+                for h in &self.layers {
+                    h.$method($($arg),*).await?;
+                }
+                Ok(())
+            })
+        }
+    };
+}
+
+/// Like [`composite_fanout_fwd!`] but iterates **bottom → top** (LIFO) so the
+/// most recently added observer sees an `after_*` result first. Same
+/// `all_noop` guard + `?` propagation, same hand-desugared future shape (#153
+/// AC2).
+macro_rules! composite_fanout_rev {
+    (
+        $method:ident < $($life:lifetime),* >
+        ( $($arg:ident : $ty:ty),* $(,)? )
+    ) => {
+        fn $method<'life0, $($life,)* 'async_trait>(
+            &'life0 self,
+            $($arg: $ty),*
+        ) -> ::core::pin::Pin<Box<
+            dyn ::core::future::Future<Output = Result<()>> + ::core::marker::Send + 'async_trait,
+        >>
+        where
+            'life0: 'async_trait,
+            $($life: 'async_trait,)*
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if self.all_noop {
+                    return Ok(());
+                }
+                for h in self.layers.iter().rev() {
+                    h.$method($($arg),*).await?;
+                }
+                Ok(())
+            })
+        }
+    };
+}
+
 #[async_trait]
 impl Hooks for CompositeHooks {
-    async fn before_run(&self, ctx: &RunCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.before_run(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn after_run(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.after_run(ctx, outcome).await?;
-        }
-        Ok(())
-    }
-
-    async fn after_run_failure(&self, ctx: &RunCtx<'_>, outcome: &RunHookOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.after_run_failure(ctx, outcome).await?;
-        }
-        Ok(())
-    }
-
-    async fn before_turn(&self, ctx: &TurnCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.before_turn(ctx).await?;
-        }
-        Ok(())
-    }
+    composite_fanout_fwd!(before_run<'l1, 'l2>(ctx: &'l1 RunCtx<'l2>));
+    composite_fanout_rev!(
+        after_run<'l1, 'l2, 'l3>(ctx: &'l1 RunCtx<'l2>, outcome: &'l3 RunHookOutcome)
+    );
+    composite_fanout_rev!(
+        after_run_failure<'l1, 'l2, 'l3>(ctx: &'l1 RunCtx<'l2>, outcome: &'l3 RunHookOutcome)
+    );
+    composite_fanout_fwd!(before_turn<'l1, 'l2>(ctx: &'l1 TurnCtx<'l2>));
 
     async fn after_turn(
         &self,
@@ -689,19 +1067,9 @@ impl Hooks for CompositeHooks {
         Ok(latest)
     }
 
-    async fn after_turn_failure(
-        &self,
-        ctx: &TurnCtx<'_>,
-        outcome: &crate::TurnOutcome,
-    ) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.after_turn_failure(ctx, outcome).await?;
-        }
-        Ok(())
-    }
+    composite_fanout_rev!(
+        after_turn_failure<'l1, 'l2, 'l3>(ctx: &'l1 TurnCtx<'l2>, outcome: &'l3 crate::TurnOutcome)
+    );
 
     async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
         if self.all_noop {
@@ -713,6 +1081,7 @@ impl Hooks for CompositeHooks {
             // Build a fresh ctx that points to the latest input (when present).
             let effective_input: &serde_json::Value = latest_input.as_ref().unwrap_or(ctx.input);
             let layer_ctx = ToolCtx {
+                session_id: ctx.session_id,
                 turn_index: ctx.turn_index,
                 tool_use_id: ctx.tool_use_id,
                 tool_name: ctx.tool_name,
@@ -734,19 +1103,10 @@ impl Hooks for CompositeHooks {
         }
     }
 
-    async fn after_tool(
-        &self,
-        ctx: &ToolCtx<'_>,
-        result: &std::result::Result<Vec<ContentBlock>, ToolError>,
-    ) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.after_tool(ctx, result).await?;
-        }
-        Ok(())
-    }
+    composite_fanout_rev!(after_tool<'l1, 'l2, 'l3>(
+        ctx: &'l1 ToolCtx<'l2>,
+        result: &'l3 std::result::Result<Vec<ContentBlock>, ToolError>,
+    ));
 
     async fn session_start(&self, ctx: &SessionCtx<'_>) -> Result<SessionStartOutcome> {
         if self.all_noop {
@@ -760,15 +1120,9 @@ impl Hooks for CompositeHooks {
         Ok(merged)
     }
 
-    async fn session_end(&self, ctx: &SessionCtx<'_>, outcome: &SessionOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.session_end(ctx, outcome).await?;
-        }
-        Ok(())
-    }
+    composite_fanout_rev!(
+        session_end<'l1, 'l2, 'l3>(ctx: &'l1 SessionCtx<'l2>, outcome: &'l3 SessionOutcome)
+    );
 
     async fn user_prompt_submit(&self, ctx: &PromptCtx<'_>) -> Result<HookDecision> {
         if self.all_noop {
@@ -804,125 +1158,24 @@ impl Hooks for CompositeHooks {
         }
     }
 
-    async fn pre_compact(&self, ctx: &CompactCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.pre_compact(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn post_compact(&self, ctx: &CompactCtx<'_>, outcome: &CompactOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.post_compact(ctx, outcome).await?;
-        }
-        Ok(())
-    }
-
-    async fn config_change(&self, ctx: &ConfigChangeCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.config_change(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn cwd_changed(&self, ctx: &CwdChangedCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.cwd_changed(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn file_changed(&self, ctx: &FileChangedCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.file_changed(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn permission_request(&self, ctx: &PermCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.permission_request(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn permission_denied(&self, ctx: &PermCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.permission_denied(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn notification(&self, ctx: &NotificationCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.notification(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn subagent_start(&self, ctx: &SubagentCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.subagent_start(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn subagent_stop(&self, ctx: &SubagentCtx<'_>, outcome: &SubagentOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.subagent_stop(ctx, outcome).await?;
-        }
-        Ok(())
-    }
-
-    async fn task_created(&self, ctx: &TaskCtx<'_>) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in &self.layers {
-            h.task_created(ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn task_completed(&self, ctx: &TaskCtx<'_>, outcome: &TaskOutcome) -> Result<()> {
-        if self.all_noop {
-            return Ok(());
-        }
-        for h in self.layers.iter().rev() {
-            h.task_completed(ctx, outcome).await?;
-        }
-        Ok(())
-    }
+    composite_fanout_fwd!(pre_compact<'l1, 'l2>(ctx: &'l1 CompactCtx<'l2>));
+    composite_fanout_rev!(
+        post_compact<'l1, 'l2, 'l3>(ctx: &'l1 CompactCtx<'l2>, outcome: &'l3 CompactOutcome)
+    );
+    composite_fanout_fwd!(config_change<'l1, 'l2>(ctx: &'l1 ConfigChangeCtx<'l2>));
+    composite_fanout_fwd!(cwd_changed<'l1, 'l2>(ctx: &'l1 CwdChangedCtx<'l2>));
+    composite_fanout_fwd!(file_changed<'l1, 'l2>(ctx: &'l1 FileChangedCtx<'l2>));
+    composite_fanout_fwd!(permission_request<'l1, 'l2>(ctx: &'l1 PermCtx<'l2>));
+    composite_fanout_fwd!(permission_denied<'l1, 'l2>(ctx: &'l1 PermCtx<'l2>));
+    composite_fanout_fwd!(notification<'l1, 'l2>(ctx: &'l1 NotificationCtx<'l2>));
+    composite_fanout_fwd!(subagent_start<'l1, 'l2>(ctx: &'l1 SubagentCtx<'l2>));
+    composite_fanout_rev!(
+        subagent_stop<'l1, 'l2, 'l3>(ctx: &'l1 SubagentCtx<'l2>, outcome: &'l3 SubagentOutcome)
+    );
+    composite_fanout_fwd!(task_created<'l1, 'l2>(ctx: &'l1 TaskCtx<'l2>));
+    composite_fanout_rev!(
+        task_completed<'l1, 'l2, 'l3>(ctx: &'l1 TaskCtx<'l2>, outcome: &'l3 TaskOutcome)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1200,42 @@ pub fn build_envelope(event_name: &str, fields: serde_json::Value) -> serde_json
         }
     }
     serde_json::Value::Object(obj)
+}
+
+/// Build the shared `PreToolUse` / `PostToolUse` envelope for external hook
+/// handlers from a [`ToolCtx`]. Centralizes the `session_id` / `turn_index` /
+/// `tool` shape that `ShellCommandHook` and `HttpHook` previously duplicated
+/// (#153 AC3). `event` is `"PreToolUse"` or `"PostToolUse"`. The `session_id`
+/// is taken from `ctx` (it now carries the real id — was hardcoded `""`).
+#[must_use]
+pub fn pre_tool_envelope(event: &str, ctx: &ToolCtx<'_>) -> serde_json::Value {
+    build_envelope(
+        event,
+        serde_json::json!({
+            "session_id": ctx.session_id,
+            "turn_index": ctx.turn_index,
+            "tool": {
+                "name": ctx.tool_name,
+                "useId": ctx.tool_use_id,
+                "input": ctx.input,
+            }
+        }),
+    )
+}
+
+/// Build the shared `SessionStart` envelope for external hook handlers from a
+/// [`SessionCtx`]. Centralizes the duplicated session-start shape (#153 AC3).
+#[must_use]
+pub fn session_start_envelope(ctx: &SessionCtx<'_>) -> serde_json::Value {
+    build_envelope(
+        "SessionStart",
+        serde_json::json!({
+            "session_id": ctx.session_id,
+            "cwd": ctx.cwd.display().to_string(),
+            "provider": ctx.provider,
+            "model": ctx.model,
+        }),
+    )
 }
 
 /// Convenience: build an envelope including a `cwd` field.
@@ -1001,7 +1290,7 @@ mod tests {
             provider: "test",
             model: "m",
         };
-        let out = composite.session_start(&ctx).await.unwrap();
+        let out = Hooks::session_start(&composite, &ctx).await.unwrap();
         assert_eq!(
             out.additional_context,
             vec!["first".to_string(), "second".to_string()]

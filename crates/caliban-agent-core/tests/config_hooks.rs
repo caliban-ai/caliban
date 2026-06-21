@@ -78,6 +78,7 @@ async fn pretooluse_hook_denies() {
     let composite = compose(&cfg);
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: "Bash",

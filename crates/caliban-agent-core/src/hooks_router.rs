@@ -124,6 +124,124 @@ pub(crate) fn parse_session_start_context(text: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// ExternalTransport / ExternalHook — shared external-handler plumbing (#153 AC3)
+// ---------------------------------------------------------------------------
+
+/// Firing gate shared by every external hook transport: which event the
+/// handler binds to, the tool-name `matcher`, the optional `if` full-pattern
+/// guard, and whether the handler is fire-and-forget. Extracted from the
+/// concrete `ShellCommandHook` / `HttpHook` types so the firing decision lives
+/// in exactly one place (#153 AC3).
+#[derive(Debug, Clone)]
+pub struct HookGate {
+    /// Event name this hook fires on (`PreToolUse` / `PostToolUse` /
+    /// `SessionStart`).
+    pub event_name: String,
+    /// Tool-name glob filter (`"*"` matches all). Only relevant for tool events.
+    pub matcher: String,
+    /// Optional full-pattern (`Tool:arg-glob`) firing guard from `if = "…"`.
+    /// `None` means "no extra guard"; `Some(p)` fires only when `p` matches the
+    /// tool + first-arg (#171).
+    pub if_pattern: Option<String>,
+    /// When true, the handler is fire-and-forget: its decision is ignored and
+    /// it never blocks the tool (ADR-0024, #171).
+    pub asynchronous: bool,
+}
+
+impl HookGate {
+    /// Whether this hook should fire for `ctx`: the tool-name `matcher` must
+    /// match AND, when an `if` pattern is configured, the full `Tool:arg-glob`
+    /// pattern must match too (#171). Moved verbatim off the concrete handler
+    /// types.
+    fn fires_for(&self, ctx: &ToolCtx<'_>) -> bool {
+        crate::permissions::matches_glob(&self.matcher, ctx.tool_name)
+            && match &self.if_pattern {
+                None => true,
+                Some(p) => crate::permissions_matcher::matches(p, ctx),
+            }
+    }
+}
+
+/// The transport-specific behavior behind an external hook handler: how to
+/// dispatch a `PreToolUse` decision, how to capture `SessionStart` context, and
+/// how to fire-and-forget an async invocation. The event gating + envelope
+/// building lives once in [`ExternalHook`]; only the I/O differs per transport.
+#[async_trait]
+pub trait ExternalTransport: Send + Sync + std::fmt::Debug {
+    /// Dispatch the envelope and return the resulting `PreToolUse` decision.
+    /// (Shell folds exit-code/JSON precedence in here; HTTP parses the body.)
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision;
+    /// Fire-and-forget the envelope (used when `gate().asynchronous` is true):
+    /// the decision is discarded and the call never blocks the tool.
+    fn spawn_detached(self: std::sync::Arc<Self>, envelope: serde_json::Value);
+    /// Capture a `SessionStart` `additionalContext` body, if any.
+    async fn capture(&self, envelope: serde_json::Value) -> Option<String>;
+    /// The shared firing gate.
+    fn gate(&self) -> &HookGate;
+}
+
+/// Generic external hook handler: wraps any [`ExternalTransport`] and provides
+/// the single `impl Hooks` whose `before_tool` / `after_tool` / `session_start`
+/// contain the previously-duplicated gating + envelope logic exactly once
+/// (#153 AC3).
+#[derive(Debug, Clone)]
+pub struct ExternalHook<T: ExternalTransport> {
+    /// The wrapped transport (shared so async fire-and-forget can move an
+    /// owned `Arc<T>` into the detached task).
+    pub transport: std::sync::Arc<T>,
+}
+
+#[async_trait]
+impl<T: ExternalTransport + 'static> Hooks for ExternalHook<T> {
+    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
+        let gate = self.transport.gate();
+        if gate.event_name != "PreToolUse" || !gate.fires_for(ctx) {
+            return Ok(HookDecision::Allow);
+        }
+        let envelope = crate::hooks::pre_tool_envelope("PreToolUse", ctx);
+        // async = true: fire-and-forget, decision ignored, never blocks (#171).
+        if gate.asynchronous {
+            std::sync::Arc::clone(&self.transport).spawn_detached(envelope);
+            return Ok(HookDecision::Allow);
+        }
+        Ok(self.transport.dispatch(envelope).await)
+    }
+
+    async fn after_tool(
+        &self,
+        ctx: &ToolCtx<'_>,
+        _result: &std::result::Result<Vec<caliban_provider::ContentBlock>, crate::tool::ToolError>,
+    ) -> Result<()> {
+        let gate = self.transport.gate();
+        if gate.event_name != "PostToolUse" || !gate.fires_for(ctx) {
+            return Ok(());
+        }
+        let envelope = crate::hooks::pre_tool_envelope("PostToolUse", ctx);
+        // PostToolUse is observer-only; async just detaches the await. The
+        // decision is discarded either way.
+        if gate.asynchronous {
+            std::sync::Arc::clone(&self.transport).spawn_detached(envelope);
+            return Ok(());
+        }
+        let _ = self.transport.dispatch(envelope).await;
+        Ok(())
+    }
+
+    async fn session_start(
+        &self,
+        ctx: &crate::hooks::SessionCtx<'_>,
+    ) -> Result<crate::hooks::SessionStartOutcome> {
+        if self.transport.gate().event_name != "SessionStart" {
+            return Ok(crate::hooks::SessionStartOutcome::default());
+        }
+        let envelope = crate::hooks::session_start_envelope(ctx);
+        let additional_context: Vec<String> =
+            self.transport.capture(envelope).await.into_iter().collect();
+        Ok(crate::hooks::SessionStartOutcome { additional_context })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config → runtime bridge
 // ---------------------------------------------------------------------------
 
@@ -185,15 +303,19 @@ pub fn build_config_hooks(
                         tracing::warn!(event = %event_name, "command hook missing `command`; skipping");
                         continue;
                     };
-                    out.push(std::sync::Arc::new(ShellCommandHook {
-                        command,
-                        args: h.args.clone(),
-                        timeout: h.timeout,
-                        env: h.env.clone(),
-                        matcher: h.matcher.clone(),
-                        if_pattern: h.if_pattern.clone(),
-                        asynchronous: h.asynchronous,
-                        event_name: event_name.clone(),
+                    out.push(std::sync::Arc::new(ExternalHook {
+                        transport: std::sync::Arc::new(ShellCommandHook {
+                            command,
+                            args: h.args.clone(),
+                            timeout: h.timeout,
+                            env: h.env.clone(),
+                            gate: HookGate {
+                                event_name: event_name.clone(),
+                                matcher: h.matcher.clone(),
+                                if_pattern: h.if_pattern.clone(),
+                                asynchronous: h.asynchronous,
+                            },
+                        }),
                     }));
                 }
                 HookHandlerType::Http => {
@@ -201,18 +323,22 @@ pub fn build_config_hooks(
                         tracing::warn!(event = %event_name, "http hook missing `url`; skipping");
                         continue;
                     };
-                    out.push(std::sync::Arc::new(HttpHook {
-                        url,
-                        headers: h.headers.clone(),
-                        timeout: h.timeout,
-                        allowed_url_globs: cfg.allowed_http_hook_urls.clone(),
-                        event_name: event_name.clone(),
-                        matcher: h.matcher.clone(),
-                        if_pattern: h.if_pattern.clone(),
-                        asynchronous: h.asynchronous,
-                        allowed_env_vars: cfg.http_hook_allowed_env_vars.clone(),
-                        allow_local_targets: cfg.allow_local_http_hook_targets,
-                        client: http_client.clone(),
+                    out.push(std::sync::Arc::new(ExternalHook {
+                        transport: std::sync::Arc::new(HttpHook {
+                            url,
+                            headers: h.headers.clone(),
+                            timeout: h.timeout,
+                            allowed_url_globs: cfg.allowed_http_hook_urls.clone(),
+                            gate: HookGate {
+                                event_name: event_name.clone(),
+                                matcher: h.matcher.clone(),
+                                if_pattern: h.if_pattern.clone(),
+                                asynchronous: h.asynchronous,
+                            },
+                            allowed_env_vars: cfg.http_hook_allowed_env_vars.clone(),
+                            allow_local_targets: cfg.allow_local_http_hook_targets,
+                            client: http_client.clone(),
+                        }),
                     }));
                 }
                 HookHandlerType::Mcp | HookHandlerType::Prompt | HookHandlerType::Agent => {
@@ -244,17 +370,8 @@ pub struct ShellCommandHook {
     pub timeout: Duration,
     /// Extra env passed to the child (in addition to inherited env).
     pub env: BTreeMap<String, String>,
-    /// Tool-name glob filter (`"*"` matches all). Only relevant for tool events.
-    pub matcher: String,
-    /// Optional full-pattern (`Tool:arg-glob`) firing guard from `if = "…"`.
-    /// `None` means "no extra guard"; `Some(p)` fires only when `p` matches the
-    /// tool + first-arg (#171).
-    pub if_pattern: Option<String>,
-    /// When true, this handler is fire-and-forget: its decision is ignored and
-    /// it never blocks the tool (ADR-0024). See #171.
-    pub asynchronous: bool,
-    /// Event name this hook fires on (used to filter dispatch in fan-out).
-    pub event_name: String,
+    /// Shared firing gate (event name + matcher + `if` pattern + async flag).
+    pub gate: HookGate,
 }
 
 /// Raw capture from a shell hook invocation.
@@ -331,17 +448,6 @@ impl ShellCommandHook {
             stderr,
             exit_code: output.status.code().unwrap_or(0),
         })
-    }
-
-    /// Whether this hook should fire for `ctx`: the tool-name `matcher` must
-    /// match AND, when an `if` pattern is configured, the full `Tool:arg-glob`
-    /// pattern must match too (#171).
-    fn fires_for(&self, ctx: &ToolCtx<'_>) -> bool {
-        crate::permissions::matches_glob(&self.matcher, ctx.tool_name)
-            && match &self.if_pattern {
-                None => true,
-                Some(p) => crate::permissions_matcher::matches(p, ctx),
-            }
     }
 
     /// Spawn the child, send the envelope, return the decision.
@@ -438,89 +544,27 @@ fn truncate_kb(s: &str, kib: usize) -> String {
 }
 
 #[async_trait]
-impl Hooks for ShellCommandHook {
-    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        if self.event_name != "PreToolUse" || !self.fires_for(ctx) {
-            return Ok(HookDecision::Allow);
-        }
-        let envelope = crate::hooks::build_envelope(
-            "PreToolUse",
-            serde_json::json!({
-                "session_id": "",
-                "turn_index": ctx.turn_index,
-                "tool": {
-                    "name": ctx.tool_name,
-                    "useId": ctx.tool_use_id,
-                    "input": ctx.input,
-                }
-            }),
-        );
-        // async = true: fire-and-forget, decision ignored, never blocks (#171).
-        if self.asynchronous {
-            let hook = self.clone();
-            tokio::spawn(async move {
-                let _ = hook.dispatch(envelope).await;
-            });
-            return Ok(HookDecision::Allow);
-        }
-        Ok(self.dispatch(envelope).await)
+impl ExternalTransport for ShellCommandHook {
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        // Inherent `ShellCommandHook::dispatch` keeps the exit-code / JSON
+        // decision precedence; the trait method just delegates to it.
+        ShellCommandHook::dispatch(self, envelope).await
     }
 
-    async fn after_tool(
-        &self,
-        ctx: &ToolCtx<'_>,
-        _result: &std::result::Result<Vec<caliban_provider::ContentBlock>, crate::tool::ToolError>,
-    ) -> Result<()> {
-        if self.event_name != "PostToolUse" || !self.fires_for(ctx) {
-            return Ok(());
-        }
-        let envelope = crate::hooks::build_envelope(
-            "PostToolUse",
-            serde_json::json!({
-                "session_id": "",
-                "turn_index": ctx.turn_index,
-                "tool": {
-                    "name": ctx.tool_name,
-                    "useId": ctx.tool_use_id,
-                    "input": ctx.input,
-                }
-            }),
-        );
-        // PostToolUse is observer-only; async just detaches the await.
-        if self.asynchronous {
-            let hook = self.clone();
-            tokio::spawn(async move {
-                let _ = hook.dispatch(envelope).await;
-            });
-            return Ok(());
-        }
-        let _ = self.dispatch(envelope).await;
-        Ok(())
+    fn spawn_detached(self: std::sync::Arc<Self>, envelope: serde_json::Value) {
+        tokio::spawn(async move {
+            let _ = self.dispatch(envelope).await;
+        });
     }
 
-    async fn session_start(
-        &self,
-        ctx: &crate::hooks::SessionCtx<'_>,
-    ) -> Result<crate::hooks::SessionStartOutcome> {
-        if self.event_name != "SessionStart" {
-            return Ok(crate::hooks::SessionStartOutcome::default());
-        }
-        let envelope = crate::hooks::build_envelope(
-            "SessionStart",
-            serde_json::json!({
-                "session_id": ctx.session_id,
-                "cwd": ctx.cwd.display().to_string(),
-                "provider": ctx.provider,
-                "model": ctx.model,
-            }),
-        );
-        let additional_context: Vec<String> = self
-            .run_capture(envelope)
+    async fn capture(&self, envelope: serde_json::Value) -> Option<String> {
+        self.run_capture(envelope)
             .await
             .and_then(|o| parse_session_start_context(&o.stdout))
-            .into_iter()
-            .collect();
-        Ok(crate::hooks::SessionStartOutcome { additional_context })
+    }
+
+    fn gate(&self) -> &HookGate {
+        &self.gate
     }
 }
 
@@ -539,14 +583,8 @@ pub struct HttpHook {
     pub timeout: Duration,
     /// Allowed URL globs (defense in depth — also enforced at config load).
     pub allowed_url_globs: Vec<String>,
-    /// Event this hook fires on.
-    pub event_name: String,
-    /// Tool-name matcher.
-    pub matcher: String,
-    /// Optional full-pattern (`Tool:arg-glob`) firing guard from `if = "…"` (#171).
-    pub if_pattern: Option<String>,
-    /// When true, fire-and-forget: decision ignored, never blocks the tool (#171).
-    pub asynchronous: bool,
+    /// Shared firing gate (event name + matcher + `if` pattern + async flag).
+    pub gate: HookGate,
     /// Env vars allowed for `${VAR}` expansion in the URL / headers, from
     /// `http_hook_allowed_env_vars` (#185 H5).
     pub allowed_env_vars: Vec<String>,
@@ -800,103 +838,28 @@ impl HttpHook {
             None => HookDecision::Allow,
         }
     }
-
-    /// Whether this hook should fire for `ctx`: tool-name `matcher` plus the
-    /// optional `if` full-pattern guard (#171).
-    fn fires_for(&self, ctx: &ToolCtx<'_>) -> bool {
-        crate::permissions::matches_glob(&self.matcher, ctx.tool_name)
-            && match &self.if_pattern {
-                None => true,
-                Some(p) => crate::permissions_matcher::matches(p, ctx),
-            }
-    }
 }
 
 #[async_trait]
-impl Hooks for HttpHook {
-    async fn before_tool(&self, ctx: &ToolCtx<'_>) -> Result<HookDecision> {
-        if self.event_name != "PreToolUse" || !self.fires_for(ctx) {
-            return Ok(HookDecision::Allow);
-        }
-        let envelope = crate::hooks::build_envelope(
-            "PreToolUse",
-            serde_json::json!({
-                "session_id": "",
-                "turn_index": ctx.turn_index,
-                "tool": {
-                    "name": ctx.tool_name,
-                    "useId": ctx.tool_use_id,
-                    "input": ctx.input,
-                }
-            }),
-        );
-        // async = true: fire-and-forget, decision ignored, never blocks (#171).
-        if self.asynchronous {
-            let hook = self.clone();
-            tokio::spawn(async move {
-                let _ = hook.dispatch(envelope).await;
-            });
-            return Ok(HookDecision::Allow);
-        }
-        Ok(self.dispatch(envelope).await)
+impl ExternalTransport for HttpHook {
+    async fn dispatch(&self, envelope: serde_json::Value) -> HookDecision {
+        HttpHook::dispatch(self, envelope).await
     }
 
-    async fn after_tool(
-        &self,
-        ctx: &ToolCtx<'_>,
-        _result: &std::result::Result<Vec<caliban_provider::ContentBlock>, crate::tool::ToolError>,
-    ) -> Result<()> {
-        // PostToolUse is observer-only — a `[[hooks.PostToolUse]]` http handler
-        // previously built but never fired (#185 H4).
-        if self.event_name != "PostToolUse" || !self.fires_for(ctx) {
-            return Ok(());
-        }
-        let envelope = crate::hooks::build_envelope(
-            "PostToolUse",
-            serde_json::json!({
-                "session_id": "",
-                "turn_index": ctx.turn_index,
-                "tool": {
-                    "name": ctx.tool_name,
-                    "useId": ctx.tool_use_id,
-                    "input": ctx.input,
-                }
-            }),
-        );
-        if self.asynchronous {
-            let hook = self.clone();
-            tokio::spawn(async move {
-                let _ = hook.dispatch(envelope).await;
-            });
-            return Ok(());
-        }
-        let _ = self.dispatch(envelope).await;
-        Ok(())
+    fn spawn_detached(self: std::sync::Arc<Self>, envelope: serde_json::Value) {
+        tokio::spawn(async move {
+            let _ = self.dispatch(envelope).await;
+        });
     }
 
-    async fn session_start(
-        &self,
-        ctx: &crate::hooks::SessionCtx<'_>,
-    ) -> Result<crate::hooks::SessionStartOutcome> {
-        if self.event_name != "SessionStart" {
-            return Ok(crate::hooks::SessionStartOutcome::default());
-        }
-        let envelope = crate::hooks::build_envelope(
-            "SessionStart",
-            serde_json::json!({
-                "session_id": ctx.session_id,
-                "cwd": ctx.cwd.display().to_string(),
-                "provider": ctx.provider,
-                "model": ctx.model,
-            }),
-        );
-        let additional_context: Vec<String> = self
-            .fetch_body(envelope)
+    async fn capture(&self, envelope: serde_json::Value) -> Option<String> {
+        self.fetch_body(envelope)
             .await
             .and_then(|b| parse_session_start_context(&b))
-            .into_iter()
-            .collect();
-        Ok(crate::hooks::SessionStartOutcome { additional_context })
+    }
+
+    fn gate(&self) -> &HookGate {
+        &self.gate
     }
 }
 
