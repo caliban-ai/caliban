@@ -19,6 +19,7 @@
 
 pub(crate) mod budget;
 pub(crate) mod cli;
+pub(crate) mod encoder;
 pub(crate) mod events;
 pub(crate) mod hooks_sink;
 pub(crate) mod input;
@@ -277,6 +278,11 @@ pub(crate) struct HeadlessRunSummary {
 pub(crate) struct HeadlessDriver<W: Write> {
     writer: W,
     config: HeadlessRunConfig,
+    /// Per-format output sink selected from `config.output_format` at
+    /// construction. Each method relocates one of the driver's former
+    /// `match self.config.output_format` arms (#165). The driver retains the
+    /// writer and passes `&mut self.writer` into each call.
+    encoder: Box<dyn encoder::FrameEncoder>,
     /// Shared stream-decode state: in-flight tool-input accumulation (cleared
     /// at the start of each `run_single_pass`, removed per `ToolCallEnd`) plus
     /// run-level model-mismatch dedup (#154).
@@ -329,9 +335,11 @@ enum TerminalStop {
 impl<W: Write> HeadlessDriver<W> {
     /// Construct a new driver writing to `writer`.
     pub(crate) fn new(writer: W, config: HeadlessRunConfig) -> Self {
+        let encoder = encoder::for_format(config.output_format);
         Self {
             writer,
             config,
+            encoder,
             decoder: crate::stream_decode::StreamDecoder::new(),
             tool_calls_seen: 0,
             last_assistant_text: String::new(),
@@ -368,20 +376,7 @@ impl<W: Write> HeadlessDriver<W> {
     /// # Errors
     /// Returns [`HeadlessError::Io`] on writer failure.
     pub(crate) fn emit_init(&mut self) -> Result<(), HeadlessError> {
-        if !matches!(self.config.output_format, OutputFormat::StreamJson) {
-            return Ok(());
-        }
-        let frame = events::system_init(
-            &self.config.session_id,
-            &self.config.model_summary,
-            self.config.tools.clone(),
-            self.config.plugins.clone(),
-            self.config.setting_sources.clone(),
-            self.config.bare_mode,
-            &self.config.cwd,
-            &self.config.permission_mode,
-        );
-        self.write_ndjson(&frame)
+        self.encoder.system_init(&mut self.writer, &self.config)
     }
 
     /// Echo a user prompt back as a `user` frame, when both
@@ -390,14 +385,11 @@ impl<W: Write> HeadlessDriver<W> {
     /// # Errors
     /// Returns [`HeadlessError::Io`] on writer failure.
     pub(crate) fn emit_user_echo(&mut self, prompt: &str) -> Result<(), HeadlessError> {
-        if !self.config.replay_user_messages
-            || !matches!(self.config.output_format, OutputFormat::StreamJson)
-        {
+        if !self.config.replay_user_messages {
             return Ok(());
         }
-        let content = serde_json::json!([{ "type": "text", "text": prompt }]);
-        let frame = events::user_echo(content);
-        self.write_ndjson(&frame)
+        self.encoder
+            .user_echo(&mut self.writer, prompt, &self.config)
     }
 
     /// Drain the hook-event buffer (if any) and emit each event as a
@@ -420,7 +412,7 @@ impl<W: Write> HeadlessDriver<W> {
             std::mem::take(&mut *guard)
         };
         for frame in &drained {
-            self.write_ndjson(frame)?;
+            self.encoder.hook_event(&mut self.writer, frame)?;
         }
         Ok(())
     }
@@ -486,7 +478,6 @@ impl<W: Write> HeadlessDriver<W> {
 
         let mut final_text = String::new();
         let mut turns: u32 = 0;
-        let mut at_column_zero = true;
 
         let outcome = self
             .run_single_pass(
@@ -495,7 +486,6 @@ impl<W: Write> HeadlessDriver<W> {
                 cancel,
                 &mut final_text,
                 &mut turns,
-                &mut at_column_zero,
             )
             .await?;
         if let Some(terminal) = outcome {
@@ -505,6 +495,20 @@ impl<W: Write> HeadlessDriver<W> {
             return self.emit_terminal_result(&terminal, &final_text, turns);
         }
 
+        self.finalize(final_text, turns)
+    }
+
+    /// Shared completion tail for [`run`](Self::run) and
+    /// [`run_frames`](Self::run_frames): validate any `--json-schema` against
+    /// the final reply, build the success/error [`HeadlessRunSummary`], emit
+    /// the terminal `result` frame, and surface a schema-validation error.
+    /// `final_text` is the last turn's assistant reply (each `run_frames` pass
+    /// resets it, so it is the final pass's text). (#165)
+    fn finalize(
+        &mut self,
+        final_text: String,
+        turns: u32,
+    ) -> Result<HeadlessRunSummary, HeadlessError> {
         // Structured-output validation.
         let (structured_output, schema_error) = match &self.config.json_schema {
             Some(schema) => match schema::extract_json_object(&final_text) {
@@ -527,7 +531,7 @@ impl<W: Write> HeadlessDriver<W> {
             } else {
                 ResultSubtype::Success
             },
-            final_text: final_text.clone(),
+            final_text,
             turns,
             total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
             total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
@@ -561,23 +565,12 @@ impl<W: Write> HeadlessDriver<W> {
         event: TurnEvent,
         final_text: &mut String,
         turns: &mut u32,
-        at_column_zero: &mut bool,
     ) -> Result<Option<TerminalStop>, HeadlessError> {
         match event {
             TurnEvent::AssistantTextDelta { text, .. } => {
                 final_text.push_str(&text);
-                match self.config.output_format {
-                    OutputFormat::Text => {
-                        self.writer
-                            .write_all(text.as_bytes())
-                            .map_err(|e| HeadlessError::Io(e.to_string()))?;
-                        *at_column_zero = text.ends_with('\n');
-                    }
-                    OutputFormat::StreamJson if self.config.include_partial_messages => {
-                        self.write_ndjson(&events::text_delta(&text))?;
-                    }
-                    _ => {}
-                }
+                self.encoder
+                    .text_delta(&mut self.writer, &text, &self.config)?;
             }
             TurnEvent::AssistantThinkingDelta { text, .. } => {
                 // Reasoning content is preserved in the final `message` frame's
@@ -589,12 +582,8 @@ impl<W: Write> HeadlessDriver<W> {
                 // Intentionally NOT mirrored into `final_text` (which feeds the
                 // `result` frame and the plain-text output mode) — reasoning
                 // shouldn't leak into the canonical answer body.
-                match self.config.output_format {
-                    OutputFormat::StreamJson if self.config.include_partial_messages => {
-                        self.write_ndjson(&events::thinking_delta(&text))?;
-                    }
-                    _ => {}
-                }
+                self.encoder
+                    .thinking_delta(&mut self.writer, &text, &self.config)?;
             }
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
@@ -626,38 +615,22 @@ impl<W: Write> HeadlessDriver<W> {
                 // counter feeds the non-`success` result frame (F7 follow-up),
                 // not just the stream-json `tool_result` frame.
                 self.tool_calls_seen = self.tool_calls_seen.saturating_add(1);
-                match self.config.output_format {
-                    OutputFormat::StreamJson => {
-                        // Pair the `tool_use` frame with the matching
-                        // `tool_result`: emit the deferred tool_use now that
-                        // the input JSON has finished streaming. Parse the
-                        // accumulated JSON; on parse failure fall back to a
-                        // string so the frame is never silently dropped.
-                        if let Some(buf) = self.decoder.take_tool_input(&tool_use_id) {
-                            let input = parse_tool_input(&buf.json);
-                            self.write_ndjson(&events::tool_use(&tool_use_id, &buf.name, input))?;
-                        }
-                        let content_value = content_blocks_to_json(&content);
-                        self.write_ndjson(&events::tool_result(
-                            &tool_use_id,
-                            is_error,
-                            content_value,
-                        ))?;
-                    }
-                    // `--verbose` text mode: dump the full, untruncated tool
-                    // call to stderr (stdout stays the assistant answer, so
-                    // pipes/`$(...)` capture is unaffected). Mirrors the
-                    // driver's existing stderr convention for warnings.
-                    OutputFormat::Text if self.config.verbose => {
-                        if let Some(buf) = self.decoder.take_tool_input(&tool_use_id) {
-                            let input = parse_tool_input(&buf.json);
-                            let block =
-                                render_verbose_tool_io(&buf.name, &input, is_error, &content);
-                            eprintln!("{block}");
-                        }
-                    }
-                    _ => {}
-                }
+                // Take the buffered tool input (only populated when this run
+                // buffers tool I/O); the encoder relocates the per-format
+                // emission of the `tool_use` / `tool_result` / verbose block.
+                let buffered = if self.buffers_tool_io() {
+                    self.decoder.take_tool_input(&tool_use_id)
+                } else {
+                    None
+                };
+                self.encoder.tool_call(
+                    &mut self.writer,
+                    &tool_use_id,
+                    buffered,
+                    is_error,
+                    &content,
+                    &self.config,
+                )?;
             }
             TurnEvent::TurnEnd {
                 assistant_message,
@@ -679,12 +652,11 @@ impl<W: Write> HeadlessDriver<W> {
                 if !turn_text.is_empty() {
                     self.last_assistant_text = turn_text;
                 }
-                if matches!(self.config.output_format, OutputFormat::StreamJson)
-                    && !self.config.include_partial_messages
-                {
-                    let content_value = content_blocks_to_json(&assistant_message.content);
-                    self.write_ndjson(&events::assistant_message(content_value))?;
-                }
+                self.encoder.assistant_message(
+                    &mut self.writer,
+                    &assistant_message.content,
+                    &self.config,
+                )?;
             }
             TurnEvent::RunEnd {
                 final_messages,
@@ -747,27 +719,16 @@ impl<W: Write> HeadlessDriver<W> {
                 // is seen this run.
                 let requested = self.config.requested_model.clone();
                 if self.decoder.note_model_mismatch(&requested, &actual) {
-                    match self.config.output_format {
-                        OutputFormat::StreamJson => {
-                            let frame = events::warning_model_mismatch(&requested, &actual);
-                            self.write_ndjson(&frame)?;
-                        }
-                        OutputFormat::Text | OutputFormat::Json => {
-                            eprintln!(
-                                "{}",
-                                crate::stream_decode::model_mismatch_text(&requested, &actual)
-                            );
-                        }
-                    }
+                    self.encoder.model_mismatch(
+                        &mut self.writer,
+                        &requested,
+                        &actual,
+                        &self.config,
+                    )?;
                 }
             }
         }
-        if matches!(self.config.output_format, OutputFormat::Text) && !*at_column_zero {
-            // Ensure deltas are flushed; final newline is added at run end.
-            self.writer
-                .flush()
-                .map_err(|e| HeadlessError::Io(e.to_string()))?;
-        }
+        self.encoder.flush_text(&mut self.writer)?;
         Ok(None)
     }
 
@@ -786,7 +747,6 @@ impl<W: Write> HeadlessDriver<W> {
         cancel: CancellationToken,
         final_text: &mut String,
         turns: &mut u32,
-        at_column_zero: &mut bool,
     ) -> Result<Option<TerminalStop>, HeadlessError> {
         // Drop any stale pending tool-call buffers from a prior pass. New
         // IDs are unique per run in practice, but clearing here keeps the
@@ -805,7 +765,7 @@ impl<W: Write> HeadlessDriver<W> {
             if budget_tripped && matches!(&event, TurnEvent::TurnStart { .. }) {
                 return Ok(Some(TerminalStop::BudgetExceeded));
             }
-            if let Some(stop) = self.handle_event(event, final_text, turns, at_column_zero)? {
+            if let Some(stop) = self.handle_event(event, final_text, turns)? {
                 return Ok(Some(stop));
             }
             self.flush_hook_events()?;
@@ -906,7 +866,6 @@ impl<W: Write> HeadlessDriver<W> {
         let mut messages = base_messages;
         let mut final_text = String::new();
         let mut turns: u32 = 0;
-        let mut at_column_zero = true;
         let mut consumed_user_frames: u32 = 0;
 
         for raw_line in input.lines() {
@@ -954,7 +913,6 @@ impl<W: Write> HeadlessDriver<W> {
                             cancel.clone(),
                             &mut final_text,
                             &mut turns,
-                            &mut at_column_zero,
                         )
                         .await?;
                     if let Some(terminal) = outcome {
@@ -996,44 +954,7 @@ impl<W: Write> HeadlessDriver<W> {
 
         // Structured-output validation runs on the cumulative `final_text`
         // (i.e. the assistant's final-turn reply, since each pass resets it).
-        let (structured_output, schema_error) = match &self.config.json_schema {
-            Some(schema) => match schema::extract_json_object(&final_text) {
-                Some(candidate) => match schema.validate(&candidate) {
-                    Ok(()) => (Some(candidate), None),
-                    Err(e) => (None, Some(e)),
-                },
-                None => (
-                    None,
-                    Some("could not extract a JSON object from the assistant reply".to_string()),
-                ),
-            },
-            None => (None, None),
-        };
-
-        let (i_tok, o_tok) = self.config.budget.total_tokens();
-        let summary = HeadlessRunSummary {
-            subtype: if schema_error.is_some() {
-                ResultSubtype::Error
-            } else {
-                ResultSubtype::Success
-            },
-            final_text: final_text.clone(),
-            turns,
-            total_input_tokens: u32::try_from(i_tok).unwrap_or(u32::MAX),
-            total_output_tokens: u32::try_from(o_tok).unwrap_or(u32::MAX),
-            total_cost_usd: self.config.budget.total_cost_usd(),
-            structured_output,
-            error: schema_error.clone(),
-            tool_calls_seen: self.tool_calls_seen,
-            final_messages: self.final_messages.clone(),
-            turns_without_edit: self.turns_without_edit,
-            no_edit_nudge_emitted: self.no_edit_nudge_emitted,
-        };
-        self.emit_result(&summary)?;
-        if let Some(e) = schema_error {
-            return Err(HeadlessError::SchemaValidation(e));
-        }
-        Ok(summary)
+        self.finalize(final_text, turns)
     }
 
     fn emit_result(&mut self, s: &HeadlessRunSummary) -> Result<(), HeadlessError> {
@@ -1063,53 +984,7 @@ impl<W: Write> HeadlessDriver<W> {
             s.turns_without_edit,
             s.no_edit_nudge_emitted,
         );
-        match self.config.output_format {
-            OutputFormat::Text => {
-                // Ensure trailing newline after streamed assistant text.
-                if !s.final_text.is_empty() && !s.final_text.ends_with('\n') {
-                    self.writer
-                        .write_all(b"\n")
-                        .map_err(|e| HeadlessError::Io(e.to_string()))?;
-                }
-                self.writer
-                    .flush()
-                    .map_err(|e| HeadlessError::Io(e.to_string()))?;
-                // Text mode prints no result frame, so a non-success terminal
-                // stop (max-turns, cancelled, budget) is otherwise completely
-                // silent. Surface a one-line diagnostic on stderr (#175).
-                if let Some(note) = text_mode_stop_note(s.subtype, s.turns) {
-                    eprintln!("{note}");
-                }
-            }
-            OutputFormat::Json => {
-                let json =
-                    serde_json::to_string(&frame).map_err(|e| HeadlessError::Io(e.to_string()))?;
-                self.writer
-                    .write_all(json.as_bytes())
-                    .map_err(|e| HeadlessError::Io(e.to_string()))?;
-                self.writer
-                    .write_all(b"\n")
-                    .map_err(|e| HeadlessError::Io(e.to_string()))?;
-            }
-            OutputFormat::StreamJson => {
-                self.write_ndjson(&frame)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn write_ndjson<T: serde::Serialize>(&mut self, value: &T) -> Result<(), HeadlessError> {
-        let json = serde_json::to_string(value).map_err(|e| HeadlessError::Io(e.to_string()))?;
-        self.writer
-            .write_all(json.as_bytes())
-            .map_err(|e| HeadlessError::Io(e.to_string()))?;
-        self.writer
-            .write_all(b"\n")
-            .map_err(|e| HeadlessError::Io(e.to_string()))?;
-        self.writer
-            .flush()
-            .map_err(|e| HeadlessError::Io(e.to_string()))?;
-        Ok(())
+        self.encoder.result(&mut self.writer, &frame, s)
     }
 }
 
@@ -2826,5 +2701,133 @@ mod tests {
             frame["no_edit_nudge_emitted"], false,
             "nudge not emitted in a single short run, got {frame}",
         );
+    }
+
+    // -------------------------------------------------------------------
+    // #165 — `FrameEncoder` refactor characterization tests.
+    //
+    // These pin the per-format output of the headless driver across the
+    // relocation of the inline `match output_format` arms into the
+    // `encoder` module. Each builds a `HeadlessDriver<Vec<u8>>` and asserts
+    // the produced bytes; the fourth unit-tests the stream-json tool-call
+    // encoder method directly.
+    // -------------------------------------------------------------------
+
+    /// Text format: a one-turn text response yields the assistant text
+    /// followed by a single trailing newline on the writer.
+    #[tokio::test]
+    async fn encoder_text_format_yields_text_plus_trailing_newline() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(text_turn_stream("hello world"));
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, HeadlessRunConfig::minimal(OutputFormat::Text));
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let out = String::from_utf8(driver.writer).expect("utf-8");
+        assert_eq!(
+            out, "hello world\n",
+            "text mode must emit the assistant text plus one trailing newline"
+        );
+    }
+
+    /// Stream-json format: the first NDJSON line is a `system`/`init` frame
+    /// and the last is a `type:result` frame.
+    #[tokio::test]
+    async fn encoder_stream_json_first_is_init_last_is_result() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(buf, HeadlessRunConfig::minimal(OutputFormat::StreamJson));
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+        assert!(frames.len() >= 2, "expected at least init + result frames");
+        let first = frames.first().expect("at least one frame");
+        assert_eq!(first["type"], "system");
+        assert_eq!(first["subtype"], "init");
+        let last = frames.last().expect("at least one frame");
+        assert_eq!(last["type"], "result");
+    }
+
+    /// Json format: the writer contains exactly one JSON object with
+    /// `type:result` and `subtype:success`.
+    #[tokio::test]
+    async fn encoder_json_format_emits_single_success_result() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(benign_text_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        let _ = driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run succeeded");
+
+        let lines: Vec<&[u8]> = driver
+            .writer
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "json mode emits exactly one object + newline"
+        );
+        let frame = parse_json_frame(&driver.writer);
+        assert_eq!(frame["type"], "result");
+        assert_eq!(frame["subtype"], "success");
+    }
+
+    /// Stream-json tool call: the encoder method emits a `tool_use` line
+    /// (with the parsed input) followed by a `tool_result` line.
+    #[test]
+    fn encoder_stream_json_tool_call_emits_use_then_result() {
+        use encoder::FrameEncoder as _;
+
+        let mut enc = encoder::StreamJsonEncoder;
+        let cfg = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        let buffered = Some(crate::stream_decode::ToolInput {
+            name: "Glob".into(),
+            json: r#"{"pattern":"**/*.toml"}"#.into(),
+        });
+        let content = vec![text_block("found 3 files")];
+
+        let mut buf: Vec<u8> = Vec::new();
+        enc.tool_call(&mut buf, "toolu_001", buffered, false, &content, &cfg)
+            .expect("tool_call encode");
+
+        let frames = parse_ndjson_lines(&buf);
+        assert_eq!(frames.len(), 2, "expected a tool_use then a tool_result");
+        assert_eq!(frames[0]["type"], "tool_use");
+        assert_eq!(frames[0]["id"], "toolu_001");
+        assert_eq!(frames[0]["name"], "Glob");
+        assert_eq!(frames[0]["input"]["pattern"], "**/*.toml");
+        assert_eq!(frames[1]["type"], "tool_result");
+        assert_eq!(frames[1]["tool_use_id"], "toolu_001");
+        assert_eq!(frames[1]["is_error"], false);
     }
 }
