@@ -1496,6 +1496,7 @@ mod tests {
 
         let input = serde_json::json!({"command": "rm -rf /"});
         let ctx = ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "t1",
             tool_name: "Bash",
@@ -1536,6 +1537,7 @@ mod tests {
 
         let input = serde_json::json!({"command": "ls"});
         let ctx = ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "t1",
             tool_name: "Bash",

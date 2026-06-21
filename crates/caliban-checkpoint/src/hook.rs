@@ -259,6 +259,7 @@ mod tests {
         hook.before_run(&ctx).await.unwrap();
         let input = serde_json::json!({"path": "a.txt", "content": "x"});
         let tctx = ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "tu_1",
             tool_name: "Write",
@@ -285,6 +286,7 @@ mod tests {
         .unwrap();
         let input = serde_json::json!({"command": "rm a.txt"});
         let tctx = ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "tu_1",
             tool_name: "Bash",

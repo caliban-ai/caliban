@@ -319,6 +319,7 @@ mod tests {
         let sink = HeadlessHookSink::new(Arc::clone(&buf));
         let input = serde_json::json!({"foo": 1});
         let ctx = ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "tu_1",
             tool_name: "Bash",

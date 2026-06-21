@@ -228,6 +228,7 @@ mod tests {
 
     fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
         ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "t",
             tool_name: name,

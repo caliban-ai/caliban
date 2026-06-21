@@ -20,6 +20,7 @@ fn write_script(dir: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
 
 fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
     ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: name,
@@ -32,15 +33,19 @@ fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
 async fn exit_zero_is_allow() {
     let dir = TempDir::new().unwrap();
     let script = write_script(&dir, "ok.sh", "#!/bin/sh\nexit 0\n");
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -55,15 +60,19 @@ async fn exit_two_is_deny_with_stderr_reason() {
         "deny.sh",
         "#!/bin/sh\necho 'blocked by site policy' >&2\nexit 2\n",
     );
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -82,15 +91,19 @@ cat <<'EOF'
 EOF
 "#;
     let script = write_script(&dir, "deny_json.sh", body);
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -115,15 +128,19 @@ cat <<'EOF'
 EOF
 "#;
     let script = write_script(&dir, "rewrite.sh", body);
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({"command": "rm -rf /"});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -137,15 +154,19 @@ EOF
 async fn timeout_treats_as_allow() {
     let dir = TempDir::new().unwrap();
     let script = write_script(&dir, "slow.sh", "#!/bin/sh\nsleep 5\n");
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_millis(150),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_millis(150),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let start = std::time::Instant::now();
@@ -158,15 +179,19 @@ async fn timeout_treats_as_allow() {
 
 #[tokio::test]
 async fn matcher_skips_non_matching_tools() {
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: "/bin/false".into(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "WebFetch".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: "/bin/false".into(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "WebFetch".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -176,15 +201,20 @@ async fn matcher_skips_non_matching_tools() {
 
 #[tokio::test]
 async fn event_filter_skips_wrong_event() {
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: "/bin/false".into(), // Would Allow per exit-code fallback (-> non-2 = Allow)
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PostToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: "/bin/false".into(),
+            // Would Allow per exit-code fallback (-> non-2 = Allow)
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PostToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     // before_tool fires on PreToolUse only; PostToolUse hook should skip.
@@ -194,15 +224,19 @@ async fn event_filter_skips_wrong_event() {
 
 #[tokio::test]
 async fn missing_command_returns_allow() {
-    let hook = ShellCommandHook {
-        if_pattern: None,
-        asynchronous: false,
-        command: "/nonexistent/binary/that/does/not/exist".into(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: "/nonexistent/binary/that/does/not/exist".into(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -217,15 +251,19 @@ async fn if_pattern_gates_firing() {
     // and MUST fire for `Bash {rm foo}`.
     let dir = TempDir::new().unwrap();
     let script = write_script(&dir, "deny.sh", "#!/bin/sh\nexit 2\n");
-    let hook = ShellCommandHook {
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        if_pattern: Some("Bash:rm *".into()),
-        asynchronous: false,
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: Some("Bash:rm *".into()),
+                asynchronous: false,
+            },
+        }),
     };
     let ls = serde_json::json!({"command": "ls"});
     let d = hook.before_tool(&ctx("Bash", &ls)).await.unwrap();
@@ -251,15 +289,19 @@ async fn json_without_decision_plus_exit2_denies() {
         "info-deny.sh",
         "#!/bin/sh\necho '{\"foo\":1}'\nexit 2\n",
     );
-    let hook = ShellCommandHook {
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        if_pattern: None,
-        asynchronous: false,
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -275,15 +317,19 @@ async fn async_deny_does_not_block() {
     // tool is not blocked (decision ignored).
     let dir = TempDir::new().unwrap();
     let script = write_script(&dir, "slow-deny.sh", "#!/bin/sh\nexit 2\n");
-    let hook = ShellCommandHook {
-        command: script.display().to_string(),
-        args: vec![],
-        timeout: Duration::from_secs(5),
-        env: BTreeMap::new(),
-        matcher: "*".into(),
-        if_pattern: None,
-        asynchronous: true,
-        event_name: "PreToolUse".into(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(ShellCommandHook {
+            command: script.display().to_string(),
+            args: vec![],
+            timeout: Duration::from_secs(5),
+            env: BTreeMap::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: true,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();

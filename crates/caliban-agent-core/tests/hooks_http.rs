@@ -9,6 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn ctx<'a>(name: &'a str, input: &'a serde_json::Value) -> ToolCtx<'a> {
     ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: name,
@@ -29,18 +30,23 @@ async fn http_200_with_deny_body_denies() {
         .await;
 
     let url = format!("{}/preflight", server.uri());
-    let hook = HttpHook {
-        if_pattern: None,
-        asynchronous: false,
-        allowed_env_vars: vec![],
-        url: url.clone(),
-        headers: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        allowed_url_globs: vec!["*".into()],
-        event_name: "PreToolUse".into(),
-        matcher: "*".into(),
-        allow_local_targets: true, // wiremock binds 127.0.0.1
-        client: reqwest::Client::new(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(HttpHook {
+            allowed_env_vars: vec![],
+            url: url.clone(),
+            headers: BTreeMap::new(),
+            timeout: Duration::from_secs(5),
+            allowed_url_globs: vec!["*".into()],
+            allow_local_targets: true,
+            // wiremock binds 127.0.0.1
+            client: reqwest::Client::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -56,19 +62,24 @@ async fn http_url_not_allowlisted_skips() {
     // No mock registered — calling the URL would surface as failure; we expect
     // the hook to skip due to allowlist BEFORE making the call.
     let url = format!("{}/preflight", server.uri());
-    let hook = HttpHook {
-        if_pattern: None,
-        asynchronous: false,
-        allowed_env_vars: vec![],
-        url: url.clone(),
-        headers: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        // Glob restricts to *.example.com — server URL won't match.
-        allowed_url_globs: vec!["*.example.com/*".into()],
-        event_name: "PreToolUse".into(),
-        matcher: "*".into(),
-        allow_local_targets: true, // wiremock binds 127.0.0.1
-        client: reqwest::Client::new(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(HttpHook {
+            allowed_env_vars: vec![],
+            url: url.clone(),
+            headers: BTreeMap::new(),
+            timeout: Duration::from_secs(5),
+            // Glob restricts to *.example.com — server URL won't match.
+            allowed_url_globs: vec!["*.example.com/*".into()],
+            allow_local_targets: true,
+            // wiremock binds 127.0.0.1
+            client: reqwest::Client::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -84,18 +95,23 @@ async fn http_non_2xx_is_allow() {
         .mount(&server)
         .await;
     let url = format!("{}/preflight", server.uri());
-    let hook = HttpHook {
-        if_pattern: None,
-        asynchronous: false,
-        allowed_env_vars: vec![],
-        url: url.clone(),
-        headers: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        allowed_url_globs: vec!["*".into()],
-        event_name: "PreToolUse".into(),
-        matcher: "*".into(),
-        allow_local_targets: true, // wiremock binds 127.0.0.1
-        client: reqwest::Client::new(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(HttpHook {
+            allowed_env_vars: vec![],
+            url: url.clone(),
+            headers: BTreeMap::new(),
+            timeout: Duration::from_secs(5),
+            allowed_url_globs: vec!["*".into()],
+            allow_local_targets: true,
+            // wiremock binds 127.0.0.1
+            client: reqwest::Client::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -114,18 +130,23 @@ async fn http_updated_input_parses() {
         .await;
 
     let url = format!("{}/rewrite", server.uri());
-    let hook = HttpHook {
-        if_pattern: None,
-        asynchronous: false,
-        allowed_env_vars: vec![],
-        url: url.clone(),
-        headers: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        allowed_url_globs: vec!["*".into()],
-        event_name: "PreToolUse".into(),
-        matcher: "*".into(),
-        allow_local_targets: true, // wiremock binds 127.0.0.1
-        client: reqwest::Client::new(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(HttpHook {
+            allowed_env_vars: vec![],
+            url: url.clone(),
+            headers: BTreeMap::new(),
+            timeout: Duration::from_secs(5),
+            allowed_url_globs: vec!["*".into()],
+            allow_local_targets: true,
+            // wiremock binds 127.0.0.1
+            client: reqwest::Client::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "*".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({"command": "rm -rf /"});
     let d = hook.before_tool(&ctx("Bash", &input)).await.unwrap();
@@ -148,18 +169,23 @@ async fn http_matcher_skips_non_matching_tools() {
         .mount(&server)
         .await;
     let url = format!("{}/wf", server.uri());
-    let hook = HttpHook {
-        if_pattern: None,
-        asynchronous: false,
-        allowed_env_vars: vec![],
-        url: url.clone(),
-        headers: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        allowed_url_globs: vec!["*".into()],
-        event_name: "PreToolUse".into(),
-        matcher: "WebFetch".into(),
-        allow_local_targets: true, // wiremock binds 127.0.0.1
-        client: reqwest::Client::new(),
+    let hook = caliban_agent_core::ExternalHook {
+        transport: std::sync::Arc::new(HttpHook {
+            allowed_env_vars: vec![],
+            url: url.clone(),
+            headers: BTreeMap::new(),
+            timeout: Duration::from_secs(5),
+            allowed_url_globs: vec!["*".into()],
+            allow_local_targets: true,
+            // wiremock binds 127.0.0.1
+            client: reqwest::Client::new(),
+            gate: caliban_agent_core::HookGate {
+                event_name: "PreToolUse".into(),
+                matcher: "WebFetch".into(),
+                if_pattern: None,
+                asynchronous: false,
+            },
+        }),
     };
     let input = serde_json::json!({});
     // Bash doesn't match WebFetch → handler skipped.

@@ -84,6 +84,7 @@ pub(crate) async fn run_shell_escape(
 
     // Gate via the same hook chain the agent uses for tool dispatch.
     let ctx = ToolCtx {
+        session_id: "",
         turn_index: 0,
         tool_use_id: &tool_use_id,
         tool_name: "Bash",

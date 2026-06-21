@@ -61,6 +61,7 @@ async fn server_deny_rule_blocks_matching_tool() {
 
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: "mcp__linear__delete_issue",
@@ -95,6 +96,7 @@ async fn server_allow_lets_tool_through() {
 
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: "mcp__linear__read_issues",
@@ -133,6 +135,7 @@ async fn global_deny_overrides_server_allow() {
 
     let input = serde_json::json!({});
     let ctx = ToolCtx {
+        session_id: "test-session",
         turn_index: 0,
         tool_use_id: "t1",
         tool_name: "mcp__linear__delete_issue",

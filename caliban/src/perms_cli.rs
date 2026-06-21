@@ -200,6 +200,7 @@ fn cmd_test(tool: &str, input: &serde_json::Value) -> i32 {
     };
     let rules = with_default_rules(loaded.settings.permission_rules());
     let ctx = caliban_agent_core::ToolCtx {
+        session_id: "",
         turn_index: 0,
         tool_use_id: "test",
         tool_name: tool,
@@ -231,6 +232,7 @@ fn cmd_explain(tool: &str, input: &serde_json::Value) -> i32 {
     };
     let rules = with_default_rules(loaded.settings.permission_rules());
     let ctx = caliban_agent_core::ToolCtx {
+        session_id: "",
         turn_index: 0,
         tool_use_id: "test",
         tool_name: tool,
@@ -512,6 +514,7 @@ mod tests {
         // an uncovered tool — the default_rules() `*` catch-all Asks.
         let rules = with_default_rules(vec![rule("Read", Action::Allow)]);
         let ctx = caliban_agent_core::ToolCtx {
+            session_id: "test-session",
             turn_index: 0,
             tool_use_id: "t",
             tool_name: "Bash",
