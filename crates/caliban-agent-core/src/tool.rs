@@ -147,6 +147,19 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether a successful call mutates files in the workspace.
+    ///
+    /// Defaults to `false`. Only the file-editing built-ins (`Edit`,
+    /// `MultiEdit`, `Write`, `NotebookEdit`) override it to return `true`.
+    /// This is deliberately narrower than `!is_read_only()`: side-effecting
+    /// tools like `Bash` are *not* read-only yet are *not* file edits either.
+    /// The no-edit-progress nudge (turns-since-last-edit) keys off this so a
+    /// build-trap (heavy `Bash`, zero edits) is not masked by `Bash` resetting
+    /// the counter.
+    fn mutates_files(&self) -> bool {
+        false
+    }
+
     /// Optional downcast hook for recovering a tool's concrete type at
     /// runtime. The default returns `None`; tools that expose extra
     /// session metadata beyond the trait (e.g. the `Skill` tool surfacing

@@ -1,7 +1,9 @@
 //! Integration tests for the no-edit-progress nudge (#239).
 //!
 //! The agent loop tracks how many consecutive turns have completed without a
-//! successful non-read-only ("edit-class") tool call. When that count crosses
+//! successful file-mutating ("edit-class") tool call — `Edit`/`MultiEdit`/
+//! `Write`/`NotebookEdit`, not side-effecting non-editors like `Bash` (#244).
+//! When that count crosses
 //! the configurable `no_edit_nudge_threshold`, the loop injects exactly one
 //! neutral user-message nudge and surfaces telemetry on `RunOutcome`
 //! (`turns_without_edit`, `no_edit_nudge_emitted`).
@@ -146,7 +148,11 @@ impl Tool for EditTool {
         static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
         SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
     }
-    // is_read_only defaults to false → counts as an edit.
+    // is_read_only defaults to false; mutates_files=true marks it edit-class so
+    // it resets the no-edit counter (#244).
+    fn mutates_files(&self) -> bool {
+        true
+    }
     async fn invoke(
         &self,
         _input: serde_json::Value,
@@ -154,6 +160,36 @@ impl Tool for EditTool {
     ) -> std::result::Result<Vec<ContentBlock>, ToolError> {
         Ok(vec![ContentBlock::Text(TextBlock {
             text: "edited".to_owned(),
+            cache_control: None,
+        })])
+    }
+}
+
+/// A side-effecting but NON-editing tool (like `Bash`): `is_read_only()` is
+/// false AND `mutates_files()` is false (both default). It must NOT reset the
+/// no-edit counter (#244) — a build-trap is heavy Bash with zero file edits.
+struct SideEffectTool;
+
+#[async_trait]
+impl Tool for SideEffectTool {
+    fn name(&self) -> &'static str {
+        "bash"
+    }
+    fn description(&self) -> &'static str {
+        "A side-effecting non-editing mock tool (Bash-like)"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+    }
+    // is_read_only=false (default) AND mutates_files=false (default).
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _cx: ToolContext,
+    ) -> std::result::Result<Vec<ContentBlock>, ToolError> {
+        Ok(vec![ContentBlock::Text(TextBlock {
+            text: "ran".to_owned(),
             cache_control: None,
         })])
     }
@@ -366,5 +402,51 @@ async fn threshold_zero_never_nudges() {
     assert!(
         !outcome.no_edit_nudge_emitted,
         "no_edit_nudge_emitted must stay false when disabled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 (#244) — a side-effecting NON-editing tool (Bash-like) must NOT reset
+// the no-edit counter, so a build-trap (heavy Bash, zero edits) still nudges.
+// This is the regression for #244: pre-fix the counter reset on any
+// !is_read_only tool, so Bash masked the nudge and this asserted 0.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn side_effecting_nonedit_tool_does_not_reset_counter() {
+    let mock = Arc::new(MockProvider::new());
+    // Four "bash" turns (non-read-only, non-mutating) then a clean end turn.
+    // With threshold=3 the streak climbs 1→3 and the nudge fires exactly once,
+    // because bash no longer resets the counter (#244).
+    for i in 0..4 {
+        mock.enqueue_stream(tool_use_stream(&format!("m{i}"), &format!("c{i}"), "bash"));
+    }
+    mock.enqueue_stream(text_stream("m_end", "done", StopReason::EndTurn));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SideEffectTool));
+    let agent = build_agent(Arc::clone(&mock), registry, 3);
+
+    let outcome = agent
+        .run_until_done(
+            vec![Message::user_text("build and test")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(
+        count_nudge_messages(&outcome.final_messages),
+        1,
+        "a Bash-like non-editing tool must not reset the no-edit counter (#244)",
+    );
+    assert!(
+        outcome.no_edit_nudge_emitted,
+        "no_edit_nudge_emitted must be true once the nudge fires"
+    );
+    assert!(
+        outcome.turns_without_edit >= 3,
+        "high-water turns_without_edit should reach the threshold; got {}",
+        outcome.turns_without_edit
     );
 }

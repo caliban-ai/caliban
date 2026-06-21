@@ -1079,13 +1079,16 @@ impl Agent {
 
                 // ---- Phase 1: plan (serial before_tool gate) ----
                 let mut plans: Vec<DispatchPlan> = Vec::new();
-                // #239: tool_use_ids of dispatched non-read-only ("edit-class")
-                // calls this turn. After dispatch we check which of these
-                // produced a *successful* result to decide whether the turn
-                // counts as edit progress. Denied calls never enter this set
-                // (they always error), so a denied edit can't reset the
-                // no-edit counter.
-                let mut non_read_only_tool_ids: std::collections::HashSet<String> =
+                // #239 / #244: tool_use_ids of dispatched *file-mutating*
+                // (Edit/MultiEdit/Write/NotebookEdit) calls this turn. After
+                // dispatch we check which produced a *successful* result to
+                // decide whether the turn counts as edit progress. Keyed off
+                // Tool::mutates_files (NOT !is_read_only): a side-effecting but
+                // non-editing tool like Bash must not reset the no-edit counter,
+                // else build-traps (heavy Bash, zero edits) mask the nudge (#244).
+                // Denied calls never enter this set (they always error), so a
+                // denied edit can't reset the counter.
+                let mut file_mutating_tool_ids: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 for (idx, block) in assistant_message.content.iter().enumerate() {
                     if cancel.is_cancelled() {
@@ -1101,6 +1104,8 @@ impl Agent {
                     // ToolResult so it can adapt).
                     let tool_is_read_only =
                         self.tools.get(&tu.name).is_some_and(|t| t.is_read_only());
+                    let tool_mutates_files =
+                        self.tools.get(&tu.name).is_some_and(|t| t.mutates_files());
                     let plan_mode_active = self
                         .plan_mode
                         .as_ref()
@@ -1214,8 +1219,8 @@ impl Agent {
                             });
                         }
                         HookDecision::Allow => {
-                            if !tool_is_read_only {
-                                non_read_only_tool_ids.insert(tu.id.clone());
+                            if tool_mutates_files {
+                                file_mutating_tool_ids.insert(tu.id.clone());
                             }
                             let conflict_key = self
                                 .tools
@@ -1230,8 +1235,8 @@ impl Agent {
                             });
                         }
                         HookDecision::UpdatedInput(new_input) => {
-                            if !tool_is_read_only {
-                                non_read_only_tool_ids.insert(tu.id.clone());
+                            if tool_mutates_files {
+                                file_mutating_tool_ids.insert(tu.id.clone());
                             }
                             tracing::info!(
                                 tool = %tu.name,
@@ -1375,12 +1380,12 @@ impl Agent {
 
                 // ---- Phase 3: collect results in assistant-message order ----
                 let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
-                // #239: a turn counts as edit progress iff at least one
-                // dispatched non-read-only tool call returned a *successful*
+                // #239 / #244: a turn counts as edit progress iff at least one
+                // dispatched *file-mutating* tool call returned a *successful*
                 // (non-error) result.
                 let mut had_successful_edit_this_turn = false;
                 for slot in ordered_results.into_iter().flatten() {
-                    if !slot.is_error && non_read_only_tool_ids.contains(&slot.tool_use_id) {
+                    if !slot.is_error && file_mutating_tool_ids.contains(&slot.tool_use_id) {
                         had_successful_edit_this_turn = true;
                     }
                     tool_result_blocks.push(ContentBlock::ToolResult(slot));

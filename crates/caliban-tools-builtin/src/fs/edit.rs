@@ -45,6 +45,10 @@ impl Tool for EditTool {
         "Edit"
     }
 
+    fn mutates_files(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Replace occurrences of old_string with new_string in a file. By default expects exactly one match; set replace_all=true to replace all occurrences."
     }

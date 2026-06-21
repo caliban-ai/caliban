@@ -239,6 +239,10 @@ impl Tool for NotebookEditTool {
         "NotebookEdit"
     }
 
+    fn mutates_files(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Edit cells in a Jupyter notebook (.ipynb, nbformat v4 only). Actions: add (insert a new cell, optionally at index), edit (replace cell source and optionally cell_type at index), delete (remove cell at index). Preserves cell metadata + outputs across edits. Atomic write."
     }
