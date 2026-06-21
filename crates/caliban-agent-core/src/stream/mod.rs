@@ -641,6 +641,11 @@ impl Agent {
             let mut no_edit_nudge_emitted = false;
 
             'outer: for turn_index in 0..max_turns {
+                // #245: bounded budget to re-issue THIS turn when the provider
+                // stream is interrupted *before any content is emitted*. Fresh
+                // per turn; persists across `continue 'inner` within a turn so
+                // repeated mid-open interruptions stay bounded.
+                let mut drain_retries: u32 = 0;
                 // The inner loop lets recovery flows (Stage A budget
                 // escalation, reactive compaction) re-enter the turn body
                 // without consuming a slot from the outer turn counter. The
@@ -898,6 +903,11 @@ impl Agent {
                     provider_stream
                 };
                 let mut acc = MessageAccumulator::new();
+                // #245: whether this attempt has yielded any *content* (text /
+                // thinking / tool deltas or a tool-call start). A retryable
+                // interruption is only safe to re-issue while this is false —
+                // otherwise replaying would double-emit to stream consumers.
+                let mut emitted_content_this_turn = false;
 
                 while let Some(evt_result) = provider_stream.next().await {
                     if cancel.is_cancelled() {
@@ -911,6 +921,27 @@ impl Agent {
                             break 'outer;
                         }
                         Err(e) => {
+                            // #245: a transient interruption *before any content
+                            // was emitted* is safe to re-issue (the consumer has
+                            // seen at most a TurnStart). Discard the partial
+                            // accumulator and redo the turn through the
+                            // `with_retry` open path; bounded so a persistent
+                            // failure still terminates. Once content has streamed
+                            // we cannot replay cleanly, so fall through to a
+                            // terminal error.
+                            if crate::retry::is_retryable(&e)
+                                && !emitted_content_this_turn
+                                && drain_retries
+                                    < self.retry.max_attempts.saturating_sub(1)
+                            {
+                                drain_retries += 1;
+                                tracing::warn!(
+                                    error = %e,
+                                    attempt = drain_retries,
+                                    "stream interrupted before content; re-issuing turn"
+                                );
+                                continue 'inner;
+                            }
                             stopped_for = StopCondition::ProviderError(e.to_string());
                             break 'outer;
                         }
@@ -951,6 +982,7 @@ impl Agent {
                                         tool_use_id: id,
                                         name,
                                     };
+                                    emitted_content_this_turn = true;
                                 }
                                 StreamingContentType::Image => {
                                     // Image streaming blocks are not supported; leave placeholder.
@@ -959,6 +991,7 @@ impl Agent {
                         }
                         StreamEvent::Delta { index, delta } => {
                             timing.observe_delta();
+                            emitted_content_this_turn = true;
                             let i = index as usize;
                             if i >= acc.active.len() {
                                 continue;
