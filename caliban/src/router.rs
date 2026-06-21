@@ -17,6 +17,8 @@ use caliban_model_router::{
 };
 use caliban_provider::{Provider, RequestPurpose};
 
+use crate::provider_wiring::{resolve_key, wrap_with_refresh_if_helper};
+
 /// Result of attempting to wire the router from `caliban.toml`.
 #[derive(Debug)]
 pub(crate) struct RouterWiring {
@@ -77,25 +79,6 @@ pub(crate) fn build_provider_handles(
         out.insert(name.to_string(), handle);
     }
     Ok(out)
-}
-
-/// Resolve the API key for `(provider_id, api_key_env)`. Helper wins
-/// when configured; env var is the fallback.
-fn resolve_key(
-    provider_id: &str,
-    api_key_env: &str,
-    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
-) -> Result<secrecy::SecretString> {
-    if pool.has_spec_for(provider_id) {
-        let outcome = pool
-            .key_for(provider_id)
-            .map_err(|e| anyhow!("api_key_helper for {provider_id}: {e}"))?;
-        Ok(secrecy::SecretString::from(outcome.key))
-    } else {
-        let key = std::env::var(api_key_env)
-            .with_context(|| format!("env var {api_key_env} is unset"))?;
-        Ok(secrecy::SecretString::from(key))
-    }
 }
 
 fn build_one(
@@ -186,35 +169,6 @@ fn build_one(
         other => Err(anyhow!(
             "unknown provider '{other}' — supported: anthropic, openai, ollama, google"
         )),
-    }
-}
-
-/// Wrap `inner` in a `RefreshingProvider` iff the pool has a spec for
-/// `provider_id`. Without a spec, no refresh path is needed and the
-/// inner provider is returned as-is.
-fn wrap_with_refresh_if_helper<P>(
-    inner: P,
-    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
-    provider_id: &str,
-    static_name: &'static str,
-    rebuild: impl Fn(secrecy::SecretString) -> std::result::Result<P, caliban_provider::Error>
-    + Send
-    + Sync
-    + 'static,
-) -> Arc<dyn Provider + Send + Sync>
-where
-    P: Provider + 'static,
-{
-    if pool.has_spec_for(provider_id) {
-        Arc::new(crate::refreshing_provider::RefreshingProvider::new(
-            inner,
-            pool.clone(),
-            provider_id.to_string(),
-            static_name,
-            rebuild,
-        ))
-    } else {
-        Arc::new(inner)
     }
 }
 

@@ -12,6 +12,7 @@ mod headless;
 mod hook_inherit;
 mod perms_cli;
 mod plugin_cli;
+mod provider_wiring;
 mod refreshing_provider;
 mod router;
 mod settings_cli;
