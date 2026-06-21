@@ -105,6 +105,10 @@ impl Tool for MultiEditTool {
         "MultiEdit"
     }
 
+    fn mutates_files(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Apply a sequence of {old_string, new_string, replace_all?} edits to a single file, atomically. Each edit operates on the result of the prior edit. If any edit's old_string is missing or matches multiple times without replace_all=true, the entire operation is aborted and the file is left unchanged."
     }

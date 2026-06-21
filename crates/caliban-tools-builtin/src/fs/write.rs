@@ -41,6 +41,10 @@ impl Tool for WriteTool {
         "Write"
     }
 
+    fn mutates_files(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Write content to a file. Creates the file (and any missing parent directories) if it does not exist; overwrites existing content."
     }
