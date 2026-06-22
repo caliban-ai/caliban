@@ -95,6 +95,16 @@ pub struct AgentConfig {
     /// the counter (and the nudge arming) resets the moment a non-read-only
     /// tool call succeeds. `0` disables the nudge entirely. Default `10`.
     pub no_edit_nudge_threshold: u32,
+    // ── #249 (empty/degenerate-turn guard) ───────────────────────
+    /// Maximum number of consecutive **degenerate** turns the loop will nudge
+    /// before letting the run end. A degenerate turn is one that consumed
+    /// output tokens yet produced no tool call and no actionable text — e.g.
+    /// an Ollama reasoning model (gemma-family) that emits only a thinking
+    /// block and then stops, which would otherwise end the run as a silent
+    /// "success" with no work done. On such a turn the loop injects one neutral
+    /// nudge and takes another turn; the streak counter resets the moment a
+    /// productive turn occurs. `0` disables the guard entirely. Default `2`.
+    pub empty_turn_nudge_max: u32,
 }
 
 impl Default for AgentConfig {
@@ -132,6 +142,8 @@ impl Default for AgentConfig {
             max_active_schemas: 24,
             // #239
             no_edit_nudge_threshold: 10,
+            // #249
+            empty_turn_nudge_max: 2,
         }
     }
 }
@@ -151,6 +163,7 @@ mod recovery_config_tests {
         // stage_a_retry_does_not_double_count_turn regression test.
         assert!(cfg.max_tokens_recovery);
         assert_eq!(cfg.no_edit_nudge_threshold, 10);
+        assert_eq!(cfg.empty_turn_nudge_max, 2);
     }
 }
 
