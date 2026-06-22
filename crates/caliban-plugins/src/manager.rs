@@ -1,12 +1,24 @@
-//! Plugin discovery + filter + namespacing.
+//! Plugin discovery + filter + namespacing — a thin orchestrating facade.
+//!
+//! The heavy lifting lives in three sibling modules:
+//! - [`crate::discovery`] — root resolution, fs walk, and the
+//!   [`PluginSourceProvider`](crate::discovery::PluginSourceProvider) seam.
+//! - [`crate::filter`] — platform / version / strict / enable-list gating.
+//! - [`crate::aggregate`] — component roots + hooks/MCP aggregation + semver
+//!   padding.
+//!
+//! [`PluginManager::load`] wires them together: build a priority-ordered list
+//! of [`PluginSourceProvider`](crate::discovery::PluginSourceProvider)s, walk
+//! each, filter every candidate, and dedup by name (lower priority shadows).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::aggregate;
+use crate::discovery::{DirectorySource, PluginSourceProvider};
 use crate::error::PluginError;
-use crate::expand;
+use crate::filter;
 use crate::loaded::{LoadedPlugin, PluginSource};
-use crate::manifest::PluginManifest;
 
 /// Discovery roots, in priority order (project beats user beats managed).
 #[derive(Debug, Clone)]
@@ -47,6 +59,41 @@ impl PluginRoots {
         }
         if let Some(p) = &self.managed {
             out.push((p.clone(), PluginSource::Managed));
+        }
+        out
+    }
+
+    /// Build the priority-ordered list of plugin sources backing these roots.
+    /// Each configured root becomes a [`DirectorySource`]; priorities follow
+    /// the historical project (0) > user (1) > managed (2) precedence so a
+    /// lower-priority source shadows same-named plugins from higher ones.
+    ///
+    /// Adding a git/HTTP source later means pushing another
+    /// [`PluginSourceProvider`] here — no edits to the discovery loop or the
+    /// shadowing logic.
+    #[must_use]
+    pub fn sources(&self) -> Vec<Box<dyn PluginSourceProvider>> {
+        let mut out: Vec<Box<dyn PluginSourceProvider>> = Vec::new();
+        if let Some(p) = &self.project {
+            out.push(Box::new(DirectorySource::new(
+                p.clone(),
+                PluginSource::Project,
+                0,
+            )));
+        }
+        if let Some(p) = &self.user {
+            out.push(Box::new(DirectorySource::new(
+                p.clone(),
+                PluginSource::User,
+                1,
+            )));
+        }
+        if let Some(p) = &self.managed {
+            out.push(Box::new(DirectorySource::new(
+                p.clone(),
+                PluginSource::Managed,
+                2,
+            )));
         }
         out
     }
@@ -148,34 +195,20 @@ impl PluginManager {
         let mut by_name: BTreeMap<String, LoadedPlugin> = BTreeMap::new();
         let mut failures: Vec<PluginLoadFailure> = Vec::new();
 
-        for (root, source) in roots.ordered() {
-            if !root.exists() {
-                continue;
-            }
-            let rd = match std::fs::read_dir(&root) {
-                Ok(rd) => rd,
-                Err(source_err) => {
-                    return Err(PluginError::Io {
-                        path: root.clone(),
-                        source: source_err,
-                    });
-                }
-            };
-            for entry in rd.flatten() {
-                let plug_dir = entry.path();
-                if !plug_dir.is_dir() {
-                    continue;
-                }
-                let dir_name = plug_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let manifest_path = plug_dir.join("plugin.json");
-                if !manifest_path.exists() {
-                    continue;
-                }
-                match Self::try_load_one(&plug_dir, &manifest_path, source, settings) {
+        // Sources iterated in priority order (lower wins): the earlier a
+        // candidate is loaded, the higher-priority root it came from, so a
+        // later same-named candidate is shadowed.
+        let mut sources = roots.sources();
+        sources.sort_by_key(|s| s.priority());
+
+        for src in &sources {
+            for cand in src.discover()? {
+                match filter::try_load_one(
+                    &cand.plug_dir,
+                    &cand.manifest_path,
+                    cand.source,
+                    settings,
+                ) {
                     Ok(Some(p)) => {
                         if let Some(existing) = by_name.get(&p.manifest.name) {
                             tracing::debug!(
@@ -194,9 +227,9 @@ impl PluginManager {
                     }
                     Err(e) => {
                         failures.push(PluginLoadFailure {
-                            root_dir: plug_dir.clone(),
-                            source,
-                            dir_name,
+                            root_dir: cand.plug_dir.clone(),
+                            source: cand.source,
+                            dir_name: cand.dir_name.clone(),
                             error: e.to_string(),
                         });
                     }
@@ -208,72 +241,6 @@ impl PluginManager {
             plugins: by_name.into_values().collect(),
             failures,
         })
-    }
-
-    fn try_load_one(
-        plug_dir: &Path,
-        manifest_path: &Path,
-        source: PluginSource,
-        settings: &PluginSettings,
-    ) -> Result<Option<LoadedPlugin>, PluginError> {
-        let manifest = PluginManifest::from_path(manifest_path)?;
-        manifest.check_name_matches_dir(manifest_path)?;
-        // Platform gating.
-        if !manifest.platform_matches() {
-            tracing::info!(
-                target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                name = %manifest.name,
-                "skipping plugin: platform mismatch",
-            );
-            return Ok(None);
-        }
-        // Min-version gating.
-        if let (Some(min), Some(cur)) = (
-            manifest.caliban.min_version.as_deref(),
-            settings.caliban_version.as_deref(),
-        ) && let (Ok(min_v), Ok(cur_v)) = (
-            semver::Version::parse(&pad_version(min)),
-            semver::Version::parse(&pad_version(cur)),
-        ) && cur_v < min_v
-        {
-            tracing::info!(
-                target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                name = %manifest.name,
-                min = %min,
-                current = %cur,
-                "skipping plugin: caliban version too old",
-            );
-            return Ok(None);
-        }
-
-        // Strict-plugin-only-customization: reject non-managed plugins.
-        if settings.strict_plugin_only_customization && source != PluginSource::Managed {
-            return Err(PluginError::StrictPluginOnly {
-                name: manifest.name.clone(),
-            });
-        }
-
-        // Enable list filter (managed plugins ignore it).
-        if source != PluginSource::Managed
-            && let Some(enabled) = settings.enabled.as_ref()
-            && !enabled.iter().any(|n| n == &manifest.name)
-        {
-            tracing::debug!(
-                target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                name = %manifest.name,
-                "skipping plugin: not in CALIBAN_ENABLED_PLUGINS",
-            );
-            return Ok(None);
-        }
-
-        let components = manifest.resolved_components(plug_dir);
-        Ok(Some(LoadedPlugin {
-            namespace: manifest.name.clone(),
-            manifest,
-            root_dir: plug_dir.to_path_buf(),
-            source,
-            components,
-        }))
     }
 
     /// Loaded plugins, ordered alphabetically by name.
@@ -293,45 +260,21 @@ impl PluginManager {
     /// subdirectories. When unset, falls back to `<plugin>/skills/`.
     #[must_use]
     pub fn skill_roots(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            if p.components.skills.is_empty() {
-                out.push(p.root_dir.join("skills"));
-            } else {
-                out.extend(p.components.skills.iter().cloned());
-            }
-        }
-        out
+        aggregate::skill_roots(&self.plugins)
     }
 
-    /// Same as [`skill_roots`] for output styles. Returned paths are
-    /// *directories* containing `.md` files; if the manifest enumerated
-    /// individual files, those file paths are returned as-is.
+    /// Same as [`skill_roots`](Self::skill_roots) for output styles. Returned
+    /// paths are *directories* containing `.md` files; if the manifest
+    /// enumerated individual files, those file paths are returned as-is.
     #[must_use]
     pub fn output_style_roots(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            if p.components.output_styles.is_empty() {
-                out.push(p.root_dir.join("output-styles"));
-            } else {
-                out.extend(p.components.output_styles.iter().cloned());
-            }
-        }
-        out
+        aggregate::output_style_roots(&self.plugins)
     }
 
-    /// Same as [`skill_roots`] for agents.
+    /// Same as [`skill_roots`](Self::skill_roots) for agents.
     #[must_use]
     pub fn agent_roots(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            if p.components.agents.is_empty() {
-                out.push(p.root_dir.join("agents"));
-            } else {
-                out.extend(p.components.agents.iter().cloned());
-            }
-        }
-        out
+        aggregate::agent_roots(&self.plugins)
     }
 
     /// Merged hooks config across all loaded plugins. Each plugin's
@@ -340,44 +283,7 @@ impl PluginManager {
     /// hooks loader is responsible for merging into its TOML world.
     #[must_use]
     pub fn hooks_configs(&self) -> Vec<(String, serde_json::Value)> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            let candidates: Vec<PathBuf> = if p.components.hooks.is_empty() {
-                vec![p.root_dir.join("hooks").join("hooks.json")]
-            } else {
-                p.components.hooks.clone()
-            };
-            for path in candidates {
-                if !path.exists() {
-                    continue;
-                }
-                match std::fs::read_to_string(&path) {
-                    Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                        Ok(mut v) => {
-                            expand::expand_json_in_place(&mut v, &p.root_dir);
-                            out.push((p.namespace.clone(), v));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                                path = %path.display(),
-                                error = %e,
-                                "skipping malformed plugin hooks.json",
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                            path = %path.display(),
-                            error = %e,
-                            "could not read plugin hooks.json",
-                        );
-                    }
-                }
-            }
-        }
-        out
+        aggregate::hooks_configs(&self.plugins)
     }
 
     /// Merged MCP server configs across plugins. Inline `mcpServers` block
@@ -385,95 +291,7 @@ impl PluginManager {
     /// warning). Each server name is namespaced `<plugin>:<server>`.
     #[must_use]
     pub fn mcp_servers(&self) -> Vec<(String, serde_json::Value)> {
-        let mut out = Vec::new();
-        for p in &self.plugins {
-            let has_inline = !p.manifest.mcp_servers_inline.is_empty();
-            let has_external = !p.components.mcp_servers.is_empty()
-                || p.root_dir.join("mcp").join(".mcp.json").exists();
-            if has_inline && has_external {
-                tracing::warn!(
-                    target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                    plugin = %p.namespace,
-                    "both inline mcpServers and components.mcp_servers set; inline wins",
-                );
-            }
-            if has_inline {
-                for (srv_name, srv) in &p.manifest.mcp_servers_inline {
-                    let key = format!("{}:{srv_name}", p.namespace);
-                    let mut v = serde_json::to_value(srv).unwrap_or(serde_json::Value::Null);
-                    expand::expand_json_in_place(&mut v, &p.root_dir);
-                    out.push((key, v));
-                }
-            } else {
-                let candidates: Vec<PathBuf> = if p.components.mcp_servers.is_empty() {
-                    let candidate = p.root_dir.join("mcp").join(".mcp.json");
-                    if candidate.exists() {
-                        vec![candidate]
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    p.components.mcp_servers.clone()
-                };
-                for path in candidates {
-                    if !path.exists() {
-                        continue;
-                    }
-                    match std::fs::read_to_string(&path) {
-                        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                            Ok(v) => {
-                                Self::flatten_mcp_json(&mut out, &p.namespace, &v, &p.root_dir);
-                            }
-                            Err(e) => tracing::warn!(
-                                target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                                path = %path.display(),
-                                error = %e,
-                                "skipping malformed plugin .mcp.json",
-                            ),
-                        },
-                        Err(e) => tracing::warn!(
-                            target: caliban_common::tracing_targets::TARGET_PLUGINS,
-                            path = %path.display(),
-                            error = %e,
-                            "could not read plugin .mcp.json",
-                        ),
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// Flatten `{"mcpServers": {"a": {...}, "b": {...}}}` (Claude Code shape)
-    /// or `{"a": {...}}` (bare) into namespaced entries.
-    fn flatten_mcp_json(
-        out: &mut Vec<(String, serde_json::Value)>,
-        namespace: &str,
-        v: &serde_json::Value,
-        root: &Path,
-    ) {
-        // Accept either `{"mcpServers": {...}}` or a bare object of servers.
-        let map = if let Some(inner) = v.get("mcpServers").and_then(|x| x.as_object()) {
-            inner.clone()
-        } else if let Some(obj) = v.as_object() {
-            obj.clone()
-        } else {
-            return;
-        };
-        for (srv_name, mut srv) in map {
-            expand::expand_json_in_place(&mut srv, root);
-            out.push((format!("{namespace}:{srv_name}"), srv));
-        }
-    }
-}
-
-/// Pad a "0.5" → "0.5.0" so semver parses it.
-fn pad_version(v: &str) -> String {
-    let parts: Vec<&str> = v.split('.').collect();
-    match parts.len() {
-        1 => format!("{}.0.0", parts[0]),
-        2 => format!("{}.{}.0", parts[0], parts[1]),
-        _ => v.to_string(),
+        aggregate::mcp_servers(&self.plugins)
     }
 }
 
@@ -1065,14 +883,6 @@ mod tests {
         let servers = mgr.mcp_servers();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].0, "demo:inline");
-    }
-
-    #[test]
-    fn pad_version_widens_partial_versions() {
-        assert_eq!(pad_version("1"), "1.0.0");
-        assert_eq!(pad_version("1.2"), "1.2.0");
-        assert_eq!(pad_version("1.2.3"), "1.2.3");
-        assert_eq!(pad_version("1.2.3.4"), "1.2.3.4");
     }
 
     #[test]
