@@ -47,6 +47,19 @@ fn updated_input_is_valid(
     Ok(())
 }
 
+/// Build the error [`ToolResultBlock`] used for a denied tool call (plan-mode
+/// gate or hook deny): a single text block flagged `is_error`.
+fn denied_tool_result(tool_use_id: &str, text: String) -> ToolResultBlock {
+    ToolResultBlock {
+        tool_use_id: tool_use_id.to_string(),
+        content: vec![ContentBlock::Text(TextBlock {
+            text,
+            cache_control: None,
+        })],
+        is_error: true,
+    }
+}
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -521,6 +534,374 @@ impl Default for RunSettings {
 }
 
 // ---------------------------------------------------------------------------
+// Turn-loop helpers (extracted from `stream_until_done_with_settings`).
+//
+// These are pure-logic / non-yielding lifts of inline blocks: each one is a
+// 1:1 behavior-preserving move so the macro body shrinks to an orchestration
+// skeleton (#152). None of them may `yield` — that only works inside the
+// `try_stream!` body — so all incremental streaming stays in the skeleton.
+// ---------------------------------------------------------------------------
+
+impl Agent {
+    /// Threshold-gated autocompaction (Plan B) plus the surrounding hook calls.
+    ///
+    /// Mutates `history` in place when a compaction succeeds and updates
+    /// `tracking` so repeated failures eventually disable autocompaction for
+    /// the run. Non-fatal: hook/compactor errors are logged, never propagated.
+    /// 1:1 lift of the inline compaction block.
+    async fn maybe_compact(
+        &self,
+        history: &mut Vec<Message>,
+        tracking: &mut recovery::AutoCompactTracking,
+    ) {
+        let active_model_snapshot = self.active_model();
+        let caps = self.provider.capabilities(active_model_snapshot.as_str());
+        let token_count_before = crate::compact::estimate_tokens(history);
+        let threshold = self.config.auto_compact_threshold;
+        let should_attempt = threshold.is_some_and(|t| {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let utilization = token_count_before as f32 / caps.max_input_tokens.max(1) as f32;
+            !tracking.disabled && utilization >= t
+        });
+        if !should_attempt {
+            return;
+        }
+        let strategy = self.compactor.strategy_name();
+        let compact_ctx = CompactCtx {
+            session_id: "",
+            token_count_before,
+            strategy,
+        };
+        if let Err(e) = self.hooks.pre_compact(&compact_ctx).await {
+            tracing::warn!(error = %e, "pre_compact hook error (non-fatal)");
+        }
+        match self.compactor.compact(history, &caps).await {
+            Err(e) => {
+                tracing::warn!(error = %e, "autocompact failed");
+                tracking.consecutive_failures = tracking.consecutive_failures.saturating_add(1);
+                if tracking.consecutive_failures >= recovery::MAX_CONSECUTIVE_COMPACT_FAILURES {
+                    tracking.disabled = true;
+                    tracing::warn!(
+                        "autocompact disabled after {} consecutive failures",
+                        recovery::MAX_CONSECUTIVE_COMPACT_FAILURES
+                    );
+                }
+            }
+            Ok(Some(new)) => {
+                tracking.consecutive_failures = 0;
+                let token_count_after = crate::compact::estimate_tokens(&new);
+                *history = new;
+                let outcome = CompactOutcome {
+                    token_count_after,
+                    compacted: true,
+                };
+                if let Err(e) = self.hooks.post_compact(&compact_ctx, &outcome).await {
+                    tracing::warn!(error = %e, "post_compact hook error (non-fatal)");
+                }
+            }
+            Ok(None) => {
+                tracking.consecutive_failures = 0;
+                let outcome = CompactOutcome {
+                    token_count_after: token_count_before,
+                    compacted: false,
+                };
+                if let Err(e) = self.hooks.post_compact(&compact_ctx, &outcome).await {
+                    tracing::warn!(error = %e, "post_compact hook error (non-fatal)");
+                }
+            }
+        }
+    }
+
+    /// Build the per-turn [`CompletionRequest`] from the current `history`.
+    ///
+    /// Applies the MCP wire filter, deferred-block splice, and prompt cache,
+    /// then snapshots the swappable effort/thinking/model controls so the
+    /// in-flight request sees one coherent set even if `/effort`, `/think`, or
+    /// `/model` lands mid-turn. `effective_max_tokens` is the resolved
+    /// per-request budget (Stage-A escalation already applied by the caller via
+    /// [`recovery::RecoveryState::effective_max_tokens`]). 1:1 lift of the
+    /// inline request-construction block.
+    fn build_request(&self, history: &[Message], effective_max_tokens: u32) -> CompletionRequest {
+        let mut req_messages = history.to_vec();
+        // ADR-0046: apply the per-turn MCP wire filter. When
+        // `config.lazy_mcp` is false this is a passthrough.
+        let active_guard = self.mcp_active.load();
+        let filter = crate::wire_filter::WireFilter {
+            lazy_mcp: self.config.lazy_mcp,
+            active: &active_guard,
+            eager_servers: &self.mcp_eager_servers,
+        };
+        let crate::wire_filter::WireFilterResult {
+            tools: mut req_tools,
+            dropped_mcp_count,
+        } = self.tools.to_caliban_tools_filtered(&filter);
+        // Splice the deferred-block paragraph into the system
+        // message when lazy mode is active and the filter dropped
+        // at least one MCP tool (ADR-0046).
+        crate::deferred_block::splice_into_messages(
+            &mut req_messages,
+            self.config.lazy_mcp,
+            dropped_mcp_count,
+        );
+        if self.prompt_cache {
+            crate::cache::apply_prompt_cache(
+                &mut req_messages,
+                &mut req_tools,
+                self.config.min_cache_block_tokens,
+            );
+        }
+        // Plan A: Stage A escalation already resolved by the caller.
+        // Plan C: snapshot the swappable effort level once per turn
+        // so the in-flight request sees a single coherent value even
+        // if `/effort` lands between turns.
+        let effort_snapshot = self.config.effort.load_full();
+        // #100: likewise snapshot the swappable extended-thinking
+        // control so a `/think` change between turns applies as one
+        // coherent value to the in-flight request.
+        let thinking_snapshot = self.config.thinking.load_full();
+        // Plan C: likewise for the model id — a `/model` swap that
+        // lands between request build and provider call must not
+        // split model + capabilities + effort across two ids.
+        let active_model_for_req = self.active_model();
+        CompletionRequest {
+            model: active_model_for_req.as_str().to_string(),
+            messages: req_messages,
+            tools: req_tools,
+            tool_choice: self.config.tool_choice.clone(),
+            max_tokens: effective_max_tokens,
+            temperature: self.config.temperature,
+            top_p: self.config.top_p,
+            top_k: None,
+            stop_sequences: self.config.stop_sequences.clone(),
+            thinking: *thinking_snapshot,
+            effort: Some(*effort_snapshot),
+            metadata: RequestMetadata {
+                user_id: self.config.user_id.clone(),
+                purpose: Some(caliban_provider::RequestPurpose::MainLoop),
+            },
+        }
+    }
+
+    /// Collect dispatched tool results in assistant-message order, apply the
+    /// tool-result size cap, build the tool-results `Message`, and append the
+    /// assistant message + tool results onto `history`.
+    ///
+    /// Returns the tool-results messages (empty when no tools ran) and whether
+    /// the turn made edit progress (`had_successful_edit_this_turn`, #239/#244:
+    /// at least one dispatched *file-mutating* call returned a non-error
+    /// result). 1:1 lift of the inline Phase-3 + cap + history-append block.
+    ///
+    /// NOTE: this contains no `yield`; the in-completion-order `ToolCallEnd`
+    /// yields stay in the skeleton's dispatch drain.
+    async fn finalize_tool_results(
+        &self,
+        history: &mut Vec<Message>,
+        assistant_message: &Message,
+        ordered_results: Vec<Option<ToolResultBlock>>,
+        file_mutating_tool_ids: &std::collections::HashSet<String>,
+        session_id: &str,
+    ) -> (Vec<Message>, bool) {
+        // ---- Phase 3: collect results in assistant-message order ----
+        let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+        // #239 / #244: a turn counts as edit progress iff at least one
+        // dispatched *file-mutating* tool call returned a *successful*
+        // (non-error) result.
+        let mut had_successful_edit_this_turn = false;
+        for slot in ordered_results.into_iter().flatten() {
+            if !slot.is_error && file_mutating_tool_ids.contains(&slot.tool_use_id) {
+                had_successful_edit_this_turn = true;
+            }
+            tool_result_blocks.push(ContentBlock::ToolResult(slot));
+        }
+
+        // ---- Tool-result size cap (context-management spec) ----
+        if self.config.tool_result_cap_chars > 0 && !tool_result_blocks.is_empty() {
+            let overflow_dir = directories::ProjectDirs::from("dev", "caliban", "caliban")
+                .map_or_else(
+                    || std::path::PathBuf::from("/tmp/caliban-tool-overflows"),
+                    |d| d.cache_dir().join("tool-overflows"),
+                );
+            let cap = crate::post_process::ToolResultCap {
+                max_chars: self.config.tool_result_cap_chars,
+                overflow_dir,
+                session_id: session_id.to_string(),
+            };
+            if let Err(e) = cap.cap(&mut tool_result_blocks).await {
+                tracing::warn!(
+                    error = %e,
+                    "ToolResultCap io error (non-fatal); inline content kept",
+                );
+            }
+        }
+
+        // Build the tool-results message (if any tools were called).
+        let tool_results: Vec<Message> = if tool_result_blocks.is_empty() {
+            vec![]
+        } else {
+            vec![Message {
+                role: Role::User,
+                content: tool_result_blocks,
+            }]
+        };
+
+        // Append to history.
+        history.push(assistant_message.clone());
+        for tr_msg in &tool_results {
+            history.push(tr_msg.clone());
+        }
+
+        (tool_results, had_successful_edit_this_turn)
+    }
+
+    /// Plan a single tool call (Phase 1): plan-mode gating, `before_tool` hook,
+    /// `UpdatedInput` validation, and the allow/deny decision — everything
+    /// except the `ToolCallEnd` yield, which the skeleton performs from the
+    /// returned [`ToolPlan`] so completion-order streaming stays in the loop.
+    /// 1:1 lift of the per-tool body of the Phase-1 plan loop.
+    async fn plan_tool_call(
+        &self,
+        tu: &caliban_provider::ToolUseBlock,
+        original_index: usize,
+        turn_index: u32,
+        session_id: &str,
+    ) -> ToolPlan {
+        // Plan-mode gating: when active, reject tools that are neither
+        // side-effect-free (Tool::is_read_only) nor a plan-control tool, BEFORE
+        // running hooks (cheaper, and the rejection still goes back to the model
+        // as a normal ToolResult so it can adapt).
+        let tool_is_read_only = self.tools.get(&tu.name).is_some_and(|t| t.is_read_only());
+        let tool_mutates_files = self.tools.get(&tu.name).is_some_and(|t| t.mutates_files());
+        let plan_mode_active = self
+            .plan_mode
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        if plan_mode_active
+            && !(tool_is_read_only || crate::plan_mode::is_plan_control_tool(&tu.name))
+        {
+            let result = denied_tool_result(
+                &tu.id,
+                format!(
+                    "Tool '{}' is not available in plan mode. Use ExitPlanMode to proceed.",
+                    tu.name
+                ),
+            );
+            return ToolPlan::Denied {
+                original_index,
+                result,
+            };
+        }
+
+        let tool_ctx = ToolCtx {
+            session_id,
+            turn_index,
+            tool_use_id: &tu.id,
+            tool_name: &tu.name,
+            input: &tu.input,
+            is_read_only: tool_is_read_only,
+        };
+        let decision = match self.hooks.before_tool(&tool_ctx).await {
+            Ok(d) => d,
+            Err(e) => {
+                return ToolPlan::Fatal(StopCondition::HookDenied(format!(
+                    "before_tool hook failed: {e}"
+                )));
+            }
+        };
+
+        // ADR-0024 / #185 H6: a hook may rewrite a tool's input via
+        // UpdatedInput, but the rewrite must be validated against the tool's
+        // schema; an invalid rewrite is a *hard deny* (not dispatched). Convert
+        // it to Deny here so it flows through the denial path below (after_tool
+        // notify + error result).
+        let decision = if let HookDecision::UpdatedInput(new_input) = &decision {
+            match self.tools.get(&tu.name) {
+                Some(tool) => match updated_input_is_valid(tool.input_schema(), new_input) {
+                    Ok(()) => decision,
+                    Err(why) => HookDecision::Deny(format!(
+                        "before_tool hook rewrote input to an invalid shape: {why}"
+                    )),
+                },
+                None => decision,
+            }
+        } else {
+            decision
+        };
+
+        match decision {
+            // AskDenied (a synthesized non-interactive Ask→Deny) is handled
+            // identically to Deny; the mode filter normally normalizes it away,
+            // but treat it as a denial defensively.
+            HookDecision::Deny(msg) | HookDecision::AskDenied(msg) => {
+                // Mirror dispatch_tool: notify after_tool of the denial.
+                let denial_err =
+                    ToolError::execution(std::io::Error::other(format!("denied: {msg}")));
+                if let Err(e) = self.hooks.after_tool(&tool_ctx, &Err(denial_err)).await {
+                    tracing::warn!(
+                        tool = %tu.name, error = %e,
+                        "after_tool hook error (non-fatal)"
+                    );
+                }
+                ToolPlan::Denied {
+                    original_index,
+                    result: denied_tool_result(&tu.id, format!("Tool call denied: {msg}")),
+                }
+            }
+            // Allow uses the original input; UpdatedInput swaps in the rewritten
+            // input (already schema-validated above). Both build an Allowed plan.
+            HookDecision::Allow | HookDecision::UpdatedInput(_) => {
+                let input = if let HookDecision::UpdatedInput(new_input) = decision {
+                    tracing::info!(
+                        tool = %tu.name,
+                        tool_use_id = %tu.id,
+                        "hook.updated_input: tool input rewritten by before_tool hook"
+                    );
+                    new_input
+                } else {
+                    tu.input.clone()
+                };
+                let conflict_key = self
+                    .tools
+                    .get(&tu.name)
+                    .and_then(|t| t.parallel_conflict_key(&input));
+                ToolPlan::Allowed {
+                    plan: DispatchPlan::Allowed {
+                        original_index,
+                        id: tu.id.clone(),
+                        name: tu.name.clone(),
+                        input,
+                        conflict_key,
+                    },
+                    mutates_files: tool_mutates_files,
+                }
+            }
+        }
+    }
+}
+
+/// Outcome of [`Agent::plan_tool_call`]. The skeleton maps this onto the
+/// `ToolCallEnd` yield + plan push so all streaming stays in the loop (#152).
+enum ToolPlan {
+    /// Tool was denied (plan-mode or hook). The skeleton yields a denied
+    /// `ToolCallEnd` (in assistant-message order) and pushes a `Denied` plan.
+    Denied {
+        original_index: usize,
+        result: ToolResultBlock,
+    },
+    /// Tool is allowed/rewritten. `mutates_files` marks it for the no-edit
+    /// progress set (#239/#244).
+    Allowed {
+        plan: DispatchPlan,
+        mutates_files: bool,
+    },
+    /// A `before_tool` hook error that must terminate the run.
+    Fatal(StopCondition),
+}
+
+// ---------------------------------------------------------------------------
 // Agent::stream_until_done
 // ---------------------------------------------------------------------------
 
@@ -557,6 +938,15 @@ impl Agent {
     ///
     /// Cannot panic in practice; see [`Agent::stream_until_done`] for the
     /// detailed safety note.
+    // The pure-logic and recovery state machine have been lifted out (#152:
+    // `maybe_compact`, `build_request`, `finalize_tool_results`,
+    // `plan_tool_call`, and `RecoveryState`), shrinking this body from ~1090 to
+    // ~600 lines. It cannot reach clippy's 100-line cap: the three streaming
+    // phases (SSE drain, Phase-1 plan loop, Phase-2 dispatch drain) `yield`
+    // `TurnEvent`s incrementally and in tool-completion order, so they MUST
+    // stay inline in the `try_stream!` body — extracting them into Vec-returning
+    // helpers would silently destroy incremental streaming. The allow is
+    // therefore intrinsic to the function's role as the orchestration skeleton.
     #[allow(clippy::too_many_lines)]
     #[instrument(
         skip(self, messages, cancel, settings),
@@ -606,28 +996,11 @@ impl Agent {
             let mut turns_completed: u32 = 0;
 
             // ---- Per-run state (Plan A recovery + Plan B autocompact) ----
-            // Plan A — recovery state (Tasks 4–7 + 11):
-            // Stage A budget escalation: tracks whether we already retried THIS
-            // turn with `escalated_max_tokens`. Reset on every fresh turn.
-            let mut stage_a_attempted_this_turn = false;
-            // Per-turn override for `max_tokens` on the next request build. None
-            // means "use `self.config.max_tokens`".
-            let mut override_max_tokens_for_request: Option<u32> = None;
-            // Stage B meta-continuation count (per-run, not per-turn).
-            let mut meta_continuation_count: u8 = 0;
-            // One-shot reactive compaction guard (Task 7).
-            let mut attempted_reactive_compact = false;
-            // T11: cap on `TurnDecision::ContinueWith` injections per run.
-            let mut forced_continuations: u8 = 0;
-
-            // Plan B — autocompact tracking (per-run):
-            const MAX_CONSECUTIVE_COMPACT_FAILURES: u8 = 2;
-            #[derive(Debug, Default)]
-            struct AutoCompactTracking {
-                consecutive_failures: u8,
-                disabled: bool,
-            }
-            let mut auto_tracking = AutoCompactTracking::default();
+            // The six recovery flags (Stage-A pair, Stage-B meta count,
+            // reactive-compact guard, forced-continuation cap, autocompact
+            // tracking) are owned by RecoveryState; the A/B/C decision logic
+            // lives on its methods (#152).
+            let mut recovery = recovery::RecoveryState::default();
 
             // #239 — no-edit-progress tracking (per-run):
             // `turns_since_last_edit` counts consecutive completed turns with
@@ -686,142 +1059,14 @@ impl Agent {
                 }
 
                 // ---- Compaction (threshold-gated autocompact) ----
-                {
-                    let active_model_snapshot = self.active_model();
-                    let caps = self.provider.capabilities(active_model_snapshot.as_str());
-                    let token_count_before = crate::compact::estimate_tokens(&history);
-                    let threshold = self.config.auto_compact_threshold;
-                    let should_attempt = threshold.is_some_and(|t| {
-                        #[allow(
-                            clippy::cast_precision_loss,
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss
-                        )]
-                        let utilization =
-                            token_count_before as f32 / caps.max_input_tokens.max(1) as f32;
-                        !auto_tracking.disabled && utilization >= t
-                    });
-                    if should_attempt {
-                        let strategy = self.compactor.strategy_name();
-                        let compact_ctx = CompactCtx {
-                            session_id: "",
-                            token_count_before,
-                            strategy,
-                        };
-                        if let Err(e) = self.hooks.pre_compact(&compact_ctx).await {
-                            tracing::warn!(error = %e, "pre_compact hook error (non-fatal)");
-                        }
-                        match self.compactor.compact(&history, &caps).await {
-                            Err(e) => {
-                                tracing::warn!(error = %e, "autocompact failed");
-                                auto_tracking.consecutive_failures =
-                                    auto_tracking.consecutive_failures.saturating_add(1);
-                                if auto_tracking.consecutive_failures
-                                    >= MAX_CONSECUTIVE_COMPACT_FAILURES
-                                {
-                                    auto_tracking.disabled = true;
-                                    tracing::warn!(
-                                        "autocompact disabled after {MAX_CONSECUTIVE_COMPACT_FAILURES} consecutive failures"
-                                    );
-                                }
-                            }
-                            Ok(Some(new)) => {
-                                auto_tracking.consecutive_failures = 0;
-                                let token_count_after = crate::compact::estimate_tokens(&new);
-                                history = new;
-                                let outcome = CompactOutcome {
-                                    token_count_after,
-                                    compacted: true,
-                                };
-                                if let Err(e) =
-                                    self.hooks.post_compact(&compact_ctx, &outcome).await
-                                {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "post_compact hook error (non-fatal)"
-                                    );
-                                }
-                            }
-                            Ok(None) => {
-                                auto_tracking.consecutive_failures = 0;
-                                let outcome = CompactOutcome {
-                                    token_count_after: token_count_before,
-                                    compacted: false,
-                                };
-                                if let Err(e) =
-                                    self.hooks.post_compact(&compact_ctx, &outcome).await
-                                {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "post_compact hook error (non-fatal)"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                self.maybe_compact(&mut history, recovery.auto_tracking_mut())
+                    .await;
 
                 // ---- Build completion request ----
-                let mut req_messages = history.clone();
-                // ADR-0046: apply the per-turn MCP wire filter. When
-                // `config.lazy_mcp` is false this is a passthrough.
-                let active_guard = self.mcp_active.load();
-                let filter = crate::wire_filter::WireFilter {
-                    lazy_mcp: self.config.lazy_mcp,
-                    active: &active_guard,
-                    eager_servers: &self.mcp_eager_servers,
-                };
-                let crate::wire_filter::WireFilterResult {
-                    tools: mut req_tools,
-                    dropped_mcp_count,
-                } = self.tools.to_caliban_tools_filtered(&filter);
-                // Splice the deferred-block paragraph into the system
-                // message when lazy mode is active and the filter dropped
-                // at least one MCP tool (ADR-0046).
-                crate::deferred_block::splice_into_messages(
-                    &mut req_messages,
-                    self.config.lazy_mcp,
-                    dropped_mcp_count,
+                let req = self.build_request(
+                    &history,
+                    recovery.effective_max_tokens(self.config.max_tokens),
                 );
-                if self.prompt_cache {
-                    crate::cache::apply_prompt_cache(
-                        &mut req_messages,
-                        &mut req_tools,
-                        self.config.min_cache_block_tokens,
-                    );
-                }
-                // Plan A: Stage A override → escalated max_tokens for retry.
-                let effective_max_tokens =
-                    override_max_tokens_for_request.unwrap_or(self.config.max_tokens);
-                // Plan C: snapshot the swappable effort level once per turn
-                // so the in-flight request sees a single coherent value even
-                // if `/effort` lands between turns.
-                let effort_snapshot = self.config.effort.load_full();
-                // #100: likewise snapshot the swappable extended-thinking
-                // control so a `/think` change between turns applies as one
-                // coherent value to the in-flight request.
-                let thinking_snapshot = self.config.thinking.load_full();
-                // Plan C: likewise for the model id — a `/model` swap that
-                // lands between request build and provider call must not
-                // split model + capabilities + effort across two ids.
-                let active_model_for_req = self.active_model();
-                let req = CompletionRequest {
-                    model: active_model_for_req.as_str().to_string(),
-                    messages: req_messages,
-                    tools: req_tools,
-                    tool_choice: self.config.tool_choice.clone(),
-                    max_tokens: effective_max_tokens,
-                    temperature: self.config.temperature,
-                    top_p: self.config.top_p,
-                    top_k: None,
-                    stop_sequences: self.config.stop_sequences.clone(),
-                    thinking: *thinking_snapshot,
-                    effort: Some(*effort_snapshot),
-                    metadata: RequestMetadata {
-                        user_id: self.config.user_id.clone(),
-                        purpose: Some(caliban_provider::RequestPurpose::MainLoop),
-                    },
-                };
 
                 // ---- Stream from provider (with retry) ----
                 // Begin per-turn timing here so TTFT reflects user-observed
@@ -851,26 +1096,20 @@ impl Agent {
                             break 'outer;
                         }
                         caliban_provider::Error::ContextTooLong { .. }
-                            if !attempted_reactive_compact =>
+                            if recovery.reactive_compact_available() =>
                         {
-                            tracing::warn!(
-                                target: "caliban::recovery",
-                                "recovery.reactive_compact.fired"
-                            );
-                            attempted_reactive_compact = true;
-                            let caps = self.provider.capabilities(&self.config.model);
-                            if let Ok(Some(new)) =
-                                self.compactor.compact(&history, &caps).await
-                            {
-                                history = new;
-                                // Redo this turn with the compacted
-                                // history; don't consume a turn slot.
-                                continue 'inner;
+                            match recovery.on_context_too_long(&self, &mut history).await {
+                                recovery::RecoveryAction::RetryTurn => continue 'inner,
+                                recovery::RecoveryAction::Surrender(stop) => {
+                                    stopped_for = stop;
+                                    break 'outer;
+                                }
+                                recovery::RecoveryAction::InjectAndContinue(_) => {
+                                    unreachable!(
+                                        "on_context_too_long only yields RetryTurn or Surrender"
+                                    )
+                                }
                             }
-                            stopped_for = StopCondition::ProviderError(
-                                "context too long; compactor declined".into(),
-                            );
-                            break 'outer;
                         }
                         other => {
                             stopped_for = StopCondition::ProviderError(other.to_string());
@@ -1047,21 +1286,21 @@ impl Agent {
                 // implementation ran AFTER yield/counter — hoisting it
                 // here is the fix that lets us flip the default to
                 // true.
-                if self.config.max_tokens_recovery
-                    && turn_stop_reason == StopReason::MaxTokens
-                    && !stage_a_attempted_this_turn
+                if let Some(action) =
+                    recovery.on_max_tokens_pre_dispatch(&self.config, turn_stop_reason)
                 {
-                    tracing::warn!(
-                        target: "caliban::recovery",
-                        from = self.config.max_tokens,
-                        to = self.config.escalated_max_tokens,
-                        "recovery.max_tokens.stage_a"
-                    );
-                    stage_a_attempted_this_turn = true;
-                    override_max_tokens_for_request =
-                        Some(self.config.escalated_max_tokens);
-                    total_usage.merge(turn_usage);
-                    continue 'inner;
+                    match action {
+                        recovery::RecoveryAction::RetryTurn => {
+                            // Stage-A merge stays in the skeleton: the user is
+                            // still billed for the failed attempt.
+                            total_usage.merge(turn_usage);
+                            continue 'inner;
+                        }
+                        recovery::RecoveryAction::InjectAndContinue(_)
+                        | recovery::RecoveryAction::Surrender(_) => {
+                            unreachable!("on_max_tokens_pre_dispatch only yields RetryTurn")
+                        }
+                    }
                 }
 
                 // Apply the assistant-text post-processor (set via
@@ -1097,115 +1336,14 @@ impl Agent {
                     }
                     let ContentBlock::ToolUse(tu) = block else { continue };
 
-                    // Plan-mode gating: when active, reject tools that are
-                    // neither side-effect-free (Tool::is_read_only) nor a
-                    // plan-control tool, BEFORE running hooks (cheaper, and the
-                    // rejection still goes back to the model as a normal
-                    // ToolResult so it can adapt).
-                    let tool_is_read_only =
-                        self.tools.get(&tu.name).is_some_and(|t| t.is_read_only());
-                    let tool_mutates_files =
-                        self.tools.get(&tu.name).is_some_and(|t| t.mutates_files());
-                    let plan_mode_active = self
-                        .plan_mode
-                        .as_ref()
-                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-                    if plan_mode_active
-                        && !(tool_is_read_only
-                            || crate::plan_mode::is_plan_control_tool(&tu.name))
+                    match self
+                        .plan_tool_call(tu, idx, turn_index, &settings.session_id)
+                        .await
                     {
-                        let msg = format!(
-                            "Tool '{}' is not available in plan mode. Use ExitPlanMode to proceed.",
-                            tu.name
-                        );
-                        let content = vec![ContentBlock::Text(TextBlock {
-                            text: msg.clone(),
-                            cache_control: None,
-                        })];
-                        let result = ToolResultBlock {
-                            tool_use_id: tu.id.clone(),
-                            content,
-                            is_error: true,
-                        };
-                        yield TurnEvent::ToolCallEnd {
-                            turn_index,
-                            tool_use_id: result.tool_use_id.clone(),
-                            is_error: true,
-                            content: result.content.clone(),
-                        };
-                        plans.push(DispatchPlan::Denied {
-                            original_index: idx,
+                        ToolPlan::Denied {
+                            original_index,
                             result,
-                        });
-                        continue;
-                    }
-
-                    let tool_ctx = ToolCtx {
-                        session_id: &settings.session_id,
-                        turn_index,
-                        tool_use_id: &tu.id,
-                        tool_name: &tu.name,
-                        input: &tu.input,
-                        is_read_only: tool_is_read_only,
-                    };
-                    let decision = match self.hooks.before_tool(&tool_ctx).await {
-                        Ok(d) => d,
-                        Err(e) => {
-                            stopped_for = StopCondition::HookDenied(
-                                format!("before_tool hook failed: {e}"),
-                            );
-                            break 'outer;
-                        }
-                    };
-
-                    // ADR-0024 / #185 H6: a hook may rewrite a tool's input via
-                    // UpdatedInput, but the rewrite must be validated against
-                    // the tool's schema; an invalid rewrite is a *hard deny*
-                    // (not dispatched). Convert it to Deny here so it flows
-                    // through the denial path below (after_tool notify + error
-                    // result).
-                    let decision = if let HookDecision::UpdatedInput(new_input) = &decision {
-                        match self.tools.get(&tu.name) {
-                            Some(tool) => {
-                                match updated_input_is_valid(tool.input_schema(), new_input) {
-                                    Ok(()) => decision,
-                                    Err(why) => HookDecision::Deny(format!(
-                                        "before_tool hook rewrote input to an invalid shape: {why}"
-                                    )),
-                                }
-                            }
-                            None => decision,
-                        }
-                    } else {
-                        decision
-                    };
-
-                    match decision {
-                        // AskDenied (a synthesized non-interactive Ask→Deny) is
-                        // handled identically to Deny; the mode filter normally
-                        // normalizes it away, but treat it as a denial defensively.
-                        HookDecision::Deny(msg) | HookDecision::AskDenied(msg) => {
-                            let content = vec![ContentBlock::Text(TextBlock {
-                                text: format!("Tool call denied: {msg}"),
-                                cache_control: None,
-                            })];
-                            // Mirror dispatch_tool: notify after_tool of the denial.
-                            let denial_err = ToolError::execution(std::io::Error::other(
-                                format!("denied: {msg}"),
-                            ));
-                            if let Err(e) =
-                                self.hooks.after_tool(&tool_ctx, &Err(denial_err)).await
-                            {
-                                tracing::warn!(
-                                    tool = %tu.name, error = %e,
-                                    "after_tool hook error (non-fatal)"
-                                );
-                            }
-                            let result = ToolResultBlock {
-                                tool_use_id: tu.id.clone(),
-                                content,
-                                is_error: true,
-                            };
+                        } => {
                             // Emit the denied ToolCallEnd up front, in
                             // assistant-message order.
                             yield TurnEvent::ToolCallEnd {
@@ -1215,46 +1353,22 @@ impl Agent {
                                 content: result.content.clone(),
                             };
                             plans.push(DispatchPlan::Denied {
-                                original_index: idx,
+                                original_index,
                                 result,
                             });
                         }
-                        HookDecision::Allow => {
-                            if tool_mutates_files {
+                        ToolPlan::Allowed {
+                            plan,
+                            mutates_files,
+                        } => {
+                            if mutates_files {
                                 file_mutating_tool_ids.insert(tu.id.clone());
                             }
-                            let conflict_key = self
-                                .tools
-                                .get(&tu.name)
-                                .and_then(|t| t.parallel_conflict_key(&tu.input));
-                            plans.push(DispatchPlan::Allowed {
-                                original_index: idx,
-                                id: tu.id.clone(),
-                                name: tu.name.clone(),
-                                input: tu.input.clone(),
-                                conflict_key,
-                            });
+                            plans.push(plan);
                         }
-                        HookDecision::UpdatedInput(new_input) => {
-                            if tool_mutates_files {
-                                file_mutating_tool_ids.insert(tu.id.clone());
-                            }
-                            tracing::info!(
-                                tool = %tu.name,
-                                tool_use_id = %tu.id,
-                                "hook.updated_input: tool input rewritten by before_tool hook"
-                            );
-                            let conflict_key = self
-                                .tools
-                                .get(&tu.name)
-                                .and_then(|t| t.parallel_conflict_key(&new_input));
-                            plans.push(DispatchPlan::Allowed {
-                                original_index: idx,
-                                id: tu.id.clone(),
-                                name: tu.name.clone(),
-                                input: new_input,
-                                conflict_key,
-                            });
+                        ToolPlan::Fatal(stop) => {
+                            stopped_for = stop;
+                            break 'outer;
                         }
                     }
                 }
@@ -1381,54 +1495,16 @@ impl Agent {
                     break 'outer;
                 }
 
-                // ---- Phase 3: collect results in assistant-message order ----
-                let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
-                // #239 / #244: a turn counts as edit progress iff at least one
-                // dispatched *file-mutating* tool call returned a *successful*
-                // (non-error) result.
-                let mut had_successful_edit_this_turn = false;
-                for slot in ordered_results.into_iter().flatten() {
-                    if !slot.is_error && file_mutating_tool_ids.contains(&slot.tool_use_id) {
-                        had_successful_edit_this_turn = true;
-                    }
-                    tool_result_blocks.push(ContentBlock::ToolResult(slot));
-                }
-
-                // ---- Tool-result size cap (context-management spec) ----
-                if self.config.tool_result_cap_chars > 0 && !tool_result_blocks.is_empty() {
-                    let overflow_dir = directories::ProjectDirs::from("dev", "caliban", "caliban")
-                        .map_or_else(
-                            || std::path::PathBuf::from("/tmp/caliban-tool-overflows"),
-                            |d| d.cache_dir().join("tool-overflows"),
-                        );
-                    let cap = crate::post_process::ToolResultCap {
-                        max_chars: self.config.tool_result_cap_chars,
-                        overflow_dir,
-                        session_id: settings.session_id.clone(),
-                    };
-                    if let Err(e) = cap.cap(&mut tool_result_blocks).await {
-                        tracing::warn!(
-                            error = %e,
-                            "ToolResultCap io error (non-fatal); inline content kept",
-                        );
-                    }
-                }
-
-                // Build the tool-results message (if any tools were called).
-                let tool_results: Vec<Message> = if tool_result_blocks.is_empty() {
-                    vec![]
-                } else {
-                    vec![Message {
-                        role: Role::User,
-                        content: tool_result_blocks,
-                    }]
-                };
-
-                // Append to history.
-                history.push(assistant_message.clone());
-                for tr_msg in &tool_results {
-                    history.push(tr_msg.clone());
-                }
+                // ---- Phase 3: collect + cap results, append to history ----
+                let (tool_results, had_successful_edit_this_turn) = self
+                    .finalize_tool_results(
+                        &mut history,
+                        &assistant_message,
+                        ordered_results,
+                        &file_mutating_tool_ids,
+                        &settings.session_id,
+                    )
+                    .await;
 
                 // T11: scratch slot for the after_turn hook's decision; the
                 // loop reads this AFTER yielding TurnEnd so the consumer sees
@@ -1459,13 +1535,8 @@ impl Agent {
                     // MaxTokens turn fails only when Stage B has exhausted
                     // its budget (cap reached) — i.e. there are no more
                     // recoveries to attempt.
-                    let turn_is_failure = matches!(
-                        turn_stop_reason,
-                        StopReason::Refusal | StopReason::ContentFilter
-                    ) || (turn_stop_reason == StopReason::MaxTokens
-                        && self.config.max_tokens_recovery
-                        && stage_a_attempted_this_turn
-                        && meta_continuation_count >= self.config.max_meta_continuations);
+                    let turn_is_failure =
+                        recovery.turn_is_failure(&self.config, turn_stop_reason);
                     // Drive the hook. `after_turn_failure` returns `Result<()>`
                     // (no decision surface for failure paths); `after_turn`
                     // returns `Result<TurnDecision>`.
@@ -1571,8 +1642,7 @@ impl Agent {
                         no_edit_nudge_emitted = true;
                         no_edit_nudge_armed = false;
                         // Re-arm Stage A for the nudged turn and advance.
-                        stage_a_attempted_this_turn = false;
-                        override_max_tokens_for_request = None;
+                        recovery.reset_for_new_turn();
                         break 'inner; // take another turn with the nudge in scope
                     }
                 }
@@ -1583,17 +1653,16 @@ impl Agent {
                         // Fall through to the natural continue/halt logic.
                     }
                     TurnDecision::ContinueWith(msgs) => {
-                        if forced_continuations < MAX_FORCED_CONTINUATIONS {
+                        if recovery.forced_continuation_available() {
                             history.extend(msgs);
-                            forced_continuations += 1;
+                            recovery.record_forced_continuation();
                             // Reset Stage A so the forced turn has a fresh
                             // budget-escalation slot.
-                            stage_a_attempted_this_turn = false;
-                            override_max_tokens_for_request = None;
+                            recovery.reset_for_new_turn();
                             break 'inner; // advance to next turn_index
                         }
                         tracing::warn!(
-                            forced_continuations,
+                            forced_continuations = recovery.forced_continuations(),
                             "after_turn ContinueWith ignored (cap reached)"
                         );
                     }
@@ -1604,118 +1673,37 @@ impl Agent {
                 }
 
                 // ---- Decide whether to continue (Tasks 4–6 dispatch) ----
-                match turn_stop_reason {
-                    StopReason::ToolUse => {
-                        // Tool calls came back; reset Stage-A flag so the next
-                        // turn has a fresh budget-escalation budget.
-                        stage_a_attempted_this_turn = false;
-                        override_max_tokens_for_request = None;
+                //
+                // `on_stop_reason` mutates `history` in place for the
+                // message-pushing arms (Stage B meta prompt, Refusal /
+                // ContentFilter synthetic, input-source resume) and returns the
+                // control-flow action. RetryTurn (`continue 'inner`, no slot)
+                // and InjectAndContinue (`break 'inner`, advance turn) stay
+                // DISTINCT. Note: injected messages land in `history` and so in
+                // `RunEnd.final_messages`.
+                match recovery
+                    .on_stop_reason(
+                        turn_stop_reason,
+                        &self.config,
+                        &mut history,
+                        settings.input_source.as_ref(),
+                        &cancel,
+                    )
+                    .await
+                {
+                    // `on_stop_reason` advances turns or surrenders; it never
+                    // asks for a no-slot retry (only the pre-dispatch / context
+                    // arms do that).
+                    recovery::RecoveryAction::InjectAndContinue(msgs) => {
+                        history.extend(msgs);
                         break 'inner;
                     }
-                    StopReason::MaxTokens if self.config.max_tokens_recovery => {
-                        // Stage A handled earlier (silent retry above
-                        // tool-dispatch / TurnEnd yield / counter inc).
-                        // If we reach this arm it's because Stage A
-                        // already fired this turn and the retry still
-                        // hit MaxTokens — try Stage B.
-                        debug_assert!(
-                            stage_a_attempted_this_turn,
-                            "Stage A must have fired before we land here"
-                        );
-                        if meta_continuation_count < self.config.max_meta_continuations {
-                            // Stage B: inject the meta-continuation prompt
-                            // and advance to the next turn.
-                            tracing::warn!(
-                                target: "caliban::recovery",
-                                meta_continuation = meta_continuation_count + 1,
-                                "recovery.max_tokens.stage_b"
-                            );
-                            history.push(Message::user_text(
-                                crate::stream::recovery::META_CONTINUATION_PROMPT,
-                            ));
-                            meta_continuation_count += 1;
-                            stage_a_attempted_this_turn = false;
-                            override_max_tokens_for_request = None;
-                            break 'inner; // next turn iteration
-                        }
-                        // Stage C: surrender.
-                        tracing::error!(
-                            target: "caliban::recovery",
-                            "recovery.max_tokens.stage_c"
-                        );
-                        stopped_for = StopCondition::MaxTokensExhausted;
+                    recovery::RecoveryAction::Surrender(stop) => {
+                        stopped_for = stop;
                         break 'outer;
                     }
-                    StopReason::Refusal => {
-                        tracing::warn!(
-                            target: "caliban::recovery",
-                            "recovery.refusal"
-                        );
-                        history.push(Message::assistant_text(
-                            crate::stream::recovery::REFUSAL_SYNTHETIC,
-                        ));
-                        stopped_for = StopCondition::Refusal(
-                            crate::stream::recovery::REFUSAL_SYNTHETIC.into(),
-                        );
-                        break 'outer;
-                    }
-                    StopReason::ContentFilter => {
-                        tracing::warn!(
-                            target: "caliban::recovery",
-                            "recovery.content_filter"
-                        );
-                        history.push(Message::assistant_text(
-                            crate::stream::recovery::CONTENT_FILTER_SYNTHETIC,
-                        ));
-                        stopped_for = StopCondition::ContentFilter(
-                            crate::stream::recovery::CONTENT_FILTER_SYNTHETIC.into(),
-                        );
-                        break 'outer;
-                    }
-                    StopReason::MaxTokens => {
-                        // Recovery disabled — surface as a distinct stop
-                        // condition so the TUI / headless driver can tell a
-                        // budget blowout from a clean end-of-turn.
-                        tracing::warn!(
-                            target: "caliban::recovery",
-                            "max_tokens.halt"
-                        );
-                        stopped_for = StopCondition::MaxTokensExhausted;
-                        break 'outer;
-                    }
-                    _ => {
-                        // EndTurn or StopSequence — natural completion. If an
-                        // interactive input source is configured, await the
-                        // next operator message instead of ending the run
-                        // (ADR 0047 / #81). Human-driven, so NOT subject to
-                        // MAX_FORCED_CONTINUATIONS.
-                        //
-                        // Note: injected messages land in `history` and therefore
-                        // in `RunEnd.final_messages`. Live per-event display of
-                        // injected user messages is deferred to the worker/attach
-                        // tickets (2/3).
-                        if let Some(provider) = settings.input_source.clone() {
-                            let next = provider.next_input(&cancel).await;
-                            if cancel.is_cancelled() {
-                                stopped_for = StopCondition::Cancelled;
-                                break 'outer;
-                            }
-                            match next {
-                                Some(msgs) if !msgs.is_empty() => {
-                                    history.extend(msgs);
-                                    stage_a_attempted_this_turn = false;
-                                    override_max_tokens_for_request = None;
-                                    break 'inner; // take another turn
-                                }
-                                _ => {
-                                    // None / empty → end of input.
-                                    stopped_for = StopCondition::EndOfTurn;
-                                    break 'outer;
-                                }
-                            }
-                        }
-                        stopped_for = StopCondition::EndOfTurn;
-                        break 'outer;
+                    recovery::RecoveryAction::RetryTurn => {
+                        unreachable!("on_stop_reason never yields RetryTurn")
                     }
                 }
                 } // end 'inner loop

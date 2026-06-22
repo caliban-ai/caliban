@@ -114,6 +114,45 @@ async fn stage_a_retry_does_not_double_count_turn() {
     );
 }
 
+/// Characterization (#152): the failed Stage-A attempt's token usage must
+/// still be merged into `RunEnd.total_usage`, even though the truncated
+/// attempt is otherwise invisible (no `TurnEnd`, no turn-count bump). Guards
+/// the `total_usage.merge(turn_usage)` at the Stage-A pre-dispatch path.
+///
+/// Failed attempt reports `output_tokens = 1024`; the successful retry reports
+/// the mock default `output_tokens = 1`. If the failed attempt's usage is
+/// dropped, `total_usage.output_tokens` would be `1`; with the merge it is
+/// `1025`.
+#[tokio::test]
+async fn stage_a_failed_attempt_usage_is_billed() {
+    let provider = MockProvider::builder()
+        .with_response_max_tokens(1024)
+        .with_response_end_turn("All done.")
+        .build();
+
+    let cfg = AgentConfig {
+        max_tokens: 1024,
+        max_tokens_recovery: true,
+        escalated_max_tokens: 16_384,
+        ..Default::default()
+    };
+    let agent = agent_with(provider, cfg);
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+
+    let mut total_output = None;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd { total_usage, .. } = ev {
+            total_output = Some(total_usage.output_tokens);
+        }
+    }
+    assert_eq!(
+        total_output,
+        Some(1025),
+        "failed Stage-A attempt (1024) + successful retry (1) must both be billed"
+    );
+}
+
 /// Companion to the regression above: with recovery off, the existing
 /// halt-in-one-turn invariant still holds (the catch-all `_` arm in
 /// the stop-reason match should not be reachable for Stage A retries).
