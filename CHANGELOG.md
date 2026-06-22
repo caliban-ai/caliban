@@ -9,6 +9,113 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-21
+
+This release is a **security and protocol-correctness pass** on top of a completed
+architecture-refactor sprint. It tightens permission resolution, hook egress, and
+tool sandboxing across the board; aligns the headless result frame and terminal-stop
+reporting with ADR 0025; hardens the model-router circuit breaker; and adds two TUI
+input conveniences. **Behavior change:** several permission fixes are intentionally
+stricter than v0.3.0 — actions that were previously allowed (broad MCP allows, `../`
+workspace escapes, mode-weakening flags under lockdown) are now denied. Review the
+Security section before upgrading if you depend on the looser behavior.
+
+### Added
+
+- **Fuzzy slash-menu typeahead** (#15): the slash-command menu now matches on
+  fuzzy subsequences instead of prefix-only. (#146)
+- **Backslash-continuation for multi-line input** (#101): end a line with `\` then
+  Enter to continue input across lines. (#136)
+
+### Changed
+
+- **Plan mode gates on tool capability, not a name allowlist** (#162): read-only
+  enforcement now keys off `Tool::is_read_only`, so plan mode correctly blocks any
+  mutating tool rather than a hard-coded set. (#207)
+- **One resettable wakeup per watched stream** (#117): replace the per-poll wakeup
+  with a single resettable timer, cutting stream-polling overhead. (#139)
+
+### Security
+
+- **`deny:mcp__*` outranks server allows** (#213): global rules are partitioned by
+  action so a deny rule can no longer be overridden by a more specific server allow. (#228)
+- **Block `../` workspace escape** (#216): relative path traversal out of the
+  workspace is rejected, and a reason sentinel can no longer flip a static Deny. (#231)
+- **SSRF guard + scoped HTTP-hook allowlists** (#217): http-hook allowlists are
+  scoped to user/managed, URLs are matched by component, and an SSRF guard blocks
+  internal-address egress. (#232)
+- **Preserve static Deny under acceptEdits** (#169): acceptEdits mode no longer
+  weakens an explicit Deny rule. (#188)
+- **Lockdown refuses mode-weakening flags** (#178): enforce-lockdown rejects CLI
+  flags that would relax the active permission mode. (#191)
+- **Workspace-scope relative file-edit patterns** (#177): relative edit patterns are
+  resolved against the workspace root rather than matching loosely. (#189)
+- **OS sandbox applied to background Bash** (#160): background Bash commands now run
+  under the same OS sandbox as foreground ones. (#190)
+- **Marketplace downloads use the hardened HTTP client** (#158): plugin marketplace
+  fetches route through the SSRF-guarded client. (#187)
+- **Checkpoint byte-cap + integrity hardening** (#220): enforce the checkpoint
+  byte-cap, restore integrity checks, and prompt the index before the hook is wired. (#235)
+
+### Fixed
+
+- **Model router — circuit-breaker recovery** (#215, #183): fix recovery
+  concurrency, the recovery state machine, and hedge bugs; wire recovery to use a
+  single probe and require N successes before closing. (#230, #200)
+- **Model router — route-resolved reasoning effort applied** (#173): the effort
+  resolved by the route is now applied to outgoing calls. (#198)
+- **Model router — tool-use capability parsing** (#172): parse the `tool_use`
+  capability requirement as a string enum. (#196)
+- **Model router — router-debug default model** (#144): derive the router-debug
+  default model from CLI args. (#150)
+- **Headless result frame stays terminal** (#218): the result frame is kept terminal
+  and `stream-json` input now activates headless mode. (#233)
+- **Headless protocol parity** (#184): budget no longer masks success, max-turns
+  reporting reaches parity, and EventKind drift is corrected. (#208)
+- **Headless text mode surfaces non-success stops** (#175): text output now reports
+  non-success terminal stops instead of swallowing them. (#203)
+- **`--json-schema` applied reliably** (#214, #174): the directive applies even when
+  a system message exists, instructs the model, and ships three validator fixes. (#229, #204)
+- **Generation-agnostic Anthropic rate-card globs** (#142): rate-card matching no
+  longer pins to a specific model generation. (#148)
+- **`type:"text"` on Anthropic system blocks** (#141): emit the explicit block type. (#147)
+- **Provider stream-interruption retry** (#245): retry stream interruptions that
+  occur before any content is produced. (#248)
+- **Google 400 bodies no longer trip fault markers** (#221): classify Google 400
+  bodies correctly and fix the Vertex `list_models` doc. (#238)
+- **Sub-agent no-edit nudge resets on edits** (#244): the no-edit nudge resets on
+  actual file edits, not on any side-effecting tool. (#246)
+- **AgentTool prompt truncation on a char boundary** (#219): truncate the AgentTool
+  Debug system prompt on a UTF-8 char boundary to avoid a panic. (#234)
+- **Sub-agent signal races** (#115, #138): serialize Kill/Respawn on the registry
+  lock and close the `Rm --force`/Respawn signal race. (#137, #145)
+- **`agents logs` reads the worker transcript** (#143): read the worker's transcript
+  file instead of the wrong source. (#149)
+- **Hooks — filter/async/exit-2 handling** (#171): apply the `if` filter, honor
+  `async`, and stop swallowing exit-2 denials. (#195)
+- **Hooks — validation hardening** (#185): event↔kind validation, `${VAR}` header
+  expansion, UpdatedInput validation, and a truncation panic fix. (#209)
+- **Checkpoint byte-cap sweeper** (#180): implement the per-project blob byte-cap
+  sweeper. (#205)
+- **Checkpoint rewind correctness** (#181): rewind keeps the prompt's assistant turn
+  and uses a deterministic cwd hash. (#206)
+- **Agent-core — degenerate reasoning-only turns** (#249): nudge reasoning-only
+  turns instead of ending the run empty. (#253)
+- **Agent-core — MicroCompactor result ordering** (#170): a failed result no longer
+  supersedes a good one. (#193)
+- **Agent-core — ToolResultCap window clamp** (#182): clamp head/tail windows to
+  avoid overlap. (#199)
+- **Eval follow-ups** (#240, #241): whitespace-tolerant Edit and transient-5xx
+  retry. (#242)
+- **Config migrate detects legacy `permissions.toml`** (#176). (#202)
+- **Perms CLI predictors mirror runtime** (#179): plus lossless ordered export. (#201)
+
+Internal: completed the architecture-refactor sprint (#152–#168) — extracted
+`RecoveryState` and pure helpers from the turn-loop, segregated the `Hooks` trait,
+decomposed the plugins-manager and TUI startup modules, converged provider transport
+plumbing and error classification, centralized frontmatter/path helpers, and migrated
+`/usage`, `/context`, `/compact` onto the slash-command registry.
+
 ## [0.3.0] - 2026-06-17
 
 This release pairs **extensibility** — config-defined hooks that now fire at
@@ -131,7 +238,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/caliban-ai/caliban/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/caliban-ai/caliban/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/caliban-ai/caliban/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/caliban-ai/caliban/releases/tag/v0.1.0
