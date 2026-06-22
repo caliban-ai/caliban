@@ -123,6 +123,22 @@
   color: '1d76db'
   description: "Area: sub-agents"
   aliases: ['area:sub-agents']
+- name: area/agent-core
+  color: '1d76db'
+  description: "Area: agent-core (turn loop, hooks, recovery, context assembly, core tool dispatch)"
+  aliases: ['area:agent-core']
+- name: area/config
+  color: '1d76db'
+  description: "Area: config (settings hierarchy, config/skill/style loaders, frontmatter, XDG paths)"
+  aliases: ['area:config']
+- name: area/plugins
+  color: '1d76db'
+  description: "Area: plugins (plugin packaging, marketplace, discovery)"
+  aliases: ['area:plugins']
+- name: area/skills
+  color: '1d76db'
+  description: "Area: skills (skills + output-styles loading and authoring)"
+  aliases: ['area:skills']
 - name: area/ci-cd
   color: '1d76db'
   description: "Area: ci-cd"
