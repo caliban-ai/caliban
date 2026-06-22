@@ -90,6 +90,15 @@ use hook_dispatch::dispatch_tool;
 use parallel::DispatchPlan;
 use turn::{ActiveBlock, MessageAccumulator, TurnTiming};
 
+/// Neutral nudge injected by the #249 empty/degenerate-turn guard: a turn that
+/// reasoned but emitted no tool call and no answer. Phrased to push the model to
+/// either act (call a tool) or commit to a final textual answer. The substring
+/// "no tool call" is asserted by the `empty_turn_nudge` integration tests.
+const EMPTY_TURN_NUDGE: &str = "Your previous response made no tool call and gave no answer — \
+it contained only internal reasoning. To make progress you must take a concrete action now: \
+call a tool to work on the task, or, if the task is genuinely complete, state your final \
+answer as plain text.";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -1013,6 +1022,15 @@ impl Agent {
             let mut no_edit_nudge_armed = true;
             let mut no_edit_nudge_emitted = false;
 
+            // #249 — empty/degenerate-turn guard (per-run): counts *consecutive*
+            // degenerate turns nudged so far (a turn that consumed output tokens
+            // yet produced no tool call and no actionable text — e.g. an Ollama
+            // reasoning model that emits only a thinking block and then stops).
+            // Resets to 0 the moment a productive turn occurs. Bounded by
+            // `config.empty_turn_nudge_max` so a perpetually-stalling model
+            // cannot loop forever.
+            let mut empty_turn_nudges: u32 = 0;
+
             'outer: for turn_index in 0..max_turns {
                 // #245: bounded budget to re-issue THIS turn when the provider
                 // stream is interrupted *before any content is emitted*. Fresh
@@ -1539,6 +1557,27 @@ impl Agent {
                     )
                     .await;
 
+                // #249: classify the turn as "degenerate" before
+                // `assistant_message` is moved into the TurnEnd yield. A turn is
+                // degenerate when it consumed output tokens yet produced neither
+                // a tool call nor any actionable (non-whitespace) text — only a
+                // thinking block, or nothing at all. Such a turn ending on a
+                // natural stop reason (EndTurn / StopSequence) would otherwise
+                // surrender the whole run as a silent success. Tool-use turns,
+                // turns with real text, and failure stop reasons (Refusal /
+                // ContentFilter / MaxTokens, which have their own handling) are
+                // never degenerate.
+                let produced_actionable_content = assistant_message.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse(_))
+                        || matches!(b, ContentBlock::Text(t) if !t.text.trim().is_empty())
+                });
+                let turn_was_degenerate = !produced_actionable_content
+                    && turn_usage.output_tokens > 0
+                    && matches!(
+                        turn_stop_reason,
+                        StopReason::EndTurn | StopReason::StopSequence
+                    );
+
                 // T11: scratch slot for the after_turn hook's decision; the
                 // loop reads this AFTER yielding TurnEnd so the consumer sees
                 // the turn data before any injected continuation messages.
@@ -1703,6 +1742,47 @@ impl Agent {
                         stopped_for = StopCondition::HookDenied("after_turn: Stop".into());
                         break 'outer;
                     }
+                }
+
+                // ---- #249: empty/degenerate-turn guard ----
+                //
+                // A turn that reasoned (output tokens > 0) but produced no tool
+                // call and no actionable text would otherwise fall through to
+                // `on_stop_reason`'s EndTurn arm and surrender the run as a
+                // silent success with no work done. Instead, inject one neutral
+                // nudge and take another turn — bounded by `empty_turn_nudge_max`
+                // consecutive nudges. The streak resets on any productive turn.
+                // Skipped when an interactive input source is configured: there,
+                // an empty turn naturally hands control back to the operator.
+                if turn_was_degenerate
+                    && settings.input_source.is_none()
+                    && self.config.empty_turn_nudge_max > 0
+                {
+                    if empty_turn_nudges < self.config.empty_turn_nudge_max {
+                        empty_turn_nudges += 1;
+                        tracing::warn!(
+                            target: "caliban::recovery",
+                            turn = turn_index,
+                            output_tokens = turn_usage.output_tokens,
+                            empty_turn_nudge = empty_turn_nudges,
+                            "empty-turn nudge injected (no tool call / actionable text)"
+                        );
+                        history.push(Message::user_text(EMPTY_TURN_NUDGE));
+                        recovery.reset_for_new_turn();
+                        break 'inner; // take another turn with the nudge in scope
+                    }
+                    // Budget exhausted: stop nudging and let the run end via the
+                    // natural EndTurn path below.
+                    tracing::warn!(
+                        target: "caliban::recovery",
+                        turn = turn_index,
+                        empty_turn_nudges,
+                        "empty-turn nudge budget exhausted; ending run"
+                    );
+                } else if !turn_was_degenerate {
+                    // A productive turn resets the consecutive-degenerate streak
+                    // so a later stall can be nudged afresh.
+                    empty_turn_nudges = 0;
                 }
 
                 // ---- Decide whether to continue (Tasks 4–6 dispatch) ----
