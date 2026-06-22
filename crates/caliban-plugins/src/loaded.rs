@@ -1,9 +1,43 @@
 //! `LoadedPlugin` and friends — the in-memory representation handed to the
 //! caliban binary after discovery.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::manifest::{PluginManifest, ResolvedComponents};
+
+/// A raw plugin candidate located on disk by a [`crate::discovery::PluginSourceProvider`],
+/// before manifest validation / filtering. Carries just enough to load and
+/// attribute the plugin.
+#[derive(Debug, Clone)]
+pub struct Discovered {
+    /// Absolute path of the plugin directory.
+    pub plug_dir: PathBuf,
+    /// Path to the plugin's `plugin.json`.
+    pub manifest_path: PathBuf,
+    /// Source root the candidate was discovered in.
+    pub source: PluginSource,
+    /// Best-effort directory name (used as a stand-in for `name` on failure).
+    pub dir_name: String,
+}
+
+impl Discovered {
+    /// Construct a candidate from a plugin directory and its source.
+    #[must_use]
+    pub fn new(plug_dir: &Path, source: PluginSource) -> Self {
+        let dir_name = plug_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let manifest_path = plug_dir.join("plugin.json");
+        Self {
+            plug_dir: plug_dir.to_path_buf(),
+            manifest_path,
+            source,
+            dir_name,
+        }
+    }
+}
 
 /// Where a plugin was discovered. Determines override semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

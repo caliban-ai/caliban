@@ -8,9 +8,12 @@
 
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod aggregate;
 pub mod cli;
+pub mod discovery;
 pub mod error;
 pub mod expand;
+pub mod filter;
 pub mod loaded;
 pub mod manager;
 pub mod manifest;
@@ -19,9 +22,10 @@ pub mod overlay;
 pub mod trust;
 
 pub use cli::{Cli, ListedPlugin};
+pub use discovery::{DirectorySource, PluginSourceProvider};
 pub use error::PluginError;
 pub use expand::{expand as expand_plugin_root, expand_json_in_place};
-pub use loaded::{LoadedPlugin, NamespacedItem, PluginSource};
+pub use loaded::{Discovered, LoadedPlugin, NamespacedItem, PluginSource};
 pub use manager::{
     PluginLoadFailure, PluginManager, PluginRoots, PluginSettings, default_managed_dir,
 };
