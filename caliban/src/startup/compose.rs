@@ -52,6 +52,20 @@ fn resolve_debug_log_path(args: &Args) -> Option<std::path::PathBuf> {
     dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"))
 }
 
+/// The default `EnvFilter` directive string used when `RUST_LOG` is unset.
+///
+/// Keeps caliban + `caliban_*` crates at DEBUG and silences noisy lower-level
+/// dependency traces. This includes the file-walk crates `ignore`/`globset`
+/// (#256): pre-fix, every `Grep` flooded the debug log with `ignore::walk`,
+/// `ignore::gitignore`, and `globset` DEBUG spam — verbose where it adds no
+/// signal and, worse, drowning the per-tool dispatch records. Users can still
+/// opt into that detail explicitly via `RUST_LOG`.
+fn default_debug_filter() -> &'static str {
+    "debug,\
+     mio=warn,hyper=warn,hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,tower=warn,\
+     ignore=warn,globset=warn"
+}
+
 /// Install a file-backed `tracing` subscriber when debug logging is enabled
 /// (see [`debug_enabled`]). No-op otherwise. Idempotent once initialized:
 /// runs at most once at startup before any `tracing::*!` site fires.
@@ -79,11 +93,8 @@ pub(crate) async fn init_debug_tracing(args: &Args) {
     // Default filter keeps caliban + caliban_* crates at DEBUG and
     // silences noisy lower-level traces (mio, hyper, reqwest, …).
     // Users can override via RUST_LOG env var.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "debug,mio=warn,hyper=warn,hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,tower=warn",
-        )
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_debug_filter()));
     let layer = tracing_subscriber::fmt::layer()
         .with_writer(std::sync::Mutex::new(file))
         .with_ansi(false);
@@ -1439,9 +1450,34 @@ fn apply_memory_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_enabled, missing_key_err, resolve_debug_log_path};
+    use super::{debug_enabled, default_debug_filter, missing_key_err, resolve_debug_log_path};
     use crate::args::Args;
     use clap::Parser as _;
+
+    /// #256: the default debug filter must silence the `ignore`/`globset`
+    /// file-walk crates so `Grep` no longer floods the log with DEBUG spam
+    /// that drowns (and over-counts vs) the real per-tool dispatch records.
+    #[test]
+    fn default_filter_silences_file_walk_noise() {
+        let filter = default_debug_filter();
+        assert!(
+            filter.contains("ignore=warn"),
+            "default filter must silence the `ignore` crate; got: {filter}"
+        );
+        assert!(
+            filter.contains("globset=warn"),
+            "default filter must silence the `globset` crate; got: {filter}"
+        );
+    }
+
+    /// The default filter string must be a valid `EnvFilter` directive set
+    /// (a typo would silently fall back at runtime and re-flood the log).
+    #[test]
+    fn default_filter_is_valid_directive_set() {
+        use tracing_subscriber::EnvFilter;
+        // Panics on an invalid directive — that is the assertion.
+        let _ = EnvFilter::new(default_debug_filter());
+    }
 
     /// Parse an `Args` from the given extra flags (always with `caliban` as
     /// argv[0]). Mirrors the helper in `args.rs`'s own test module.

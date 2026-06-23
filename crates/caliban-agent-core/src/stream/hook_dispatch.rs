@@ -6,7 +6,9 @@
 //! orchestration may move here as the loop body is further factored.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use caliban_common::tracing_targets::TARGET_TOOLS;
 use caliban_provider::{ContentBlock, TextBlock, ToolResultBlock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -54,6 +56,21 @@ pub(crate) async fn dispatch_tool(
         is_read_only: agent.tools.get(tool_name).is_some_and(|t| t.is_read_only()),
     };
 
+    // Per-tool dispatch record (#256). The per-turn aggregate in
+    // `stream/mod.rs` only reports counts; this fires once per *call* so the
+    // debug log carries a greppable, reconstructable tool timeline for EVERY
+    // tool — independent of whether the tool emits its own internal tracing.
+    // (Pre-#256 only Grep was visible, because its `ignore`/`globset` file
+    // walk happened to emit DEBUG under the dispatch span.)
+    tracing::debug!(
+        target: TARGET_TOOLS,
+        tool = tool_name,
+        tool_use_id,
+        turn_index,
+        "tool dispatch start",
+    );
+    let started_at = Instant::now();
+
     let invoke_result: std::result::Result<Vec<ContentBlock>, ToolError> =
         match agent.tools.get(tool_name) {
             None => Err(ToolError::invalid_input(format!(
@@ -69,6 +86,23 @@ pub(crate) async fn dispatch_tool(
                 tool.invoke(input.clone(), cx).await
             }
         };
+
+    // Completion record — `status` lets a reader distinguish ok / error /
+    // cancelled without parsing the result payload.
+    let status = match &invoke_result {
+        Ok(_) => "ok",
+        Err(ToolError::Cancelled) => "cancelled",
+        Err(_) => "error",
+    };
+    tracing::debug!(
+        target: TARGET_TOOLS,
+        tool = tool_name,
+        tool_use_id,
+        turn_index,
+        status,
+        duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "tool dispatch end",
+    );
 
     // after_tool hook (non-fatal; errors are logged by tracing, not propagated)
     if let Err(e) = agent.hooks.after_tool(&tool_ctx, &invoke_result).await {
