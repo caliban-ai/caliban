@@ -1,0 +1,26 @@
+# cargo-deny configuration — advisory gate for caliban (#258).
+#
+# The CI `security-audit` workflow runs `cargo deny check advisories`, which
+# fails the build on any RustSec advisory (vulnerability / unsound / unmaintained)
+# affecting a crate in Cargo.lock — except the explicitly triaged entries below.
+# This is the durable guard that stops advisory drift from silently re-entering
+# the tree (the gap that let #258's CVEs accumulate unnoticed).
+#
+# Adding an ignore is a deliberate, reviewed decision: each MUST carry a `reason`
+# explaining why it is not actionable today. Revisit on every dependency bump.
+
+[advisories]
+# Deny every advisory by default; only the IDs below are exempted.
+ignore = [
+  # paste 1.0.15 — unmaintained (no fixed release exists; the crate is archived).
+  # Pulled transitively by ratatui 0.29 as a compile-time proc-macro only; it is
+  # not on any runtime path. Cannot be bumped independently of ratatui. Re-check
+  # when ratatui drops the dependency.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled only by ratatui 0.29; no fixed release; compile-time only" },
+
+  # lru 0.12.5 — unsound (IterMut stacked-borrows; patched >= 0.16.3). Pinned at
+  # 0.12 transitively by ratatui 0.29; cannot be upgraded without a major ratatui
+  # bump. The unsound IterMut path is internal to ratatui and not reachable from
+  # caliban. Re-check when ratatui bumps lru.
+  { id = "RUSTSEC-2026-0002", reason = "unsound IterMut pinned at lru 0.12 by ratatui 0.29; not reachable from caliban; awaits ratatui bump" },
+]

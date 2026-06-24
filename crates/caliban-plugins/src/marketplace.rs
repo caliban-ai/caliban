@@ -177,9 +177,8 @@ pub struct MarketplaceClient {
 impl Default for MarketplaceClient {
     fn default() -> Self {
         // Untrusted plugin index/tarball downloads must run on the hardened
-        // shared client (finite timeout, caliban user-agent, rustls,
-        // hickory-dns) rather than a bare `reqwest::Client::new()` with no
-        // request timeout. See #158.
+        // shared client (finite timeout, caliban user-agent, rustls) rather
+        // than a bare `reqwest::Client::new()` with no request timeout. See #158.
         Self::new(
             caliban_common::http::default_client(),
             MarketplaceSettings::default(),

@@ -71,7 +71,7 @@ anyhow    = "1"
 async-trait        = "0.1"
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
-reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2", "hickory-dns"] }
+reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
 futures            = "0.3"
 secrecy            = { version = "0.10", features = ["serde"] }
 eventsource-stream = "0.2"
@@ -80,7 +80,12 @@ url                = { version = "2", features = ["serde"] }
 bytes              = "1"
 http               = "1"
 aws-config             = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = "1"
+# Drop the SDK's default `rustls` feature: it pulls aws-smithy-runtime's
+# `tls-rustls` → legacy rustls 0.21 / rustls-webpki 0.101 (RUSTSEC-2024-0336 /
+# 2026-0098 / 2026-0099). `default-https-client` already provides the modern
+# rustls-aws-lc (rustls 0.23) connector that the Bedrock client actually uses,
+# so the legacy stack was redundant. `rt-tokio` is the rest of the SDK default.
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-types       = "1"
 gcp_auth               = "0.12"
 wiremock = "0.6"
@@ -130,7 +135,7 @@ image  = { version = "0.25", default-features = false, features = ["png", "jpeg"
 infer  = { version = "0.16", default-features = false }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 # ADR 0037 deps (sub-agent worktree isolation + supervisor daemon).
-git2         = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2         = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 interprocess = { version = "2", features = ["tokio"] }
 nix          = { version = "0.30", features = ["signal", "process"] }
 bincode      = { version = "1" }

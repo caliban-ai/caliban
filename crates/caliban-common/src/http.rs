@@ -36,7 +36,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// - Redirect follow ≤ 10 (the `reqwest` default — limit kept explicit)
 /// - HTTP/2 preferred (negotiated via ALPN)
 /// - 30-second per-request timeout
-/// - `hickory-dns` resolver
+/// - reqwest's default (system / `getaddrinfo`) DNS resolver — the optional
+///   `hickory-dns` resolver was dropped in #258 because hickory-proto carried
+///   unfixable denial-of-service advisories (RUSTSEC-2026-0118 has no patched
+///   release) reachable through this client; the system resolver has no such issue
 /// - `rustls` TLS backend (the workspace `reqwest` is built with
 ///   `default-features = false` + `rustls-tls`)
 ///
@@ -47,7 +50,6 @@ pub fn default_client_builder() -> reqwest::ClientBuilder {
         .user_agent(USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(DEFAULT_TIMEOUT)
-        .hickory_dns(true)
         .http2_adaptive_window(true)
 }
 
