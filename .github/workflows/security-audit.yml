@@ -1,0 +1,46 @@
+name: security-audit
+
+# Advisory gate (#258). Fails when a RustSec advisory affects any crate in
+# Cargo.lock, except the entries explicitly triaged in deny.toml. Runs when the
+# dependency graph changes AND on a weekly schedule so advisories disclosed
+# against otherwise-static dependencies are still caught.
+#
+# This is intentionally a separate, non-required workflow: it only reports on
+# dependency/schedule events, so it must not be wired into the branch ruleset as
+# a required check (that would block non-dependency PRs on which it never runs).
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/security-audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/security-audit.yml"
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC — catch drift on unchanged deps.
+  workflow_dispatch:
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check advisories
+        run: cargo deny check advisories
