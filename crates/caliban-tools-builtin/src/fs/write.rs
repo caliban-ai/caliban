@@ -214,4 +214,42 @@ mod tests {
 
         assert!(matches!(err, ToolError::Execution(_)));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_file_is_0644_not_0600() {
+        // #224: the atomic write path used to leak the tempfile's 0600.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool::new(WorkspaceRoot::new(tmp.path()));
+        tool.invoke(json!({"path": "created.txt", "content": "x"}), ctx())
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(tmp.path().join("created.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644, "new file mode {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewrite_preserves_existing_mode() {
+        // The reported failure: a full rewrite of an existing 0644 source file
+        // dropped it to 0600. It must keep the destination's mode.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("src.ts");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let tool = WriteTool::new(WorkspaceRoot::new(tmp.path()));
+        tool.invoke(json!({"path": "src.ts", "content": "rewritten"}), ctx())
+            .await
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "rewrite mode {mode:o}");
+    }
 }

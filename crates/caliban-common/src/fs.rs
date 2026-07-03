@@ -37,6 +37,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(parent_for_temp)?;
     tmp.write_all(bytes)?;
     tmp.flush()?;
+    // `NamedTempFile` (mkstemp) creates the tempfile at a private 0600, and a
+    // rename preserves the source's mode — so without this the destination
+    // would inherit 0600 (#224). Set the tempfile's mode before persisting:
+    // preserve the destination's existing mode on overwrite (an executable
+    // stays executable), otherwise apply the ordinary 0644 for a fresh file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o777);
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -135,5 +147,37 @@ mod tests {
         write_atomic_with_mode(&p, b"sssh", 0o600).unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "got mode {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_creates_new_file_with_0644() {
+        // Regression for #224: the tempfile-then-rename recipe used to leak the
+        // tempfile's private 0600 onto the destination. New files must land at
+        // the ordinary 0644, matching `File::create` under the common umask.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("fresh.txt");
+        write_atomic(&p, b"content").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "new file got mode {mode:o}, expected 0644");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserves_existing_mode_on_overwrite() {
+        // A rewrite must keep the destination's mode (e.g. an executable stays
+        // executable) rather than silently dropping to the tempfile's 0600.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("script.sh");
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&p, b"#!/bin/sh\necho hi\n").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "overwrite changed mode to {mode:o}, expected 0755"
+        );
     }
 }
