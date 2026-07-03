@@ -26,6 +26,7 @@ fn provider_for(server: &MockServer) -> OllamaProvider<DirectTransport> {
     let cfg = DirectConfig {
         base_url: Url::parse(&server.uri()).unwrap(),
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     OllamaProvider::direct(cfg).unwrap()
 }

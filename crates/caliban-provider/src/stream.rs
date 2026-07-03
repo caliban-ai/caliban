@@ -216,10 +216,13 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
 // ---------------------------------------------------------------------------
 
 /// Wraps a `Stream` and aborts with [`Error::StreamIdle`] when no chunk
-/// arrives within `idle`.
+/// arrives within the active idle window. The window is `prefill` before the
+/// first chunk (slow local-model prefill on a large-context turn, #263) and
+/// `idle` after it (mid-content stall).
 ///
-/// Emits a `tracing::warn` at half-time (helpful operational signal for
-/// observability dashboards) and `Err(Error::StreamIdle)` on full timeout.
+/// Emits a `tracing::warn` at half-time (with a `phase` field — helpful
+/// operational signal for observability dashboards) and
+/// `Err(Error::StreamIdle)` on full timeout.
 ///
 /// `S` must be `Unpin` because we hold the inner stream in a `Box<dyn ...>`
 /// behind a `Pin<&mut Self>`-style `poll_next`. The concrete provider streams
@@ -228,7 +231,16 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
 /// stays simple without pulling in `pin_project_lite`.
 pub struct WatchedStream<S> {
     inner: S,
+    /// Idle window that governs *after* the first chunk has arrived
+    /// (mid-content stalls).
     idle: Duration,
+    /// Idle window that governs *before* the first chunk arrives (slow
+    /// prefill on a large-context local-model turn, #263). Typically
+    /// `>= idle`.
+    prefill: Duration,
+    /// Set once the inner stream yields its first chunk. Switches the active
+    /// idle limit from `prefill` to `idle`.
+    first_chunk_seen: bool,
     last_chunk_at: Instant,
     warned: bool,
     /// A single, resettable wakeup timer armed to the idle deadline. Reused
@@ -239,15 +251,29 @@ pub struct WatchedStream<S> {
 }
 
 impl<S> WatchedStream<S> {
-    /// Build a new `WatchedStream`. `idle` is the maximum time the inner
-    /// stream may stay silent before [`Error::StreamIdle`] is surfaced.
-    pub fn new(inner: S, idle: Duration) -> Self {
+    /// Build a new `WatchedStream`. `idle` is the maximum silence tolerated
+    /// *after* the first chunk (mid-content stall); `prefill` is the maximum
+    /// silence tolerated *before* the first chunk (slow prefill, #263). Both
+    /// surface [`Error::StreamIdle`] on expiry.
+    pub fn new(inner: S, idle: Duration, prefill: Duration) -> Self {
         Self {
             inner,
             idle,
+            prefill,
+            first_chunk_seen: false,
             last_chunk_at: Instant::now(),
             warned: false,
             wakeup: None,
+        }
+    }
+
+    /// The idle limit currently in force: `prefill` until the first chunk is
+    /// seen, `idle` thereafter.
+    fn active_idle(&self) -> Duration {
+        if self.first_chunk_seen {
+            self.idle
+        } else {
+            self.prefill
         }
     }
 }
@@ -262,35 +288,44 @@ where
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(item)) => {
                 self.last_chunk_at = Instant::now();
+                self.first_chunk_seen = true;
                 self.warned = false;
                 Poll::Ready(Some(item))
             }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
+                let limit = self.active_idle();
+                let phase = if self.first_chunk_seen {
+                    "content"
+                } else {
+                    "prefill"
+                };
                 let elapsed = self.last_chunk_at.elapsed();
-                if elapsed >= self.idle {
+                if elapsed >= limit {
                     tracing::error!(
                         target: "caliban::stream",
+                        phase = phase,
                         elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                         "recovery.stream_idle.abort"
                     );
                     return Poll::Ready(Some(Err(Error::StreamIdle(elapsed))));
                 }
-                if !self.warned && elapsed >= self.idle / 2 {
+                if !self.warned && elapsed >= limit / 2 {
                     self.warned = true;
                     tracing::warn!(
                         target: "caliban::stream",
+                        phase = phase,
                         elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                         "recovery.stream_idle.warning"
                     );
                 }
-                // Arm (or re-arm) a single resettable timer at the idle
+                // Arm (or re-arm) a single resettable timer at the active idle
                 // deadline so we can fire the abort even if `inner` stays
                 // Pending. Resetting an existing `Sleep` reuses its timer
                 // slot — unlike the previous `tokio::spawn`-per-poll, which
                 // leaked one detached sleep task for every poll under a
                 // slow-but-alive upstream (#117).
-                let remaining = self.idle.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+                let remaining = limit.checked_sub(elapsed).unwrap_or(Duration::ZERO);
                 let deadline = tokio::time::Instant::now() + remaining + Duration::from_millis(1);
                 let wakeup = self
                     .wakeup
@@ -310,7 +345,7 @@ where
 mod watched_tests {
     use super::*;
     use futures::stream;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn passes_through_normal_data() {
@@ -318,7 +353,7 @@ mod watched_tests {
             Ok(StreamEvent::MessageStop),
             Ok(StreamEvent::MessageStop),
         ]);
-        let mut w = WatchedStream::new(inner, Duration::from_secs(1));
+        let mut w = WatchedStream::new(inner, Duration::from_secs(1), Duration::from_secs(1));
         let mut seen = 0;
         while let Some(item) = w.next().await {
             item.unwrap();
@@ -330,7 +365,7 @@ mod watched_tests {
     #[tokio::test]
     async fn aborts_after_idle_timeout() {
         let inner = stream::pending::<Result<StreamEvent>>();
-        let mut w = WatchedStream::new(inner, Duration::from_millis(20));
+        let mut w = WatchedStream::new(inner, Duration::from_millis(20), Duration::from_millis(20));
         let r = w.next().await.expect("Some(_)");
         assert!(matches!(r, Err(Error::StreamIdle(_))));
     }
@@ -351,7 +386,11 @@ mod watched_tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
             Some((Ok(StreamEvent::Ping), n + 1))
         }));
-        let mut w = WatchedStream::new(inner, Duration::from_millis(100));
+        let mut w = WatchedStream::new(
+            inner,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
         let mut seen = 0;
         while let Some(item) = w.next().await {
             // Every item must be a real chunk, never a StreamIdle abort.
@@ -359,5 +398,57 @@ mod watched_tests {
             seen += 1;
         }
         assert_eq!(seen, 5);
+    }
+
+    /// Before the first chunk, the *prefill* budget governs — a longer pre-
+    /// first-token silence must be tolerated up to `prefill`, even when `idle`
+    /// is tight. Guards #263.
+    #[tokio::test]
+    async fn prefill_budget_tolerates_slow_first_chunk() {
+        // Never yields a chunk. idle=20ms would abort fast; prefill=300ms must
+        // hold it open past the idle window before aborting.
+        let inner = stream::pending::<Result<StreamEvent>>();
+        let mut w =
+            WatchedStream::new(inner, Duration::from_millis(20), Duration::from_millis(300));
+        let start = Instant::now();
+        let r = w.next().await.expect("Some(_)");
+        let waited = start.elapsed();
+        assert!(
+            matches!(r, Err(Error::StreamIdle(_))),
+            "still aborts eventually"
+        );
+        assert!(
+            waited >= Duration::from_millis(200),
+            "prefill budget should hold open well past the 20ms idle window, waited {waited:?}",
+        );
+    }
+
+    /// After the first chunk arrives, the tight `idle` window governs mid-
+    /// content stalls — the generous prefill budget no longer applies.
+    #[tokio::test]
+    async fn idle_window_governs_after_first_chunk() {
+        // One real chunk, then silence forever. prefill is huge (would never
+        // fire); idle is tiny, so the post-first-chunk stall must abort at
+        // ~idle.
+        let inner = Box::pin(stream::unfold(0u32, |n| async move {
+            if n == 0 {
+                Some((Ok(StreamEvent::Ping), 1))
+            } else {
+                std::future::pending::<()>().await;
+                None
+            }
+        }));
+        let mut w = WatchedStream::new(inner, Duration::from_millis(20), Duration::from_mins(1));
+        // First poll yields the chunk.
+        let first = w.next().await.expect("first item");
+        assert!(matches!(first, Ok(StreamEvent::Ping)));
+        // Second poll must abort at the tight idle window, not the 60s prefill.
+        let start = Instant::now();
+        let second = w.next().await.expect("second item");
+        assert!(matches!(second, Err(Error::StreamIdle(_))));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "post-first-chunk stall must abort at idle (20ms), not prefill (60s)",
+        );
     }
 }

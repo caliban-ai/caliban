@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::Stream;
+use futures::StreamExt as _;
 use futures::stream;
 
 use crate::capabilities::{
@@ -34,6 +35,12 @@ enum MockEntry {
     Events(Vec<Result<StreamEvent>>),
     Error(Error),
     Silent,
+    /// A stream that stays silent for `delay` (exercising the prefill budget,
+    /// #263), then emits `events`.
+    DelayedFirstChunk {
+        delay: Duration,
+        events: Vec<Result<StreamEvent>>,
+    },
 }
 
 #[derive(Default)]
@@ -195,6 +202,18 @@ impl Provider for MockProvider {
             MockEntry::Error(e) => Err(e),
             MockEntry::Events(events) => Ok(Box::pin(stream::iter(events))),
             MockEntry::Silent => Ok(Box::pin(SilentStream)),
+            MockEntry::DelayedFirstChunk { delay, events } => {
+                // Sleep once (no chunk → exercises the prefill budget), then
+                // emit the events. `once(...).flatten()` moves `events` into
+                // the future exactly once, so no Clone bound is needed (Error
+                // is not Clone).
+                let s = stream::once(async move {
+                    tokio::time::sleep(delay).await;
+                    stream::iter(events)
+                })
+                .flatten();
+                Ok(Box::pin(s))
+            }
         }
     }
 
@@ -320,6 +339,16 @@ impl MockProviderBuilder {
     #[must_use]
     pub fn with_silent_stream(mut self, _min_silence: Duration) -> Self {
         self.entries.push(MockEntry::Silent);
+        self
+    }
+
+    /// Enqueue a stream that stays silent for `delay` (exercising the prefill
+    /// budget, #263), then emits a normal `EndTurn` response with `text`.
+    #[must_use]
+    pub fn with_delayed_first_chunk(mut self, delay: Duration, text: &str) -> Self {
+        let events = build_text_events(text, StopReason::EndTurn, 1);
+        self.entries
+            .push(MockEntry::DelayedFirstChunk { delay, events });
         self
     }
 

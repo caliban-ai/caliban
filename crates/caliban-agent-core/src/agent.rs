@@ -60,8 +60,15 @@ pub struct AgentConfig {
     pub escalated_max_tokens: u32,
     /// Stage B meta-continuation cap (per-run).
     pub max_meta_continuations: u8,
-    /// Stream idle timeout (ms). 0 disables the watchdog.
+    /// Stream idle timeout (ms). 0 disables the watchdog. Governs the silence
+    /// tolerated *after* the first output chunk (mid-content stall).
     pub stream_idle_timeout_ms: u32,
+    /// Pre-first-token idle budget (ms) for the stream watchdog. Governs the
+    /// silence tolerated *before* the first output chunk (slow local-model
+    /// prefill on a large-context turn, #263). `0` falls back to
+    /// `stream_idle_timeout_ms`. Frontier models prefill in ms and never
+    /// approach this, so a single generous global default is safe.
+    pub stream_prefill_timeout_ms: u32,
     /// Master switch for `MaxTokens` recovery (Stage A + B).
     pub max_tokens_recovery: bool,
     // ── Plan B (context-window management) ───────────────────────
@@ -123,6 +130,7 @@ impl Default for AgentConfig {
             escalated_max_tokens: 16_384,
             max_meta_continuations: 3,
             stream_idle_timeout_ms: 90_000,
+            stream_prefill_timeout_ms: 300_000,
             // Stage A hoisted above TurnEnd yield + counter inc (PR #90+
             // follow-up); regression test
             // `stage_a_retry_does_not_double_count_turn` guards the
@@ -158,6 +166,7 @@ mod recovery_config_tests {
         assert_eq!(cfg.escalated_max_tokens, 16_384);
         assert_eq!(cfg.max_meta_continuations, 3);
         assert_eq!(cfg.stream_idle_timeout_ms, 90_000);
+        assert_eq!(cfg.stream_prefill_timeout_ms, 300_000);
         // Stage A no longer double-counts the turn — recovery is
         // safely default-on. See stream/mod.rs Stage A hoist + the
         // stage_a_retry_does_not_double_count_turn regression test.

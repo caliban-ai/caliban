@@ -1131,6 +1131,25 @@ pub(crate) async fn fire_session_end(
     }
 }
 
+/// Overlay an env override onto a watchdog budget field. Reads `raw`; on a
+/// valid `u32` it overwrites `*slot`; on a malformed value it warns and leaves
+/// `*slot` unchanged. Returns whether an override was applied (for tests).
+fn apply_env_ms_override(var: &str, raw: Option<&str>, slot: &mut u32) -> bool {
+    let Some(s) = raw else { return false };
+    if let Ok(v) = s.parse::<u32>() {
+        *slot = v;
+        true
+    } else {
+        tracing::warn!(
+            target: caliban_common::tracing_targets::TARGET_SETTINGS,
+            var = var,
+            value = s,
+            "ignoring malformed stream-timeout env override (expected integer ms)",
+        );
+        false
+    }
+}
+
 /// Build the agent: wire the provider + registry, install the output-
 /// style post-processor when the `Learning` style is active, compose the
 /// hook chain (`HeadlessHookSink` + `PermissionsHook`), and apply the
@@ -1180,6 +1199,31 @@ pub(crate) fn build_agent(
     // a separate follow-up — install_sub_agent does not yet thread the same
     // Settings snapshot into the factory closure.
     settings_snapshot.apply_context_management(&mut cfg);
+    // Stream-watchdog knobs from Settings — stream_idle_timeout_ms,
+    // stream_prefill_timeout_ms (#263 / #254). Same wire-or-it-never-arrives
+    // caveat as apply_context_management above.
+    settings_snapshot.apply_stream_watchdog(&mut cfg);
+    // #263: ollama-only env override for the watchdog budgets so eval /
+    // emulated runs widen the window without a rebuild. Scoped to ollama
+    // because the watchdog is global (provider-agnostic) but this knob exists
+    // for the slow-local-model case; applying it to a frontier provider would
+    // be surprising. Precedence: env > settings > default.
+    if crate::args::provider_name(crate::args::resolved_provider(args)) == "ollama" {
+        apply_env_ms_override(
+            "OLLAMA_STREAM_IDLE_TIMEOUT_MS",
+            std::env::var("OLLAMA_STREAM_IDLE_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
+            &mut cfg.stream_idle_timeout_ms,
+        );
+        apply_env_ms_override(
+            "OLLAMA_STREAM_PREFILL_TIMEOUT_MS",
+            std::env::var("OLLAMA_STREAM_PREFILL_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
+            &mut cfg.stream_prefill_timeout_ms,
+        );
+    }
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(registry)
@@ -1450,9 +1494,23 @@ fn apply_memory_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_enabled, default_debug_filter, missing_key_err, resolve_debug_log_path};
+    use super::{
+        apply_env_ms_override, debug_enabled, default_debug_filter, missing_key_err,
+        resolve_debug_log_path,
+    };
     use crate::args::Args;
     use clap::Parser as _;
+
+    #[test]
+    fn env_ms_override_applies_valid_and_ignores_garbage() {
+        let mut slot = 90_000_u32;
+        assert!(apply_env_ms_override("X", Some("120000"), &mut slot));
+        assert_eq!(slot, 120_000);
+        assert!(!apply_env_ms_override("X", Some("abc"), &mut slot));
+        assert_eq!(slot, 120_000, "garbage leaves the prior value");
+        assert!(!apply_env_ms_override("X", None, &mut slot));
+        assert_eq!(slot, 120_000, "unset leaves the prior value");
+    }
 
     /// #256: the default debug filter must silence the `ignore`/`globset`
     /// file-walk crates so `Grep` no longer floods the log with DEBUG spam

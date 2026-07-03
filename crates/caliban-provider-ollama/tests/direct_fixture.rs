@@ -27,6 +27,7 @@ async fn complete_simple_round_trip() {
     let cfg = DirectConfig {
         base_url: Url::parse(&server.uri()).unwrap(),
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     let provider = OllamaProvider::direct(cfg).unwrap();
     let req = CompletionRequest::builder("llama3.1")
