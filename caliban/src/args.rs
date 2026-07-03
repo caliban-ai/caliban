@@ -44,6 +44,22 @@ pub(crate) fn resolved_provider(args: &Args) -> ProviderKind {
     args.provider.unwrap_or(ProviderKind::Anthropic)
 }
 
+/// Whether the file/shell tools should be confined to the workspace root.
+///
+/// Restriction is ON when `--restrict-paths` is passed **or** a `--workspace`
+/// is explicitly chosen (setting a workspace signals intent to scope the agent
+/// to it — #237), and OFF when `--no-restrict-paths` overrides. With no
+/// workspace and no flags it is OFF (the interactive default).
+pub(crate) fn should_restrict(args: &Args) -> bool {
+    !args.no_restrict_paths && (args.restrict_paths || args.workspace.is_some())
+}
+
+/// Whether this run is auto-approving every tool call **and** leaves the file
+/// tools unfenced — the F2 danger combo (#237). Drives a startup warning.
+pub(crate) fn unfenced_automation(args: &Args) -> bool {
+    args.no_permissions && !should_restrict(args)
+}
+
 pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "anthropic",
@@ -203,7 +219,8 @@ pub(crate) struct Args {
     #[arg(long, value_parser = parse_temperature, allow_negative_numbers = true)]
     pub(crate) temperature: Option<f32>,
 
-    /// Workspace root for file/shell tools
+    /// Workspace root for file/shell tools. Restricts those tools to this
+    /// directory by default (pass `--no-restrict-paths` to opt out).
     #[arg(long)]
     pub(crate) workspace: Option<PathBuf>,
 
@@ -211,9 +228,16 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) no_tools: bool,
 
-    /// Reject tool paths outside the workspace root
+    /// Reject tool paths outside the workspace root. Implied when
+    /// `--workspace` is set; use `--no-restrict-paths` to opt out.
     #[arg(long)]
     pub(crate) restrict_paths: bool,
+
+    /// Opt out of path restriction (the file/shell tools may read and write
+    /// outside the workspace root). Restriction is otherwise ON whenever
+    /// `--workspace` is set. Conflicts with `--restrict-paths`.
+    #[arg(long = "no-restrict-paths", conflicts_with = "restrict_paths")]
+    pub(crate) no_restrict_paths: bool,
 
     /// Suppress tool-execution announcements
     #[arg(long)]
@@ -830,6 +854,51 @@ mod tests {
         let mut argv: Vec<&str> = vec!["caliban"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn should_restrict_truth_table() {
+        // workspace alone => restricted (the #237 fix).
+        assert!(super::should_restrict(&parse(&["--workspace", "/tmp"])));
+        // workspace + explicit opt-out => not restricted.
+        assert!(!super::should_restrict(&parse(&[
+            "--workspace",
+            "/tmp",
+            "--no-restrict-paths"
+        ])));
+        // restrict-paths alone (no workspace) => restricted (unchanged).
+        assert!(super::should_restrict(&parse(&["--restrict-paths"])));
+        // nothing => interactive default, not restricted.
+        assert!(!super::should_restrict(&parse(&[])));
+        // opt-out alone => no-op, not restricted.
+        assert!(!super::should_restrict(&parse(&["--no-restrict-paths"])));
+    }
+
+    /// #237 F2 regression: the exact leaked scenario — `--workspace B` with no
+    /// `--restrict-paths` — must now be restricted.
+    #[test]
+    fn workspace_without_restrict_paths_is_now_fenced() {
+        assert!(super::should_restrict(&parse(&["--workspace", "/some/dir"])));
+    }
+
+    #[test]
+    fn restrict_and_no_restrict_together_is_a_parse_error() {
+        let argv = ["caliban", "--restrict-paths", "--no-restrict-paths"];
+        assert!(Args::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn unfenced_automation_flags_the_danger_combo() {
+        // --no-permissions with no fence => flagged.
+        assert!(super::unfenced_automation(&parse(&["--no-permissions"])));
+        // --no-permissions but fenced via --workspace => not flagged.
+        assert!(!super::unfenced_automation(&parse(&[
+            "--no-permissions",
+            "--workspace",
+            "/tmp"
+        ])));
+        // fenceless but permissioned => not flagged (interactive).
+        assert!(!super::unfenced_automation(&parse(&[])));
     }
 
     #[test]
