@@ -388,9 +388,18 @@ pub(crate) fn build_registry(
         return ToolRegistry::new();
     }
     let workspace_root = workspace.root().to_path_buf();
-    let root = if args.restrict_paths {
+    let root = if crate::args::should_restrict(args) {
         workspace.restricted()
     } else {
+        // #237: an auto-approve run with no path fence can mutate anywhere on
+        // the host. Warn (don't block — the operator may have opted out with
+        // --no-restrict-paths on purpose).
+        if crate::args::unfenced_automation(args) {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
+                "running with --no-permissions and no path fence: file tools may read/write outside the workspace; pass --workspace (fenced by default) or --restrict-paths to contain them"
+            );
+        }
         workspace
     };
     let mut r = ToolRegistry::new();
