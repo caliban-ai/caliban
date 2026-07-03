@@ -45,7 +45,7 @@ conventions.
 | [0022](0022-model-routing-architecture.md) | Model routing architecture (Layer 3 `caliban-model-router`; router-impl-Provider) | accepted (deferred-item scope superseded by [0038](0038-model-router-v2.md)) |
 | [0023](0023-mcp-v2-transports-and-oauth.md) | MCP v2 — transports, OAuth, elicitation, resources | accepted |
 | [0024](0024-hook-event-taxonomy.md) | Hook event taxonomy (expanded events + handler types) | accepted |
-| [0025](0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | accepted |
+| [0025](0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | accepted (result-frame shape amended by [0049](0049-result-frame-cc-enrichment.md)) |
 | [0026](0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | accepted (write format + rule schema partially superseded by [0045](0045-permissions-v2-and-toml-primary-config.md)) |
 | [0027](0027-tui-ergonomics.md) | TUI ergonomics (@file, !, Ctrl+G, Ask modal, transcript viewer) | accepted |
 | [0028](0028-checkpointing-rewind.md) | Auto-checkpointing + `/rewind` | accepted |
@@ -69,6 +69,7 @@ conventions.
 | [0046](0046-two-stage-tool-surface.md) | Two-stage tool surface — lazy MCP schema loading + ToolSearch | accepted |
 | [0047](0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
 | [0048](0048-workspace-default-restricted.md) | `--workspace` restricts file/shell tools by default (amends 0010) | accepted |
+| [0049](0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
 
 ## Adding a new ADR
 

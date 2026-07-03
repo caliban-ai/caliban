@@ -1,6 +1,6 @@
 # ADR 0025 · Headless `-p` mode + JSON output protocol
 
-- **Status:** accepted
+- **Status:** accepted (result-frame shape amended by [0049](0049-result-frame-cc-enrichment.md))
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-headless-mode-design.md`
 
