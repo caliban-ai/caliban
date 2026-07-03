@@ -298,6 +298,15 @@ pub struct Settings {
     /// `--max-tokens-recovery` overrides.
     pub max_tokens_recovery: Option<bool>,
 
+    // ----- stream watchdog (#263 / #254) ------------------------------------
+    /// Idle window (ms) tolerated *after* the first output chunk (mid-content
+    /// stall). `None` keeps the 90s default; `0` disables the watchdog.
+    pub stream_idle_timeout_ms: Option<u32>,
+    /// Idle window (ms) tolerated *before* the first output chunk (slow
+    /// local-model prefill, #263). `None` keeps the 300s default; `0` falls
+    /// back to the idle window.
+    pub stream_prefill_timeout_ms: Option<u32>,
+
     // ----- tool surface (ADR-0046) ------------------------------------------
     /// Lazy MCP tool loading knobs. Default off in v1.
     pub tools: Option<ToolsConfig>,
@@ -494,6 +503,18 @@ impl Settings {
         }
     }
 
+    /// Apply stream-watchdog knobs onto a fresh
+    /// [`caliban_agent_core::AgentConfig`]. Only fields explicitly set in
+    /// settings override the defaults. See #263 / #254.
+    pub fn apply_stream_watchdog(&self, cfg: &mut caliban_agent_core::AgentConfig) {
+        if let Some(v) = self.stream_idle_timeout_ms {
+            cfg.stream_idle_timeout_ms = v;
+        }
+        if let Some(v) = self.stream_prefill_timeout_ms {
+            cfg.stream_prefill_timeout_ms = v;
+        }
+    }
+
     /// When `settings.hooks` contains the legacy-compat sentinel written by
     /// [`crate::compat::maybe_load_legacy_hooks`], extract the handler-count
     /// for diagnostics. Returns `None` when no sentinel is present.
@@ -652,6 +673,30 @@ mod tests {
         assert_eq!(cfg.micro_compact_enabled, snap_micro);
         assert_eq!(cfg.tool_result_cap_chars, snap_cap);
         assert_eq!(cfg.min_cache_block_tokens, snap_min);
+    }
+
+    #[test]
+    fn apply_stream_watchdog_overrides_each_field() {
+        let raw = r#"{
+            "stream_idle_timeout_ms": 45000,
+            "stream_prefill_timeout_ms": 600000
+        }"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        s.apply_stream_watchdog(&mut cfg);
+        assert_eq!(cfg.stream_idle_timeout_ms, 45_000);
+        assert_eq!(cfg.stream_prefill_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn apply_stream_watchdog_leaves_defaults_when_unset() {
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        let snap_idle = cfg.stream_idle_timeout_ms;
+        let snap_prefill = cfg.stream_prefill_timeout_ms;
+        s.apply_stream_watchdog(&mut cfg);
+        assert_eq!(cfg.stream_idle_timeout_ms, snap_idle);
+        assert_eq!(cfg.stream_prefill_timeout_ms, snap_prefill);
     }
 
     #[test]
