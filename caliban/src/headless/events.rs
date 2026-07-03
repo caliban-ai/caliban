@@ -253,6 +253,15 @@ pub(crate) struct WarningFrame {
     pub(crate) details: Value,
 }
 
+/// Claude-Code-style token usage object, emitted alongside the flat
+/// `total_input_tokens` / `total_output_tokens` for drop-in CC compatibility
+/// (#222).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UsageTotals {
+    pub(crate) input_tokens: u32,
+    pub(crate) output_tokens: u32,
+}
+
 /// Final `result` frame. Also the single body of `--output-format json`.
 ///
 /// Field semantics by `subtype`:
@@ -265,15 +274,6 @@ pub(crate) struct WarningFrame {
 ///   `error`) instead. This avoids the old behavior where `result` was the
 ///   raw concatenation of every assistant-text fragment across a truncated
 ///   run, which couldn't be distinguished from a clean answer.
-/// Claude-Code-style token usage object, emitted alongside the flat
-/// `total_input_tokens` / `total_output_tokens` for drop-in CC compatibility
-/// (#222).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct UsageTotals {
-    pub(crate) input_tokens: u32,
-    pub(crate) output_tokens: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ResultFrame {
     /// Always `"result"`.
@@ -810,9 +810,7 @@ mod tests {
             ResultSubtype::BudgetExceeded,
             ResultSubtype::MaxTokens,
         ] {
-            let f = result_frame(
-                st, "", "s", 0.0, 1, 0, 0, None, None, None, 0, 0, false, 0,
-            );
+            let f = result_frame(st, "", "s", 0.0, 1, 0, 0, None, None, None, 0, 0, false, 0);
             let v = serde_json::to_value(&f).unwrap();
             assert_eq!(v["is_error"], true, "subtype {st:?} must be is_error=true");
         }

@@ -1503,7 +1503,10 @@ mod tests {
             frame["result"], "final answer",
             "result must be the final message, not the concat; got {frame}",
         );
-        assert!(frame["duration_ms"].is_u64(), "duration_ms present; got {frame}");
+        assert!(
+            frame["duration_ms"].is_u64(),
+            "duration_ms present; got {frame}"
+        );
         assert_eq!(frame["is_error"], false);
         assert_eq!(frame["num_turns"], 2);
         assert_eq!(frame["usage"]["input_tokens"], 5);
