@@ -44,7 +44,7 @@ Import resolution is:
   keep the prompt-assembly path auditable.
 - **External imports** (paths outside the workspace root and outside
   `~/.config/caliban/`) require one-time approval. The approval decision is
-  persisted to `~/.caliban/imports-allowlist.json`. In non-interactive mode
+  persisted to `~/.local/state/caliban/imports-allowlist.json`. In non-interactive mode
   (`--print`, `--bare`, CI), external imports are denied unless
   `CALIBAN_APPROVE_IMPORTS=1` is set.
 

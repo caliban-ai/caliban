@@ -37,7 +37,7 @@ conventions.
 | [0014](0014-system-prompt-and-tui-fixes.md) | Default system prompt + TUI stall fixes + debug logging | accepted (redraw-tick open question closed by [0041](0041-tui-redraw-tick-closeout.md)) |
 | [0015](0015-context-and-path-fixes.md) | Context preservation + path conventions (~ expansion) | accepted |
 | [0016](0016-parallel-tool-dispatch.md) | Parallel tool dispatch (semaphore-bounded; supersedes 0009 sequential clause) | accepted |
-| [0017](0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted (stdio-only scope superseded by [0023](0023-mcp-v2-transports-and-oauth.md)) |
+| [0017](0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted (stdio-only scope superseded by [0023](0023-mcp-v2-transports-and-oauth.md); macOS `mcp.toml` path amended by [0050](0050-xdg-first-path-locations.md)) |
 | [0018](0018-memory-tier-model.md) | Memory tier model (global / project / auto-memory; spliced into system prompt) | accepted |
 | [0019](0019-skills-loading.md) | Skills loading & invocation (frontmatter + body; `SkillTool` on-demand load) | accepted |
 | [0020](0020-permission-rules.md) | Permission rules layered on Hooks (TOML rule sources; interactive Ask) | accepted |
@@ -70,6 +70,7 @@ conventions.
 | [0047](0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
 | [0048](0048-workspace-default-restricted.md) | `--workspace` restricts file/shell tools by default (amends 0010) | accepted |
 | [0049](0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
+| [0050](0050-xdg-first-path-locations.md) | XDG-first path locations on all platforms (drops macOS-native Library default; amends 0017) | accepted |
 
 ## Adding a new ADR
 

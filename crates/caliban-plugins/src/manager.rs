@@ -27,7 +27,7 @@ pub struct PluginRoots {
     pub project: Option<PathBuf>,
     /// `$XDG_DATA_HOME/caliban/plugins/`
     pub user: Option<PathBuf>,
-    /// `/etc/caliban/plugins/` (Linux), `/Library/Application Support/Caliban/plugins/` (macOS).
+    /// `/etc/caliban/plugins/` (Unix: Linux + macOS).
     pub managed: Option<PathBuf>,
 }
 
@@ -104,7 +104,7 @@ impl PluginRoots {
 pub fn default_managed_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        PathBuf::from("/Library/Application Support/Caliban/plugins")
+        PathBuf::from("/etc/caliban/plugins")
     }
     #[cfg(target_os = "linux")]
     {

@@ -196,27 +196,28 @@ pub fn is_valid_server_name(name: &str) -> bool {
 /// Returns `(user_candidates, project_path)`. The `user_candidates` vec is
 /// an ordered, deduplicated list of user-scope candidates:
 ///
-/// 1. `$XDG_CONFIG_HOME/caliban/mcp.toml` if `XDG_CONFIG_HOME` is set,
-///    else `$HOME/.config/caliban/mcp.toml` (the "XDG path").
-/// 2. `dirs::config_dir().join("caliban/mcp.toml")` (the "platform-native
-///    path"). On Linux this equals the XDG path and is deduped; on macOS
-///    it resolves to `~/Library/Application Support/caliban/mcp.toml` and
-///    on Windows to `%APPDATA%\caliban\mcp.toml`.
+/// 1. `$XDG_CONFIG_HOME/caliban/mcp.toml`, else `~/.config/caliban/mcp.toml`
+///    (the XDG path — XDG-first on every OS per ADR 0050).
+/// 2. `platform_config_dir().join("caliban/mcp.toml")` (the base config path).
+///    Under ADR 0050 this now resolves to the same `~/.config/caliban` on every
+///    platform, so it is virtually always deduped against (1); it is retained
+///    only as a defensive second candidate.
 ///
-/// `load_config` consults these in order with **first-found wins** semantics
-/// at the user tier — XDG, when present, takes precedence over the
-/// platform-native path; we never merge both. This avoids surprising silent
-/// merges when stale data exists in both locations.
+/// `load_config` consults these in order with **first-found wins** semantics at
+/// the user tier. Since both resolve to `~/.config/caliban`, `mcp.toml` and the
+/// unified `settings.toml` now live in the same directory — the split that let
+/// a `[mcp_servers]` block in `settings.toml` be silently ignored on macOS is
+/// gone.
 #[must_use]
 pub fn discovery_paths(workspace_root: &Path) -> (Vec<PathBuf>, PathBuf) {
     let mut user: Vec<PathBuf> = Vec::new();
-    // 1. XDG path. `caliban_common::xdg_config_home` already implements the
-    //    "$XDG_CONFIG_HOME ? : $HOME/.config" rule.
+    // 1. XDG path: "$XDG_CONFIG_HOME ? : $HOME/.config", + caliban/mcp.toml.
     let xdg = caliban_common::paths::xdg_config_home("caliban").join("mcp.toml");
     user.push(xdg);
-    // 2. Platform-native path via `dirs::config_dir`. On Linux this is the
-    //    same as the XDG path — dedupe.
-    if let Some(native) = dirs::config_dir().map(|d| d.join("caliban").join("mcp.toml"))
+    // 2. Base config path. XDG-first (ADR 0050) makes this identical to (1) on
+    //    every OS; dedupe keeps a single candidate.
+    if let Some(native) =
+        caliban_common::paths::platform_config_dir().map(|d| d.join("caliban").join("mcp.toml"))
         && !user.iter().any(|p| p == &native)
     {
         user.push(native);
@@ -1043,30 +1044,27 @@ ask   = ["create_*"]
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn discovery_paths_macos_returns_xdg_and_native_when_distinct() {
-        // On macOS, $HOME/.config/caliban/mcp.toml and
-        // ~/Library/Application Support/caliban/mcp.toml are distinct.
-        // Without an XDG override, the XDG fallback is $HOME/.config and
-        // the platform-native path is Application Support — expect both.
+    fn discovery_paths_macos_dedupes_to_xdg_config() {
+        // XDG-first (ADR 0050): on macOS the base config dir is now
+        // $HOME/.config (not ~/Library/Application Support), so the XDG
+        // candidate and the platform-config candidate are identical and
+        // dedupe to a single ~/.config/caliban/mcp.toml — same as Linux.
         let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
         let (user, _project) = discovery_paths(std::path::Path::new("/tmp/ws"));
         assert_eq!(
             user.len(),
-            2,
-            "expected XDG + Application Support on macOS; got {user:?}",
+            1,
+            "expected dedupe to a single XDG path on macOS (ADR 0050); got {user:?}",
         );
-        // Order is XDG first, platform-native second.
         assert!(
             user[0].to_string_lossy().contains(".config/caliban"),
-            "first should be XDG path, got {:?}",
+            "expected ~/.config/caliban, got {:?}",
             user[0],
         );
         assert!(
-            user[1]
-                .to_string_lossy()
-                .contains("Application Support/caliban"),
-            "second should be platform-native, got {:?}",
-            user[1],
+            !user[0].to_string_lossy().contains("Application Support"),
+            "must not use Application Support (ADR 0050), got {:?}",
+            user[0],
         );
     }
 

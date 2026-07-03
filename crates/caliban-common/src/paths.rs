@@ -61,47 +61,65 @@ pub fn xdg_runtime_home(app: &str) -> Option<PathBuf> {
     Some(PathBuf::from(raw).join(app))
 }
 
-/// The base user-config directory, honoring an `$XDG_CONFIG_HOME` override but
-/// otherwise the OS-native location.
+/// Resolve an XDG base dir: the `$XDG_*_HOME` override if set and non-empty,
+/// else `$HOME/<default...>`. Returns `None` only when neither is available.
 ///
-/// 1. `$XDG_CONFIG_HOME` if set and non-empty.
-/// 2. Else [`dirs::config_dir`] — `~/.config` on Linux, `~/Library/Application
-///    Support` on macOS, `%APPDATA%` on Windows.
-///
-/// This is the drop-in replacement for bare `dirs::config_dir()` call sites:
-/// it keeps the platform-native default (so existing on-disk locations don't
-/// move) while making `$XDG_CONFIG_HOME` an honored override on every OS, which
-/// `dirs` does not do on macOS/Windows. Unlike [`xdg_config_home`], it does
-/// **not** force the XDG `~/.config` layout on macOS, and it does **not** join
-/// an app segment — callers append their own (e.g. `.join("caliban")`).
-#[must_use]
-pub fn platform_config_dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("XDG_CONFIG_HOME")
+/// This is XDG-first on **every** platform (ADR 0050): we do not defer to the
+/// OS-native `dirs::config_dir()` / `dirs::data_local_dir()` locations, which
+/// on macOS resolve to `~/Library/Application Support` — a GUI-app store that
+/// is wrong for a terminal-first tool. Caliban is uniform across Linux, macOS,
+/// and Windows: `~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache`
+/// (or the matching `XDG_*` override), plus a `caliban` app segment the caller
+/// appends.
+fn xdg_base(var: &str, default: &[&str]) -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var(var)
         && !custom.is_empty()
     {
         return Some(PathBuf::from(custom));
     }
-    dirs::config_dir()
+    dirs::home_dir().map(|home| {
+        let mut p = home;
+        for seg in default {
+            p.push(seg);
+        }
+        p
+    })
 }
 
-/// The base user-data directory, honoring an `$XDG_DATA_HOME` override but
-/// otherwise the OS-native location.
+/// The base user-config directory: `$XDG_CONFIG_HOME` or `~/.config`.
 ///
-/// 1. `$XDG_DATA_HOME` if set and non-empty.
-/// 2. Else [`dirs::data_local_dir`].
+/// The drop-in replacement for bare `dirs::config_dir()` call sites. Does
+/// **not** join an app segment — callers append their own (e.g.
+/// `.join("caliban")`). XDG-first on every OS (see [`xdg_base`], ADR 0050).
+#[must_use]
+pub fn platform_config_dir() -> Option<PathBuf> {
+    xdg_base("XDG_CONFIG_HOME", &[".config"])
+}
+
+/// The base user-data directory: `$XDG_DATA_HOME` or `~/.local/share`.
 ///
-/// The data-dir analogue of [`platform_config_dir`]: a drop-in for bare
-/// `dirs::data_local_dir()` that adds an honored `$XDG_DATA_HOME` override
-/// without moving the platform-native default. Callers append their own app
-/// segment.
+/// Drop-in for bare `dirs::data_local_dir()` / `dirs::data_dir()`. Callers
+/// append their own app segment. XDG-first on every OS (ADR 0050).
 #[must_use]
 pub fn platform_data_dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("XDG_DATA_HOME")
-        && !custom.is_empty()
-    {
-        return Some(PathBuf::from(custom));
-    }
-    dirs::data_local_dir()
+    xdg_base("XDG_DATA_HOME", &[".local", "share"])
+}
+
+/// The base user-state directory: `$XDG_STATE_HOME` or `~/.local/state`.
+///
+/// For machine-maintained, non-portable state (logs, allowlists, markers).
+/// Drop-in for bare `dirs::state_dir()`. XDG-first on every OS (ADR 0050).
+#[must_use]
+pub fn platform_state_dir() -> Option<PathBuf> {
+    xdg_base("XDG_STATE_HOME", &[".local", "state"])
+}
+
+/// The base user-cache directory: `$XDG_CACHE_HOME` or `~/.cache`.
+///
+/// Drop-in for bare `dirs::cache_dir()`. XDG-first on every OS (ADR 0050).
+#[must_use]
+pub fn platform_cache_dir() -> Option<PathBuf> {
+    xdg_base("XDG_CACHE_HOME", &[".cache"])
 }
 
 /// Build a directory-safe slug from an absolute workspace path.
@@ -259,11 +277,14 @@ mod tests {
     }
 
     #[test]
-    fn platform_config_dir_falls_back_to_os_native() {
+    fn platform_config_dir_falls_back_to_xdg_home_on_every_os() {
         let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
-        // Without the override we defer to the OS-native dir (no forced
-        // `~/.config` layout on macOS) — i.e. exactly `dirs::config_dir()`.
-        assert_eq!(platform_config_dir(), dirs::config_dir());
+        // XDG-first (ADR 0050): the fallback is `~/.config` on ALL platforms,
+        // never the OS-native `dirs::config_dir()` (Library on macOS).
+        assert_eq!(
+            platform_config_dir(),
+            dirs::home_dir().map(|h| h.join(".config"))
+        );
     }
 
     #[test]
@@ -273,9 +294,38 @@ mod tests {
     }
 
     #[test]
-    fn platform_data_dir_falls_back_to_os_native() {
+    fn platform_data_dir_falls_back_to_xdg_home_on_every_os() {
         let _g = EnvGuard::set("XDG_DATA_HOME", None);
-        assert_eq!(platform_data_dir(), dirs::data_local_dir());
+        assert_eq!(
+            platform_data_dir(),
+            dirs::home_dir().map(|h| h.join(".local").join("share"))
+        );
+    }
+
+    #[test]
+    fn platform_state_dir_honors_override_and_falls_back() {
+        {
+            let _g = EnvGuard::set("XDG_STATE_HOME", Some("/tmp/state"));
+            assert_eq!(platform_state_dir(), Some(PathBuf::from("/tmp/state")));
+        }
+        let _g = EnvGuard::set("XDG_STATE_HOME", None);
+        assert_eq!(
+            platform_state_dir(),
+            dirs::home_dir().map(|h| h.join(".local").join("state"))
+        );
+    }
+
+    #[test]
+    fn platform_cache_dir_honors_override_and_falls_back() {
+        {
+            let _g = EnvGuard::set("XDG_CACHE_HOME", Some("/tmp/cache"));
+            assert_eq!(platform_cache_dir(), Some(PathBuf::from("/tmp/cache")));
+        }
+        let _g = EnvGuard::set("XDG_CACHE_HOME", None);
+        assert_eq!(
+            platform_cache_dir(),
+            dirs::home_dir().map(|h| h.join(".cache"))
+        );
     }
 
     #[test]

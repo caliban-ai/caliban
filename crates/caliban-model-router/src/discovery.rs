@@ -71,7 +71,8 @@ pub fn discover_caliban_toml(
     if let Some(found) = walk_up_for_file(start, "caliban.toml") {
         return read_and_parse(&found).map(Some);
     }
-    if let Some(home_cfg) = dirs::config_dir().map(|d| d.join("caliban").join("caliban.toml"))
+    if let Some(home_cfg) =
+        caliban_common::paths::platform_config_dir().map(|d| d.join("caliban").join("caliban.toml"))
         && home_cfg.is_file()
     {
         return read_and_parse(&home_cfg).map(Some);

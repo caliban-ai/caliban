@@ -1,6 +1,6 @@
 # File Locations
 
-Caliban resolves settings files from four on-disk scopes. This page lists the canonical path for each scope on each supported OS.
+Caliban resolves settings files from four on-disk scopes. Paths are **XDG-first on every platform** ([ADR 0050](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0050-xdg-first-path-locations.md)) — the same layout on Linux, macOS, and Windows.
 
 ## Scope paths
 
@@ -10,21 +10,18 @@ Set by a system administrator. Caliban reads but never writes this directory.
 
 | OS | Path |
 |----|------|
-| macOS | `/Library/Application Support/Caliban/managed-settings.toml` |
-| Linux | `/etc/caliban/managed-settings.toml` |
+| Unix (Linux + macOS) | `/etc/caliban/managed-settings.toml` |
 | Windows | `C:\ProgramData\Caliban\managed-settings.toml` |
 
 The JSON equivalent (`managed-settings.json`) is accepted on read as a legacy path but triggers a `WARN` on startup.
 
 ### User scope
 
-Per-user settings that apply across all projects. Caliban uses the standard OS user-configuration directory (the parent of `caliban/`) resolved via the `dirs` crate.
+Per-user settings that apply across all projects. Caliban resolves the user-configuration directory XDG-first: `$XDG_CONFIG_HOME/caliban/`, defaulting to `~/.config/caliban/` on every platform.
 
 | OS | Path |
 |----|------|
-| macOS | `~/Library/Application Support/caliban/settings.toml` |
-| Linux | `~/.config/caliban/settings.toml` (or `$XDG_CONFIG_HOME/caliban/settings.toml`) |
-| Windows | `%APPDATA%\caliban\settings.toml` |
+| All (Linux / macOS / Windows) | `~/.config/caliban/settings.toml` (or `$XDG_CONFIG_HOME/caliban/settings.toml`) |
 
 ### Project scope
 

@@ -729,11 +729,10 @@ impl Agent {
 
         // ---- Tool-result size cap (context-management spec) ----
         if self.config.tool_result_cap_chars > 0 && !tool_result_blocks.is_empty() {
-            let overflow_dir = directories::ProjectDirs::from("dev", "caliban", "caliban")
-                .map_or_else(
-                    || std::path::PathBuf::from("/tmp/caliban-tool-overflows"),
-                    |d| d.cache_dir().join("tool-overflows"),
-                );
+            let overflow_dir = caliban_common::paths::platform_cache_dir().map_or_else(
+                || std::path::PathBuf::from("/tmp/caliban-tool-overflows"),
+                |d| d.join("caliban").join("tool-overflows"),
+            );
             let cap = crate::post_process::ToolResultCap {
                 max_chars: self.config.tool_result_cap_chars,
                 overflow_dir,

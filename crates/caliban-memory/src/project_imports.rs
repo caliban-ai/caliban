@@ -417,7 +417,9 @@ fn needs_approval(resolved: &Path, workspace_root: &Path) -> bool {
     if resolved_c.starts_with(&workspace_c) || resolved.starts_with(workspace_root) {
         return false;
     }
-    if let Some(config_dir) = dirs::config_dir().map(|d| d.join("caliban")) {
+    if let Some(config_dir) =
+        caliban_common::paths::platform_config_dir().map(|d| d.join("caliban"))
+    {
         let cfg_c = canonical_or(&config_dir);
         if resolved_c.starts_with(&cfg_c) || resolved.starts_with(&config_dir) {
             return false;

@@ -25,7 +25,7 @@ are still selectable as conversation-rewind targets.
 ## Disk layout
 
 ```text
-~/.caliban/projects/<cwd-hash>/checkpoints/<session>/
+~/.local/share/caliban/projects/<cwd-hash>/checkpoints/<session>/
   prompt-001/
     manifest.json
     blobs/<sha256>.bin

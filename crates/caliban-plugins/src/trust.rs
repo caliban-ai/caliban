@@ -81,9 +81,9 @@ impl TrustStore {
             || PathBuf::from(".caliban-trust/plugins.json"),
             |d| d.join("caliban").join("trust").join("plugins.json"),
         );
-        let allow = dirs::home_dir().map_or_else(
-            || PathBuf::from(".caliban/marketplaces-allowlist.json"),
-            |h| h.join(".caliban").join("marketplaces-allowlist.json"),
+        let allow = caliban_common::paths::platform_data_dir().map_or_else(
+            || PathBuf::from(".caliban-trust/marketplaces-allowlist.json"),
+            |d| d.join("caliban").join("marketplaces-allowlist.json"),
         );
         (trust, allow)
     }

@@ -311,7 +311,8 @@ pub fn load_rules(
     #[allow(deprecated)]
     all.extend(load_rules_file(&project_file)?);
 
-    let user_dir = dirs::config_dir().map(|d| d.join("caliban/permissions.toml"));
+    let user_dir = caliban_common::paths::platform_config_dir()
+        .map(|d| d.join("caliban").join("permissions.toml"));
     if let Some(p) = user_dir {
         #[allow(deprecated)]
         all.extend(load_rules_file(&p)?);

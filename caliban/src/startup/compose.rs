@@ -49,7 +49,7 @@ fn resolve_debug_log_path(args: &Args) -> Option<std::path::PathBuf> {
     if let Some(path) = args.debug_file.clone() {
         return Some(path);
     }
-    dirs::cache_dir().map(|d| d.join("caliban").join("debug.log"))
+    caliban_common::paths::platform_cache_dir().map(|d| d.join("caliban").join("debug.log"))
 }
 
 /// The default `EnvFilter` directive string used when `RUST_LOG` is unset.

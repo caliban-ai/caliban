@@ -21,7 +21,7 @@ pub(crate) enum HistoryScope {
     Session,
     /// Persisted history for the current project (cwd-derived path).
     Project,
-    /// All persisted histories under `~/.caliban/projects/`.
+    /// All persisted histories under `<data>/caliban/projects/`.
     AllProjects,
 }
 
@@ -198,9 +198,9 @@ pub(crate) fn sanitize_cwd(p: &Path) -> String {
 /// Returns `None` if `dirs::home_dir()` fails.
 #[must_use]
 pub(crate) fn project_history_path(cwd: &Path) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let base = caliban_common::paths::platform_data_dir()?;
     Some(
-        home.join(".caliban")
+        base.join("caliban")
             .join("projects")
             .join(sanitize_cwd(cwd))
             .join("input-history.txt"),
@@ -210,8 +210,8 @@ pub(crate) fn project_history_path(cwd: &Path) -> Option<PathBuf> {
 /// Resolve the root of the all-projects directory.
 #[must_use]
 pub(crate) fn projects_root() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(home.join(".caliban").join("projects"))
+    let base = caliban_common::paths::platform_data_dir()?;
+    Some(base.join("caliban").join("projects"))
 }
 
 /// Read history file as newline-separated entries. Missing file → empty vec.
@@ -341,7 +341,8 @@ mod tests {
     fn project_history_path_includes_sanitized_cwd() {
         let cwd = Path::new("/tmp/some project");
         if let Some(path) = project_history_path(cwd) {
-            assert!(path.display().to_string().contains(".caliban/projects/"));
+            // XDG-first (ADR 0050): under `<data>/caliban/projects/`, not `~/.caliban`.
+            assert!(path.display().to_string().contains("caliban/projects/"));
             assert!(
                 path.file_name()
                     .and_then(|n| n.to_str())

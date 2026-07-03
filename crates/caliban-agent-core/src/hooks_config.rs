@@ -152,7 +152,7 @@ impl HooksConfig {
     pub fn load(workspace_root: &Path) -> Result<Self, HooksConfigError> {
         #[allow(deprecated)]
         let project = Self::load_one(&workspace_root.join(".caliban/hooks.toml"))?;
-        let user = if let Some(d) = dirs::config_dir() {
+        let user = if let Some(d) = caliban_common::paths::platform_config_dir() {
             #[allow(deprecated)]
             Self::load_one(&d.join("caliban/hooks.toml"))?
         } else {
