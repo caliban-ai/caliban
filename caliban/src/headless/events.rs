@@ -265,6 +265,15 @@ pub(crate) struct WarningFrame {
 ///   `error`) instead. This avoids the old behavior where `result` was the
 ///   raw concatenation of every assistant-text fragment across a truncated
 ///   run, which couldn't be distinguished from a clean answer.
+/// Claude-Code-style token usage object, emitted alongside the flat
+/// `total_input_tokens` / `total_output_tokens` for drop-in CC compatibility
+/// (#222).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UsageTotals {
+    pub(crate) input_tokens: u32,
+    pub(crate) output_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ResultFrame {
     /// Always `"result"`.
@@ -290,6 +299,15 @@ pub(crate) struct ResultFrame {
     pub(crate) total_input_tokens: u32,
     /// Total output tokens.
     pub(crate) total_output_tokens: u32,
+    /// Claude-Code-contract alias for `turns` (additive; #222).
+    pub(crate) num_turns: u32,
+    /// `true` for any non-`success` subtype (additive; #222). Lets consumers
+    /// branch without enumerating every subtype spelling.
+    pub(crate) is_error: bool,
+    /// Wall-clock run duration in milliseconds (#222).
+    pub(crate) duration_ms: u64,
+    /// Claude-Code-style usage object mirroring the flat token totals (#222).
+    pub(crate) usage: UsageTotals,
     /// Structured output, when `--json-schema` was set and validation
     /// succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +503,7 @@ pub(crate) fn result_frame(
     tool_calls_seen: u32,
     turns_without_edit: u32,
     no_edit_nudge_emitted: bool,
+    duration_ms: u64,
 ) -> ResultFrame {
     let is_success = matches!(subtype, ResultSubtype::Success);
     let result_text: String = result_text.into();
@@ -514,6 +533,13 @@ pub(crate) fn result_frame(
         turns,
         total_input_tokens,
         total_output_tokens,
+        num_turns: turns,
+        is_error: !is_success,
+        duration_ms,
+        usage: UsageTotals {
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+        },
         structured_output,
         error,
         last_assistant_text,
@@ -743,6 +769,56 @@ mod tests {
     }
 
     #[test]
+    fn result_frame_adds_cc_contract_fields() {
+        let f = result_frame(
+            ResultSubtype::Success,
+            "final answer",
+            "sess-1",
+            0.0,
+            3, // turns
+            100,
+            42,
+            None,
+            None,
+            None,
+            0,
+            0,
+            false,
+            1234, // duration_ms
+        );
+        let v = serde_json::to_value(&f).unwrap();
+        // result = the passed final message.
+        assert_eq!(v["result"], "final answer");
+        // Additive CC keys.
+        assert_eq!(v["is_error"], false);
+        assert_eq!(v["num_turns"], 3);
+        assert_eq!(v["usage"]["input_tokens"], 100);
+        assert_eq!(v["usage"]["output_tokens"], 42);
+        assert_eq!(v["duration_ms"], 1234);
+        // Legacy keys still present (non-breaking).
+        assert_eq!(v["turns"], 3);
+        assert_eq!(v["total_input_tokens"], 100);
+        assert_eq!(v["total_output_tokens"], 42);
+    }
+
+    #[test]
+    fn result_frame_is_error_true_for_non_success() {
+        for st in [
+            ResultSubtype::Error,
+            ResultSubtype::MaxTurns,
+            ResultSubtype::Cancelled,
+            ResultSubtype::BudgetExceeded,
+            ResultSubtype::MaxTokens,
+        ] {
+            let f = result_frame(
+                st, "", "s", 0.0, 1, 0, 0, None, None, None, 0, 0, false, 0,
+            );
+            let v = serde_json::to_value(&f).unwrap();
+            assert_eq!(v["is_error"], true, "subtype {st:?} must be is_error=true");
+        }
+    }
+
+    #[test]
     fn result_frame_success_carries_result_field() {
         let frame = result_frame(
             ResultSubtype::Success,
@@ -758,6 +834,7 @@ mod tests {
             0,
             0,
             false,
+            0,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "result");
@@ -798,6 +875,7 @@ mod tests {
                 7,
                 0,
                 false,
+                0,
             );
             let json = serde_json::to_value(&frame).unwrap();
             assert_eq!(json["type"], "result");
@@ -832,6 +910,7 @@ mod tests {
             0,
             0,
             false,
+            0,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["last_assistant_text"], "partial assistant text");
@@ -857,6 +936,7 @@ mod tests {
             0,
             0,
             false,
+            0,
         );
         let json = serde_json::to_value(&frame).unwrap();
         assert!(

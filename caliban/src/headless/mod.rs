@@ -308,6 +308,9 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// Whether the no-edit-progress nudge fired at least once this run
     /// (#239). Captured from `TurnEvent::RunEnd`.
     no_edit_nudge_emitted: bool,
+    /// Wall-clock start of the current run (or input frame in `run_frames`),
+    /// used to compute the result frame's `duration_ms` (#222).
+    started: std::time::Instant,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -346,6 +349,7 @@ impl<W: Write> HeadlessDriver<W> {
             final_messages: Vec::new(),
             turns_without_edit: 0,
             no_edit_nudge_emitted: false,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -906,6 +910,9 @@ impl<W: Write> HeadlessDriver<W> {
                     // frame reflects the *last* turn's assistant reply
                     // (not a concatenation across every frame).
                     final_text.clear();
+                    // Reset the duration clock so `duration_ms` measures this
+                    // frame's run, not the cumulative session (#222).
+                    self.started = std::time::Instant::now();
                     let outcome = self
                         .run_single_pass(
                             Arc::clone(&agent),
@@ -963,15 +970,24 @@ impl<W: Write> HeadlessDriver<W> {
         // a hook event flushed after the result (e.g. SessionEnd) would trail it
         // and violate "the last frame is `type: result`" (#218).
         self.flush_hook_events()?;
-        let last_assistant_text_override =
-            if matches!(s.subtype, ResultSubtype::Success) || self.last_assistant_text.is_empty() {
-                None
-            } else {
-                Some(self.last_assistant_text.clone())
-            };
+        let is_success = matches!(s.subtype, ResultSubtype::Success);
+        // #222: success `result` = the final assistant message (last turn),
+        // not the cross-turn concatenation carried by `final_text`. Fall back
+        // to `final_text` when the per-turn tracker is empty.
+        let result_source: &str = if is_success && !self.last_assistant_text.is_empty() {
+            &self.last_assistant_text
+        } else {
+            &s.final_text
+        };
+        let last_assistant_text_override = if is_success || self.last_assistant_text.is_empty() {
+            None
+        } else {
+            Some(self.last_assistant_text.clone())
+        };
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let frame = events::result_frame(
             s.subtype,
-            &s.final_text,
+            result_source,
             &self.config.session_id,
             s.total_cost_usd,
             s.turns,
@@ -983,6 +999,7 @@ impl<W: Write> HeadlessDriver<W> {
             s.tool_calls_seen,
             s.turns_without_edit,
             s.no_edit_nudge_emitted,
+            duration_ms,
         );
         self.encoder.result(&mut self.writer, &frame, s)
     }
@@ -1449,6 +1466,48 @@ mod tests {
         let s = std::str::from_utf8(buf).expect("driver output not utf-8");
         let line = s.trim_end_matches('\n');
         serde_json::from_str(line).expect("driver output not valid JSON")
+    }
+
+    /// #222: for a multi-turn run, the success `result` must be the FINAL
+    /// assistant message, not the cross-turn concatenation carried by
+    /// `final_text`. Drives `emit_result` directly with the two diverging
+    /// values (as a tool-loop run would produce them) plus asserts the new
+    /// CC-contract fields.
+    #[test]
+    fn success_result_is_final_message_not_concat() {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver =
+            HeadlessDriver::new(&mut buf, HeadlessRunConfig::minimal(OutputFormat::Json));
+        // Per-turn tracker holds only the final turn; `final_text` is the
+        // across-turn concat (what a tool-using run accumulates).
+        driver.last_assistant_text = "final answer".into();
+        let summary = HeadlessRunSummary {
+            subtype: ResultSubtype::Success,
+            final_text: "investigating…final answer".into(),
+            turns: 2,
+            total_input_tokens: 5,
+            total_output_tokens: 7,
+            total_cost_usd: 0.0,
+            structured_output: None,
+            error: None,
+            tool_calls_seen: 1,
+            final_messages: vec![],
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
+        };
+        driver.emit_result(&summary).expect("emit_result");
+
+        let frame = parse_json_frame(&buf);
+        assert_eq!(frame["subtype"], "success");
+        assert_eq!(
+            frame["result"], "final answer",
+            "result must be the final message, not the concat; got {frame}",
+        );
+        assert!(frame["duration_ms"].is_u64(), "duration_ms present; got {frame}");
+        assert_eq!(frame["is_error"], false);
+        assert_eq!(frame["num_turns"], 2);
+        assert_eq!(frame["usage"]["input_tokens"], 5);
+        assert_eq!(frame["usage"]["output_tokens"], 7);
     }
 
     #[tokio::test]
