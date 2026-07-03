@@ -87,6 +87,32 @@ pub fn build_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
     default_client_builder().timeout(timeout).build()
 }
 
+/// Build a [`reqwest::Client`] for the **streaming** path: a bounded
+/// `connect_timeout` but **no** total `.timeout()`.
+///
+/// reqwest's `.timeout()` is a *total* deadline (connect → body finished),
+/// which kills a healthy-but-slow streaming response (large local-model turn)
+/// even while tokens are flowing (#254). The streaming path instead relies on
+/// the application-level `WatchedStream` idle watchdog for stall detection, so
+/// the transport only needs to bound connection establishment.
+///
+/// [`default_client_builder`] applies [`DEFAULT_TIMEOUT`] as a total timeout,
+/// so we start from `reqwest::Client::builder()` directly to keep the shared
+/// user-agent / redirect / http2 config while omitting the total timeout.
+///
+/// # Errors
+///
+/// Returns the underlying [`reqwest::Error`] if the TLS / DNS backend fails to
+/// initialize (a broken environment, not a configuration error).
+pub fn build_stream_client(connect_timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .http2_adaptive_window(true)
+        .connect_timeout(connect_timeout)
+        .build()
+}
+
 /// Build a [`reqwest::Client`] that does **not** follow redirects.
 ///
 /// Used by `web_fetch` to enforce its own same-host redirect policy.
@@ -172,5 +198,15 @@ mod tests {
     #[test]
     fn default_timeout_is_thirty_seconds() {
         assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn build_stream_client_constructs_without_total_timeout() {
+        // The stream client sets a connect timeout but no total timeout, so a
+        // healthy slow stream is never wall-clock-killed. We can only smoke the
+        // constructor here; the "no total timeout" property is covered by the
+        // provider transport tests + the eval re-run.
+        let client = build_stream_client(Duration::from_secs(30)).expect("stream client builds");
+        let _ = client;
     }
 }
