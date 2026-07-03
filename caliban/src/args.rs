@@ -878,7 +878,10 @@ mod tests {
     /// `--restrict-paths` — must now be restricted.
     #[test]
     fn workspace_without_restrict_paths_is_now_fenced() {
-        assert!(super::should_restrict(&parse(&["--workspace", "/some/dir"])));
+        assert!(super::should_restrict(&parse(&[
+            "--workspace",
+            "/some/dir"
+        ])));
     }
 
     #[test]
