@@ -6,9 +6,11 @@ This page covers how caliban resolves file paths for tools, dispatches multiple 
 
 Every filesystem and shell tool resolves paths relative to the **workspace root** — the directory caliban was started in, unless overridden.
 
-**`--workspace <DIR>`** — Set the workspace root explicitly. Relative tool paths are joined against this directory. If not supplied, caliban uses the current working directory.
+**`--workspace <DIR>`** — Set the workspace root explicitly. Relative tool paths are joined against this directory. If not supplied, caliban uses the current working directory. Setting `--workspace` **confines the file and shell tools to that directory by default** (path restriction is implied); pass `--no-restrict-paths` to opt out. See [ADR 0048](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0048-workspace-default-restricted.md).
 
-**`--restrict-paths`** — Reject any tool call whose path resolves outside the workspace root. With this flag, absolute paths that escape the workspace return an error rather than silently accessing arbitrary filesystem locations. Use it when you want a hard containment boundary at the path-resolution layer.
+**`--restrict-paths`** — Reject any tool call whose path resolves outside the workspace root. Absolute paths that escape the workspace return an error rather than silently accessing arbitrary filesystem locations. This is **implied when `--workspace` is set**; the explicit flag is still useful to fence to the current working directory when no `--workspace` is given.
+
+**`--no-restrict-paths`** — Opt out of the implied restriction so the tools may read and write outside the workspace root. Conflicts with `--restrict-paths`. When combined with `--no-permissions` (auto-approve), caliban emits a startup warning that the run is unfenced.
 
 **`additional_directories`** — A list of extra root paths declared in `settings.toml`. Tools may read and write these paths even when `--restrict-paths` is active, as long as the path falls under one of the declared roots.
 

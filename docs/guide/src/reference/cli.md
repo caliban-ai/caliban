@@ -75,9 +75,10 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--workspace <DIR>` | Current working directory | Workspace root for file and shell tools. Must be an existing directory. |
+| `--workspace <DIR>` | Current working directory | Workspace root for file and shell tools. Must be an existing directory. **Restricts those tools to this directory by default** — pass `--no-restrict-paths` to opt out. |
 | `--no-tools` | `false` | Disable all tools (chat-only mode). |
-| `--restrict-paths` | `false` | Reject tool paths outside the workspace root. |
+| `--restrict-paths` | `false` | Reject tool paths outside the workspace root. **Implied when `--workspace` is set.** |
+| `--no-restrict-paths` | `false` | Opt out of path restriction (tools may read/write outside the workspace). Conflicts with `--restrict-paths`. |
 | `--quiet` | `false` | Suppress tool-execution announcements. |
 
 ---

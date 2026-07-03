@@ -30,7 +30,7 @@ conventions.
 | [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
 | [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
 | [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted (sequential-tools clause superseded by [0016](0016-parallel-tool-dispatch.md)) |
-| [0010](0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted |
+| [0010](0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted (restricted-mode default amended by [0048](0048-workspace-default-restricted.md)) |
 | [0011](0011-sessions-and-repl.md) | Sessions persisted to disk + interactive REPL | accepted |
 | [0012](0012-tui-via-ratatui.md) | TUI via ratatui (replacing the rustyline REPL) | accepted |
 | [0013](0013-tui-overlays.md) | TUI overlays + layout v2 | accepted |
@@ -68,6 +68,7 @@ conventions.
 | [0045](0045-permissions-v2-and-toml-primary-config.md) | Permissions v2 — TOML-primary config + richer rule schema | accepted |
 | [0046](0046-two-stage-tool-surface.md) | Two-stage tool surface — lazy MCP schema loading + ToolSearch | accepted |
 | [0047](0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
+| [0048](0048-workspace-default-restricted.md) | `--workspace` restricts file/shell tools by default (amends 0010) | accepted |
 
 ## Adding a new ADR
 

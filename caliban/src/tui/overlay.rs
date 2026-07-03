@@ -540,7 +540,13 @@ pub(crate) fn config_lines(app: &App) -> Vec<Line<'_>> {
     out.push(kv("Temperature", temperature_line));
     out.push(Line::raw(""));
     out.push(kv("Workspace root", workspace));
-    out.push(kv("Restrict paths", app.args.restrict_paths.to_string()));
+    // Show the *effective* restriction (#237: --workspace now implies it),
+    // not the raw --restrict-paths flag, so the overlay doesn't read `false`
+    // while the tools are actually fenced.
+    out.push(kv(
+        "Restrict paths",
+        crate::args::should_restrict(&app.args).to_string(),
+    ));
     out.push(kv("Tools", tools_line));
     out.push(Line::raw(""));
     out.push(kv("Sessions dir", sessions_dir));
