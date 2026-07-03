@@ -58,7 +58,7 @@ This is the recommended way to supply CI-specific settings without touching scop
 When an operator sets `parent_settings_behavior = "block"` in the managed scope, the merge order flips: the managed scope moves to the **top** of the chain and overrides every other scope, including the CLI overlay.
 
 ```toml
-# /Library/Application Support/Caliban/managed-settings.toml
+# /etc/caliban/managed-settings.toml
 parent_settings_behavior = "block"
 model = "claude-haiku-4-7"
 ```

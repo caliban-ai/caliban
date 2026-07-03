@@ -9,9 +9,13 @@ metadata:
 
 # Auto-memory
 
-You have access to per-project memory under
-`~/.caliban/projects/<sanitized-cwd>/memory/`. The index, `MEMORY.md`, is
-already in your system prompt (the `<auto-memory-index>` block above).
+You have access to per-project memory under the caliban data directory —
+`$XDG_DATA_HOME/caliban/projects/<sanitized-cwd>/memory/` (defaulting to
+`~/.local/share/caliban/projects/<sanitized-cwd>/memory/`, honored uniformly on
+Linux, macOS, and Windows; overridable via `CALIBAN_MEMORY_DIR`). You don't need
+to construct that path yourself — the `ReadMemoryTopic` / `WriteMemoryTopic`
+tools resolve it. The index, `MEMORY.md`, is already in your system prompt (the
+`<auto-memory-index>` block above).
 
 ## When to READ a topic file
 

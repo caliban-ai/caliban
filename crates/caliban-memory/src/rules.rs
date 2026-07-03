@@ -145,9 +145,9 @@ impl RuleSet {
 #[must_use]
 pub fn scan_caliban_rules(workspace_root: &Path) -> RuleSet {
     let mut rules = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(cfg) = caliban_common::paths::platform_config_dir() {
         scan_dir(
-            &home.join(".caliban").join("rules"),
+            &cfg.join("caliban").join("rules"),
             RuleScope::User,
             &mut rules,
         );

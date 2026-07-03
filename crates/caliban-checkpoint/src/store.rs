@@ -38,8 +38,8 @@ pub const DISABLED_ENV: &str = "CALIBAN_CHECKPOINT_DISABLED";
 /// Resolve the default checkpoint root.
 ///
 /// 1. `$CALIBAN_CHECKPOINT_ROOT` if set (the rebase point for tests).
-/// 2. Otherwise `~/.caliban/projects` (so callers can locate it
-///    alongside Claude Code's `~/.claude/projects/...` tree).
+/// 2. Otherwise `<data>/caliban/projects` (XDG-first per ADR 0050 —
+///    `$XDG_DATA_HOME/caliban/projects`, default `~/.local/share/caliban/projects`).
 ///
 /// # Errors
 /// Returns an error when neither env override nor home directory are
@@ -50,13 +50,13 @@ pub fn default_root() -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(custom));
     }
-    let home = dirs::home_dir().ok_or_else(|| {
+    let base = caliban_common::paths::platform_data_dir().ok_or_else(|| {
         CheckpointError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "no home directory",
+            "no home / data directory",
         ))
     })?;
-    Ok(home.join(".caliban").join("projects"))
+    Ok(base.join("caliban").join("projects"))
 }
 
 /// Deterministic, filesystem-safe identifier for a workspace cwd.

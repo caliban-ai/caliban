@@ -12,10 +12,9 @@ use crate::hooks::{HookDecision, Hooks, ToolCtx};
 
 /// Return the canonical path for the permission-decisions log file.
 ///
-/// Falls back from `$XDG_STATE_HOME/caliban/` to `$XDG_DATA_HOME/caliban/`
-/// when the state dir is unavailable (macOS).
+/// Resolves to `$XDG_STATE_HOME/caliban/` (or `~/.local/state/caliban/`).
 pub fn decision_log_path() -> Option<PathBuf> {
-    let base = dirs::state_dir().or_else(dirs::data_local_dir)?;
+    let base = caliban_common::paths::platform_state_dir()?;
     let dir = base.join("caliban");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("permission-decisions.jsonl"))

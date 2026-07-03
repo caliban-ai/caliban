@@ -59,8 +59,8 @@ Env:
 
 fn make_cli() -> Result<Cli, String> {
     let workspace_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-    let user_install_dir = dirs::data_local_dir()
-        .ok_or_else(|| "no $XDG_DATA_HOME".to_string())?
+    let user_install_dir = caliban_common::paths::platform_data_dir()
+        .ok_or_else(|| "no home / $XDG_DATA_HOME".to_string())?
         .join("caliban")
         .join("plugins");
     let trust = TrustStore::open_default().map_err(|e| format!("trust store: {e}"))?;
@@ -333,7 +333,7 @@ fn cmd_enable(args: &[String], enable: bool) -> i32 {
 /// `settings.json`. Creates the file if missing, preserves any other
 /// keys, and writes pretty-printed JSON. Returns the path written.
 fn update_user_settings_plugins_enabled(name: &str, enable: bool) -> Result<PathBuf, String> {
-    let dir = dirs::config_dir()
+    let dir = caliban_common::paths::platform_config_dir()
         .ok_or_else(|| "no user config dir".to_string())?
         .join("caliban");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;

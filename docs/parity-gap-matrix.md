@@ -90,7 +90,7 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 | `@path/file` imports inside CLAUDE.md (recursion-bounded) | ✅ | ADR-0036 |
 | Auto-memory (model-written notes per project) | ✅ | ADR-0035 |
 | `claudeMdExcludes` for monorepos | ✅ | ADR-0036 |
-| Auto-checkpoint per prompt + `/rewind` | ✅ | ADR-0028; new crate `caliban-checkpoint`; `before_run`/`after_run` hooks + `CheckpointHook` snapshots file-tool pre-images per prompt under `~/.caliban/projects/<cwd>/checkpoints/<session>/prompt-N/`; `/rewind` slash command opens the overlay |
+| Auto-checkpoint per prompt + `/rewind` | ✅ | ADR-0028; new crate `caliban-checkpoint`; `before_run`/`after_run` hooks + `CheckpointHook` snapshots file-tool pre-images per prompt under `<data>/caliban/projects/<cwd>/checkpoints/<session>/prompt-N/` (XDG data dir per ADR-0050); `/rewind` slash command opens the overlay |
 | Esc-Esc / fork-from-checkpoint | ✅ | ADR-0028 — Esc-Esc on empty input opens the rewind overlay (`is_esc_chord` policy, 400 ms window). Fork-from-checkpoint stays 🔴 (sub-agent fleet spec) |
 | MicroCompact (LLM-free per-tool supersession janitor) | ✅ | Plan B (`2026-05-26-context-management`); `MicroCompactor` strategy walks history each turn replacing superseded `ToolResult` blocks (per-tool key: `Read`→file_path, `Grep`/`Glob`→exact args, `WebFetch`→url; `Bash` never supersedable) with `[superseded: <tool>(<key>)]` placeholders |
 | Tool-result size cap with overflow persistence | ✅ | Plan B; `ToolResultCap` (default 50_000 chars) writes overflow to `~/Library/Caches/caliban/tool-overflows/<session>/<tool_use_id>.txt`, replaces inline content with `[truncated: N chars, full at <path>]` + head/tail 2KB preview |

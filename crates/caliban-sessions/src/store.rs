@@ -67,7 +67,7 @@ impl SessionStore {
     /// # Errors
     /// Returns `Error::NoHome` if neither `XDG_DATA_HOME` nor HOME are available.
     pub fn default_root() -> Result<PathBuf> {
-        let base = dirs::data_dir().ok_or(Error::NoHome)?;
+        let base = caliban_common::paths::platform_data_dir().ok_or(Error::NoHome)?;
         Ok(base.join("caliban").join("sessions"))
     }
 

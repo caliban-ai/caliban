@@ -46,7 +46,9 @@ pub struct MemoryConfig {
     /// auto-deny. Defaults to `false` (interactive). Set by the binary based
     /// on its run mode.
     pub non_interactive: bool,
-    /// Path to the imports-allowlist JSON (`~/.caliban/imports-allowlist.json`).
+    /// Path to the imports-allowlist JSON
+    /// (`<state>/caliban/imports-allowlist.json`, e.g.
+    /// `~/.local/state/caliban/imports-allowlist.json`).
     pub imports_allowlist_path: PathBuf,
     /// Per-workspace auto-memory directory. Always set; may not exist yet.
     pub auto_memory_dir: PathBuf,
@@ -90,8 +92,8 @@ impl MemoryConfig {
     ///   gitignore-style patterns to skip during the ancestor walk.
     #[must_use]
     pub fn from_env(workspace_root: &Path) -> Self {
-        let config_home = xdg_dir("XDG_CONFIG_HOME", dirs::config_dir);
-        let data_home = xdg_dir("XDG_DATA_HOME", dirs::data_local_dir);
+        let config_home = caliban_common::paths::platform_config_dir();
+        let data_home = caliban_common::paths::platform_data_dir();
 
         let global_path = config_home.map(|d| d.join("caliban").join("CLAUDE.md"));
         let project_path = Some(workspace_root.join("CLAUDE.md"));
@@ -124,9 +126,9 @@ impl MemoryConfig {
         let claude_md_excludes =
             parse_exclude_patterns(std::env::var("CALIBAN_CLAUDE_MD_EXCLUDES").ok().as_deref());
 
-        let imports_allowlist_path = dirs::home_dir()
+        let imports_allowlist_path = caliban_common::paths::platform_state_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".caliban")
+            .join("caliban")
             .join("imports-allowlist.json");
 
         Self {
@@ -273,17 +275,6 @@ where
         builder.add(Glob::new(p.as_ref())?);
     }
     builder.build()
-}
-
-/// Resolve an XDG directory: honor the env var if set + non-empty, else fall
-/// back to the `dirs` crate's platform default.
-fn xdg_dir(env_var: &str, fallback: fn() -> Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os(env_var)
-        && !v.is_empty()
-    {
-        return Some(PathBuf::from(v));
-    }
-    fallback()
 }
 
 #[cfg(test)]

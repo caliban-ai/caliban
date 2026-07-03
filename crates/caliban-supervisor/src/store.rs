@@ -41,7 +41,7 @@ impl AgentStore {
     #[must_use]
     pub fn default_for(repo_root: &Path) -> Self {
         let sanitized = caliban_common::paths::sanitize_cwd_for_path(repo_root);
-        let data_root = dirs::data_dir()
+        let data_root = caliban_common::paths::platform_data_dir()
             .map_or_else(std::env::temp_dir, |d| d.join("caliban"))
             .join("projects")
             .join(sanitized)

@@ -1107,8 +1107,7 @@ pub(crate) fn permissions_lines(app: &App) -> Vec<Line<'static>> {
 /// `permission-decisions.jsonl` filename under
 /// `$XDG_STATE_HOME/caliban/` (or the OS equivalent).
 fn audit_log_exists() -> bool {
-    let base = dirs::state_dir()
-        .or_else(dirs::data_local_dir)
+    let base = caliban_common::paths::platform_state_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("caliban")
         .join("permission-decisions.jsonl")

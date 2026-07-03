@@ -111,10 +111,10 @@ impl ScopePaths {
     /// config dir, with an honored `$XDG_CONFIG_HOME` override).
     #[must_use]
     pub fn defaults() -> Self {
-        let managed_root = if cfg!(target_os = "linux") {
+        // Unix (Linux + macOS) unify on `/etc/caliban` (ADR 0050); Windows uses
+        // ProgramData. Other targets have no managed root.
+        let managed_root = if cfg!(any(target_os = "linux", target_os = "macos")) {
             Some(PathBuf::from("/etc/caliban"))
-        } else if cfg!(target_os = "macos") {
-            Some(PathBuf::from("/Library/Application Support/Caliban"))
         } else if cfg!(target_os = "windows") {
             Some(PathBuf::from("C:/ProgramData/Caliban"))
         } else {

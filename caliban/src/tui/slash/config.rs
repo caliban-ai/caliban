@@ -142,7 +142,7 @@ impl SlashCommand for PluginsCommand {
         });
         let cli = caliban_plugins::Cli {
             workspace_root,
-            user_install_dir: dirs::data_local_dir()
+            user_install_dir: caliban_common::paths::platform_data_dir()
                 .map(|d| d.join("caliban").join("plugins"))
                 .unwrap_or_default(),
             trust,

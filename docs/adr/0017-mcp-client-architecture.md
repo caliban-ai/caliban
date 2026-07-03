@@ -1,6 +1,6 @@
 # ADR 0017 · MCP client architecture
 
-- **Status:** accepted
+- **Status:** accepted (stdio-only scope superseded by [0023](0023-mcp-v2-transports-and-oauth.md); macOS `mcp.toml` path amended by [0050](0050-xdg-first-path-locations.md))
 - **Date:** 2026-05-23
 
 ## Context
@@ -65,7 +65,9 @@ and deny-rules cover MCP automatically.
 
 Two TOML files, merged at startup with project overriding user:
 
-- `~/.config/caliban/mcp.toml` (per-user; XDG-aware on Linux, cache_dir on macOS)
+- `~/.config/caliban/mcp.toml` (per-user; XDG-first on **all** platforms per
+  [ADR 0050](0050-xdg-first-path-locations.md) — the original "cache_dir on
+  macOS" note is superseded)
 - `.caliban/mcp.toml` (per-project, relative to cwd; optional)
 
 Schema is fully specified in the design doc. Project-level config can

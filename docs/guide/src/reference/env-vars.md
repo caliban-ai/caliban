@@ -102,7 +102,7 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_CHECKPOINT_ROOT` | `~/.caliban/projects` | Override the checkpoint root directory. |
+| `CALIBAN_CHECKPOINT_ROOT` | `~/.local/share/caliban/projects` | Override the checkpoint root directory. |
 | `CALIBAN_CHECKPOINT_DISABLED` | — | Any non-empty value disables checkpoint recording and pruning. |
 | `CALIBAN_CHECKPOINT_MAX_FILE_BYTES` | — | Maximum checkpoint file size before rotation. |
 | `CALIBAN_CLEANUP_PERIOD_DAYS` | — | Number of days after which old checkpoint files are pruned. |
