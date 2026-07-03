@@ -20,6 +20,9 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 | `GEMINI_API_KEY` | Google | **Required** when using the Google provider. `GOOGLE_GEMINI_API_KEY` is checked as a fallback. |
 | `GOOGLE_GEMINI_API_KEY` | Google | Fallback for `GEMINI_API_KEY`. |
 | `OLLAMA_BASE_URL` | Ollama | Optional. Base URL for the Ollama server. Default: `http://localhost:11434`. |
+| `OLLAMA_STREAM_IDLE_TIMEOUT_MS` | Ollama | Optional. Overrides `stream_idle_timeout_ms` (mid-content stall window) for ollama runs — widens the watchdog without editing settings. Takes precedence over settings. |
+| `OLLAMA_STREAM_PREFILL_TIMEOUT_MS` | Ollama | Optional. Overrides `stream_prefill_timeout_ms` (pre-first-token / slow-prefill budget) for ollama runs. Takes precedence over settings. Useful for slow local models under emulation. |
+| `OLLAMA_STREAM_TOTAL_TIMEOUT_MS` | Ollama | Optional. Re-imposes a hard **total** wall-clock timeout (ms) on the ollama streaming path. Unset (default) means no total cap — the stream relies on the connect timeout + the idle watchdog. |
 
 ---
 

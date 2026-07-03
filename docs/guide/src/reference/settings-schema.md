@@ -174,6 +174,25 @@ Nested under `[memory]`.
 
 ---
 
+## Stream Watchdog
+
+The streaming idle watchdog aborts a run when a response goes silent for too
+long. It distinguishes two phases: **prefill** (before the first output token —
+where a slow local model with a large context may legitimately pause) and
+**mid-content** (after the first token, where a long gap signals a genuine
+stall).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `stream_idle_timeout_ms` | `integer` (≥ 0) | `90000` | Silence (ms) tolerated **after** the first output token before aborting a stalled stream. `0` disables the watchdog entirely. |
+| `stream_prefill_timeout_ms` | `integer` (≥ 0) | `300000` | Silence (ms) tolerated **before** the first output token (slow local-model prefill). `0` falls back to the idle window. Frontier models prefill in milliseconds and never approach this. |
+
+For ollama, both budgets can also be overridden per-run via environment
+variables (see the [environment variables reference](env-vars.md)) so eval and
+emulated runs can widen the window without editing settings.
+
+---
+
 ## Enterprise (Managed Scope)
 
 | Key | Type | Default | Description |
