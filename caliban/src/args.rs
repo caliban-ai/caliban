@@ -100,7 +100,16 @@ pub(crate) struct Args {
     /// Suppress the ADR 0025 auto-headless dispatch when stdout is
     /// piped or stdin is non-TTY. Explicit `--print` / `--output-format`
     /// always wins; this flag only governs the implicit fall-through.
-    #[arg(long = "no-auto-print", help_heading = "Headless / -p mode (ADR 0025)")]
+    #[arg(
+        long = "no-auto-print",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) no_auto_print: bool,
 
     /// Stdin format (headless mode only).
@@ -125,7 +134,16 @@ pub(crate) struct Args {
 
     /// Skip hooks/skills/plugins/MCP/auto-memory/CLAUDE.md discovery
     /// (deterministic CI mode; ADR 0025).
-    #[arg(long = "bare", help_heading = "Headless / -p mode (ADR 0025)")]
+    #[arg(
+        long = "bare",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
     pub(crate) bare: bool,
 
     /// Request and validate structured final output matching the given JSON
@@ -143,6 +161,12 @@ pub(crate) struct Args {
     /// stream-json mode (default: aggregate into one `message` frame).
     #[arg(
         long = "include-partial-messages",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
         help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) include_partial_messages: bool,
@@ -150,6 +174,12 @@ pub(crate) struct Args {
     /// Emit a `hook_event` frame per fired hook event in stream-json mode.
     #[arg(
         long = "include-hook-events",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
         help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) include_hook_events: bool,
@@ -157,12 +187,27 @@ pub(crate) struct Args {
     /// Echo each user prompt as a `user` frame in stream-json mode.
     #[arg(
         long = "replay-user-messages",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
         help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) replay_user_messages: bool,
 
     /// Resume the most recently updated session.
-    #[arg(short = 'c', long = "continue")]
+    #[arg(
+        short = 'c',
+        long = "continue",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) continue_latest: bool,
 
     /// Resume a named session.
@@ -209,7 +254,14 @@ pub(crate) struct Args {
     ///
     /// Precedence: CLI flag > settings `max_tokens_recovery` > built-in
     /// default. Honored by `caliban-agent-core::stream::Agent`.
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) max_tokens_recovery: Option<bool>,
 
     /// Sampling temperature in `[0.0, 2.0]`. Above 2.0 is rejected
@@ -225,22 +277,55 @@ pub(crate) struct Args {
     pub(crate) workspace: Option<PathBuf>,
 
     /// Disable all tools (chat-only mode)
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_tools: bool,
 
     /// Reject tool paths outside the workspace root. Implied when
     /// `--workspace` is set; use `--no-restrict-paths` to opt out.
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) restrict_paths: bool,
 
     /// Opt out of path restriction (the file/shell tools may read and write
     /// outside the workspace root). Restriction is otherwise ON whenever
     /// `--workspace` is set. Conflicts with `--restrict-paths`.
-    #[arg(long = "no-restrict-paths", conflicts_with = "restrict_paths")]
+    #[arg(
+        long = "no-restrict-paths",
+        conflicts_with = "restrict_paths",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_restrict_paths: bool,
 
     /// Suppress tool-execution announcements
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) quiet: bool,
 
     /// Load or create a named session; persists to ~/.local/share/caliban/sessions/<NAME>.json.
@@ -248,7 +333,15 @@ pub(crate) struct Args {
     pub(crate) session: Option<String>,
 
     /// Don't save the session back to disk after the run.
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_save: bool,
 
     /// Override the sessions directory.
@@ -264,13 +357,30 @@ pub(crate) struct Args {
     pub(crate) system_file: Option<PathBuf>,
 
     /// Run with no system prompt (disables the default).
-    #[arg(long, conflicts_with_all = ["system", "system_file"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["system", "system_file"],
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_system: bool,
 
     /// Append-log events + draws to ~/.cache/caliban/debug.log
     /// (`~/Library/Caches/caliban/debug.log` on macOS). `CALIBAN_DEBUG`
     /// is also honored — any non-empty value turns it on.
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(
+        long,
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) debug: bool,
 
     /// Redirect debug output to this path instead of the default
@@ -287,6 +397,12 @@ pub(crate) struct Args {
     #[arg(
         long,
         env = "CALIBAN_VERBOSE",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
         help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) verbose: bool,
@@ -300,11 +416,29 @@ pub(crate) struct Args {
     pub(crate) attach_budget_bytes: u64,
 
     /// Disable Anthropic-style prompt caching (default: enabled).
-    #[arg(long, env = "CALIBAN_NO_PROMPT_CACHE")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_PROMPT_CACHE",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_prompt_cache: bool,
 
     /// Disable parallel tool execution (run `tool_use` blocks serially).
-    #[arg(long, env = "CALIBAN_NO_PARALLEL_TOOLS")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_PARALLEL_TOOLS",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_parallel_tools: bool,
 
     /// Max concurrent tool invocations per turn. Defaults to CPU cores - 1 (min 1).
@@ -312,12 +446,30 @@ pub(crate) struct Args {
     pub(crate) parallel_tool_limit: Option<NonZeroUsize>,
 
     /// Disable the Skill tool (no skill discovery at startup).
-    #[arg(long, env = "CALIBAN_NO_SKILLS")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_SKILLS",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_skills: bool,
 
     /// Disable MCP server discovery (skip the unified `settings.json`
     /// `mcp.servers` block and the legacy `mcp.toml` compat shim).
-    #[arg(long, env = "CALIBAN_NO_MCP")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_MCP",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_mcp: bool,
 
     /// Override the loopback port used by the OAuth callback server
@@ -332,11 +484,30 @@ pub(crate) struct Args {
 
     /// Disable plugin discovery (ADR 0030). Skips scanning all plugin roots
     /// (project, user, managed) and treats `CALIBAN_ENABLED_PLUGINS` as empty.
-    #[arg(long, env = "CALIBAN_NO_PLUGINS")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_PLUGINS",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_plugins: bool,
 
     /// Disable permission gating entirely (all tool calls allowed).
-    #[arg(long, env = "CALIBAN_NO_PERMISSIONS", conflicts_with_all = ["allow", "deny", "ask", "auto_allow"])]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_PERMISSIONS",
+        conflicts_with_all = ["allow", "deny", "ask", "auto_allow"],
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_permissions: bool,
 
     /// Add an Allow rule at top priority (repeatable). Pattern is `Tool` or `Tool:first-arg-glob`.
@@ -352,7 +523,16 @@ pub(crate) struct Args {
     pub(crate) ask: Vec<String>,
 
     /// DANGEROUS: allow the model to run any Ask-rule tool without prompting in non-interactive mode.
-    #[arg(long, env = "CALIBAN_AUTO_ALLOW")]
+    #[arg(
+        long,
+        env = "CALIBAN_AUTO_ALLOW",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) auto_allow: bool,
 
     /// Initial permission mode (ADR 0029). Valid values (camelCase):
@@ -364,23 +544,58 @@ pub(crate) struct Args {
     /// DANGEROUS: required to enter `bypassPermissions` mode. Without this
     /// flag, the binary refuses to start in bypass mode and the
     /// Shift+Tab cycle skips past it (ADR 0029).
-    #[arg(long = "allow-dangerously-skip-permissions")]
+    #[arg(
+        long = "allow-dangerously-skip-permissions",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) allow_dangerously_skip_permissions: bool,
 
     /// Disable the auto-mode classifier. Every call that would be
     /// classified instead falls through to the Ask handler (ADR 0029).
-    #[arg(long = "disable-auto-mode", env = "CALIBAN_DISABLE_AUTO_MODE")]
+    #[arg(
+        long = "disable-auto-mode",
+        env = "CALIBAN_DISABLE_AUTO_MODE",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) disable_auto_mode: bool,
 
     /// Disable the built-in `AgentTool` (the sub-agent primitive).
-    #[arg(long, env = "CALIBAN_NO_SUB_AGENT")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_SUB_AGENT",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_sub_agent: bool,
 
     /// Bypass every external hook handler (debugging escape hatch).
     /// Mirrors the `hooks.disable_all_hooks` field in `settings.json`
     /// but applies one-off. In-process hooks (`PermissionsHook`, audit)
     /// still run.
-    #[arg(long, env = "CALIBAN_NO_HOOKS")]
+    #[arg(
+        long,
+        env = "CALIBAN_NO_HOOKS",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
     pub(crate) no_hooks: bool,
 
     /// Explicit path to `caliban.toml` (overrides walk-up discovery).
@@ -735,6 +950,21 @@ pub(crate) enum RouterCommand {
 
 /// clap `value_parser` for `--temperature`. Validates the input is a
 /// finite `f32` in `[0.0, 2.0]`.
+/// Parse an optional-value boolean flag (`--flag`, `--flag=true`,
+/// `--flag=false`). Accepts the common truthy/falsy spellings
+/// (`true/false/1/0/yes/no/on/off`, case-insensitive) so env-var forms like
+/// `CALIBAN_NO_MCP=1` keep working — clap's built-in `bool` parser accepts only
+/// `true`/`false` and would turn those into a startup error.
+fn parse_bool_flag(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "`{other}` is not a boolean; use true/false (or 1/0, yes/no, on/off)"
+        )),
+    }
+}
+
 fn parse_temperature(s: &str) -> Result<f32, String> {
     let n: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
     if !n.is_finite() {
@@ -854,6 +1084,93 @@ mod tests {
         let mut argv: Vec<&str> = vec!["caliban"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn bool_flag_accepts_optional_equals_value() {
+        // #223: bare, =true, and =false must all parse.
+        assert!(!parse(&[]).include_partial_messages);
+        assert!(parse(&["--include-partial-messages"]).include_partial_messages);
+        assert!(parse(&["--include-partial-messages=true"]).include_partial_messages);
+        assert!(!parse(&["--include-partial-messages=false"]).include_partial_messages);
+    }
+
+    #[test]
+    fn bool_flag_does_not_swallow_positional_prompt() {
+        // require_equals means a bare flag can't eat the following token.
+        let args = parse(&["--include-partial-messages", "do the thing"]);
+        assert!(args.include_partial_messages);
+        assert_eq!(args.prompt.as_deref(), Some("do the thing"));
+    }
+
+    #[test]
+    fn bool_flag_rejects_non_bool_value() {
+        assert!(Args::try_parse_from(["caliban", "--include-partial-messages=maybe"]).is_err());
+    }
+
+    #[test]
+    fn env_bool_flag_still_cli_parses_equals_form() {
+        // no_mcp reads from CALIBAN_NO_MCP; the CLI `=BOOL` form must work too.
+        assert!(parse(&["--no-mcp"]).no_mcp);
+        assert!(!parse(&["--no-mcp=false"]).no_mcp);
+    }
+
+    #[test]
+    fn converted_flags_accept_equals_across_the_surface() {
+        // A representative sweep proving the rollout is uniform: env flags,
+        // negation flags, a conflict-bearing flag, and `debug` all take =BOOL.
+        assert!(parse(&["--no-tools=true"]).no_tools);
+        assert!(!parse(&["--no-tools=false"]).no_tools);
+        assert!(parse(&["--verbose=1"]).verbose);
+        assert!(!parse(&["--no-permissions=false"]).no_permissions);
+        assert!(parse(&["--debug=true"]).debug);
+        assert!(!parse(&["--quiet=off"]).quiet);
+    }
+
+    #[test]
+    fn short_continue_flag_still_parses_bare() {
+        // require_equals must not break the bare short form `-c`.
+        assert!(parse(&["-c"]).continue_latest);
+        assert!(!parse(&[]).continue_latest);
+        assert!(!parse(&["--continue=false"]).continue_latest);
+    }
+
+    #[test]
+    fn conflict_still_fires_on_bare_occurrence() {
+        // Converting to an optional-value flag must not weaken conflict rules.
+        assert!(
+            Args::try_parse_from(["caliban", "--restrict-paths", "--no-restrict-paths"]).is_err()
+        );
+    }
+
+    #[test]
+    fn max_tokens_recovery_equals_form_and_positional() {
+        assert_eq!(
+            parse(&["--max-tokens-recovery=false"]).max_tokens_recovery,
+            Some(false)
+        );
+        assert_eq!(
+            parse(&["--max-tokens-recovery"]).max_tokens_recovery,
+            Some(true)
+        );
+        assert_eq!(parse(&[]).max_tokens_recovery, None);
+        // Bare flag before a positional prompt must not swallow it.
+        let a = parse(&["--max-tokens-recovery", "hello"]);
+        assert_eq!(a.max_tokens_recovery, Some(true));
+        assert_eq!(a.prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_bool_flag_accepts_env_truthy_falsy_spellings() {
+        // clap runs this same parser over env-sourced values, so accepting the
+        // 1/0/yes/no/on/off spellings is what preserves `CALIBAN_NO_MCP=1`.
+        for t in ["true", "TRUE", "1", "yes", "on"] {
+            assert_eq!(parse_bool_flag(t), Ok(true), "{t}");
+        }
+        for f in ["false", "False", "0", "no", "off"] {
+            assert_eq!(parse_bool_flag(f), Ok(false), "{f}");
+        }
+        assert!(parse_bool_flag("maybe").is_err());
     }
 
     #[test]
