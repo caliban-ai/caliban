@@ -1152,9 +1152,17 @@ impl Agent {
                 let mut provider_stream: Pin<
                     Box<dyn Stream<Item = caliban_provider::Result<StreamEvent>> + Send>,
                 > = if self.config.stream_idle_timeout_ms > 0 {
+                    let idle = Duration::from_millis(self.config.stream_idle_timeout_ms.into());
+                    // `0` prefill → no separate grace, fall back to `idle`.
+                    let prefill = if self.config.stream_prefill_timeout_ms > 0 {
+                        Duration::from_millis(self.config.stream_prefill_timeout_ms.into())
+                    } else {
+                        idle
+                    };
                     Box::pin(caliban_provider::stream::WatchedStream::new(
                         provider_stream,
-                        Duration::from_millis(self.config.stream_idle_timeout_ms.into()),
+                        idle,
+                        prefill,
                     ))
                 } else {
                     provider_stream
