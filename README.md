@@ -94,6 +94,12 @@ export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
 export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
 ```
 
+### Container image
+
+A container image bundling `caliban` + `caliband` is published to
+`ghcr.io/caliban-ai/caliban`. See [docs/container.md](docs/container.md) for
+build/run instructions and the sandbox caveat.
+
 ## Quick start
 
 ### One-shot prompt
