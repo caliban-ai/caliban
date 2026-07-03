@@ -169,6 +169,7 @@ Nested under `[memory]`.
 |-----|------|---------|-------------|
 | `auto_compact_threshold` | `number` (0–1) or `null` | `0.75` | Pre-turn autocompaction threshold (context utilization fraction). `null` disables autocompact. |
 | `micro_compact_enabled` | `boolean` | `true` | Enable the per-turn microcompact (LLM-free supersession) pass. |
+| `compact_strategy` | `string` | `"summarize"` | Strategy used by `/compact` and threshold-autocompact: `"summarize"` (LLM summary of older turns — preserves context, incurs a provider call), `"drop-oldest"` (LLM-free; drops oldest turns past the recent window), or `"noop"` (disable). |
 | `tool_result_cap_chars` | `integer` (≥ 0) | `50000` | Global per-tool-result cap in characters. `0` disables. |
 | `min_cache_block_tokens` | `integer` (≥ 0) | `1024` | Minimum estimated tokens on the last user message to merit the conversation-level cache marker. |
 

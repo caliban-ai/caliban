@@ -1159,6 +1159,41 @@ fn apply_env_ms_override(var: &str, raw: Option<&str>, slot: &mut u32) -> bool {
     }
 }
 
+/// Select the history [`Compactor`] for the main agent from the configured
+/// strategy name. `"noop"` disables compaction; `"drop-oldest"` is the
+/// LLM-free tail-preserving strategy; anything else (including `"summarize"`,
+/// the default) uses the provider-backed `SummarizingCompactor`.
+///
+/// This is the wiring that was missing (#292): without an explicit
+/// `.compactor(..)` the agent falls back to the builder default
+/// `NoopCompactor`, so `/compact` and threshold-autocompact both no-op and
+/// history never shrinks.
+fn select_compactor(
+    strategy: &str,
+    provider: Arc<dyn Provider + Send + Sync>,
+    model: &str,
+) -> Arc<dyn caliban_agent_core::Compactor + Send + Sync> {
+    use caliban_agent_core::{DropOldestCompactor, NoopCompactor, SummarizingCompactor};
+    match strategy {
+        "noop" => Arc::new(NoopCompactor),
+        "drop-oldest" => Arc::new(DropOldestCompactor::default()),
+        other => {
+            if other != "summarize" {
+                tracing::warn!(
+                    strategy = other,
+                    "unknown compact_strategy; falling back to \"summarize\""
+                );
+            }
+            Arc::new(SummarizingCompactor {
+                provider,
+                summarizer_model: model.to_string(),
+                target_fraction: 0.7,
+                keep_recent_turns: 4,
+            })
+        }
+    }
+}
+
 /// Build the agent: wire the provider + registry, install the output-
 /// style post-processor when the `Learning` style is active, compose the
 /// hook chain (`HeadlessHookSink` + `PermissionsHook`), and apply the
@@ -1233,8 +1268,18 @@ pub(crate) fn build_agent(
             &mut cfg.stream_prefill_timeout_ms,
         );
     }
+    // #292: wire a real history compactor. Without this the builder default
+    // (`NoopCompactor`) leaves `/compact` and threshold-autocompact as no-ops.
+    // The `SummarizingCompactor` needs the provider, so clone before the Arc
+    // is moved into `.provider(..)`.
+    let compactor = select_compactor(
+        settings_snapshot.compact_strategy_or_default(),
+        Arc::clone(&provider),
+        model,
+    );
     let mut builder = Agent::builder()
         .provider(provider)
+        .compactor(compactor)
         .tools(registry)
         .config(cfg)
         .prompt_cache(!args.no_prompt_cache)
@@ -1519,6 +1564,29 @@ mod tests {
         assert_eq!(slot, 120_000, "garbage leaves the prior value");
         assert!(!apply_env_ms_override("X", None, &mut slot));
         assert_eq!(slot, 120_000, "unset leaves the prior value");
+    }
+
+    /// #292: the strategy name maps to a real compactor, and the default
+    /// (plus any unknown value) resolves to `Summarizing` — never the
+    /// `Noop` builder default that made `/compact` and autocompact no-ops.
+    #[test]
+    fn select_compactor_maps_names_and_defaults_to_summarize() {
+        use caliban_provider::{MockProvider, Provider};
+        use std::sync::Arc;
+        let p: Arc<dyn Provider + Send + Sync> = Arc::new(MockProvider::new());
+        let name = |s: &str| {
+            super::select_compactor(s, Arc::clone(&p), "mock")
+                .strategy_name()
+                .to_string()
+        };
+        assert_eq!(name("noop"), "Noop");
+        assert_eq!(name("drop-oldest"), "DropOldest");
+        assert_eq!(name("summarize"), "Summarizing");
+        assert_eq!(
+            name("bogus"),
+            "Summarizing",
+            "unknown falls back to summarize"
+        );
     }
 
     /// #256: the default debug filter must silence the `ignore`/`globset`

@@ -166,6 +166,7 @@ See [Telemetry & Cost](../observability/telemetry.md).
 |-----|------|---------|-------------|
 | `auto_compact_threshold` | `float` or `null` | `0.75` | Pre-turn auto-compaction threshold as a utilization fraction in `[0, 1]`. `null` disables auto-compact |
 | `micro_compact_enabled` | `bool` | `true` | Enable per-turn microcompact (LLM-free supersession pass) |
+| `compact_strategy` | `string` | `"summarize"` | Strategy for `/compact` + threshold-autocompact: `"summarize"`, `"drop-oldest"`, or `"noop"` |
 | `tool_result_cap_chars` | `integer` | `50000` | Global per-tool-result character cap. `0` disables |
 | `min_cache_block_tokens` | `integer` | `1024` | Minimum estimated tokens on the last user message to place a conversation-level prompt-cache marker |
 

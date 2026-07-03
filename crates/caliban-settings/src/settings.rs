@@ -287,6 +287,14 @@ pub struct Settings {
     pub auto_compact_threshold: Option<f32>,
     /// Enable the per-turn microcompact (LLM-free supersession) pass.
     pub micro_compact_enabled: Option<bool>,
+    /// Compaction strategy used by `/compact` and threshold-autocompact.
+    /// One of `"summarize"` (default — LLM summary of older turns; preserves
+    /// context but incurs a provider call), `"drop-oldest"` (LLM-free; drops
+    /// the oldest turns past the recent window), or `"noop"` (disable).
+    /// Unknown values fall back to the default. Without this the agent runs
+    /// the builder default `NoopCompactor` and neither path reduces history
+    /// (#292).
+    pub compact_strategy: Option<String>,
     /// Global per-tool-result cap in characters. `0` disables.
     pub tool_result_cap_chars: Option<usize>,
     /// Minimum estimated tokens on the last user message to merit the
@@ -503,6 +511,14 @@ impl Settings {
         }
     }
 
+    /// Resolve the configured compaction strategy name, defaulting to
+    /// `"summarize"` when unset. The strategy object itself is constructed at
+    /// agent-build time (it needs the provider); this only resolves the name.
+    #[must_use]
+    pub fn compact_strategy_or_default(&self) -> &str {
+        self.compact_strategy.as_deref().unwrap_or("summarize")
+    }
+
     /// Apply stream-watchdog knobs onto a fresh
     /// [`caliban_agent_core::AgentConfig`]. Only fields explicitly set in
     /// settings override the defaults. See #263 / #254.
@@ -657,6 +673,14 @@ mod tests {
         assert!(!cfg.micro_compact_enabled);
         assert_eq!(cfg.tool_result_cap_chars, 12_345);
         assert_eq!(cfg.min_cache_block_tokens, 789);
+    }
+
+    #[test]
+    fn compact_strategy_defaults_to_summarize_and_honors_override() {
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        assert_eq!(s.compact_strategy_or_default(), "summarize");
+        let s: Settings = serde_json::from_str(r#"{"compact_strategy": "drop-oldest"}"#).unwrap();
+        assert_eq!(s.compact_strategy_or_default(), "drop-oldest");
     }
 
     #[test]
