@@ -227,29 +227,42 @@ async fn text_format_prints_final_text_with_newline() {
 #[tokio::test]
 async fn json_format_shape_includes_required_fields() {
     // The JSON format wraps the same logical content as the result frame.
-    // Ensure the protocol fields are present as documented in ADR 0025.
+    // Ensure the protocol fields are present as documented in ADR 0025 + the
+    // #222 enrichment (ADR 0049): additive Claude-Code-contract keys alongside
+    // the legacy ones. The real serialized frame is asserted end-to-end in the
+    // bin's `headless::tests` (the driver is bin-private, unreachable here).
     use serde_json::json;
     let frame = json!({
         "type": "result",
         "subtype": "success",
         "result": "the answer",
+        "is_error": false,
         "session_id": "sess-1",
         "total_cost_usd": 0.0,
         "turns": 1,
+        "num_turns": 1,
         "total_input_tokens": 10,
         "total_output_tokens": 5,
+        "usage": { "input_tokens": 10, "output_tokens": 5 },
+        "duration_ms": 0,
     });
     assert_eq!(frame["type"], "result");
     assert_eq!(frame["subtype"], "success");
     assert_eq!(frame["session_id"], "sess-1");
-    // Required protocol surface
+    assert_eq!(frame["num_turns"], frame["turns"]);
+    assert_eq!(frame["usage"]["input_tokens"], frame["total_input_tokens"]);
+    // Required protocol surface (legacy + #222 additive CC-contract keys).
     for k in [
         "type",
         "subtype",
         "result",
+        "is_error",
         "session_id",
         "total_cost_usd",
         "turns",
+        "num_turns",
+        "usage",
+        "duration_ms",
     ] {
         assert!(frame.get(k).is_some(), "missing key {k}");
     }
