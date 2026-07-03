@@ -21,8 +21,13 @@ pub struct DirectConfig {
     pub organization: Option<String>,
     /// Optional `OpenAI` project identifier.
     pub project: Option<String>,
-    /// Request timeout.
+    /// Request timeout (non-streaming `send` path).
     pub timeout: Duration,
+    /// Optional **total** timeout for the streaming path. `None` (default) =
+    /// no total cap; the stream relies on the connect timeout + the agent-core
+    /// `WatchedStream` idle watchdog (#254). `Some(d)` re-imposes a hard
+    /// wall-clock cap.
+    pub stream_total_timeout: Option<Duration>,
 }
 
 impl DirectConfig {
@@ -39,6 +44,7 @@ impl DirectConfig {
             organization: None,
             project: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            stream_total_timeout: None,
         }
     }
 

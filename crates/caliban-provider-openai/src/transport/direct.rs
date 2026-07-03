@@ -14,6 +14,7 @@ use crate::transport::Transport;
 #[derive(Debug)]
 pub struct DirectTransport {
     client: reqwest::Client,
+    stream_client: reqwest::Client,
     config: DirectConfig,
 }
 
@@ -26,7 +27,21 @@ impl DirectTransport {
     pub fn new(config: DirectConfig) -> Result<Self, OpenAIError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(OpenAIError::Http)?;
-        Ok(Self { client, config })
+        // Streaming path: no total timeout by default (#254); rely on the
+        // connect timeout + the agent-core WatchedStream watchdog. Honor an
+        // operator-set stream total timeout if present.
+        let stream_client = match config.stream_total_timeout {
+            Some(total) => caliban_common::http::build_client(total),
+            None => {
+                caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+            }
+        }
+        .map_err(OpenAIError::Http)?;
+        Ok(Self {
+            client,
+            stream_client,
+            config,
+        })
     }
 
     fn endpoint(&self) -> String {
@@ -86,7 +101,7 @@ impl Transport for DirectTransport {
 
         let headers = self.auth_headers()?;
         let resp = self
-            .client
+            .stream_client
             .post(self.endpoint())
             .headers(headers)
             .json(&body)

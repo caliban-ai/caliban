@@ -24,6 +24,7 @@ fn transport_for(server: &MockServer) -> DirectTransport {
     DirectTransport::new(DirectConfig {
         base_url: Url::parse(&server.uri()).unwrap(),
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     })
     .unwrap()
 }

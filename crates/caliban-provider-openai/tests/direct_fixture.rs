@@ -32,6 +32,7 @@ async fn complete_simple_round_trip() {
         organization: None,
         project: None,
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     let provider = OpenAIProvider::direct(cfg).unwrap();
     let req = CompletionRequest::builder("gpt-4o")
@@ -84,6 +85,7 @@ async fn o1_uses_developer_role() {
         organization: None,
         project: None,
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     let provider = OpenAIProvider::direct(cfg).unwrap();
     let req = CompletionRequest::builder("o1")
@@ -114,6 +116,7 @@ async fn rate_limit_429_captures_retry_after_header() {
         organization: None,
         project: None,
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     let provider = OpenAIProvider::direct(cfg).unwrap();
     let req = CompletionRequest::builder("gpt-4o")

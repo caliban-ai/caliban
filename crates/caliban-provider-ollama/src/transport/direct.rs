@@ -13,6 +13,7 @@ use crate::transport::Transport;
 #[derive(Debug)]
 pub struct DirectTransport {
     client: reqwest::Client,
+    stream_client: reqwest::Client,
     config: DirectConfig,
 }
 
@@ -25,7 +26,21 @@ impl DirectTransport {
     pub fn new(config: DirectConfig) -> Result<Self, OllamaError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(OllamaError::Http)?;
-        Ok(Self { client, config })
+        // Streaming path: no total timeout by default (#254); rely on the
+        // connect timeout + the agent-core WatchedStream watchdog. If the
+        // operator set a stream total timeout, honor it.
+        let stream_client = match config.stream_total_timeout {
+            Some(total) => caliban_common::http::build_client(total),
+            None => {
+                caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+            }
+        }
+        .map_err(OllamaError::Http)?;
+        Ok(Self {
+            client,
+            stream_client,
+            config,
+        })
     }
 
     fn endpoint(&self) -> String {
@@ -61,7 +76,7 @@ impl Transport for DirectTransport {
         body: NativeRequest,
     ) -> Result<BoxStream<'static, Result<bytes::Bytes, OllamaError>>, OllamaError> {
         let resp = self
-            .client
+            .stream_client
             .post(self.endpoint())
             .header("content-type", "application/json")
             .json(&body)

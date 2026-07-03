@@ -28,6 +28,7 @@ async fn stream_simple_round_trip() {
         organization: None,
         project: None,
         timeout: std::time::Duration::from_secs(10),
+        stream_total_timeout: None,
     };
     let provider = OpenAIProvider::direct(cfg).unwrap();
     let req = CompletionRequest::builder("gpt-4o")
