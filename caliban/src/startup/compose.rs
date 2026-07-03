@@ -1135,23 +1135,18 @@ pub(crate) async fn fire_session_end(
 /// valid `u32` it overwrites `*slot`; on a malformed value it warns and leaves
 /// `*slot` unchanged. Returns whether an override was applied (for tests).
 fn apply_env_ms_override(var: &str, raw: Option<&str>, slot: &mut u32) -> bool {
-    match raw {
-        None => false,
-        Some(s) => match s.parse::<u32>() {
-            Ok(v) => {
-                *slot = v;
-                true
-            }
-            Err(_) => {
-                tracing::warn!(
-                    target: caliban_common::tracing_targets::TARGET_SETTINGS,
-                    var = var,
-                    value = s,
-                    "ignoring malformed stream-timeout env override (expected integer ms)",
-                );
-                false
-            }
-        },
+    let Some(s) = raw else { return false };
+    if let Ok(v) = s.parse::<u32>() {
+        *slot = v;
+        true
+    } else {
+        tracing::warn!(
+            target: caliban_common::tracing_targets::TARGET_SETTINGS,
+            var = var,
+            value = s,
+            "ignoring malformed stream-timeout env override (expected integer ms)",
+        );
+        false
     }
 }
 
@@ -1216,7 +1211,9 @@ pub(crate) fn build_agent(
     if crate::args::provider_name(crate::args::resolved_provider(args)) == "ollama" {
         apply_env_ms_override(
             "OLLAMA_STREAM_IDLE_TIMEOUT_MS",
-            std::env::var("OLLAMA_STREAM_IDLE_TIMEOUT_MS").ok().as_deref(),
+            std::env::var("OLLAMA_STREAM_IDLE_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
             &mut cfg.stream_idle_timeout_ms,
         );
         apply_env_ms_override(

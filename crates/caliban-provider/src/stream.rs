@@ -386,8 +386,11 @@ mod watched_tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
             Some((Ok(StreamEvent::Ping), n + 1))
         }));
-        let mut w =
-            WatchedStream::new(inner, Duration::from_millis(100), Duration::from_millis(100));
+        let mut w = WatchedStream::new(
+            inner,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
         let mut seen = 0;
         while let Some(item) = w.next().await {
             // Every item must be a real chunk, never a StreamIdle abort.
@@ -428,15 +431,14 @@ mod watched_tests {
         // fire); idle is tiny, so the post-first-chunk stall must abort at
         // ~idle.
         let inner = Box::pin(stream::unfold(0u32, |n| async move {
-            match n {
-                0 => Some((Ok(StreamEvent::Ping), 1)),
-                _ => {
-                    std::future::pending::<()>().await;
-                    None
-                }
+            if n == 0 {
+                Some((Ok(StreamEvent::Ping), 1))
+            } else {
+                std::future::pending::<()>().await;
+                None
             }
         }));
-        let mut w = WatchedStream::new(inner, Duration::from_millis(20), Duration::from_secs(60));
+        let mut w = WatchedStream::new(inner, Duration::from_millis(20), Duration::from_mins(1));
         // First poll yields the chunk.
         let first = w.next().await.expect("first item");
         assert!(matches!(first, Ok(StreamEvent::Ping)));

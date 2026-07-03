@@ -94,7 +94,9 @@ impl DirectConfig {
             cfg.base_url = Url::parse(url).map_err(|e| OllamaError::Transport(Box::new(e)))?;
         }
         if let Some(ms) = total_timeout_ms {
-            let ms: u64 = ms.parse().map_err(|e| OllamaError::Transport(Box::new(e)))?;
+            let ms: u64 = ms
+                .parse()
+                .map_err(|e| OllamaError::Transport(Box::new(e)))?;
             cfg.stream_total_timeout = Some(Duration::from_millis(ms));
         }
         Ok(cfg)
@@ -133,9 +135,8 @@ mod tests {
 
     #[test]
     fn stream_total_timeout_parsed_from_env() {
-        let cfg =
-            DirectConfig::from_env_parts(None, Some("120000")).expect("valid ms parses");
-        assert_eq!(cfg.stream_total_timeout, Some(Duration::from_millis(120_000)));
+        let cfg = DirectConfig::from_env_parts(None, Some("120000")).expect("valid ms parses");
+        assert_eq!(cfg.stream_total_timeout, Some(Duration::from_mins(2)));
     }
 
     #[test]
