@@ -97,7 +97,7 @@ If caliban finds both `settings.toml` and `settings.json` in the same scope dire
 
 Most settings changes take effect immediately via the file watcher (250 ms debounce). A subset of keys require a full restart:
 
-- **Restart-required:** `model`, `fallback_model`, `mcp_servers.*`, `output_style`, `auto_compact_threshold`, `micro_compact_enabled`
+- **Restart-required:** `model`, `fallback_model`, `mcp_servers.*`, `output_style`, `auto_compact_threshold`, `micro_compact_enabled`, `compact_strategy`
 
 When a restart-required key changes on disk while caliban is running, caliban logs a `WARN` and shows a "restart required" badge in the `/config` TUI overlay. The new value will be used the next time you launch `caliban`.
 

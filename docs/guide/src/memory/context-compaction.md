@@ -37,6 +37,25 @@ auto_compact_threshold = 0.75   # 0.0–1.0; unset or null disables autocompact
 Set `auto_compact_threshold` to `null` (or omit it) to disable autocompact
 entirely and rely on manual `/compact` invocations.
 
+## Compaction strategy
+
+Both autocompact and manual `/compact` run the compactor selected by
+`compact_strategy`:
+
+| Strategy       | API calls | Behavior                                                              |
+|----------------|-----------|----------------------------------------------------------------------|
+| `summarize`    | Yes       | Summarizes older turns into a single system message (default). Preserves goals/decisions; incurs one provider call per compaction. |
+| `drop-oldest`  | No        | Drops the oldest turns past the recent window until back under target. Deterministic and free, but older detail is lost. |
+| `noop`         | No        | Disables strategy-level compaction (micro-compaction still runs).    |
+
+```toml
+compact_strategy = "summarize"   # "summarize" (default) | "drop-oldest" | "noop"
+```
+
+`summarize` and `drop-oldest` keep leading system messages and the most recent
+turns verbatim, and only act once utilization is high enough that there is older
+history to shed. Unknown values fall back to `summarize`.
+
 ## Micro-compaction
 
 Micro-compaction is an LLM-free per-turn pass that supersedes stale
@@ -72,9 +91,9 @@ telemetry is enabled.
 /compact
 ```
 
-No flags. The compactor strategy (summarizing vs. micro) is determined by the
-active configuration — see [Hooks](../extending/hooks.md) for the
-`PreCompact` / `PostCompact` hook events that fire around each compaction.
+No flags. The strategy is determined by `compact_strategy` (see [Compaction
+strategy](#compaction-strategy) above) — see [Hooks](../extending/hooks.md) for
+the `PreCompact` / `PostCompact` hook events that fire around each compaction.
 
 ## `/clear`
 
@@ -140,5 +159,6 @@ tool_result_cap_chars = 65536   # 0 disables the cap (default)
 |----------------------------|---------|---------|----------------------------------------------------|
 | `auto_compact_threshold`   | float   | `0.75`  | Utilization (0–1) that triggers autocompact; `null` disables |
 | `micro_compact_enabled`    | bool    | `true`  | Enable the LLM-free per-turn supersession pass     |
+| `compact_strategy`         | string  | `"summarize"` | `summarize` \| `drop-oldest` \| `noop`       |
 | `min_cache_block_tokens`   | integer | —       | Minimum tokens to place the prompt cache marker    |
 | `tool_result_cap_chars`    | integer | `0`     | Per-result character cap; `0` disables             |

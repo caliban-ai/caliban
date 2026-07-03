@@ -88,7 +88,7 @@ An unknown scope name is a fatal error (`exit 78`) rather than a silent no-op.
 A file watcher monitors each scope's path with a 250 ms debounce. When a file changes, caliban re-loads and re-merges all scopes atomically and fires a `ConfigChange` hook event. Most keys take effect immediately:
 
 - **Live-reloadable:** `permissions.*`, `hooks.*`, `api_key_helper.*`, `output_style`, `editor_mode`, `view_mode`, `statusLine`, `env`, `memory`, `additional_directories`, `claude_md_excludes`
-- **Restart-required:** `model`, `fallback_model`, `mcp_servers.*`, `auto_compact_threshold`, `micro_compact_enabled`
+- **Restart-required:** `model`, `fallback_model`, `mcp_servers.*`, `auto_compact_threshold`, `micro_compact_enabled`, `compact_strategy`
 
 Restart-required keys log a `WARN` on change and take effect on the next `caliban` invocation. The `/config` TUI overlay shows a "restart required" badge next to changed restart-required keys.
 
