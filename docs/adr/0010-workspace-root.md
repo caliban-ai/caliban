@@ -1,6 +1,6 @@
 # ADR 0010 · WorkspaceRoot path resolution + opt-in restricted mode
 
-- **Status:** accepted
+- **Status:** accepted (restricted-mode default amended by [0048](0048-workspace-default-restricted.md) — `--workspace` now implies restriction)
 - **Date:** 2026-05-23
 
 ## Context
