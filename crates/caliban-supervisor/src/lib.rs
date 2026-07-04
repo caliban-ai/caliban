@@ -31,7 +31,7 @@ pub use proto::{
     SupervisorError,
 };
 pub use registry::Registry;
-pub use runtime::{repo_socket_path, repo_socket_path_in};
+pub use runtime::{workspace_socket_path, workspace_socket_path_in};
 pub use server::{NetworkConfig, Supervisor};
 pub use store::AgentStore;
 pub use transport::{BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect};

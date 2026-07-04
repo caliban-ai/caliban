@@ -993,11 +993,11 @@ pub(crate) fn handoff_to_supervisor(app: &mut App) {
     use std::path::PathBuf;
 
     use caliban_supervisor::proto::SpawnSpec;
-    use caliban_supervisor::{SupervisorClient, repo_socket_path};
+    use caliban_supervisor::{SupervisorClient, workspace_socket_path};
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let repo = crate::agents_cli::discover_repo_root(&cwd);
-    let socket_path = repo_socket_path(&repo);
+    let socket_path = workspace_socket_path(&repo);
 
     // Build a placeholder spec so the daemon can list the agent. The
     // real session bytes live in the parent's transcript; once we have

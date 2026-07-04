@@ -35,12 +35,12 @@ impl AgentStore {
         Self { base: base.into() }
     }
 
-    /// Default `<base>/agents` directory for the given repo root.
+    /// Default `<base>/agents` directory for the given workspace root.
     /// Falls back to `<tempdir>/caliban-agents/<sanitized>` when the
     /// user has no data dir configured.
     #[must_use]
-    pub fn default_for(repo_root: &Path) -> Self {
-        let sanitized = caliban_common::paths::sanitize_cwd_for_path(repo_root);
+    pub fn default_for(workspace_root: &Path) -> Self {
+        let sanitized = caliban_common::paths::sanitize_cwd_for_path(workspace_root);
         let data_root = caliban_common::paths::platform_data_dir()
             .map_or_else(std::env::temp_dir, |d| d.join("caliban"))
             .join("projects")

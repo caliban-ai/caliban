@@ -1,10 +1,10 @@
-//! `caliband` — caliban's per-repo supervisor daemon binary (ADR 0037).
+//! `caliband` — caliban's per-workspace supervisor daemon binary (ADR 0037).
 //!
 //! Usage (rarely invoked directly — the `caliban` CLI auto-spawns this
 //! binary on first need):
 //!
 //! ```text
-//! caliband --repo-root /path/to/repo
+//! caliband --workspace-root /path/to/workspace  # (or --repo-root, alias)
 //!         [--socket-path /custom/path.sock]
 //!         [--data-base /custom/data/dir]
 //!         [--listen 0.0.0.0:7070]          # network (TCP) server mode (#280)
@@ -24,11 +24,11 @@ use std::sync::Arc;
 
 use caliban_supervisor::store::AgentStore;
 use caliban_supervisor::transport::{BindSpec, Endpoint, tls_server_from_pem};
-use caliban_supervisor::{NetworkConfig, Supervisor, repo_socket_path};
+use caliban_supervisor::{NetworkConfig, Supervisor, workspace_socket_path};
 
 #[derive(Debug, Default)]
 struct Args {
-    repo_root: Option<PathBuf>,
+    workspace_root: Option<PathBuf>,
     socket_path: Option<PathBuf>,
     data_base: Option<PathBuf>,
     // Network (TCP) server mode (#280 Task 7).
@@ -51,7 +51,9 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--repo-root" => a.repo_root = it.next().map(PathBuf::from),
+            "--workspace-root" | "--repo-root" => {
+                a.workspace_root = it.next().map(PathBuf::from);
+            }
             "--socket-path" => a.socket_path = it.next().map(PathBuf::from),
             "--data-base" => a.data_base = it.next().map(PathBuf::from),
             "--listen" => a.listen = it.next(),
@@ -70,10 +72,11 @@ fn parse_args() -> Result<Args, String> {
             "--token" => a.token = it.next(),
             "-h" | "--help" => {
                 eprintln!(
-                    "Usage: caliband --repo-root <path> [--socket-path <path>] [--data-base <path>]\n\
-                     \x20               [--listen <host:port>] [--advertise-host <host>]\n\
-                     \x20               [--agent-port-base <port>] [--tls-cert <pem> --tls-key <pem>]\n\
-                     \x20               [--tls-ca <pem>] [--token <bearer>]"
+                    "Usage: caliband --workspace-root <path> [--repo-root <path>] [--socket-path <path>]\n\
+                     \x20               [--data-base <path>] [--listen <host:port>]\n\
+                     \x20               [--advertise-host <host>] [--agent-port-base <port>]\n\
+                     \x20               [--tls-cert <pem> --tls-key <pem>] [--tls-ca <pem>]\n\
+                     \x20               [--token <bearer>]"
                 );
                 std::process::exit(0);
             }
@@ -104,8 +107,8 @@ fn parse_args() -> Result<Args, String> {
         .or_else(|| env_opt("CALIBAN_DAEMON_TLS_CA").map(PathBuf::from));
     a.token = a.token.or_else(|| env_opt("CALIBAN_DAEMON_TOKEN"));
 
-    if a.repo_root.is_none() {
-        return Err("--repo-root required".to_string());
+    if a.workspace_root.is_none() {
+        return Err("--workspace-root required (or --repo-root)".to_string());
     }
     Ok(a)
 }
@@ -128,12 +131,15 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // `parse_args` guarantees `repo_root` is set.
-    let repo_root = args.repo_root.clone().unwrap_or_else(|| PathBuf::from("."));
+    // `parse_args` guarantees `workspace_root` is set.
+    let workspace_root = args
+        .workspace_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
     let socket_path = args
         .socket_path
         .clone()
-        .unwrap_or_else(|| repo_socket_path(&repo_root));
+        .unwrap_or_else(|| workspace_socket_path(&workspace_root));
     let agent_runtime_dir = socket_path.parent().map_or_else(
         || std::env::temp_dir().join("caliban-agents"),
         |p| p.join("agents"),
@@ -141,7 +147,7 @@ async fn main() -> std::io::Result<()> {
     let store = if let Some(base) = args.data_base.clone() {
         AgentStore::new(base)
     } else {
-        AgentStore::default_for(&repo_root)
+        AgentStore::default_for(&workspace_root)
     };
 
     let supervisor = match build_supervisor(&args, socket_path, store, agent_runtime_dir) {

@@ -1,7 +1,7 @@
-//! Runtime-directory + per-repo socket path resolution.
+//! Runtime-directory + per-workspace socket path resolution.
 //!
 //! Per the design spec: socket path is
-//! `${CALIBAN_DAEMON_RUNTIME_DIR:-$XDG_RUNTIME_DIR/caliban}/<hash(repo_root)>.sock`
+//! `${CALIBAN_DAEMON_RUNTIME_DIR:-$XDG_RUNTIME_DIR/caliban}/<hash(workspace_root)>.sock`
 //! (and we fall back to `$TMPDIR/caliban-daemon` when neither env var is
 //! set — primarily macOS, where `$XDG_RUNTIME_DIR` isn't conventional).
 
@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-/// Compute a stable, short hash of the absolute repo root. We use the
+/// Compute a stable, short hash of the absolute workspace root. We use the
 /// first 16 hex chars of SHA-256, which collides at a rate that's
 /// irrelevant in practice (one machine, few repos).
 #[must_use]
-pub fn repo_hash(repo_root: &Path) -> String {
+pub fn workspace_hash(workspace_root: &Path) -> String {
     use std::fmt::Write as _;
-    let s = repo_root.to_string_lossy();
+    let s = workspace_root.to_string_lossy();
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     let bytes = h.finalize();
@@ -46,17 +46,18 @@ pub fn default_runtime_dir() -> PathBuf {
     std::env::temp_dir().join("caliban-daemon")
 }
 
-/// Compute the per-repo daemon socket path under the default runtime dir.
+/// Compute the per-workspace daemon socket path under the default runtime
+/// dir.
 #[must_use]
-pub fn repo_socket_path(repo_root: &Path) -> PathBuf {
-    repo_socket_path_in(&default_runtime_dir(), repo_root)
+pub fn workspace_socket_path(workspace_root: &Path) -> PathBuf {
+    workspace_socket_path_in(&default_runtime_dir(), workspace_root)
 }
 
-/// Compute the per-repo daemon socket path under an explicit runtime
+/// Compute the per-workspace daemon socket path under an explicit runtime
 /// directory (used by tests).
 #[must_use]
-pub fn repo_socket_path_in(runtime_dir: &Path, repo_root: &Path) -> PathBuf {
-    runtime_dir.join(format!("{}.sock", repo_hash(repo_root)))
+pub fn workspace_socket_path_in(runtime_dir: &Path, workspace_root: &Path) -> PathBuf {
+    runtime_dir.join(format!("{}.sock", workspace_hash(workspace_root)))
 }
 
 #[cfg(test)]
@@ -64,29 +65,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repo_hash_stable() {
-        let a = repo_hash(Path::new("/tmp/foo"));
-        let b = repo_hash(Path::new("/tmp/foo"));
+    fn workspace_hash_stable() {
+        let a = workspace_hash(Path::new("/tmp/foo"));
+        let b = workspace_hash(Path::new("/tmp/foo"));
         assert_eq!(a, b);
         assert_eq!(a.len(), 16);
     }
 
     #[test]
-    fn repo_hash_differs_per_path() {
-        assert_ne!(repo_hash(Path::new("/a")), repo_hash(Path::new("/b")));
+    fn workspace_hash_differs_per_path() {
+        assert_ne!(
+            workspace_hash(Path::new("/a")),
+            workspace_hash(Path::new("/b"))
+        );
     }
 
     #[test]
     fn socket_path_in_runtime_dir() {
         let dir = PathBuf::from("/tmp/runtime");
-        let p = repo_socket_path_in(&dir, Path::new("/repo"));
+        let p = workspace_socket_path_in(&dir, Path::new("/repo"));
         assert!(p.starts_with("/tmp/runtime"));
         assert!(p.extension().is_some_and(|e| e == "sock"));
     }
 
     #[test]
-    fn repo_hash_is_lowercase_hex() {
-        let h = repo_hash(Path::new("/some/repo/root"));
+    fn workspace_hash_is_lowercase_hex() {
+        let h = workspace_hash(Path::new("/some/repo/root"));
         assert_eq!(h.len(), 16);
         assert!(
             h.chars()
@@ -94,12 +98,22 @@ mod tests {
         );
     }
 
+    /// Back-compat: a single-repo workspace root == old `repo_root` must
+    /// hash the same, so existing sockets/stores are found unchanged.
     #[test]
-    fn socket_filename_is_repo_hash_dot_sock() {
+    fn workspace_hash_matches_legacy_repo_hash_for_same_path() {
+        let p = std::path::Path::new("/some/repo/root");
+        // 16 lowercase hex chars, stable, same as the pre-rename repo_hash.
+        assert_eq!(workspace_hash(p).len(), 16);
+        assert_eq!(workspace_hash(p), workspace_hash(p));
+    }
+
+    #[test]
+    fn socket_filename_is_workspace_hash_dot_sock() {
         let dir = PathBuf::from("/tmp/rt");
         let repo = Path::new("/repo/here");
-        let p = repo_socket_path_in(&dir, repo);
-        let expected = format!("{}.sock", repo_hash(repo));
+        let p = workspace_socket_path_in(&dir, repo);
+        let expected = format!("{}.sock", workspace_hash(repo));
         assert_eq!(p.file_name().unwrap().to_str().unwrap(), expected);
     }
 
@@ -204,16 +218,16 @@ mod tests {
     }
 
     #[test]
-    fn repo_socket_path_uses_default_runtime_dir() {
+    fn workspace_socket_path_uses_default_runtime_dir() {
         let _lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = EnvGuard::set("CALIBAN_DAEMON_RUNTIME_DIR", "/rt/base");
         let repo = Path::new("/some/repo");
-        let p = repo_socket_path(repo);
+        let p = workspace_socket_path(repo);
         assert_eq!(
             p,
-            PathBuf::from("/rt/base").join(format!("{}.sock", repo_hash(repo)))
+            PathBuf::from("/rt/base").join(format!("{}.sock", workspace_hash(repo)))
         );
     }
 }
