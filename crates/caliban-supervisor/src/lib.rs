@@ -21,6 +21,7 @@ pub mod proto;
 pub mod registry;
 pub mod runtime;
 pub mod server;
+pub mod sources;
 pub mod store;
 pub mod transport;
 
@@ -33,5 +34,6 @@ pub use proto::{
 pub use registry::Registry;
 pub use runtime::{workspace_socket_path, workspace_socket_path_in};
 pub use server::{NetworkConfig, Supervisor};
+pub use sources::{Source, discover_sources, resolve_source};
 pub use store::AgentStore;
 pub use transport::{BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect};
