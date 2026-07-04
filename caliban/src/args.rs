@@ -70,7 +70,7 @@ pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "caliban", version, about = "caliban agent harness")]
+#[command(name = "caliban", version = crate::version::long_version(), about = "caliban agent harness")]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Args {
     /// User prompt. Use "-" to read from stdin.

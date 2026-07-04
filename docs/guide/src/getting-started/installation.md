@@ -54,6 +54,19 @@ caliban --version
 
 You should see a version string. If you get a "command not found" error, confirm `target/release/` is on your `PATH`.
 
+For a build made from a git checkout, the version also carries the commit it
+was built from, so you can pin exactly which point in history a binary
+corresponds to:
+
+```text
+caliban 0.4.0 (d364def, 2026-07-03)
+```
+
+The parentheses hold the short commit SHA and that commit's date; a build with
+uncommitted changes appends `-dirty` (e.g. `d364def-dirty`). Builds made
+without git metadata (release tarballs, `cargo install` from crates.io) report
+just the bare semver — `caliban 0.4.0`.
+
 ## Optional: cloud transport feature flags
 
 By default, caliban connects to providers over their public HTTPS APIs. Cloud-managed transports (AWS Bedrock, Google Vertex AI, Azure OpenAI) require optional Cargo feature flags. The exact flag names per crate are:

@@ -9,6 +9,10 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Added
+
+- **Build commit in `--version`** (#303): binaries built from a git checkout now report the commit they were built from — `caliban --version` prints e.g. `caliban 0.4.0 (d364def, 2026-07-03)`, appending `-dirty` for an uncommitted tree. This lets you pin a binary to an exact point in git history between releases, where every commit on `main` otherwise reports the same semver. Builds without git metadata (release tarballs, crates.io installs) fall back to the bare semver.
+
 ## [0.4.0] - 2026-06-21
 
 This release is a **security and protocol-correctness pass** on top of a completed
