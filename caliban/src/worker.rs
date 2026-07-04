@@ -14,7 +14,6 @@ use caliban_supervisor::proto::AgentRecord;
 use clap::Parser as _;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::UnixListener;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use crate::attach::AttachInbound;
@@ -201,7 +200,7 @@ impl InputProvider for SocketInputProvider {
 /// to `inbox`. Malformed lines are skipped. Returns on EOF or inbox closed.
 async fn read_inbound_frames<R>(reader: R, inbox: mpsc::Sender<AttachInbound>)
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin + Send,
 {
     use tokio::io::AsyncBufReadExt as _;
     use tokio::sync::mpsc::error::TrySendError;
@@ -284,14 +283,19 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     // can clone it immediately.
     let hub = EventHub::new();
 
-    // --- Bind the per-agent Unix socket.
+    // --- Bind the per-agent socket via the transport seam (Unix mode).
     // The socket file's existence signals to `caliband` and `caliban agents
-    // attach` that this worker is alive.
-    if let Some(parent) = socket.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let _ = tokio::fs::remove_file(socket).await;
-    let listener = match UnixListener::bind(socket) {
+    // attach` that this worker is alive. `Listener::bind`'s Unix arm creates
+    // the parent dir and unlinks any stale file at `socket` for us.
+    let listen_endpoint = caliban_supervisor::transport::Endpoint::Unix {
+        path: socket.to_path_buf(),
+    };
+    let bind = caliban_supervisor::transport::BindSpec {
+        endpoint: listen_endpoint,
+        tls: None,
+        token: None,
+    };
+    let listener = match caliban_supervisor::transport::Listener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
             eprintln!(
@@ -345,12 +349,12 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     let accept_inbox_tx = inbox_keepalive.clone();
     let accept_has_clients = Arc::clone(&has_clients);
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let conn_hub = Arc::clone(&accept_hub);
             let conn_inbox = accept_inbox_tx.clone();
             let conn_clients = Arc::clone(&accept_has_clients);
             tokio::spawn(serve_attach_client(
-                stream,
+                conn,
                 conn_hub,
                 conn_inbox,
                 conn_clients,
@@ -646,7 +650,7 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
 /// so the `SocketInputProvider` knows at least one operator is watching and
 /// resets its idle timer (#81 ticket 5).
 async fn serve_attach_client(
-    stream: tokio::net::UnixStream,
+    conn: caliban_supervisor::transport::BoxConn,
     hub: Arc<EventHub>,
     inbox: Option<mpsc::Sender<AttachInbound>>,
     clients: Arc<AtomicUsize>,
@@ -655,7 +659,7 @@ async fn serve_attach_client(
     // returns (e.g. write errors in history replay) are covered by Drop.
     let _client_guard = ClientCountGuard::new(clients);
 
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(conn);
 
     // Spawn the inbound read task when in interactive mode.
     if let Some(tx) = inbox {
@@ -691,8 +695,8 @@ async fn serve_attach_client(
 }
 
 /// Write one NDJSON line (event + trailing newline) to the client.
-async fn write_line(
-    stream: &mut tokio::net::unix::OwnedWriteHalf,
+async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
     line: &str,
 ) -> std::io::Result<()> {
     stream.write_all(line.as_bytes()).await?;

@@ -162,17 +162,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
-            Ok(endpoint) => {
-                if let Endpoint::Unix { path } = &endpoint {
-                    run_attach(path, id).await
-                } else {
-                    // Unreachable in Unix-only mode (this task never produces
-                    // a TCP endpoint); Task 6 generalizes `run_attach` to
-                    // dial any `Endpoint`.
-                    eprintln!("caliban: attach to a non-Unix endpoint is not yet supported");
-                    1
-                }
-            }
+            Ok(endpoint) => run_attach(&endpoint, id).await,
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
@@ -303,14 +293,20 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
 /// stdout until the agent finishes (EOF) or the user detaches with Ctrl+C.
 /// Also pumps operator stdin as `AttachInbound` NDJSON frames to the write
 /// half of the socket (bidirectional attach for interactive agents, ADR 0047 / #81).
-async fn run_attach(socket_path: &Path, id: &str) -> i32 {
-    use tokio::net::UnixStream;
-    let stream = match UnixStream::connect(socket_path).await {
-        Ok(s) => s,
+async fn run_attach(endpoint: &Endpoint, id: &str) -> i32 {
+    let conn = match caliban_supervisor::transport::connect(
+        &caliban_supervisor::transport::ConnectSpec {
+            endpoint: endpoint.clone(),
+            tls: None,
+            token: None,
+        },
+    )
+    .await
+    {
+        Ok(c) => c,
         Err(e) => {
             eprintln!(
-                "caliban: cannot attach to {id} at {} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`",
-                socket_path.display()
+                "caliban: cannot attach to {id} at {endpoint:?} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`"
             );
             return 74;
         }
@@ -318,7 +314,7 @@ async fn run_attach(socket_path: &Path, id: &str) -> i32 {
     eprintln!(
         "caliban: attached to {id} (type to send \u{00b7} Ctrl+D end-of-input \u{00b7} Ctrl+C detach)"
     );
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(conn);
 
     // Pump operator stdin → inbound frames on a background task. Harmless
     // for non-interactive agents (the worker drops its read half; our
