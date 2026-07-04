@@ -9,6 +9,29 @@ caliban [FLAGS/OPTIONS] <SUBCOMMAND>
 
 ---
 
+## Meta
+
+| Flag | Description |
+|------|-------------|
+| `-h`, `--help` | Print help and exit. |
+| `-V`, `--version` | Print the version and exit. |
+
+When caliban is built from a git checkout, `--version` includes the commit it
+was built from so you can pin a binary to an exact point in history — useful
+between releases, where every commit on `main` otherwise reports the same
+semver:
+
+```text
+caliban 0.4.0 (d364def, 2026-07-03)
+```
+
+The parentheses carry the short commit SHA and that commit's date; an
+uncommitted working tree appends `-dirty` (`d364def-dirty`). Builds with no git
+metadata (release tarballs, `cargo install` from crates.io) report just the
+bare semver, `caliban 0.4.0`.
+
+---
+
 ## Prompts
 
 | Flag | Default | Description |

@@ -21,6 +21,7 @@ mod stream_decode;
 mod subcommands;
 mod system_prompt;
 mod tui;
+mod version;
 mod worker;
 
 use std::path::PathBuf;
