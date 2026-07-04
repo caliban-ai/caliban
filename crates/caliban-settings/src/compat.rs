@@ -44,6 +44,12 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
                     caliban_mcp_client::OauthMode::Off => None,
                     other => Some(other.as_str().to_string()),
                 };
+                // Preserve any legacy `[server.X.oauth_config]` block so manual
+                // oauth survives the mcp.toml → settings fold (only emit it when
+                // non-default to avoid writing an empty table).
+                let oauth_config = (sc.manual_oauth
+                    != caliban_mcp_client::ManualOauthConfig::default())
+                .then_some(sc.manual_oauth);
                 settings.mcp_servers.insert(
                     name,
                     crate::McpServerSetting {
@@ -55,6 +61,7 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
                         url: sc.url.map(|u| u.to_string()),
                         headers: sc.headers,
                         oauth,
+                        oauth_config,
                         permissions: sc.permissions,
                         disabled: sc.disabled,
                         lazy: sc.lazy,

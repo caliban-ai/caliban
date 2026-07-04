@@ -238,6 +238,7 @@ async fn handshake_timeout_marks_server_failed() {
     let opts = StartOptions {
         startup_timeout: Duration::from_millis(250),
         tool_timeout: DEFAULT_TOOL_TIMEOUT,
+        ..StartOptions::default()
     };
     let cfg = single_server_config(
         "hung",
@@ -349,6 +350,7 @@ async fn per_tool_timeout_fires() {
     let opts = StartOptions {
         startup_timeout: Duration::from_secs(5),
         tool_timeout: Duration::from_millis(250),
+        ..StartOptions::default()
     };
     let cfg = single_server_config("test", server_config(&[], BTreeMap::new()));
     let mgr = McpClientManager::start_with_options(&cfg, opts)

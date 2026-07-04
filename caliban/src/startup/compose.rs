@@ -559,6 +559,7 @@ pub(crate) async fn start_mcp(
     args: &Args,
     settings_snapshot: &caliban_settings::Settings,
     registry: &mut ToolRegistry,
+    interactive: bool,
 ) -> (
     Vec<caliban_mcp_client::ServerSummary>,
     std::collections::BTreeMap<String, caliban_mcp_client::ServerConfig>,
@@ -569,7 +570,11 @@ pub(crate) async fn start_mcp(
     }
     let cfg = settings_snapshot.mcp_config();
     let servers_for_perms = cfg.servers.clone();
-    match caliban_mcp_client::McpClientManager::start(&cfg).await {
+    // `interactive` gates the OAuth browser flow: only an interactive (TUI) run
+    // may open a browser and block on the loopback callback. Headless/`--print`
+    // runs pass `false` so a cold-cache `oauth = auto|manual` server fails with
+    // an actionable error instead of hanging (ADR 0023 Phase C).
+    match caliban_mcp_client::McpClientManager::start_interactive(&cfg, interactive).await {
         Ok(mgr) => {
             // Snapshot the MCP tool directory for ToolSearch (ADR-0046)
             // BEFORE register_all consumes the manager state.

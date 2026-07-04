@@ -145,6 +145,15 @@ pub struct McpServerSetting {
     /// OAuth mode: `"off"` (default), `"auto"`, `"manual"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<String>,
+    /// OAuth client/endpoint config (`[mcp_servers.X.oauth_config]`).
+    ///
+    /// Required for `oauth = "manual"` (supplies `auth_url` / `token_url` /
+    /// `client_id`). For `oauth = "auto"` the endpoints are discovered, but a
+    /// `client_id` is still needed here whenever the authorization server does
+    /// not support dynamic client registration (e.g. GitHub) — register an
+    /// OAuth app and set `client_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_config: Option<caliban_mcp_client::ManualOauthConfig>,
     // ---- common ----
     /// Per-server permission scoping (composes with global rules).
     pub permissions: caliban_mcp_client::ServerPermissions,
@@ -385,7 +394,7 @@ impl Settings {
                     url,
                     headers: s.headers.clone(),
                     oauth,
-                    manual_oauth: caliban_mcp_client::ManualOauthConfig::default(),
+                    manual_oauth: s.oauth_config.clone().unwrap_or_default(),
                     disabled: s.disabled,
                     lazy: s.lazy,
                     permissions: s.permissions.clone(),

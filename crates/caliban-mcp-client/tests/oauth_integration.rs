@@ -14,12 +14,15 @@
 
 use std::time::Duration;
 
+use caliban_mcp_client::config::OauthMode;
 use caliban_mcp_client::oauth::{
-    FileStore, ManualOauthConfig, MemoryStore, OauthEndpoints, OauthFlow, OauthFlowOptions,
-    OauthTokens, TokenStore, discover_endpoints, endpoints_from_manual, refresh_tokens,
+    FileStore, ManualOauthConfig, MemoryStore, OauthAuthenticator, OauthEndpoints, OauthFlow,
+    OauthFlowOptions, OauthTokens, TokenStore, discover_endpoints, endpoints_from_manual,
+    refresh_tokens,
 };
 use chrono::Utc;
 use serde_json::json;
+use std::sync::Arc;
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -33,23 +36,33 @@ async fn spawn_mock_oauth_server() -> MockServer {
 }
 
 async fn install_discovery_routes(server: &MockServer, audience: &str) {
-    // 1. /.well-known/oauth-protected-resource — points at this same host.
+    // The resource lives under `/mcp`, so RFC 9728 discovery hits the
+    // PATH-PRESERVING well-known `/.well-known/oauth-protected-resource/mcp`.
+    // The authorization server itself lives under `/login/oauth` (as GitHub's
+    // does), so its RFC 8414 metadata is at the path-preserving
+    // `/.well-known/oauth-authorization-server/login/oauth`. This exercises the
+    // path-preserving `join_wellknown` fix end-to-end.
     let base = server.uri();
+    let as_issuer = format!("{base}/login/oauth");
     Mock::given(method("GET"))
-        .and(path("/.well-known/oauth-protected-resource"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "resource": audience,
-            "authorization_servers": [base],
+            "authorization_servers": [as_issuer],
+            // Resource-scoped list (RFC 9728) — the authoritative scopes, as on
+            // GitHub. Discovery must prefer these over the AS metadata.
+            "scopes_supported": ["read", "write"],
         })))
         .mount(server)
         .await;
-    // 2. /.well-known/oauth-authorization-server — RFC 8414 metadata.
     Mock::given(method("GET"))
-        .and(path("/.well-known/oauth-authorization-server"))
+        .and(path("/.well-known/oauth-authorization-server/login/oauth"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "authorization_endpoint": format!("{base}/oauth/authorize"),
             "token_endpoint":         format!("{base}/oauth/token"),
-            "scopes_supported":       ["read", "write"],
+            // AS metadata leaves scopes null (as GitHub does) — proves the
+            // resource-doc fallback path.
+            "scopes_supported":       null,
         })))
         .mount(server)
         .await;
@@ -191,6 +204,7 @@ async fn token_store_persists_and_reuses() {
         refresh_token: Some("r".to_string()),
         expires_at: Some(Utc::now() + chrono::Duration::seconds(3600)),
         scopes: vec!["read".to_string()],
+        client_id: None,
     };
     store.put("svc", "aud", &tokens).expect("put");
     let cached = store.get("svc", "aud").expect("get").expect("some");
@@ -224,6 +238,7 @@ async fn refresh_swaps_in_new_access_token() {
         // Mark as expiring inside the refresh margin.
         expires_at: Some(Utc::now() + chrono::Duration::seconds(10)),
         scopes: vec![],
+        client_id: None,
     };
     assert!(old.needs_refresh(Utc::now()));
     let new = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
@@ -255,6 +270,7 @@ async fn token_endpoint_401_surfaces_exchange_error() {
         refresh_token: Some("r".to_string()),
         expires_at: None,
         scopes: vec![],
+        client_id: None,
     };
     let err = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
         .await
@@ -281,6 +297,7 @@ async fn clear_on_401_removes_cached_token() {
                 refresh_token: None,
                 expires_at: None,
                 scopes: vec![],
+                client_id: None,
             },
         )
         .expect("put");
@@ -302,6 +319,7 @@ async fn file_store_serves_as_keyring_fallback() {
         refresh_token: None,
         expires_at: None,
         scopes: vec![],
+        client_id: None,
     };
     store.put("svc", "aud", &tokens).expect("put");
     let reread = FileStore::new(path);
@@ -333,6 +351,7 @@ async fn refresh_preserves_existing_refresh_token() {
         refresh_token: Some("preserved".to_string()),
         expires_at: None,
         scopes: vec![],
+        client_id: None,
     };
     let new = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
         .await
@@ -396,6 +415,7 @@ async fn refresh_request_body_includes_required_fields() {
         refresh_token: Some("r".to_string()),
         expires_at: None,
         scopes: vec![],
+        client_id: None,
     };
     let _ = refresh_tokens(
         &http(),
@@ -425,4 +445,165 @@ async fn refresh_request_body_includes_required_fields() {
         body_str.contains("scope=read+write") || body_str.contains("scope=read%20write"),
         "{body_str}",
     );
+}
+
+/// GitHub-style failure: HTTP 200 with an `error` body (not a 4xx). Must
+/// surface a clear error, not a "missing access_token" decode failure.
+#[tokio::test]
+async fn token_endpoint_200_with_error_body_surfaces_error() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "error": "bad_verification_code",
+            "error_description": "The code passed is incorrect or expired."
+        })))
+        .mount(&server)
+        .await;
+    let endpoints = OauthEndpoints {
+        auth_url: Url::parse(&format!("{}/oauth/authorize", server.uri())).unwrap(),
+        token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
+        scopes: vec![],
+        audience: "aud".to_string(),
+    };
+    let old = OauthTokens {
+        access_token: "x".to_string(),
+        refresh_token: Some("r".to_string()),
+        expires_at: None,
+        scopes: vec![],
+        client_id: None,
+    };
+    let err = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
+        .await
+        .expect_err("200+error body must be an error");
+    let s = err.to_string();
+    assert!(s.contains("bad_verification_code"), "got: {s}");
+}
+
+// ---------------------------------------------------------------------------
+// OauthAuthenticator — connect-path orchestration (the wiring under test in
+// #300). These prove the reuse / refresh / headless-no-hang / no-client-id
+// decisions without ever opening a browser.
+// ---------------------------------------------------------------------------
+
+fn manual_cfg(server: &MockServer) -> ManualOauthConfig {
+    ManualOauthConfig {
+        client_id: Some("cid".to_string()),
+        client_secret: None,
+        auth_url: Some(format!("{}/oauth/authorize", server.uri())),
+        token_url: Some(format!("{}/oauth/token", server.uri())),
+        scopes: vec!["read".to_string()],
+        audience: Some("aud".to_string()),
+    }
+}
+
+/// A fresh (non-expiring) cached token is reused verbatim — no browser, no
+/// network. Manual mode so no discovery is needed either.
+#[tokio::test]
+async fn authenticator_reuses_cached_token() {
+    let server = spawn_mock_oauth_server().await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    store
+        .put(
+            "github",
+            "aud",
+            &OauthTokens {
+                access_token: "cached-access".to_string(),
+                refresh_token: Some("r".to_string()),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(3600)),
+                scopes: vec![],
+                client_id: Some("cid".to_string()),
+            },
+        )
+        .expect("put");
+    let auth = OauthAuthenticator::new(http(), Arc::clone(&store), /* interactive */ true);
+    let url = Url::parse("https://api.example/mcp").unwrap();
+    let token = auth
+        .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
+        .await
+        .expect("bearer");
+    assert_eq!(token.as_deref(), Some("cached-access"));
+}
+
+/// A cold cache in headless mode (interactive = false) fails with an
+/// actionable error instead of hanging on a loopback callback.
+#[tokio::test]
+async fn authenticator_headless_cold_cache_errors() {
+    let server = spawn_mock_oauth_server().await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    let auth = OauthAuthenticator::new(http(), store, /* interactive */ false);
+    let url = Url::parse("https://api.example/mcp").unwrap();
+    let err = auth
+        .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
+        .await
+        .expect_err("headless cold cache must error, not hang");
+    let s = err.to_string();
+    assert!(s.contains("interactive"), "got: {s}");
+}
+
+/// `auto` mode with a successful discovery but no configured client_id (and no
+/// dynamic registration) fails with the no-client-id error — checked before
+/// interactivity, so it fires even when interactive.
+#[tokio::test]
+async fn authenticator_auto_without_client_id_errors() {
+    let server = spawn_mock_oauth_server().await;
+    install_discovery_routes(&server, "aud").await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    let auth = OauthAuthenticator::new(http(), store, /* interactive */ true);
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let err = auth
+        .bearer_for(
+            "github",
+            OauthMode::Auto,
+            &server_url,
+            &ManualOauthConfig::default(),
+        )
+        .await
+        .expect_err("no client_id + no DCR must error");
+    let s = err.to_string();
+    assert!(
+        s.contains("dynamic client registration") || s.contains("client_id"),
+        "got: {s}",
+    );
+}
+
+/// A near-expiry cached token is silently refreshed (no browser), the refreshed
+/// token is returned and persisted. Manual mode → the token endpoint is the
+/// mock's `/oauth/token`.
+#[tokio::test]
+async fn authenticator_refreshes_expiring_token() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "refreshed-access",
+            "expires_in": 3600
+        })))
+        .mount(&server)
+        .await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    store
+        .put(
+            "github",
+            "aud",
+            &OauthTokens {
+                access_token: "old-access".to_string(),
+                refresh_token: Some("rtok".to_string()),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(10)),
+                scopes: vec![],
+                client_id: Some("cid".to_string()),
+            },
+        )
+        .expect("put");
+    let auth = OauthAuthenticator::new(http(), Arc::clone(&store), /* interactive */ false);
+    let url = Url::parse("https://api.example/mcp").unwrap();
+    let token = auth
+        .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
+        .await
+        .expect("bearer");
+    assert_eq!(token.as_deref(), Some("refreshed-access"));
+    // Persisted for next time.
+    let cached = store.get("github", "aud").expect("get").expect("some");
+    assert_eq!(cached.access_token, "refreshed-access");
+    assert_eq!(cached.client_id.as_deref(), Some("cid"));
 }

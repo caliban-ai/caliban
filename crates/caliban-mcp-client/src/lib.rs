@@ -47,9 +47,9 @@ pub use elicitation::{
 pub use error::{McpError, Result};
 pub use manager::{DEFAULT_STARTUP_TIMEOUT, DEFAULT_TOOL_TIMEOUT, McpClientManager, StartOptions};
 pub use oauth::{
-    FileStore, KEYRING_SERVICE, KeyringStore, ManualOauthConfig, MemoryStore, OauthEndpoints,
-    OauthFlow, OauthFlowOptions, OauthTokens, PORT_ENV_VAR, REFRESH_MARGIN, TokenStore,
-    default_store, discover_endpoints, endpoints_from_manual, refresh_tokens,
+    FileStore, KEYRING_SERVICE, KeyringStore, ManualOauthConfig, MemoryStore, OauthAuthenticator,
+    OauthEndpoints, OauthFlow, OauthFlowOptions, OauthTokens, PORT_ENV_VAR, REFRESH_MARGIN,
+    TokenStore, default_store, discover_endpoints, endpoints_from_manual, refresh_tokens,
 };
 pub use permissions::{compile_server_permission_rules, merge_with_global};
 pub use registry::{ServerStatus, ServerSummary};

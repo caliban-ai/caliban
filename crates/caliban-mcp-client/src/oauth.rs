@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
 use url::Url;
 
+use crate::config::OauthMode;
 use crate::error::McpError;
 
 /// Default OAuth keyring service identifier.
@@ -48,7 +49,7 @@ pub const REFRESH_MARGIN: Duration = Duration::from_mins(1);
 /// Manually-configured OAuth endpoints (per-server `[server.X.oauth]`
 /// block). Used in `oauth = "manual"` mode; `auto` discovers these from
 /// the server's well-known documents.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ManualOauthConfig {
     /// Client identifier registered with the auth server.
     #[serde(default)]
@@ -99,6 +100,13 @@ pub struct OauthTokens {
     /// Scopes the auth server actually granted (may be a subset).
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The `client_id` these tokens were issued to. Persisted so a later
+    /// refresh uses the *same* client the `refresh_token` is bound to —
+    /// critical for `oauth = "auto"`, where the `client_id` came from
+    /// config/registration and isn't otherwise recoverable at refresh time.
+    /// `None` for tokens written before this field existed (serde default).
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 impl OauthTokens {
@@ -150,7 +158,7 @@ impl PkcePair {
 /// Pluggable token persistence. Production uses `KeyringStore` (or
 /// `FileStore` when the OS keyring is unavailable); tests use
 /// `MemoryStore` for isolation.
-pub trait TokenStore: Send + Sync {
+pub trait TokenStore: Send + Sync + std::fmt::Debug {
     /// Look up tokens for `(server, audience)`. Returns `Ok(None)` when no
     /// entry exists.
     ///
@@ -401,14 +409,23 @@ struct ProtectedResourceDoc {
     authorization_servers: Vec<String>,
     #[serde(default)]
     resource: Option<String>,
+    /// Scopes required to access this resource (RFC 9728). For many hosted
+    /// servers (GitHub included) this is the authoritative scope list — the
+    /// authorization server's own metadata leaves `scopes_supported` null.
+    /// `Option` because servers emit an explicit `null` (not just omission),
+    /// which a bare `Vec` would fail to deserialize.
+    #[serde(default)]
+    scopes_supported: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AuthServerDoc {
     authorization_endpoint: String,
     token_endpoint: String,
+    /// `Option` because auth servers (GitHub) emit an explicit `null` here,
+    /// which a bare `Vec` would reject.
     #[serde(default)]
-    scopes_supported: Vec<String>,
+    scopes_supported: Option<Vec<String>>,
 }
 
 /// Discover endpoints for `server_url`. Hits the MCP-flavoured
@@ -450,6 +467,11 @@ pub async fn discover_endpoints(
         u.set_path("");
         u.to_string()
     });
+    // The protected-resource doc's scopes (RFC 9728) are the scopes the
+    // *resource* needs — the right thing to request. The AS metadata's
+    // `scopes_supported` is often null (GitHub), so prefer the resource doc and
+    // fall back to the AS list only if the resource didn't advertise any.
+    let resource_scopes = prs.scopes_supported.unwrap_or_default();
     let as_url_raw = prs
         .authorization_servers
         .into_iter()
@@ -493,14 +515,37 @@ pub async fn discover_endpoints(
             server: server.to_string(),
             message: format!("invalid token_endpoint: {e}"),
         })?,
-        scopes: asd.scopes_supported,
+        scopes: if resource_scopes.is_empty() {
+            asd.scopes_supported.unwrap_or_default()
+        } else {
+            resource_scopes
+        },
         audience,
     })
 }
 
+/// Build a `.well-known` metadata URL from an issuer/resource URL.
+///
+/// RFC 8414 §3.1 (auth-server metadata) and RFC 9728 §3.1 (protected-resource
+/// metadata) both insert `/.well-known/{suffix}` **between the host and the
+/// issuer path** — the path is preserved, not replaced. So
+/// `https://github.com/login/oauth` → `https://github.com/.well-known/
+/// oauth-authorization-server/login/oauth`, and a root-path issuer
+/// `https://example.com/` → `https://example.com/.well-known/{suffix}`.
+///
+/// (The earlier implementation replaced the whole path, which 404s against any
+/// issuer/resource served under a sub-path — e.g. GitHub's
+/// `github.com/login/oauth` and `api.githubcopilot.com/mcp/`.)
 fn join_wellknown(base: &Url, suffix: &str) -> Url {
     let mut u = base.clone();
-    u.set_path(&format!("/.well-known/{suffix}"));
+    // Preserve the issuer/resource path segment(s), dropping only a trailing
+    // slash so we don't emit `//` or a dangling separator.
+    let issuer_path = base.path().trim_end_matches('/');
+    if issuer_path.is_empty() {
+        u.set_path(&format!("/.well-known/{suffix}"));
+    } else {
+        u.set_path(&format!("/.well-known/{suffix}{issuer_path}"));
+    }
     u.set_query(None);
     u.set_fragment(None);
     u
@@ -866,6 +911,10 @@ async fn exchange_code(
     }
     parse_token_response(
         http.post(args.endpoints.token_url.clone())
+            // GitHub's token endpoint returns form-encoded by default; force
+            // JSON so `parse_token_response` can decode it. Spec-compliant
+            // servers already return JSON, so this is harmless there.
+            .header(reqwest::header::ACCEPT, "application/json")
             .form(&form)
             .send()
             .await
@@ -880,13 +929,22 @@ async fn exchange_code(
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    /// Optional so we can distinguish a real error body (which omits it) from a
+    /// genuine success — GitHub returns HTTP 200 even for token errors.
+    #[serde(default)]
+    access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
     #[serde(default)]
     scope: Option<String>,
+    // OAuth error fields (RFC 6749 §5.2). GitHub reports token-exchange
+    // failures as HTTP 200 with these set, not a 4xx.
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
 }
 
 async fn parse_token_response(
@@ -905,6 +963,19 @@ async fn parse_token_response(
         server: server.to_string(),
         message: format!("malformed token response: {e}"),
     })?;
+    // GitHub (and RFC 6749 §5.2) can report failure with HTTP 200 + an `error`
+    // field. Surface it clearly instead of a confusing "missing access_token".
+    if let Some(err) = body.error {
+        let desc = body.error_description.unwrap_or_default();
+        return Err(McpError::OauthExchange {
+            server: server.to_string(),
+            message: format!("token endpoint error '{err}': {desc}"),
+        });
+    }
+    let access_token = body.access_token.ok_or_else(|| McpError::OauthExchange {
+        server: server.to_string(),
+        message: "token response had neither access_token nor error".to_string(),
+    })?;
     let expires_at = body
         .expires_in
         .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
@@ -913,10 +984,14 @@ async fn parse_token_response(
         .map(|s| s.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default();
     Ok(OauthTokens {
-        access_token: body.access_token,
+        access_token,
         refresh_token: body.refresh_token,
         expires_at,
         scopes,
+        // Set by the caller (`await_callback` / `refresh_tokens` / the
+        // authenticator) which knows the client_id; the token endpoint doesn't
+        // echo it back.
+        client_id: None,
     })
 }
 
@@ -954,6 +1029,8 @@ pub async fn refresh_tokens(
     }
     let response = http
         .post(endpoints.token_url.clone())
+        // Force JSON — GitHub's token endpoint otherwise returns form-encoded.
+        .header(reqwest::header::ACCEPT, "application/json")
         .form(&form)
         .send()
         .await
@@ -968,7 +1045,210 @@ pub async fn refresh_tokens(
         // still work.
         new.refresh_token.clone_from(&tokens.refresh_token);
     }
+    // Preserve the client_id binding so the *next* refresh still targets the
+    // right client (the token endpoint never echoes it back).
+    new.client_id = Some(client_id.to_string());
     Ok(new)
+}
+
+// ---------------------------------------------------------------------------
+// Connect-path orchestrator
+// ---------------------------------------------------------------------------
+
+/// Resolves a Bearer access token for one remote MCP server, driving the full
+/// OAuth lifecycle: reuse a cached token, silently refresh a near-expiry one,
+/// or — on a cold cache — run the interactive PKCE browser flow and persist the
+/// result. Shared across every server in a single startup pass so the reqwest
+/// client and token store are built once.
+///
+/// This is the piece that was missing from ADR 0023 Phase C: the flow building
+/// blocks above (`discover_endpoints`, `OauthFlow`, `refresh_tokens`, the token
+/// store) all existed but nothing wired them into the connect path, so
+/// `oauth = "auto"`/`"manual"` servers silently failed to authenticate.
+#[derive(Clone)]
+pub struct OauthAuthenticator {
+    http: reqwest::Client,
+    store: Arc<dyn TokenStore>,
+    /// Whether we may open a browser and block on the loopback callback. False
+    /// in headless/`--print`/non-TTY runs — a cold cache then errors with
+    /// [`McpError::OauthInteractiveRequired`] instead of hanging forever.
+    interactive: bool,
+}
+
+impl std::fmt::Debug for OauthAuthenticator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthAuthenticator")
+            .field("interactive", &self.interactive)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OauthAuthenticator {
+    /// Build an authenticator over an HTTP client, a token store, and the
+    /// interactivity of the current run.
+    #[must_use]
+    pub fn new(http: reqwest::Client, store: Arc<dyn TokenStore>, interactive: bool) -> Self {
+        Self {
+            http,
+            store,
+            interactive,
+        }
+    }
+
+    /// Resolve a Bearer token for `server`.
+    ///
+    /// Returns `Ok(None)` for `OauthMode::Off` (nothing to attach). Otherwise
+    /// returns `Ok(Some(access_token))`, running whichever of {reuse, refresh,
+    /// interactive flow} is required. Endpoints are discovered (`auto`) or read
+    /// from the manual block (`manual`); `client_id` comes from the manual/auto
+    /// config block (auto's DCR fallback is not yet implemented — GitHub and
+    /// most hosted servers don't offer registration anyway).
+    ///
+    /// # Errors
+    /// - [`McpError::OauthDiscovery`] / [`McpError::OauthManualIncomplete`] if
+    ///   endpoints can't be resolved.
+    /// - [`McpError::OauthNoClientId`] on a cold cache with no configured
+    ///   `client_id` and no dynamic registration.
+    /// - [`McpError::OauthInteractiveRequired`] on a cold cache in headless mode.
+    /// - [`McpError::OauthFlow`] / [`McpError::OauthExchange`] if the flow fails.
+    pub async fn bearer_for(
+        &self,
+        server: &str,
+        mode: OauthMode,
+        server_url: &Url,
+        manual: &ManualOauthConfig,
+    ) -> Result<Option<String>, McpError> {
+        let mut endpoints = match mode {
+            OauthMode::Off => return Ok(None),
+            OauthMode::Auto => discover_endpoints(server, server_url, &self.http).await?,
+            OauthMode::Manual => endpoints_from_manual(server, manual, server_url)?,
+        };
+        // Explicit `oauth_config.scopes` always wins — it lets an operator
+        // narrow or correct the scopes discovery inferred (or supply them when
+        // the server advertises none). Empty means "use what was resolved".
+        if !manual.scopes.is_empty() {
+            endpoints.scopes = manual.scopes.clone();
+        }
+
+        // 1. Reuse or refresh a cached token, keyed by the resolved audience.
+        let now = Utc::now();
+        if let Some(existing) = self.store.get(server, &endpoints.audience)? {
+            if !existing.needs_refresh(now) {
+                tracing::debug!(
+                    target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                    server,
+                    "reusing cached oauth token",
+                );
+                return Ok(Some(existing.access_token));
+            }
+            // Near expiry — try a silent refresh before falling back to the
+            // full interactive flow. Use the client_id the token was issued to.
+            if existing.refresh_token.is_some()
+                && let Some(client_id) = existing
+                    .client_id
+                    .clone()
+                    .or_else(|| manual.client_id.clone())
+            {
+                match refresh_tokens(
+                    &self.http,
+                    server,
+                    &endpoints,
+                    &client_id,
+                    manual.client_secret.as_deref(),
+                    &existing,
+                )
+                .await
+                {
+                    Ok(refreshed) => {
+                        self.store.put(server, &endpoints.audience, &refreshed)?;
+                        tracing::info!(
+                            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                            server,
+                            "refreshed oauth token",
+                        );
+                        return Ok(Some(refreshed.access_token));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                            server,
+                            error = %e,
+                            "oauth token refresh failed; re-authenticating interactively",
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. Cold cache — need a fresh interactive authorization.
+        let client_id = manual
+            .client_id
+            .clone()
+            .ok_or_else(|| McpError::OauthNoClientId {
+                server: server.to_string(),
+            })?;
+        if !self.interactive {
+            return Err(McpError::OauthInteractiveRequired {
+                server: server.to_string(),
+            });
+        }
+        let mut opts =
+            OauthFlowOptions::new(server.to_string(), endpoints.clone(), client_id.clone());
+        opts.client_secret = manual.client_secret.clone();
+        let flow = OauthFlow::start(opts).await?;
+        present_auth_url(server, &flow.auth_url);
+        let mut tokens = flow.await_callback(&self.http).await?;
+        tokens.client_id = Some(client_id);
+        self.store.put(server, &endpoints.audience, &tokens)?;
+        tracing::info!(
+            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+            server,
+            "oauth authorization complete; token cached",
+        );
+        Ok(Some(tokens.access_token))
+    }
+}
+
+/// Present the authorization URL to the operator: print it prominently (this
+/// runs during startup, before the TUI takes the terminal) and make a
+/// best-effort attempt to open the system browser. Printing is the source of
+/// truth — the loopback callback captures the code regardless of whether the
+/// auto-open succeeded.
+fn present_auth_url(server: &str, auth_url: &Url) {
+    // `eprintln!` (not the TUI): start_mcp runs before the alternate screen is
+    // entered, so this lands on the normal terminal.
+    eprintln!(
+        "\n\u{1f510} caliban: MCP server '{server}' needs authorization.\n   \
+         Opening your browser. If it doesn't open, visit:\n\n   {auth_url}\n"
+    );
+    let opened = open_in_browser(auth_url.as_str());
+    if !opened {
+        tracing::debug!(
+            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+            server,
+            "could not auto-open a browser; user must open the printed URL manually",
+        );
+    }
+}
+
+/// Best-effort system-browser open, dependency-free. Returns `true` if the
+/// launcher process spawned (not that the page actually rendered).
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let launcher = ("open", Vec::<&str>::new());
+    #[cfg(target_os = "windows")]
+    let launcher = ("cmd", vec!["/C", "start", ""]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let launcher = ("xdg-open", Vec::<&str>::new());
+
+    let (cmd, prefix_args) = launcher;
+    std::process::Command::new(cmd)
+        .args(prefix_args)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1283,7 @@ mod tests {
             refresh_token: None,
             expires_at: None,
             scopes: vec![],
+            client_id: None,
         };
         assert!(!t.needs_refresh(Utc::now()));
     }
@@ -1015,6 +1296,7 @@ mod tests {
             refresh_token: Some("r".to_string()),
             expires_at: Some(now + chrono::Duration::seconds(10)),
             scopes: vec![],
+            client_id: None,
         };
         assert!(t.needs_refresh(now));
     }
@@ -1027,6 +1309,7 @@ mod tests {
             refresh_token: Some("r".to_string()),
             expires_at: Some(now + chrono::Duration::seconds(3600)),
             scopes: vec![],
+            client_id: None,
         };
         assert!(!t.needs_refresh(now));
     }
@@ -1039,6 +1322,7 @@ mod tests {
             refresh_token: Some("r".to_string()),
             expires_at: None,
             scopes: vec!["read".to_string()],
+            client_id: None,
         };
         store.put("svc", "aud", &tokens).expect("put");
         let got = store.get("svc", "aud").expect("get").expect("some");
@@ -1059,6 +1343,7 @@ mod tests {
             refresh_token: None,
             expires_at: None,
             scopes: vec![],
+            client_id: None,
         };
         store.put("svc", "aud", &tokens).expect("put");
         // File exists and is non-empty.
@@ -1086,6 +1371,7 @@ mod tests {
                     refresh_token: None,
                     expires_at: None,
                     scopes: vec![],
+                    client_id: None,
                 },
             )
             .expect("put");
@@ -1094,12 +1380,38 @@ mod tests {
     }
 
     #[test]
-    fn join_wellknown_strips_path() {
-        let base = Url::parse("https://example.com/v1/mcp").unwrap();
+    fn join_wellknown_preserves_issuer_path() {
+        // RFC 8414 / RFC 9728: the issuer/resource path is preserved after the
+        // well-known suffix (path-preserving), NOT replaced. This is the case
+        // GitHub relies on — a stripped path 404s.
+        let base = Url::parse("https://github.com/login/oauth").unwrap();
+        let u = join_wellknown(&base, "oauth-authorization-server");
+        assert_eq!(
+            u.to_string(),
+            "https://github.com/.well-known/oauth-authorization-server/login/oauth"
+        );
+    }
+
+    #[test]
+    fn join_wellknown_trims_trailing_slash() {
+        // A trailing slash on the resource URL must not leak into the metadata
+        // path (would yield a `//` or dangling separator).
+        let base = Url::parse("https://api.githubcopilot.com/mcp/").unwrap();
         let u = join_wellknown(&base, "oauth-protected-resource");
         assert_eq!(
             u.to_string(),
-            "https://example.com/.well-known/oauth-protected-resource"
+            "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp"
+        );
+    }
+
+    #[test]
+    fn join_wellknown_root_path_has_no_suffix_path() {
+        // A root-path issuer collapses to the bare well-known URL.
+        let base = Url::parse("https://example.com/").unwrap();
+        let u = join_wellknown(&base, "oauth-authorization-server");
+        assert_eq!(
+            u.to_string(),
+            "https://example.com/.well-known/oauth-authorization-server"
         );
     }
 

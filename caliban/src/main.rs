@@ -286,8 +286,21 @@ async fn main() -> Result<()> {
     // rule list. MCP servers come from the unified Settings snapshot
     // (caliban-settings already folds legacy `mcp.toml` via its compat
     // shim).
+    // Whether this run may perform interactive OAuth authorization for
+    // `oauth = auto|manual` MCP servers (open a browser + block on the loopback
+    // callback). Only true for an interactive run — i.e. NOT headless/`--print`
+    // /stream-json/non-TTY. Mirrors the headless-dispatch decision made below;
+    // computed here because MCP starts before that dispatch.
+    let mcp_interactive = {
+        use std::io::IsTerminal as _;
+        !args::is_headless_active(
+            &args,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    };
     let (mcp_summaries, mcp_server_cfg, mcp_tools_for_search) =
-        startup::start_mcp(&args, &settings_snapshot, &mut registry).await;
+        startup::start_mcp(&args, &settings_snapshot, &mut registry, mcp_interactive).await;
 
     // ADR-0046 — set up the shared MCP activation surface for lazy
     // schema loading. The Arc<ArcSwap<McpActivationSet>> must be the

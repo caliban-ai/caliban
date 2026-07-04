@@ -369,9 +369,10 @@ pub(crate) struct Args {
     )]
     pub(crate) no_system: bool,
 
-    /// Append-log events + draws to ~/.cache/caliban/debug.log
-    /// (`~/Library/Caches/caliban/debug.log` on macOS). `CALIBAN_DEBUG`
-    /// is also honored — any non-empty value turns it on.
+    /// Append-log events + draws to `~/.cache/caliban/debug.log`
+    /// (XDG-first on every platform per ADR 0050; `$XDG_CACHE_HOME` overrides
+    /// the `~/.cache` base). `CALIBAN_DEBUG` is also honored — any non-empty
+    /// value turns it on.
     #[arg(
         long,
         value_name = "BOOL",
