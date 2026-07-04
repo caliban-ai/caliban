@@ -55,19 +55,31 @@ url  = "https://api.example.com/mcp/sse"
 
 For HTTP/SSE servers behind OAuth, caliban performs the authorization-code flow with PKCE and a loopback callback server.
 
-**Auto discovery** (`oauth = "auto"`): caliban discovers the authorization endpoints from the server's `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` documents. It still needs a **`client_id`** — caliban does not perform dynamic client registration (RFC 7591), and most hosted servers (including GitHub) don't offer it. Register an OAuth app once and put its `client_id` in an `oauth_config` block; the endpoints are still discovered for you:
+**Auto discovery** (`oauth = "auto"`): caliban discovers the authorization endpoints from the server's `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` documents. Most hosted MCP servers (Sentry, Linear, Notion, …) also advertise a `registration_endpoint`, so caliban **dynamically registers a client (RFC 7591)** on the first run — no app registration, no `client_id`, nothing to configure but the URL:
 
 ```toml
-[mcp_servers.github]
+[mcp_servers.sentry]
 type  = "http"
-url   = "https://api.githubcopilot.com/mcp/"
+url   = "https://mcp.sentry.dev/mcp"
 oauth = "auto"
-
-[mcp_servers.github.oauth_config]
-client_id = "${GITHUB_OAUTH_CLIENT_ID}"   # from a registered GitHub OAuth App
 ```
 
-> **GitHub OAuth App setup.** GitHub matches the OAuth App's *Authorization callback URL* exactly, so pin the loopback port: register the callback URL as `http://127.0.0.1:41870/callback` and run caliban with `CALIBAN_MCP_OAUTH_PORT=41870` (or `--mcp-oauth-port 41870`). The scopes are requested from GitHub's protected-resource metadata (`repo`, `read:org`, …); GitHub OAuth Apps also require a `client_secret` (add `client_secret = "${GITHUB_OAUTH_CLIENT_SECRET}"`).
+The first interactive run opens a browser, you authorize, and the token is cached. caliban registers a **public PKCE client** for its loopback callback; a fixed callback port (below) keeps that registration stable across runs.
+
+> **GitHub is the exception** — its authorization server does not offer dynamic registration (`registration_endpoint: null`), so `auto` needs a manually-registered OAuth App's `client_id` (+ `client_secret`) in an `oauth_config` block:
+>
+> ```toml
+> [mcp_servers.github]
+> type  = "http"
+> url   = "https://api.githubcopilot.com/mcp/"
+> oauth = "auto"
+>
+> [mcp_servers.github.oauth_config]
+> client_id     = "${GITHUB_OAUTH_CLIENT_ID}"
+> client_secret = "${GITHUB_OAUTH_CLIENT_SECRET}"
+> ```
+>
+> GitHub matches the OAuth App's *Authorization callback URL* exactly, so pin the loopback port: register the callback as `http://127.0.0.1:41870/callback` and run with `CALIBAN_MCP_OAUTH_PORT=41870`. A configured `client_id` always takes precedence over dynamic registration.
 
 **Manual configuration** (`oauth = "manual"`): supply the endpoints yourself in a `[mcp_servers.<name>.oauth_config]` block:
 

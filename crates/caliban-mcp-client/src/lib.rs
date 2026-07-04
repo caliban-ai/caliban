@@ -49,7 +49,8 @@ pub use manager::{DEFAULT_STARTUP_TIMEOUT, DEFAULT_TOOL_TIMEOUT, McpClientManage
 pub use oauth::{
     FileStore, KEYRING_SERVICE, KeyringStore, ManualOauthConfig, MemoryStore, OauthAuthenticator,
     OauthEndpoints, OauthFlow, OauthFlowOptions, OauthTokens, PORT_ENV_VAR, REFRESH_MARGIN,
-    TokenStore, default_store, discover_endpoints, endpoints_from_manual, refresh_tokens,
+    RegisteredClient, TokenStore, default_store, discover_endpoints, endpoints_from_manual,
+    refresh_tokens, register_client,
 };
 pub use permissions::{compile_server_permission_rules, merge_with_global};
 pub use registry::{ServerStatus, ServerSummary};

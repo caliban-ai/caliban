@@ -83,6 +83,10 @@ pub struct OauthEndpoints {
     pub scopes: Vec<String>,
     /// Resource audience (for token cache keying + the `audience` claim).
     pub audience: String,
+    /// RFC 7591 dynamic-client-registration endpoint, when the authorization
+    /// server advertises one. Present via discovery (`auto`); `None` for manual
+    /// config and for servers that don't offer registration (e.g. GitHub).
+    pub registration_endpoint: Option<Url>,
 }
 
 /// One persisted token bundle. Stored under
@@ -426,6 +430,9 @@ struct AuthServerDoc {
     /// which a bare `Vec` would reject.
     #[serde(default)]
     scopes_supported: Option<Vec<String>>,
+    /// RFC 7591 registration endpoint. `null` on servers without DCR (GitHub).
+    #[serde(default)]
+    registration_endpoint: Option<String>,
 }
 
 /// Discover endpoints for `server_url`. Hits the MCP-flavoured
@@ -521,6 +528,13 @@ pub async fn discover_endpoints(
             resource_scopes
         },
         audience,
+        // RFC 7591: carry the registration endpoint so `auto` can dynamically
+        // register a client when no static `client_id` was configured. A
+        // malformed URL here is non-fatal — treat it as "no DCR available".
+        registration_endpoint: asd
+            .registration_endpoint
+            .as_deref()
+            .and_then(|s| Url::parse(s).ok()),
     })
 }
 
@@ -598,7 +612,88 @@ pub fn endpoints_from_manual(
         })?,
         scopes: cfg.scopes.clone(),
         audience,
+        registration_endpoint: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Client Registration (RFC 7591)
+// ---------------------------------------------------------------------------
+
+/// A client registered dynamically with an authorization server (RFC 7591).
+/// caliban registers a public PKCE client, so `client_secret` is usually
+/// `None`; a server that issues a confidential client returns one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredClient {
+    /// The issued client identifier.
+    pub client_id: String,
+    /// Client secret, when the server issued a confidential client.
+    pub client_secret: Option<String>,
+}
+
+/// Register a public (PKCE) client with an RFC 7591 `registration_endpoint`.
+///
+/// Used by `oauth = "auto"` when no static `client_id` was configured and the
+/// authorization server advertises dynamic registration. Registers `client_name`
+/// with the loopback `redirect_uri` the flow will use, requesting a public
+/// client (`token_endpoint_auth_method: "none"`) for `authorization_code` +
+/// `refresh_token`.
+///
+/// # Errors
+/// [`McpError::OauthRegistration`] on any HTTP / JSON failure or a non-success
+/// status from the registration endpoint.
+pub async fn register_client(
+    server: &str,
+    registration_endpoint: &Url,
+    redirect_uri: &Url,
+    client_name: &str,
+    http: &reqwest::Client,
+) -> Result<RegisteredClient, McpError> {
+    let body = serde_json::json!({
+        "client_name": client_name,
+        "redirect_uris": [redirect_uri.as_str()],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        // Public client — PKCE only, no client secret.
+        "token_endpoint_auth_method": "none",
+    });
+    let response = http
+        .post(registration_endpoint.clone())
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| McpError::OauthRegistration {
+            server: server.to_string(),
+            message: format!("POST {registration_endpoint}: {e}"),
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(McpError::OauthRegistration {
+            server: server.to_string(),
+            message: format!("registration endpoint returned {status}: {text}"),
+        });
+    }
+    let doc: ClientRegistrationResponse =
+        response
+            .json()
+            .await
+            .map_err(|e| McpError::OauthRegistration {
+                server: server.to_string(),
+                message: format!("malformed registration response: {e}"),
+            })?;
+    Ok(RegisteredClient {
+        client_id: doc.client_id,
+        client_secret: doc.client_secret,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientRegistrationResponse {
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -727,34 +822,67 @@ impl std::fmt::Debug for OauthFlow {
     }
 }
 
+/// Bind the loopback callback listener and derive its `redirect_uri`.
+///
+/// `port = Some(p)` pins the port (required when the `redirect_uri` must match
+/// a fixed registration — GitHub OAuth Apps, or a DCR registration we're about
+/// to submit); `None` binds an ephemeral port. Returning the bound listener
+/// (rather than just the port) lets a caller learn the `redirect_uri` — e.g. to
+/// dynamically register a client for it — before handing the *same* listener to
+/// [`OauthFlow::start_on_listener`], with no unbind/rebind race.
+///
+/// # Errors
+/// [`McpError::OauthFlow`] if the listener can't bind.
+pub(crate) async fn bind_loopback(
+    server: &str,
+    port: Option<u16>,
+) -> Result<(tokio::net::TcpListener, Url), McpError> {
+    let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| McpError::OauthFlow {
+            server: server.to_string(),
+            message: format!("bind loopback {bind_addr}: {e}"),
+        })?;
+    let local = listener.local_addr().map_err(|e| McpError::OauthFlow {
+        server: server.to_string(),
+        message: format!("local_addr: {e}"),
+    })?;
+    let redirect_uri =
+        Url::parse(&format!("http://127.0.0.1:{}/callback", local.port())).map_err(|e| {
+            McpError::OauthFlow {
+                server: server.to_string(),
+                message: format!("redirect uri parse: {e}"),
+            }
+        })?;
+    Ok((listener, redirect_uri))
+}
+
 impl OauthFlow {
-    /// Spawn the loopback callback server and build the auth URL.
+    /// Spawn the loopback callback server and build the auth URL, binding the
+    /// port from `opts.port` (ephemeral when `None`).
     ///
     /// # Errors
     /// [`McpError::OauthFlow`] if the loopback listener fails to bind.
     pub async fn start(opts: OauthFlowOptions) -> Result<Self, McpError> {
+        let (listener, redirect_uri) = bind_loopback(&opts.server, opts.port).await?;
+        Ok(Self::start_on_listener(opts, listener, redirect_uri))
+    }
+
+    /// Like [`Self::start`] but drives an already-bound loopback `listener` +
+    /// its `redirect_uri`. Used when the caller needed the `redirect_uri` before
+    /// starting the flow (e.g. to dynamically register a client for it). Must be
+    /// called from within a Tokio runtime (it spawns the callback server).
+    #[must_use]
+    pub(crate) fn start_on_listener(
+        opts: OauthFlowOptions,
+        listener: tokio::net::TcpListener,
+        redirect_uri: Url,
+    ) -> Self {
         let pkce = PkcePair::generate();
         let mut state_bytes = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut state_bytes);
         let expected_state = URL_SAFE_NO_PAD.encode(state_bytes);
-
-        let bind_port = opts.port.unwrap_or(0);
-        let bind_addr = SocketAddr::from(([127, 0, 0, 1], bind_port));
-        let listener = tokio::net::TcpListener::bind(bind_addr)
-            .await
-            .map_err(|e| McpError::OauthFlow {
-                server: opts.server.clone(),
-                message: format!("bind loopback {bind_addr}: {e}"),
-            })?;
-        let local = listener.local_addr().map_err(|e| McpError::OauthFlow {
-            server: opts.server.clone(),
-            message: format!("local_addr: {e}"),
-        })?;
-        let redirect_uri = Url::parse(&format!("http://127.0.0.1:{}/callback", local.port()))
-            .map_err(|e| McpError::OauthFlow {
-                server: opts.server.clone(),
-                message: format!("redirect uri parse: {e}"),
-            })?;
 
         let (code_tx, code_rx) = oneshot::channel::<Result<String, McpError>>();
         let cb_state = CallbackState {
@@ -796,7 +924,7 @@ impl OauthFlow {
             }
         }
 
-        Ok(Self {
+        Self {
             auth_url,
             inner: OauthFlowInner {
                 server: opts.server,
@@ -810,7 +938,7 @@ impl OauthFlow {
                 shutdown_tx: Some(shutdown_tx),
                 callback_timeout: opts.callback_timeout,
             },
-        })
+        }
     }
 
     /// Wait for the user's browser callback, then exchange the
@@ -1112,15 +1240,16 @@ impl OauthAuthenticator {
     /// Returns `Ok(None)` for `OauthMode::Off` (nothing to attach). Otherwise
     /// returns `Ok(Some(access_token))`, running whichever of {reuse, refresh,
     /// interactive flow} is required. Endpoints are discovered (`auto`) or read
-    /// from the manual block (`manual`); `client_id` comes from the manual/auto
-    /// config block (auto's DCR fallback is not yet implemented — GitHub and
-    /// most hosted servers don't offer registration anyway).
+    /// from the manual block (`manual`); the `client_id` comes from the config
+    /// block when set, otherwise (`auto`) from RFC 7591 dynamic registration
+    /// when the auth server advertises a `registration_endpoint`.
     ///
     /// # Errors
     /// - [`McpError::OauthDiscovery`] / [`McpError::OauthManualIncomplete`] if
     ///   endpoints can't be resolved.
     /// - [`McpError::OauthNoClientId`] on a cold cache with no configured
-    ///   `client_id` and no dynamic registration.
+    ///   `client_id` and no dynamic registration available.
+    /// - [`McpError::OauthRegistration`] if dynamic registration fails.
     /// - [`McpError::OauthInteractiveRequired`] on a cold cache in headless mode.
     /// - [`McpError::OauthFlow`] / [`McpError::OauthExchange`] if the flow fails.
     pub async fn bearer_for(
@@ -1193,25 +1322,72 @@ impl OauthAuthenticator {
         }
 
         // 2. Cold cache — need a fresh interactive authorization.
-        let client_id = manual
-            .client_id
-            .clone()
-            .ok_or_else(|| McpError::OauthNoClientId {
+        self.interactive_authorize(server, &endpoints, manual).await
+    }
+
+    /// Cold-cache path: obtain a `client_id` (static config or RFC 7591 dynamic
+    /// registration), run the interactive browser flow, and cache the token.
+    ///
+    /// # Errors
+    /// - [`McpError::OauthNoClientId`] when neither a configured `client_id` nor
+    ///   a `registration_endpoint` is available (server unconfigurable — GitHub).
+    /// - [`McpError::OauthInteractiveRequired`] in headless mode.
+    /// - [`McpError::OauthRegistration`] / [`McpError::OauthFlow`] /
+    ///   [`McpError::OauthExchange`] if registration or the flow fails.
+    async fn interactive_authorize(
+        &self,
+        server: &str,
+        endpoints: &OauthEndpoints,
+        manual: &ManualOauthConfig,
+    ) -> Result<Option<String>, McpError> {
+        // A `client_id` can come from static config OR (RFC 7591) dynamic
+        // registration when the auth server advertises a `registration_endpoint`.
+        // Resolve the source up front so neither branch has to panic-unwrap.
+        enum Source {
+            Static(String, Option<String>),
+            Dcr(Url),
+        }
+        let source = if let Some(cid) = &manual.client_id {
+            Source::Static(cid.clone(), manual.client_secret.clone())
+        } else if let Some(reg_url) = &endpoints.registration_endpoint {
+            Source::Dcr(reg_url.clone())
+        } else {
+            // Neither configured nor registrable (e.g. GitHub, no DCR).
+            return Err(McpError::OauthNoClientId {
                 server: server.to_string(),
-            })?;
+            });
+        };
+        // Refuse to open a browser we can't complete in headless mode — check
+        // BEFORE spending a dynamic registration.
         if !self.interactive {
             return Err(McpError::OauthInteractiveRequired {
                 server: server.to_string(),
             });
         }
+
+        // Bind the callback listener first so we know the exact `redirect_uri`
+        // to register (DCR) and to present in the auth URL. Holding the bound
+        // listener across registration avoids any unbind/rebind race.
+        let (listener, redirect_uri) = bind_loopback(server, self.callback_port).await?;
+        let (client_id, client_secret) = match source {
+            Source::Static(cid, secret) => (cid, secret),
+            Source::Dcr(reg_url) => {
+                let registered =
+                    register_client(server, &reg_url, &redirect_uri, "caliban", &self.http).await?;
+                tracing::info!(
+                    target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                    server,
+                    client_id = registered.client_id.as_str(),
+                    "registered oauth client dynamically (RFC 7591)",
+                );
+                (registered.client_id, registered.client_secret)
+            }
+        };
+
         let mut opts =
             OauthFlowOptions::new(server.to_string(), endpoints.clone(), client_id.clone());
-        opts.client_secret = manual.client_secret.clone();
-        // Pin the loopback callback port when configured so the `redirect_uri`
-        // matches a fixed registered callback URL (required by GitHub OAuth
-        // Apps). `None` keeps the ephemeral default.
-        opts.port = self.callback_port;
-        let flow = OauthFlow::start(opts).await?;
+        opts.client_secret = client_secret;
+        let flow = OauthFlow::start_on_listener(opts, listener, redirect_uri);
         present_auth_url(server, &flow.auth_url);
         let mut tokens = flow.await_callback(&self.http).await?;
         tokens.client_id = Some(client_id);
