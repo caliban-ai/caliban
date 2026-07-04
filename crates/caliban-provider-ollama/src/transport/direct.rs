@@ -6,7 +6,9 @@ use futures::stream::BoxStream;
 
 use crate::config::DirectConfig;
 use crate::error::OllamaError;
-use crate::schema::{ModelShow, NativeRequest, NativeResponse, RunningModel, RunningModelList};
+use crate::schema::{
+    ModelShow, NativeRequest, NativeResponse, RunningModel, RunningModelList, TagEntry, TagList,
+};
 use crate::transport::Transport;
 
 /// Sends requests directly to the Ollama HTTP API (no auth required).
@@ -89,11 +91,12 @@ impl Transport for DirectTransport {
         Ok(Box::pin(s))
     }
 
-    fn wire_model_id(&self, canonical: &str) -> String {
-        crate::models::models()
-            .into_iter()
-            .find(|m| m.id == canonical)
-            .map_or_else(|| canonical.to_string(), |m| m.native_id)
+    fn server_id(&self) -> String {
+        let url = &self.config.base_url;
+        match url.host_str() {
+            Some(host) => format!("{host}:{}", url.port().unwrap_or(11434)),
+            None => "default".to_string(),
+        }
     }
 
     async fn running_models(&self) -> Result<Vec<RunningModel>, OllamaError> {
@@ -112,5 +115,11 @@ impl Transport for DirectTransport {
             .await?;
         let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
         Ok(Some(resp.json::<ModelShow>().await?))
+    }
+
+    async fn list_tags(&self) -> Result<Vec<TagEntry>, OllamaError> {
+        let resp = self.client.get(self.api_url("/api/tags")).send().await?;
+        let resp = caliban_provider::transport::check_status(resp, OllamaError::bad_status).await?;
+        Ok(resp.json::<TagList>().await?.models)
     }
 }
