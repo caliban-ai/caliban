@@ -203,6 +203,7 @@ mod tests {
             started_at: "2026-06-09T00:00:00Z".into(),
             session_dir,
             endpoint: crate::transport::Endpoint::Unix { path: socket },
+            working_dir: PathBuf::new(),
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -214,6 +215,7 @@ mod tests {
                 inherit_hooks: true,
                 interactive: false,
                 inherited_hooks_config: None,
+                source: None,
             },
         }
     }

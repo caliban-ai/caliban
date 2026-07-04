@@ -391,7 +391,10 @@ impl Supervisor {
                 };
                 let rec = {
                     let mut r = self.registry.lock().await;
-                    r.register(spec, endpoint)
+                    // Task 4 (#281) resolves `spec.source` into a real
+                    // working dir; until then every worker inherits the
+                    // daemon's cwd, matching today's behavior.
+                    r.register(spec, endpoint, std::path::PathBuf::new())
                 };
                 let reply = CtlReply::Spawned {
                     id: rec.id.clone(),
@@ -446,7 +449,8 @@ impl Supervisor {
                         Ok(e) => e,
                         Err(error) => return CtlReply::Error { error },
                     };
-                    r.register(old.spec, endpoint)
+                    // Same placeholder as Spawn above (Task 4 resolves for real).
+                    r.register(old.spec, endpoint, std::path::PathBuf::new())
                 };
                 let reply = CtlReply::Respawned {
                     id: new_rec.id.clone(),

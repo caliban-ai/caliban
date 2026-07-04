@@ -329,6 +329,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 inherit_hooks: true,
                 interactive: *interactive,
                 inherited_hooks_config: None,
+                source: None,
             };
             match client.spawn(spec).await {
                 Ok((id, endpoint)) => {
@@ -474,6 +475,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         inherit_hooks: true,
         interactive: false,
         inherited_hooks_config: None,
+        source: None,
     };
     match client.spawn(spec).await {
         Ok((id, endpoint)) => {

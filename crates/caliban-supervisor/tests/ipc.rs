@@ -43,6 +43,7 @@ fn spec() -> SpawnSpec {
         inherit_hooks: true,
         interactive: false,
         inherited_hooks_config: None,
+        source: None,
     }
 }
 
@@ -359,6 +360,7 @@ async fn spawn_launches_worker_and_reaches_done() {
         inherit_hooks: true,
         interactive: false,
         inherited_hooks_config: None,
+        source: None,
     };
     let (id, endpoint) = client.spawn(spec).await.unwrap();
     let caliban_supervisor::Endpoint::Unix { path: socket_path } = endpoint else {

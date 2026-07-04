@@ -5,6 +5,7 @@
 //! restart can reconstruct the world.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::Utc;
 
@@ -84,7 +85,15 @@ impl Registry {
     /// Register a new agent. Picks a fresh id, persists the manifest,
     /// and returns the assigned record. Transport-agnostic: `endpoint` may
     /// be any [`Endpoint`] variant (Unix today; TCP from #280 Task 7).
-    pub fn register(&mut self, spec: SpawnSpec, endpoint: Endpoint) -> AgentRecord {
+    /// `working_dir` is the resolved directory the worker should run in
+    /// (empty = inherit the daemon's cwd, today's behavior; real resolution
+    /// against `spec.source` lands in #281 Task 4).
+    pub fn register(
+        &mut self,
+        spec: SpawnSpec,
+        endpoint: Endpoint,
+        working_dir: PathBuf,
+    ) -> AgentRecord {
         let id = new_id();
         let session_dir = self.store.session_dir(&id);
         let record = AgentRecord {
@@ -94,6 +103,7 @@ impl Registry {
             started_at: Utc::now().to_rfc3339(),
             session_dir,
             endpoint,
+            working_dir,
             spec,
         };
         // Best-effort persistence — IO errors get logged but don't block
@@ -260,6 +270,7 @@ mod tests {
             inherit_hooks: true,
             interactive: false,
             inherited_hooks_config: None,
+            source: None,
         }
     }
 
@@ -280,6 +291,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         assert_eq!(rec.status, AgentStatus::Spawning);
         assert_eq!(r.len(), 1);
@@ -297,6 +309,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         let err = r.remove(&rec.id, false).unwrap_err();
         assert!(matches!(err, SupervisorError::InvalidState { .. }));
@@ -311,6 +324,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         r.remove(&rec.id, true).unwrap();
         assert!(r.get(&rec.id).is_none());
@@ -325,6 +339,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         r.set_status(&rec.id, AgentStatus::Done).unwrap();
         r.remove(&rec.id, false).unwrap();
@@ -340,6 +355,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         // Spawning -> Running allowed.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
@@ -359,6 +375,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         let swept = r.sweep_crashed();
         assert_eq!(swept, vec![rec.id.clone()]);
@@ -374,6 +391,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         // Put agent in Running state.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
@@ -395,6 +413,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         r.set_status(&rec.id, AgentStatus::Killed).unwrap();
         // report_status must refuse to change a terminal state.
@@ -414,6 +433,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
         assert!(r.report_status(&rec.id, AgentStatus::Idle));
@@ -433,6 +453,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         r.track_pid(&rec.id, 4242);
         assert_eq!(r.pid_of(&rec.id), Some(4242));
@@ -452,6 +473,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         r.track_pid(&rec.id, 99);
         r.remove(&rec.id, true).unwrap();
@@ -469,6 +491,7 @@ mod tests {
             Endpoint::Unix {
                 path: std::path::PathBuf::from("/tmp/x.sock"),
             },
+            PathBuf::new(),
         );
         // Advance to Running then to Idle.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));

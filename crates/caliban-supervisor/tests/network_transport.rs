@@ -43,6 +43,7 @@ fn spec() -> SpawnSpec {
         inherit_hooks: true,
         interactive: false,
         inherited_hooks_config: None,
+        source: None,
     }
 }
 

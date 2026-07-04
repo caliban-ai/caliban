@@ -777,6 +777,7 @@ pub(crate) fn install_sub_agent(
                 } else {
                     None
                 },
+                source: None,
             };
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;
