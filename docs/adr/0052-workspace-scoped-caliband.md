@@ -93,8 +93,22 @@ one optional field, back-compatible via `#[serde(default)]`).
   workspace (the #281 acceptance), each agent runs in the correct checkout, and
   `isolation_worktree` finally materializes a real per-source worktree — a
   capability 0037 promised but never delivered, now available in local **and**
-  in-pod modes. Local single-repo use is byte-for-byte unchanged (same hash, same
-  socket, same store). Runtime-added sources need no daemon restart.
+  in-pod modes. caliband's **identity** for single-repo use is byte-for-byte
+  unchanged (same `workspace_hash`, same socket path, same store dir — a
+  workspace root equal to the old repo_root hashes identically). Runtime-added
+  sources need no daemon restart.
+- **Behavior note (worker cwd normalization):** before this change a worker
+  inherited the daemon's process cwd (which, for an auto-spawned daemon, is
+  whatever directory the user invoked `caliban` from — often a repo
+  *subdirectory*). Now the launcher sets the worker's `current_dir` to the
+  resolved working directory (the source dir, or its worktree), i.e. the
+  workspace root for a no-`source` non-isolation spawn. So a worker's effective
+  cwd is identical to before **only when the daemon was launched from the
+  workspace root**; a subdirectory launch now normalizes the worker cwd up to
+  the workspace root. This is deliberate (deterministic, matches the in-pod
+  model where the workspace root is the anchor) and is a behavior improvement,
+  not an accident — but it is a real change for anyone who relied on agents
+  inheriting a subdir cwd.
 - **Negative:** the daemon now owns git-worktree lifecycle (create-on-spawn,
   remove-on-exit) — more state and more failure surface (a source that isn't a
   checkout, a worktree that fails to create, orphaned worktrees on a hard crash,
