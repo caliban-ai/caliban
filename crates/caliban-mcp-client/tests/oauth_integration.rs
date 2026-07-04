@@ -49,6 +49,9 @@ async fn install_discovery_routes(server: &MockServer, audience: &str) {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "resource": audience,
             "authorization_servers": [as_issuer],
+            // Resource-scoped list (RFC 9728) — the authoritative scopes, as on
+            // GitHub. Discovery must prefer these over the AS metadata.
+            "scopes_supported": ["read", "write"],
         })))
         .mount(server)
         .await;
@@ -57,7 +60,9 @@ async fn install_discovery_routes(server: &MockServer, audience: &str) {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "authorization_endpoint": format!("{base}/oauth/authorize"),
             "token_endpoint":         format!("{base}/oauth/token"),
-            "scopes_supported":       ["read", "write"],
+            // AS metadata leaves scopes null (as GitHub does) — proves the
+            // resource-doc fallback path.
+            "scopes_supported":       null,
         })))
         .mount(server)
         .await;

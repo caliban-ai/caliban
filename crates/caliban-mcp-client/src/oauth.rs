@@ -409,14 +409,23 @@ struct ProtectedResourceDoc {
     authorization_servers: Vec<String>,
     #[serde(default)]
     resource: Option<String>,
+    /// Scopes required to access this resource (RFC 9728). For many hosted
+    /// servers (GitHub included) this is the authoritative scope list — the
+    /// authorization server's own metadata leaves `scopes_supported` null.
+    /// `Option` because servers emit an explicit `null` (not just omission),
+    /// which a bare `Vec` would fail to deserialize.
+    #[serde(default)]
+    scopes_supported: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AuthServerDoc {
     authorization_endpoint: String,
     token_endpoint: String,
+    /// `Option` because auth servers (GitHub) emit an explicit `null` here,
+    /// which a bare `Vec` would reject.
     #[serde(default)]
-    scopes_supported: Vec<String>,
+    scopes_supported: Option<Vec<String>>,
 }
 
 /// Discover endpoints for `server_url`. Hits the MCP-flavoured
@@ -458,6 +467,11 @@ pub async fn discover_endpoints(
         u.set_path("");
         u.to_string()
     });
+    // The protected-resource doc's scopes (RFC 9728) are the scopes the
+    // *resource* needs — the right thing to request. The AS metadata's
+    // `scopes_supported` is often null (GitHub), so prefer the resource doc and
+    // fall back to the AS list only if the resource didn't advertise any.
+    let resource_scopes = prs.scopes_supported.unwrap_or_default();
     let as_url_raw = prs
         .authorization_servers
         .into_iter()
@@ -501,7 +515,11 @@ pub async fn discover_endpoints(
             server: server.to_string(),
             message: format!("invalid token_endpoint: {e}"),
         })?,
-        scopes: asd.scopes_supported,
+        scopes: if resource_scopes.is_empty() {
+            asd.scopes_supported.unwrap_or_default()
+        } else {
+            resource_scopes
+        },
         audience,
     })
 }
@@ -1072,11 +1090,17 @@ impl OauthAuthenticator {
         server_url: &Url,
         manual: &ManualOauthConfig,
     ) -> Result<Option<String>, McpError> {
-        let endpoints = match mode {
+        let mut endpoints = match mode {
             OauthMode::Off => return Ok(None),
             OauthMode::Auto => discover_endpoints(server, server_url, &self.http).await?,
             OauthMode::Manual => endpoints_from_manual(server, manual, server_url)?,
         };
+        // Explicit `oauth_config.scopes` always wins — it lets an operator
+        // narrow or correct the scopes discovery inferred (or supply them when
+        // the server advertises none). Empty means "use what was resolved".
+        if !manual.scopes.is_empty() {
+            endpoints.scopes = manual.scopes.clone();
+        }
 
         // 1. Reuse or refresh a cached token, keyed by the resolved audience.
         let now = Utc::now();
