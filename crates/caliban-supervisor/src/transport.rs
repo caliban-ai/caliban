@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -67,12 +68,11 @@ fn ensure_crypto_provider() {
 /// Build server TLS from a PEM cert chain + private key.
 pub fn tls_server_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<TlsServer> {
     ensure_crypto_provider();
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<_, _>>()
-        .map_err(std::io::Error::other)?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_pem[..])
-        .map_err(std::io::Error::other)?
-        .ok_or_else(|| std::io::Error::other("no private key in PEM"))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let key: PrivateKeyDer<'static> =
+        PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| std::io::Error::other(e.to_string()))?;
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -86,9 +86,9 @@ pub fn tls_server_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<T
 pub fn tls_client_from_pem(ca_pem: &[u8], server_name: &str) -> std::io::Result<TlsClient> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &ca_pem[..]) {
+    for cert in CertificateDer::pem_slice_iter(ca_pem) {
         roots
-            .add(cert.map_err(std::io::Error::other)?)
+            .add(cert.map_err(|e| std::io::Error::other(e.to_string()))?)
             .map_err(std::io::Error::other)?;
     }
     let config = ClientConfig::builder()

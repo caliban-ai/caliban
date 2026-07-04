@@ -27,7 +27,6 @@ dirs        = { workspace = true }
 sha2        = { workspace = true }
 futures     = { workspace = true }
 tokio-rustls   = { workspace = true }
-rustls-pemfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix  = { workspace = true }
