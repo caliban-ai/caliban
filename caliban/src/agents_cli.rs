@@ -71,31 +71,54 @@ struct DaemonNetworkEnv {
 
 /// Pure resolver behind [`daemon_network_env`] — no env access, so it's
 /// directly unit-testable (mirrors the `parse_idle_timeout` /
-/// `worker_idle_timeout` split in `worker.rs`). A malformed/unreadable TLS CA
-/// PEM disables TLS (best-effort) rather than failing the whole client
-/// build, matching `worker::build_status_client`'s posture.
+/// `worker_idle_timeout` split in `worker.rs`).
+///
+/// Security posture (#280 fix-before-merge): `tls_ca_pem: None` means the CA
+/// env var itself was absent — plaintext is an intentional choice (e.g.
+/// loopback dev) and stays `tls: None`. But when the caller *did* find a CA
+/// PEM and it fails to parse into a working [`TlsClient`], that is a hard
+/// misconfiguration, NOT a signal to fall back to plaintext: silently
+/// dropping `tls` while keeping `token` would dial plaintext TCP and write
+/// the bearer token in cleartext before the TLS server ever gets a chance to
+/// reject the handshake, handing the daemon token to any on-path observer.
+/// So a present-but-broken CA is a hard `Err`, never a downgrade.
 fn resolve_daemon_network_env(
     listen: Option<String>,
     token: Option<String>,
     tls_ca_pem: Option<Vec<u8>>,
     tls_server_name: Option<String>,
-) -> Option<DaemonNetworkEnv> {
-    let listen = listen?;
-    let tls = tls_ca_pem.and_then(|pem| {
-        let server_name = tls_server_name.unwrap_or_else(|| "localhost".to_string());
-        caliban_supervisor::transport::tls_client_from_pem(&pem, &server_name).ok()
-    });
-    Some(DaemonNetworkEnv { listen, tls, token })
+) -> Result<Option<DaemonNetworkEnv>, String> {
+    let Some(listen) = listen else {
+        return Ok(None);
+    };
+    let tls = match tls_ca_pem {
+        None => None,
+        Some(pem) => {
+            let server_name = tls_server_name.unwrap_or_else(|| "localhost".to_string());
+            let client = caliban_supervisor::transport::tls_client_from_pem(&pem, &server_name)
+                .map_err(|e| {
+                    format!("CALIBAN_DAEMON_TLS_CA is set but could not be loaded: {e}")
+                })?;
+            Some(client)
+        }
+    };
+    Ok(Some(DaemonNetworkEnv { listen, tls, token }))
 }
 
 /// Env-reading wrapper around [`resolve_daemon_network_env`] (thin; see that
-/// function for the tested logic).
-fn daemon_network_env() -> Option<DaemonNetworkEnv> {
+/// function for the tested logic). A `CALIBAN_DAEMON_TLS_CA` that's set but
+/// whose file can't even be read is folded into the same hard error as a
+/// present-but-unparseable PEM — both are "the operator asked for TLS and we
+/// can't deliver it," never a silent downgrade to plaintext-with-token.
+fn daemon_network_env() -> Result<Option<DaemonNetworkEnv>, String> {
     let listen = std::env::var("CALIBAN_DAEMON_LISTEN").ok();
     let token = std::env::var("CALIBAN_DAEMON_TOKEN").ok();
-    let tls_ca_pem = std::env::var("CALIBAN_DAEMON_TLS_CA")
-        .ok()
-        .and_then(|path| std::fs::read(path).ok());
+    let tls_ca_pem = match std::env::var("CALIBAN_DAEMON_TLS_CA").ok() {
+        None => None,
+        Some(path) => Some(std::fs::read(&path).map_err(|e| {
+            format!("CALIBAN_DAEMON_TLS_CA is set but could not be read ({path}): {e}")
+        })?),
+    };
     let tls_server_name = std::env::var("CALIBAN_DAEMON_TLS_SERVER_NAME").ok();
     resolve_daemon_network_env(listen, token, tls_ca_pem, tls_server_name)
 }
@@ -112,9 +135,12 @@ pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<Superviso
 /// Network mode (#280 Task 8): when `CALIBAN_DAEMON_LISTEN` is set, dial the
 /// daemon over TCP (optionally TLS + a bearer token) instead — the client
 /// assumes a daemon is already reachable there, so it skips the Unix
-/// socket-file poll/auto-spawn entirely.
+/// socket-file poll/auto-spawn entirely. A `CALIBAN_DAEMON_TLS_CA` that's set
+/// but unreadable/unparseable is a hard error here (surfaced to the user)
+/// rather than a silent downgrade to a plaintext dial carrying the bearer
+/// token in the clear.
 async fn ensure_daemon(repo_root: &Path) -> Result<SupervisorClient> {
-    if let Some(net) = daemon_network_env() {
+    if let Some(net) = daemon_network_env().map_err(|e| anyhow::anyhow!(e))? {
         return Ok(SupervisorClient::new_tcp(net.listen, net.tls, net.token));
     }
     let socket_path = repo_socket_path(repo_root);
@@ -219,9 +245,19 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Ok(endpoint) => {
                 // Reuse the same client TLS + token used to dial the daemon
                 // (#280 Task 8) for the per-agent socket. Unix mode: both
-                // `None`, matching the pre-Task-8 hardcoded values exactly.
-                let (tls, token) =
-                    daemon_network_env().map_or((None, None), |net| (net.tls, net.token));
+                // `None`, matching the pre-Task-8 hardcoded values exactly. A
+                // broken `CALIBAN_DAEMON_TLS_CA` is a hard error, not a silent
+                // downgrade to a plaintext dial carrying the bearer token
+                // (in practice `ensure_daemon` above already validated this
+                // once; re-checking keeps this call site honest on its own).
+                let (tls, token) = match daemon_network_env() {
+                    Ok(Some(net)) => (net.tls, net.token),
+                    Ok(None) => (None, None),
+                    Err(e) => {
+                        eprintln!("caliban: {e}");
+                        return 1;
+                    }
+                };
                 run_attach(&endpoint, id, tls, token).await
             }
             Err(e) => map_client_error(e),
@@ -509,6 +545,7 @@ mod tests {
                 Some(b"garbage".to_vec()),
                 Some("localhost".into()),
             )
+            .expect("no listen -> Ok(None), not an error")
             .is_none()
         );
     }
@@ -521,10 +558,14 @@ mod tests {
             None,
             None,
         )
+        .expect("listen present -> Ok(Some(..))")
         .expect("listen present -> Some");
         assert_eq!(net.listen, "example.test:9000");
         assert_eq!(net.token.as_deref(), Some("s3cret"));
-        assert!(net.tls.is_none(), "no CA PEM given -> plaintext");
+        assert!(
+            net.tls.is_none(),
+            "no CA PEM given -> plaintext is intentional"
+        );
     }
 
     #[test]
@@ -537,6 +578,7 @@ mod tests {
             Some(cert_pem),
             Some("localhost".into()),
         )
+        .expect("listen present -> Ok(Some(..))")
         .expect("listen present -> Some");
         assert!(
             net.tls.is_some(),
@@ -545,22 +587,28 @@ mod tests {
     }
 
     #[test]
-    fn daemon_network_env_malformed_ca_pem_disables_tls_but_keeps_listen() {
-        // Best-effort posture (matches `worker::build_status_client`): a
-        // malformed CA PEM (a cert block whose base64 body doesn't decode)
-        // must not fail the whole client build, just fall back to a
-        // plaintext dial.
+    fn daemon_network_env_malformed_ca_pem_is_a_hard_error() {
+        // Security fix (#280 fix-before-merge): a CA PEM that's present but
+        // fails to parse (a cert block whose base64 body doesn't decode) must
+        // NOT silently fall back to a plaintext-with-token dial — that would
+        // hand the bearer token to any on-path observer before the TLS server
+        // gets a chance to reject the handshake. It must be a hard `Err`
+        // instead, so no `DaemonNetworkEnv` (and no token dial) is ever built.
         let bad_pem =
             b"-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----\n"
                 .to_vec();
-        let net = resolve_daemon_network_env(
+        let result = resolve_daemon_network_env(
             Some("example.test:9000".into()),
             Some("tok".into()),
             Some(bad_pem),
             Some("localhost".into()),
-        )
-        .expect("listen present -> Some even with a bad CA PEM");
-        assert!(net.tls.is_none());
-        assert_eq!(net.listen, "example.test:9000");
+        );
+        let Err(err) = result else {
+            panic!("a present-but-unparseable CA PEM must be a hard error, not Ok(tls: None)")
+        };
+        assert!(
+            err.contains("CALIBAN_DAEMON_TLS_CA"),
+            "error should name the offending env var, got: {err}"
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! and dispatches them against the [`crate::Registry`].
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -47,10 +47,15 @@ pub struct Supervisor {
     bind: BindSpec,
     /// Network config when running in TCP server mode; `None` = Unix mode.
     network: Option<NetworkConfig>,
-    /// Monotonic per-agent port offset (added to `agent_port_base`). An
-    /// `AtomicU16` gives ~64k distinct assignments before the range is
-    /// exhausted; see the ceiling note in [`Supervisor::next_endpoint`].
-    next_agent_port: AtomicU16,
+    /// Monotonic per-agent port offset (added to `agent_port_base`). Widened
+    /// to `AtomicU32` (#280 fix-before-merge) so the offset keeps growing
+    /// forever instead of wrapping back to 0 at 65536 — a 16-bit counter
+    /// would silently re-hand a low port to a new agent while an earlier
+    /// worker holding that port is still alive. With `u32` the `port >
+    /// u16::MAX` ceiling in [`Supervisor::next_endpoint`] latches
+    /// permanently once tripped: exhaustion becomes a clean, terminal error
+    /// (ADR 0051 "clean error, not wrap"), never a collision.
+    next_agent_port: AtomicU32,
     /// The actually-bound TCP address (resolves `:0`), published after
     /// `serve` binds so tests / callers can dial an OS-assigned port.
     bound_addr: OnceLock<String>,
@@ -120,7 +125,7 @@ impl Supervisor {
         Self {
             bind,
             network,
-            next_agent_port: AtomicU16::new(0),
+            next_agent_port: AtomicU32::new(0),
             bound_addr: OnceLock::new(),
             started: Instant::now(),
             registry,
@@ -169,12 +174,15 @@ impl Supervisor {
     /// or a monotonically-numbered TCP endpoint (network mode).
     ///
     /// Network mode draws ports from `agent_port_base` upward via an
-    /// `AtomicU16` offset. **Ceiling (QA note, ADR 0051 "Revisit if"):** the
-    /// counter is 16-bit, so a very long-lived daemon spawning more than
-    /// ~64k agents over its lifetime would exhaust the range and this returns
-    /// `Internal`. Acceptable for the MVP (agent lifetimes are bounded; warm-
-    /// pool reuse is a later refinement). Monotonic (not `base + live-index`)
-    /// so a freshly assigned port can't collide with a still-draining worker.
+    /// `AtomicU32` offset. **Ceiling (ADR 0051 "clean error, not wrap"):**
+    /// once `agent_port_base + offset` exceeds `u16::MAX` this returns
+    /// `Internal` — and because the offset is a `u32` that only ever grows,
+    /// once tripped the ceiling latches permanently: every subsequent call
+    /// keeps returning the same clean error rather than eventually wrapping
+    /// back through 0 and re-handing a port a still-live worker is advertising.
+    /// (A 16-bit counter would wrap at 65536 and do exactly that.) Monotonic
+    /// (not `base + live-index`) so a freshly assigned port can't collide
+    /// with a still-draining worker either.
     fn next_endpoint(&self) -> Result<Endpoint, SupervisorError> {
         match &self.network {
             None => {
@@ -186,7 +194,7 @@ impl Supervisor {
             }
             Some(net) => {
                 let offset = self.next_agent_port.fetch_add(1, Ordering::Relaxed);
-                let port = u32::from(net.agent_port_base) + u32::from(offset);
+                let port = u32::from(net.agent_port_base) + offset;
                 if port > u32::from(u16::MAX) {
                     return Err(SupervisorError::Internal {
                         message: "agent port range exhausted".into(),
@@ -496,4 +504,81 @@ async fn write_reply<W: AsyncWrite + Unpin>(
     stream.write_all(&body).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proc::WorkerHandle;
+    use crate::proto::AgentRecord;
+    use crate::store::AgentStore;
+
+    /// Never actually launches anything — these tests only exercise
+    /// `next_endpoint`'s port bookkeeping, not a real worker lifecycle.
+    struct NopLauncher;
+    impl WorkerLauncher for NopLauncher {
+        fn launch(&self, _record: &AgentRecord) -> std::io::Result<WorkerHandle> {
+            unreachable!("next_endpoint tests never launch a worker")
+        }
+    }
+
+    fn test_supervisor(network: NetworkConfig) -> Supervisor {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("data"));
+        let agent_dir = dir.path().join("agents-rt");
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: None,
+            token: None,
+        };
+        // Leak the tempdir handle so its directory outlives this short unit
+        // test without needing to thread a guard through the return type.
+        std::mem::forget(dir);
+        Supervisor::with_bind(bind, Some(network), store, agent_dir, Arc::new(NopLauncher))
+    }
+
+    /// Regression for the fix-before-merge finding: `next_agent_port` used to
+    /// be an `AtomicU16`, so `fetch_add` wrapped at 65536 back to 0 — the
+    /// `port > u16::MAX` ceiling caught the exhaustion once, but the very
+    /// next call would silently re-hand `agent_port_base` (a port a still-
+    /// live worker may already be advertising) to a brand new agent.
+    /// Widening the counter to `AtomicU32` must make that ceiling latch
+    /// permanently: every call after exhaustion keeps returning the same
+    /// clean `Internal` error, never a fresh low port (ADR 0051 "clean
+    /// error, not wrap").
+    #[test]
+    fn agent_port_ceiling_latches_permanently_instead_of_wrapping() {
+        let network = NetworkConfig {
+            advertise_host: "localhost".into(),
+            agent_port_base: u16::MAX, // one call in-range, then exhausted
+            agent_tls: None,
+            agent_token: None,
+        };
+        let sup = test_supervisor(network);
+
+        // First call: base itself (65535) is still <= u16::MAX -> Ok.
+        let first = sup
+            .next_endpoint()
+            .expect("first port assignment (the base itself) should succeed");
+        match first {
+            Endpoint::Tcp { addr } => assert!(addr.ends_with(":65535"), "got {addr}"),
+            Endpoint::Unix { .. } => panic!("expected a TCP endpoint in network mode"),
+        }
+
+        // Every call after this must keep returning the same clean error —
+        // latched, not wrapping back through 0 to re-hand a live port.
+        for i in 0..5 {
+            match sup.next_endpoint() {
+                Err(SupervisorError::Internal { message }) => {
+                    assert!(
+                        message.contains("exhausted"),
+                        "call {i}: got message {message:?}"
+                    );
+                }
+                other => panic!("call {i}: expected a latched Internal error, got {other:?}"),
+            }
+        }
+    }
 }
