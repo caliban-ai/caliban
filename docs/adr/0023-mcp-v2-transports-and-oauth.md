@@ -76,13 +76,13 @@ closes that gap:
   browser and block on the loopback callback; headless/`--print`/non-TTY runs
   fail a cold-cache server with an actionable "authorize interactively once"
   error instead of hanging.
-- **`auto` discovers *endpoints*, not a client.** Dynamic Client Registration
-  (RFC 7591) is **not** implemented, and the flagship hosted server (GitHub,
-  `api.githubcopilot.com/mcp/`) advertises `registration_endpoint: null` — so
-  auto-registration would not help it anyway. `auto` therefore still requires a
-  `client_id` from `[mcp_servers.X.oauth_config]` (register an OAuth app once);
-  a cold cache with no `client_id` and no DCR fails with a clear error. DCR
-  remains a possible follow-up for servers that do offer it.
+- **`auto` discovers *endpoints*; the `client_id` comes from config or (as of
+  #313) dynamic registration.** At #300 time, Dynamic Client Registration (RFC
+  7591) was not implemented, so `auto` required a `client_id` from
+  `[mcp_servers.X.oauth_config]`. See the #313 amendment below — `auto` now
+  self-registers where the server supports it. GitHub remains the exception
+  (`registration_endpoint: null`), so it still needs a manually-registered
+  OAuth App.
 - **Discovery is RFC 8414/9728 path-preserving.** The well-known lookup inserts
   `/.well-known/<doc>` between host and issuer path
   (`github.com/login/oauth` → `github.com/.well-known/oauth-authorization-server/login/oauth`)
@@ -90,6 +90,30 @@ closes that gap:
   sub-path issuer/resource.
 - **`OauthTokens` carries the issuing `client_id`** so a later refresh targets
   the same client the `refresh_token` is bound to.
+
+#### Amendment (#313): `auto` performs Dynamic Client Registration (RFC 7591)
+
+The #300 note above deferred DCR, leaving `oauth = "auto"` dependent on a
+manually-configured `client_id`. But every mainstream hosted MCP server
+(Sentry, Linear, Notion) is **DCR-first** — it publishes a `registration_endpoint`
+and issues no static `client_id` — so `auto` was effectively unusable against
+the ecosystem. #313 closes that:
+
+- **Discovery carries `registration_endpoint`** (`OauthEndpoints`), parsed from
+  the RFC 8414 auth-server metadata.
+- **On a cold cache with no configured `client_id`,** if the auth server
+  advertises a `registration_endpoint`, caliban registers a **public PKCE
+  client** (`register_client`, RFC 7591: `token_endpoint_auth_method: "none"`,
+  `authorization_code` + `refresh_token`) bound to the flow's loopback
+  `redirect_uri`, then proceeds with the browser flow. The callback listener is
+  bound *before* registration so the registered `redirect_uri` exactly matches
+  what the flow presents (no unbind/rebind race).
+- **A configured `client_id` still takes precedence** (skips DCR). When there is
+  neither a `client_id` nor a `registration_endpoint` (GitHub), the clear
+  `OauthNoClientId` "register an OAuth app" error stands.
+- **No new persistence:** later runs reuse the cached token (which carries its
+  `client_id`), so DCR only re-runs on a fully cold cache. A fixed callback port
+  (`--mcp-oauth-port`) keeps a re-registered client's `redirect_uri` stable.
 
 ### Elicitation is a side-channel, not a tool
 

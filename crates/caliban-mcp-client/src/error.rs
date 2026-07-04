@@ -225,6 +225,14 @@ pub enum McpError {
         /// Stringified upstream error.
         message: String,
     },
+    /// RFC 7591 dynamic client registration failed.
+    #[error("mcp: server '{server}' oauth dynamic client registration failed: {message}")]
+    OauthRegistration {
+        /// Server name.
+        server: String,
+        /// Stringified upstream error / non-success status.
+        message: String,
+    },
     /// `oauth = "manual"` was set but a required field is missing in the
     /// `[server.X.oauth]` block.
     #[error("mcp: server '{server}' manual oauth block is missing required field '{field}'")]

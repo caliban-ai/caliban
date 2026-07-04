@@ -18,7 +18,7 @@ use caliban_mcp_client::config::OauthMode;
 use caliban_mcp_client::oauth::{
     FileStore, ManualOauthConfig, MemoryStore, OauthAuthenticator, OauthEndpoints, OauthFlow,
     OauthFlowOptions, OauthTokens, TokenStore, discover_endpoints, endpoints_from_manual,
-    refresh_tokens,
+    refresh_tokens, register_client,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -68,6 +68,42 @@ async fn install_discovery_routes(server: &MockServer, audience: &str) {
         .await;
 }
 
+/// Like [`install_discovery_routes`] but the auth-server metadata advertises an
+/// RFC 7591 `registration_endpoint`, and a `/register` route mints a public
+/// PKCE client. Models the DCR-first hosted servers (Sentry/Linear/Notion).
+async fn install_discovery_routes_with_dcr(server: &MockServer, audience: &str) {
+    let base = server.uri();
+    let as_issuer = format!("{base}/login/oauth");
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": audience,
+            "authorization_servers": [as_issuer],
+            "scopes_supported": ["read", "write"],
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/login/oauth"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            "token_endpoint":         format!("{base}/oauth/token"),
+            "registration_endpoint":  format!("{base}/register"),
+            "scopes_supported":       null,
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/register"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "client_id": "dcr-minted-client",
+            "client_secret": null,
+            "token_endpoint_auth_method": "none",
+        })))
+        .mount(server)
+        .await;
+}
+
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -99,6 +135,101 @@ async fn discovery_returns_endpoints_via_well_known() {
         vec!["read".to_string(), "write".to_string()]
     );
     assert_eq!(endpoints.audience, "https://api.example/mcp");
+}
+
+/// Discovery surfaces the RFC 7591 `registration_endpoint` when the auth server
+/// advertises one (DCR-first hosted servers).
+#[tokio::test]
+async fn discovery_surfaces_registration_endpoint() {
+    let server = spawn_mock_oauth_server().await;
+    install_discovery_routes_with_dcr(&server, "aud").await;
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let endpoints = discover_endpoints("demo", &server_url, &http())
+        .await
+        .expect("discover");
+    let reg = endpoints
+        .registration_endpoint
+        .expect("registration_endpoint should be discovered");
+    assert!(reg.as_str().ends_with("/register"), "got: {reg}");
+}
+
+/// When the auth server advertises no registration endpoint (GitHub), the field
+/// is `None`.
+#[tokio::test]
+async fn discovery_registration_endpoint_absent_is_none() {
+    let server = spawn_mock_oauth_server().await;
+    install_discovery_routes(&server, "aud").await;
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let endpoints = discover_endpoints("demo", &server_url, &http())
+        .await
+        .expect("discover");
+    assert!(endpoints.registration_endpoint.is_none());
+}
+
+/// RFC 7591 DCR: POST to the registration endpoint mints a public client_id.
+/// The request registers the loopback redirect and a public (`none`) auth
+/// method — pure PKCE, no secret.
+#[tokio::test]
+async fn register_client_returns_public_client_id() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/register"))
+        .and(body_string_contains("http://127.0.0.1:41870/callback"))
+        .and(body_string_contains("none"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "client_id": "abc123",
+            "client_secret": null,
+            "token_endpoint_auth_method": "none",
+        })))
+        .mount(&server)
+        .await;
+    let reg_url = Url::parse(&format!("{}/register", server.uri())).unwrap();
+    let redirect = Url::parse("http://127.0.0.1:41870/callback").unwrap();
+    let rc = register_client("demo", &reg_url, &redirect, "caliban", &http())
+        .await
+        .expect("register");
+    assert_eq!(rc.client_id, "abc123");
+    assert!(rc.client_secret.is_none());
+}
+
+/// If the auth server issues a confidential client (returns a secret), it's
+/// carried through so the later token exchange can authenticate.
+#[tokio::test]
+async fn register_client_carries_secret_when_present() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/register"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "client_id": "cid",
+            "client_secret": "shh",
+        })))
+        .mount(&server)
+        .await;
+    let reg_url = Url::parse(&format!("{}/register", server.uri())).unwrap();
+    let redirect = Url::parse("http://127.0.0.1:41870/callback").unwrap();
+    let rc = register_client("demo", &reg_url, &redirect, "caliban", &http())
+        .await
+        .expect("register");
+    assert_eq!(rc.client_id, "cid");
+    assert_eq!(rc.client_secret.as_deref(), Some("shh"));
+}
+
+/// A registration failure (4xx) surfaces as an McpError, not a panic.
+#[tokio::test]
+async fn register_client_error_surfaces() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/register"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("invalid_redirect_uri"))
+        .mount(&server)
+        .await;
+    let reg_url = Url::parse(&format!("{}/register", server.uri())).unwrap();
+    let redirect = Url::parse("http://127.0.0.1:41870/callback").unwrap();
+    let err = register_client("demo", &reg_url, &redirect, "caliban", &http())
+        .await
+        .expect_err("400 must surface as error");
+    let s = err.to_string();
+    assert!(s.contains("400") || s.contains("register"), "got: {s}");
 }
 
 /// 2. Manual config skips discovery entirely — we never hit the mock server.
@@ -143,6 +274,7 @@ async fn pkce_flow_happy_path() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec!["read".to_string()],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let opts = OauthFlowOptions::new("demo".to_string(), endpoints, "client-id".to_string());
     let flow = OauthFlow::start(opts).await.expect("start flow");
@@ -186,6 +318,7 @@ async fn flow_times_out_when_user_never_completes() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let mut opts = OauthFlowOptions::new("demo".to_string(), endpoints, "cid".to_string());
     opts.callback_timeout = Duration::from_millis(150);
@@ -231,6 +364,7 @@ async fn refresh_swaps_in_new_access_token() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec!["read".to_string()],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let old = OauthTokens {
         access_token: "expiring".to_string(),
@@ -264,6 +398,7 @@ async fn token_endpoint_401_surfaces_exchange_error() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let old = OauthTokens {
         access_token: "x".to_string(),
@@ -345,6 +480,7 @@ async fn refresh_preserves_existing_refresh_token() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let old = OauthTokens {
         access_token: "old".to_string(),
@@ -368,6 +504,7 @@ async fn state_mismatch_in_callback_surfaces_error() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let mut opts = OauthFlowOptions::new("demo".to_string(), endpoints, "cid".to_string());
     opts.callback_timeout = Duration::from_secs(2);
@@ -409,6 +546,7 @@ async fn refresh_request_body_includes_required_fields() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec!["read".to_string(), "write".to_string()],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let old = OauthTokens {
         access_token: "a".to_string(),
@@ -465,6 +603,7 @@ async fn token_endpoint_200_with_error_body_surfaces_error() {
         token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     let old = OauthTokens {
         access_token: "x".to_string(),
@@ -544,6 +683,34 @@ async fn authenticator_headless_cold_cache_errors() {
         .expect_err("headless cold cache must error, not hang");
     let s = err.to_string();
     assert!(s.contains("interactive"), "got: {s}");
+}
+
+/// `auto` with no configured client_id but a discoverable `registration_endpoint`
+/// (DCR-first server) in HEADLESS mode must reach the interactive gate
+/// (`OauthInteractiveRequired`) — NOT `OauthNoClientId`. This proves DCR is
+/// selected as the client source (a client_id is obtainable) and we correctly
+/// refuse to open a browser headless rather than failing as if unconfigurable.
+#[tokio::test]
+async fn authenticator_auto_dcr_headless_requires_interactive() {
+    let server = spawn_mock_oauth_server().await;
+    install_discovery_routes_with_dcr(&server, "aud").await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    let auth = OauthAuthenticator::new(http(), store, /* interactive */ false, None);
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let err = auth
+        .bearer_for(
+            "dcr",
+            OauthMode::Auto,
+            &server_url,
+            &ManualOauthConfig::default(),
+        )
+        .await
+        .expect_err("headless cold cache must require interactive");
+    let s = err.to_string();
+    assert!(
+        s.contains("interactive") && !s.contains("dynamic client registration"),
+        "expected interactive-required (DCR selected), got: {s}",
+    );
 }
 
 /// `auto` mode with a successful discovery but no configured client_id (and no
@@ -629,6 +796,7 @@ async fn oauth_flow_honors_fixed_callback_port() {
         token_url: Url::parse("https://auth.example/token").unwrap(),
         scopes: vec![],
         audience: "aud".to_string(),
+        registration_endpoint: None,
     };
     // Pick a fixed high port and confirm the redirect_uri uses it.
     let mut opts = OauthFlowOptions::new("demo".to_string(), endpoints.clone(), "cid".to_string());
