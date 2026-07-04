@@ -54,6 +54,52 @@ fn try_spawn_daemon(repo_root: &Path, socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Client-side network target for dialing the daemon over TCP (#280 Task 8),
+/// resolved from `CALIBAN_DAEMON_LISTEN` / `_TOKEN` / `_TLS_CA` /
+/// `_TLS_SERVER_NAME`. `None` when no network env is set — the CLI then
+/// stays on the default local Unix-socket path, unchanged.
+struct DaemonNetworkEnv {
+    /// `host:port` to dial for the control-plane socket.
+    listen: String,
+    /// Trust root for both the control-plane dial and the per-agent attach
+    /// dial (ADR 0051 assumes one CA for a caliband network deployment).
+    tls: Option<caliban_supervisor::transport::TlsClient>,
+    /// Bearer token presented on both the control-plane dial and the
+    /// per-agent attach dial.
+    token: Option<String>,
+}
+
+/// Pure resolver behind [`daemon_network_env`] — no env access, so it's
+/// directly unit-testable (mirrors the `parse_idle_timeout` /
+/// `worker_idle_timeout` split in `worker.rs`). A malformed/unreadable TLS CA
+/// PEM disables TLS (best-effort) rather than failing the whole client
+/// build, matching `worker::build_status_client`'s posture.
+fn resolve_daemon_network_env(
+    listen: Option<String>,
+    token: Option<String>,
+    tls_ca_pem: Option<Vec<u8>>,
+    tls_server_name: Option<String>,
+) -> Option<DaemonNetworkEnv> {
+    let listen = listen?;
+    let tls = tls_ca_pem.and_then(|pem| {
+        let server_name = tls_server_name.unwrap_or_else(|| "localhost".to_string());
+        caliban_supervisor::transport::tls_client_from_pem(&pem, &server_name).ok()
+    });
+    Some(DaemonNetworkEnv { listen, tls, token })
+}
+
+/// Env-reading wrapper around [`resolve_daemon_network_env`] (thin; see that
+/// function for the tested logic).
+fn daemon_network_env() -> Option<DaemonNetworkEnv> {
+    let listen = std::env::var("CALIBAN_DAEMON_LISTEN").ok();
+    let token = std::env::var("CALIBAN_DAEMON_TOKEN").ok();
+    let tls_ca_pem = std::env::var("CALIBAN_DAEMON_TLS_CA")
+        .ok()
+        .and_then(|path| std::fs::read(path).ok());
+    let tls_server_name = std::env::var("CALIBAN_DAEMON_TLS_SERVER_NAME").ok();
+    resolve_daemon_network_env(listen, token, tls_ca_pem, tls_server_name)
+}
+
 /// Public re-export of [`ensure_daemon`] for the `AgentTool` background
 /// spawner wired in `main`.
 pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<SupervisorClient> {
@@ -62,7 +108,15 @@ pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<Superviso
 
 /// Ensure a daemon is running for the given repo. Polls the socket for
 /// existence up to 2s; returns a connected client.
+///
+/// Network mode (#280 Task 8): when `CALIBAN_DAEMON_LISTEN` is set, dial the
+/// daemon over TCP (optionally TLS + a bearer token) instead — the client
+/// assumes a daemon is already reachable there, so it skips the Unix
+/// socket-file poll/auto-spawn entirely.
 async fn ensure_daemon(repo_root: &Path) -> Result<SupervisorClient> {
+    if let Some(net) = daemon_network_env() {
+        return Ok(SupervisorClient::new_tcp(net.listen, net.tls, net.token));
+    }
     let socket_path = repo_socket_path(repo_root);
     if !socket_path.exists() {
         try_spawn_daemon(repo_root, &socket_path)?;
@@ -162,7 +216,14 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
-            Ok(endpoint) => run_attach(&endpoint, id).await,
+            Ok(endpoint) => {
+                // Reuse the same client TLS + token used to dial the daemon
+                // (#280 Task 8) for the per-agent socket. Unix mode: both
+                // `None`, matching the pre-Task-8 hardcoded values exactly.
+                let (tls, token) =
+                    daemon_network_env().map_or((None, None), |net| (net.tls, net.token));
+                run_attach(&endpoint, id, tls, token).await
+            }
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
@@ -293,12 +354,23 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
 /// stdout until the agent finishes (EOF) or the user detaches with Ctrl+C.
 /// Also pumps operator stdin as `AttachInbound` NDJSON frames to the write
 /// half of the socket (bidirectional attach for interactive agents, ADR 0047 / #81).
-async fn run_attach(endpoint: &Endpoint, id: &str) -> i32 {
+///
+/// `tls`/`token` are the client-side network credentials (#280 Task 8):
+/// `None`/`None` in the default Unix mode (the pre-Task-8 behavior,
+/// unchanged); when the CLI is running in network mode
+/// (`CALIBAN_DAEMON_LISTEN` set) and `endpoint` is `Tcp`, these are the same
+/// TLS trust root + bearer token used to dial the daemon's control socket.
+async fn run_attach(
+    endpoint: &Endpoint,
+    id: &str,
+    tls: Option<caliban_supervisor::transport::TlsClient>,
+    token: Option<String>,
+) -> i32 {
     let conn = match caliban_supervisor::transport::connect(
         &caliban_supervisor::transport::ConnectSpec {
             endpoint: endpoint.clone(),
-            tls: None,
-            token: None,
+            tls,
+            token,
         },
     )
     .await
@@ -422,5 +494,73 @@ mod tests {
     fn truncate_long_string_ellipsized() {
         let out = truncate("abcdefghijklmnop", 5);
         assert_eq!(out, "abcd…");
+    }
+
+    // --- resolve_daemon_network_env (#280 Task 8) ---
+
+    #[test]
+    fn daemon_network_env_none_when_listen_absent() {
+        // No `CALIBAN_DAEMON_LISTEN` → CLI stays on the default Unix path,
+        // regardless of what the other network vars say.
+        assert!(
+            resolve_daemon_network_env(
+                None,
+                Some("tok".into()),
+                Some(b"garbage".to_vec()),
+                Some("localhost".into()),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn daemon_network_env_plaintext_carries_listen_and_token() {
+        let net = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            Some("s3cret".into()),
+            None,
+            None,
+        )
+        .expect("listen present -> Some");
+        assert_eq!(net.listen, "example.test:9000");
+        assert_eq!(net.token.as_deref(), Some("s3cret"));
+        assert!(net.tls.is_none(), "no CA PEM given -> plaintext");
+    }
+
+    #[test]
+    fn daemon_network_env_builds_tls_from_valid_ca_pem() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let net = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            None,
+            Some(cert_pem),
+            Some("localhost".into()),
+        )
+        .expect("listen present -> Some");
+        assert!(
+            net.tls.is_some(),
+            "valid CA PEM + server name should build a TlsClient"
+        );
+    }
+
+    #[test]
+    fn daemon_network_env_malformed_ca_pem_disables_tls_but_keeps_listen() {
+        // Best-effort posture (matches `worker::build_status_client`): a
+        // malformed CA PEM (a cert block whose base64 body doesn't decode)
+        // must not fail the whole client build, just fall back to a
+        // plaintext dial.
+        let bad_pem =
+            b"-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----\n"
+                .to_vec();
+        let net = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            Some("tok".into()),
+            Some(bad_pem),
+            Some("localhost".into()),
+        )
+        .expect("listen present -> Some even with a bad CA PEM");
+        assert!(net.tls.is_none());
+        assert_eq!(net.listen, "example.test:9000");
     }
 }

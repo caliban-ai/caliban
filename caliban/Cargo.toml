@@ -87,6 +87,7 @@ url              = { workspace = true }
 serde_json       = { workspace = true }
 image            = { workspace = true }
 toml             = { workspace = true }
+rcgen            = { workspace = true }
 
 [lints]
 workspace = true

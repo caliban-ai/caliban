@@ -850,6 +850,7 @@ dependencies = [
  "image",
  "nucleo-matcher",
  "ratatui",
+ "rcgen",
  "reqwest 0.12.28",
  "rust_decimal",
  "secrecy",
