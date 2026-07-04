@@ -1073,25 +1073,37 @@ pub struct OauthAuthenticator {
     /// in headless/`--print`/non-TTY runs — a cold cache then errors with
     /// [`McpError::OauthInteractiveRequired`] instead of hanging forever.
     interactive: bool,
+    /// Fixed loopback callback port (`--mcp-oauth-port` / [`PORT_ENV_VAR`]).
+    /// `None` → ephemeral (`127.0.0.1:0`). A fixed port is required for
+    /// authorization servers that match the `redirect_uri` exactly (e.g. GitHub
+    /// OAuth Apps, whose registered callback URL pins host + port).
+    callback_port: Option<u16>,
 }
 
 impl std::fmt::Debug for OauthAuthenticator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OauthAuthenticator")
             .field("interactive", &self.interactive)
+            .field("callback_port", &self.callback_port)
             .finish_non_exhaustive()
     }
 }
 
 impl OauthAuthenticator {
-    /// Build an authenticator over an HTTP client, a token store, and the
-    /// interactivity of the current run.
+    /// Build an authenticator over an HTTP client, a token store, the
+    /// interactivity of the current run, and an optional fixed callback port.
     #[must_use]
-    pub fn new(http: reqwest::Client, store: Arc<dyn TokenStore>, interactive: bool) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        store: Arc<dyn TokenStore>,
+        interactive: bool,
+        callback_port: Option<u16>,
+    ) -> Self {
         Self {
             http,
             store,
             interactive,
+            callback_port,
         }
     }
 
@@ -1195,6 +1207,10 @@ impl OauthAuthenticator {
         let mut opts =
             OauthFlowOptions::new(server.to_string(), endpoints.clone(), client_id.clone());
         opts.client_secret = manual.client_secret.clone();
+        // Pin the loopback callback port when configured so the `redirect_uri`
+        // matches a fixed registered callback URL (required by GitHub OAuth
+        // Apps). `None` keeps the ephemeral default.
+        opts.port = self.callback_port;
         let flow = OauthFlow::start(opts).await?;
         present_auth_url(server, &flow.auth_url);
         let mut tokens = flow.await_callback(&self.http).await?;

@@ -363,6 +363,17 @@ impl Settings {
     /// log to surface the misconfiguration during a restart.
     #[must_use]
     pub fn mcp_config(&self) -> caliban_mcp_client::McpConfig {
+        // `${VAR}` / `${VAR:-default}` / `${CLAUDE_PROJECT_DIR}` expansion is
+        // applied to every string-valued MCP field so secrets (OAuth client
+        // secrets, bearer tokens) can live in the environment rather than in
+        // `settings.toml`. This matches the legacy `mcp.toml` loader's semantics
+        // (`caliban_mcp_client::config`); `CLAUDE_PROJECT_DIR` binds to the
+        // current working directory (the workspace root in normal runs).
+        let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
+        if let Ok(cwd) = std::env::current_dir() {
+            ctx.set("CLAUDE_PROJECT_DIR", cwd.to_string_lossy().into_owned());
+        }
+
         let mut servers = std::collections::BTreeMap::new();
         for (name, s) in &self.mcp_servers {
             let transport = parse_transport(name, s.r#type.as_deref());
@@ -370,31 +381,50 @@ impl Settings {
             // Parse URL string into the typed `url::Url`. Bad input
             // surfaces as `None` here; downstream the manager will
             // refuse to start a remote transport without a valid url.
-            let url = s.url.as_deref().and_then(|raw| match url::Url::parse(raw) {
-                Ok(u) => Some(u),
-                Err(e) => {
-                    tracing::warn!(
-                        target: caliban_common::tracing_targets::TARGET_MCP,
-                        server = name.as_str(),
-                        url = raw,
-                        error = %e,
-                        "invalid MCP server url; ignoring",
-                    );
-                    None
+            let url = s.url.as_deref().and_then(|raw| {
+                let raw = expand_mcp_field(&ctx, name, "url", raw);
+                match url::Url::parse(&raw) {
+                    Ok(u) => Some(u),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: caliban_common::tracing_targets::TARGET_MCP,
+                            server = name.as_str(),
+                            url = raw.as_str(),
+                            error = %e,
+                            "invalid MCP server url; ignoring",
+                        );
+                        None
+                    }
                 }
             });
             servers.insert(
                 name.clone(),
                 caliban_mcp_client::ServerConfig {
                     transport,
-                    command: s.command.clone(),
-                    args: s.args.clone(),
-                    env: s.env.clone(),
+                    command: expand_mcp_field(&ctx, name, "command", &s.command),
+                    args: s
+                        .args
+                        .iter()
+                        .map(|a| expand_mcp_field(&ctx, name, "args", a))
+                        .collect(),
+                    env: s
+                        .env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), expand_mcp_field(&ctx, name, "env", v)))
+                        .collect(),
                     cwd: s.cwd.clone(),
                     url,
-                    headers: s.headers.clone(),
+                    headers: s
+                        .headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), expand_mcp_field(&ctx, name, "headers", v)))
+                        .collect(),
                     oauth,
-                    manual_oauth: s.oauth_config.clone().unwrap_or_default(),
+                    manual_oauth: expand_manual_oauth(
+                        &ctx,
+                        name,
+                        s.oauth_config.clone().unwrap_or_default(),
+                    ),
                     disabled: s.disabled,
                     lazy: s.lazy,
                     permissions: s.permissions.clone(),
@@ -602,9 +632,118 @@ fn parse_oauth(server: &str, raw: Option<&str>) -> caliban_mcp_client::OauthMode
     }
 }
 
+/// Expand `${VAR}` references in one MCP config string. On an expansion error
+/// (missing var with no default, malformed syntax) warn and return the raw
+/// value unchanged — matching ADR 0026's warn-and-continue posture. The bad
+/// value then surfaces downstream (e.g. a failed handshake) rather than
+/// silently dropping the server.
+fn expand_mcp_field(
+    ctx: &caliban_common::expand::ExpandContext,
+    server: &str,
+    field: &str,
+    raw: &str,
+) -> String {
+    match caliban_common::expand::expand_vars(raw, ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_MCP,
+                server = server,
+                field = field,
+                error = %e,
+                "MCP config value expansion failed; using raw value",
+            );
+            raw.to_string()
+        }
+    }
+}
+
+/// Expand `${VAR}` references inside a `[mcp_servers.X.oauth_config]` block
+/// (client id/secret, endpoints, audience, scopes) so credentials can live in
+/// the environment.
+fn expand_manual_oauth(
+    ctx: &caliban_common::expand::ExpandContext,
+    server: &str,
+    cfg: caliban_mcp_client::ManualOauthConfig,
+) -> caliban_mcp_client::ManualOauthConfig {
+    let expand_opt = |field: &str, v: Option<String>| -> Option<String> {
+        v.map(|raw| expand_mcp_field(ctx, server, field, &raw))
+    };
+    caliban_mcp_client::ManualOauthConfig {
+        client_id: expand_opt("oauth_config.client_id", cfg.client_id),
+        client_secret: expand_opt("oauth_config.client_secret", cfg.client_secret),
+        auth_url: expand_opt("oauth_config.auth_url", cfg.auth_url),
+        token_url: expand_opt("oauth_config.token_url", cfg.token_url),
+        audience: expand_opt("oauth_config.audience", cfg.audience),
+        scopes: cfg
+            .scopes
+            .into_iter()
+            .map(|s| expand_mcp_field(ctx, server, "oauth_config.scopes", &s))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_field_expands_var() {
+        let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
+        ctx.set("GITHUB_MCP_TOKEN", "ghs_secret");
+        assert_eq!(
+            expand_mcp_field(&ctx, "github", "headers", "Bearer ${GITHUB_MCP_TOKEN}"),
+            "Bearer ghs_secret",
+        );
+    }
+
+    #[test]
+    fn mcp_field_default_and_literal() {
+        let ctx = caliban_common::expand::ExpandContext::from_process_env();
+        // Default form when the var is unset.
+        assert_eq!(
+            expand_mcp_field(
+                &ctx,
+                "s",
+                "url",
+                "https://${NOPE_UNSET_VAR:-example.com}/mcp"
+            ),
+            "https://example.com/mcp",
+        );
+        // A plain literal is untouched.
+        assert_eq!(
+            expand_mcp_field(&ctx, "s", "url", "https://example.com/mcp"),
+            "https://example.com/mcp",
+        );
+    }
+
+    #[test]
+    fn mcp_field_missing_var_falls_back_to_raw() {
+        // Missing var with no default: warn-and-continue returns the raw string
+        // (the bad value then surfaces downstream, not silently dropped).
+        let ctx = caliban_common::expand::ExpandContext::from_process_env();
+        let raw = "Bearer ${DEFINITELY_UNSET_TOKEN_VAR_XYZ}";
+        assert_eq!(expand_mcp_field(&ctx, "s", "headers", raw), raw);
+    }
+
+    #[test]
+    fn manual_oauth_expands_client_id_and_scopes() {
+        let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
+        ctx.set("CID", "Iv1.abc");
+        ctx.set("SEC", "shhh");
+        let cfg = caliban_mcp_client::ManualOauthConfig {
+            client_id: Some("${CID}".to_string()),
+            client_secret: Some("${SEC}".to_string()),
+            auth_url: None,
+            token_url: None,
+            audience: None,
+            scopes: vec!["${CID}".to_string(), "read".to_string()],
+        };
+        let out = expand_manual_oauth(&ctx, "github", cfg);
+        assert_eq!(out.client_id.as_deref(), Some("Iv1.abc"));
+        assert_eq!(out.client_secret.as_deref(), Some("shhh"));
+        assert_eq!(out.scopes, vec!["Iv1.abc".to_string(), "read".to_string()]);
+    }
 
     #[test]
     fn round_trip_minimal() {

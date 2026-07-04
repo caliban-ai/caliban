@@ -516,7 +516,12 @@ async fn authenticator_reuses_cached_token() {
             },
         )
         .expect("put");
-    let auth = OauthAuthenticator::new(http(), Arc::clone(&store), /* interactive */ true);
+    let auth = OauthAuthenticator::new(
+        http(),
+        Arc::clone(&store),
+        /* interactive */ true,
+        None,
+    );
     let url = Url::parse("https://api.example/mcp").unwrap();
     let token = auth
         .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
@@ -531,7 +536,7 @@ async fn authenticator_reuses_cached_token() {
 async fn authenticator_headless_cold_cache_errors() {
     let server = spawn_mock_oauth_server().await;
     let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
-    let auth = OauthAuthenticator::new(http(), store, /* interactive */ false);
+    let auth = OauthAuthenticator::new(http(), store, /* interactive */ false, None);
     let url = Url::parse("https://api.example/mcp").unwrap();
     let err = auth
         .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
@@ -549,7 +554,7 @@ async fn authenticator_auto_without_client_id_errors() {
     let server = spawn_mock_oauth_server().await;
     install_discovery_routes(&server, "aud").await;
     let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
-    let auth = OauthAuthenticator::new(http(), store, /* interactive */ true);
+    let auth = OauthAuthenticator::new(http(), store, /* interactive */ true, None);
     let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
     let err = auth
         .bearer_for(
@@ -595,7 +600,12 @@ async fn authenticator_refreshes_expiring_token() {
             },
         )
         .expect("put");
-    let auth = OauthAuthenticator::new(http(), Arc::clone(&store), /* interactive */ false);
+    let auth = OauthAuthenticator::new(
+        http(),
+        Arc::clone(&store),
+        /* interactive */ false,
+        None,
+    );
     let url = Url::parse("https://api.example/mcp").unwrap();
     let token = auth
         .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
@@ -606,4 +616,50 @@ async fn authenticator_refreshes_expiring_token() {
     let cached = store.get("github", "aud").expect("get").expect("some");
     assert_eq!(cached.access_token, "refreshed-access");
     assert_eq!(cached.client_id.as_deref(), Some("cid"));
+}
+
+/// A fixed callback port (`--mcp-oauth-port` / `CALIBAN_MCP_OAUTH_PORT`) lands
+/// in the authorize `redirect_uri` — required so GitHub OAuth Apps, which pin
+/// the registered callback URL's host + port, accept the redirect. Default
+/// (`None`) stays ephemeral (a non-zero OS-assigned port).
+#[tokio::test]
+async fn oauth_flow_honors_fixed_callback_port() {
+    let endpoints = OauthEndpoints {
+        auth_url: Url::parse("https://auth.example/authorize").unwrap(),
+        token_url: Url::parse("https://auth.example/token").unwrap(),
+        scopes: vec![],
+        audience: "aud".to_string(),
+    };
+    // Pick a fixed high port and confirm the redirect_uri uses it.
+    let mut opts = OauthFlowOptions::new("demo".to_string(), endpoints.clone(), "cid".to_string());
+    opts.port = Some(47653);
+    let flow = OauthFlow::start(opts)
+        .await
+        .expect("start flow on fixed port");
+    let redirect = flow
+        .auth_url
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .map(|(_, v)| v.into_owned())
+        .expect("redirect_uri present");
+    assert_eq!(
+        redirect, "http://127.0.0.1:47653/callback",
+        "fixed port must appear in redirect_uri"
+    );
+    flow.cancel();
+
+    // Ephemeral default: some non-zero port, never literally `:0`.
+    let opts2 = OauthFlowOptions::new("demo".to_string(), endpoints, "cid".to_string());
+    let flow2 = OauthFlow::start(opts2).await.expect("start flow ephemeral");
+    let redirect2 = flow2
+        .auth_url
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .map(|(_, v)| v.into_owned())
+        .expect("redirect_uri present");
+    assert!(
+        redirect2.starts_with("http://127.0.0.1:") && !redirect2.contains(":0/"),
+        "ephemeral redirect_uri should have an OS-assigned port, got {redirect2}"
+    );
+    flow2.cancel();
 }
