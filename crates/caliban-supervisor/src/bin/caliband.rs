@@ -150,7 +150,13 @@ async fn main() -> std::io::Result<()> {
         AgentStore::default_for(&workspace_root)
     };
 
-    let supervisor = match build_supervisor(&args, socket_path, store, agent_runtime_dir) {
+    let supervisor = match build_supervisor(
+        &args,
+        socket_path,
+        store,
+        agent_runtime_dir,
+        workspace_root.clone(),
+    ) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("caliband: {e}");
@@ -185,10 +191,12 @@ fn build_supervisor(
     socket_path: PathBuf,
     store: AgentStore,
     agent_runtime_dir: PathBuf,
+    workspace_root: PathBuf,
 ) -> Result<Supervisor, String> {
     let Some(listen) = args.listen.clone() else {
         // Unix mode (default, unchanged).
-        return Ok(Supervisor::new(socket_path, store, agent_runtime_dir));
+        return Ok(Supervisor::new(socket_path, store, agent_runtime_dir)
+            .with_workspace_root(workspace_root));
     };
 
     // --- Network (TCP) mode. ---
@@ -244,13 +252,10 @@ fn build_supervisor(
         ),
     );
 
-    Ok(Supervisor::with_bind(
-        bind,
-        Some(network),
-        store,
-        agent_runtime_dir,
-        launcher,
-    ))
+    Ok(
+        Supervisor::with_bind(bind, Some(network), store, agent_runtime_dir, launcher)
+            .with_workspace_root(workspace_root),
+    )
 }
 
 /// Derive the control endpoint (`host:port`) a worker dials to report status

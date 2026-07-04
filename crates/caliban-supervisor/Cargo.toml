@@ -13,7 +13,8 @@ name = "caliband"
 path = "src/bin/caliband.rs"
 
 [dependencies]
-caliban-common = { workspace = true }
+caliban-common    = { workspace = true }
+caliban-worktrees = { workspace = true }
 async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
