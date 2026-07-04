@@ -1,14 +1,13 @@
 //! Client used by the `caliban` CLI (and the parent `AgentTool`) to talk
 //! to a running supervisor daemon.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::UnixStream;
 
 use crate::proto::{CtlReply, CtlRequest, SupervisorError};
-use crate::transport::Endpoint;
+use crate::transport::{ConnectSpec, Endpoint, TlsClient};
 
 /// Errors talking to the supervisor.
 #[derive(thiserror::Error, Debug)]
@@ -30,26 +29,45 @@ pub enum ClientError {
     NotRunning(PathBuf),
 }
 
-/// Thin client around a Unix socket. One client = one connection.
+/// Thin client around the transport seam. One client = one connection.
 pub struct SupervisorClient {
-    socket_path: PathBuf,
+    spec_endpoint: Endpoint,
+    tls: Option<TlsClient>,
+    token: Option<String>,
 }
 
 impl SupervisorClient {
-    /// Build a client targeting the given socket path.
+    /// Build a client targeting the given Unix socket path.
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
-            socket_path: socket_path.into(),
+            spec_endpoint: Endpoint::Unix {
+                path: socket_path.into(),
+            },
+            tls: None,
+            token: None,
         }
+    }
+
+    /// The endpoint this client dials.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.spec_endpoint
     }
 
     /// Connect and send a single request, returning the matching reply.
     pub async fn request(&self, req: &CtlRequest) -> Result<CtlReply, ClientError> {
-        if !self.socket_path.exists() {
-            return Err(ClientError::NotRunning(self.socket_path.clone()));
+        // Preserve the "not running" nicety for the Unix case.
+        if let Endpoint::Unix { path } = &self.spec_endpoint
+            && !path.exists()
+        {
+            return Err(ClientError::NotRunning(path.clone()));
         }
-        let stream = UnixStream::connect(&self.socket_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
+        let spec = ConnectSpec {
+            endpoint: self.spec_endpoint.clone(),
+            tls: self.tls.clone(),
+            token: self.token.clone(),
+        };
+        let conn = crate::transport::connect(&spec).await?;
+        let (read_half, mut write_half) = tokio::io::split(conn);
         let mut body = serde_json::to_vec(req)?;
         body.push(b'\n');
         write_half.write_all(&body).await?;
@@ -167,10 +185,5 @@ impl SupervisorClient {
             CtlReply::Error { error } => Err(error.into()),
             other => Err(ClientError::Unexpected(format!("{other:?}"))),
         }
-    }
-
-    /// Path the client targets.
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
     }
 }

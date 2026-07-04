@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -17,7 +16,7 @@ use crate::proc::{OsSignaller, Signaller, WorkerLauncher};
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
-use crate::transport::Endpoint;
+use crate::transport::{BindSpec, Endpoint, Listener};
 
 /// Per-daemon-process supervisor. Owns the registry, accept loop, and
 /// graceful-shutdown token.
@@ -93,17 +92,21 @@ impl Supervisor {
     /// Bind the socket and accept clients until `cancel_token()` fires.
     /// Returns when the cancellation fires.
     pub async fn serve(self: Arc<Self>) -> std::io::Result<()> {
-        if let Some(parent) = self.socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         if let Some(parent) = self.agent_runtime_dir.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::create_dir_all(&self.agent_runtime_dir).await?;
 
-        // Best-effort: unlink a stale socket from a previous run.
-        let _ = tokio::fs::remove_file(&self.socket_path).await;
-        let listener = UnixListener::bind(&self.socket_path)?;
+        // `Listener::bind`'s Unix arm creates the parent dir and unlinks a
+        // stale socket from a previous run.
+        let bind = BindSpec {
+            endpoint: Endpoint::Unix {
+                path: self.socket_path.clone(),
+            },
+            tls: None,
+            token: None,
+        };
+        let listener = Listener::bind(&bind).await?;
         tracing::info!(socket = %self.socket_path.display(), "supervisor listening");
 
         // Sweep crashed agents on startup so a daemon-restart shows the
@@ -124,10 +127,10 @@ impl Supervisor {
                 }
                 accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _addr)) => {
+                        Ok(conn) => {
                             let me = Arc::clone(&self);
                             tokio::spawn(async move {
-                                if let Err(e) = me.handle_client(stream).await {
+                                if let Err(e) = me.handle_client(conn).await {
                                     tracing::warn!(error = %e, "client handler error");
                                 }
                             });
@@ -145,8 +148,11 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn handle_client(self: Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
-        let (read_half, mut write_half) = stream.into_split();
+    async fn handle_client(
+        self: Arc<Self>,
+        conn: crate::transport::BoxConn,
+    ) -> std::io::Result<()> {
+        let (read_half, mut write_half) = tokio::io::split(conn);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         loop {
@@ -369,8 +375,8 @@ impl Supervisor {
     }
 }
 
-async fn write_reply(
-    stream: &mut tokio::net::unix::OwnedWriteHalf,
+async fn write_reply<W: AsyncWrite + Unpin>(
+    stream: &mut W,
     reply: &CtlReply,
 ) -> std::io::Result<()> {
     let mut body = serde_json::to_vec(reply).map_err(std::io::Error::other)?;
