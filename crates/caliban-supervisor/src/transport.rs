@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -100,6 +100,69 @@ pub fn tls_client_from_pem(ca_pem: &[u8], server_name: &str) -> std::io::Result<
     })
 }
 
+/// Wire format of the bearer-token preamble: a single JSON object on its own
+/// line, `{"bearer":"<token>"}\n`. Sits below the NDJSON protocol — TCP only,
+/// applied after the (optional) TLS handshake so the token travels encrypted
+/// when TLS is on. Unix connections never send or expect this.
+#[derive(Serialize, Deserialize)]
+struct TokenPreamble {
+    bearer: String,
+}
+
+/// Read one `\n`-terminated line byte-by-byte (bounded), so nothing past the
+/// newline is consumed from the protocol stream that follows.
+async fn read_preamble_line(conn: &mut BoxConn) -> std::io::Result<String> {
+    let mut buf = Vec::with_capacity(128);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = conn.read(&mut byte).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "no token preamble",
+            ));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        buf.push(byte[0]);
+        if buf.len() > 4096 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "token preamble too long",
+            ));
+        }
+    }
+    String::from_utf8(buf).map_err(std::io::Error::other)
+}
+
+/// Read and validate the bearer-token preamble on `conn`, failing with
+/// `PermissionDenied` if it's missing or doesn't match `expected`.
+async fn server_check_token(conn: &mut BoxConn, expected: &str) -> std::io::Result<()> {
+    let line = read_preamble_line(conn).await?;
+    let preamble: TokenPreamble = serde_json::from_str(&line).map_err(std::io::Error::other)?;
+    // Constant-time-ish compare is overkill for a shared daemon token; plain eq.
+    if preamble.bearer == expected {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "bad bearer token",
+        ))
+    }
+}
+
+/// Write the bearer-token preamble line onto `conn`.
+async fn client_send_token(conn: &mut BoxConn, token: &str) -> std::io::Result<()> {
+    let mut line = serde_json::to_vec(&TokenPreamble {
+        bearer: token.to_string(),
+    })
+    .map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    conn.write_all(&line).await?;
+    conn.flush().await
+}
+
 /// How to bind a listener.
 pub struct BindSpec {
     /// Address family + address.
@@ -167,30 +230,36 @@ impl Listener {
     }
 
     /// Accept one connection, returning a boxed duplex stream. Performs the
-    /// TLS handshake when server TLS is configured. (Token check added in
-    /// Task 3.)
+    /// TLS handshake when server TLS is configured, then — for TCP — checks
+    /// the bearer-token preamble when a token is configured.
     pub async fn accept(&self) -> std::io::Result<BoxConn> {
         match self {
             Listener::Unix(l) => {
                 let (stream, _addr) = l.accept().await?;
                 Ok(Box::new(stream))
             }
-            Listener::Tcp { listener, tls, .. } => {
+            Listener::Tcp {
+                listener,
+                tls,
+                token,
+            } => {
                 let (stream, _addr) = listener.accept().await?;
-                match tls {
-                    None => Ok(Box::new(stream)),
-                    Some(t) => {
-                        let tls_stream = t.acceptor.accept(stream).await?;
-                        Ok(Box::new(tls_stream))
-                    }
+                let mut conn: BoxConn = match tls {
+                    None => Box::new(stream),
+                    Some(t) => Box::new(t.acceptor.accept(stream).await?),
+                };
+                if let Some(expected) = token {
+                    server_check_token(&mut conn, expected).await?;
                 }
+                Ok(conn)
             }
         }
     }
 }
 
 /// Dial a connection per `spec`. Performs the TLS handshake when client TLS
-/// is configured. (Token preamble added in Task 3.)
+/// is configured, then — for TCP — sends the bearer-token preamble when a
+/// token is configured.
 pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
     match &spec.endpoint {
         Endpoint::Unix { path } => {
@@ -199,15 +268,18 @@ pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
         }
         Endpoint::Tcp { addr } => {
             let stream = TcpStream::connect(addr).await?;
-            match &spec.tls {
-                None => Ok(Box::new(stream)),
+            let mut conn: BoxConn = match &spec.tls {
+                None => Box::new(stream),
                 Some(t) => {
                     let name = ServerName::try_from(t.server_name.clone())
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-                    let tls_stream = t.connector.connect(name, stream).await?;
-                    Ok(Box::new(tls_stream))
+                    Box::new(t.connector.connect(name, stream).await?)
                 }
+            };
+            if let Some(token) = &spec.token {
+                client_send_token(&mut conn, token).await?;
             }
+            Ok(conn)
         }
     }
 }
@@ -215,7 +287,6 @@ pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     async fn echo_once(listener: Listener) {
         let mut conn = listener.accept().await.expect("accept");
@@ -322,5 +393,50 @@ mod tests {
         c.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"tls!!");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_token_accept_and_reject() {
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: None,
+            token: Some("s3cret".into()),
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server accepts twice: once good, once bad.
+        let srv = tokio::spawn(async move {
+            let good = listener.accept().await; // good token → Ok
+            let bad = listener.accept().await; // bad token  → Err(PermissionDenied)
+            (good.is_ok(), bad.err().map(|e| e.kind()))
+        });
+
+        // Good client.
+        let mut ok = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr: addr.clone() },
+            tls: None,
+            token: Some("s3cret".into()),
+        })
+        .await
+        .unwrap();
+        ok.write_all(b"x").await.unwrap(); // keep the conn alive briefly
+
+        // Bad client.
+        let bad = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: None,
+            token: Some("wrong".into()),
+        })
+        .await;
+        // connect() itself succeeds at the TCP layer; the server rejects post-preamble.
+        // The bad conn may connect but the server-side accept errored.
+        drop(bad);
+
+        let (good_ok, bad_kind) = srv.await.unwrap();
+        assert!(good_ok, "good token should be accepted");
+        assert_eq!(bad_kind, Some(std::io::ErrorKind::PermissionDenied));
     }
 }
