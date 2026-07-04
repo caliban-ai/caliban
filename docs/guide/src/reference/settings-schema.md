@@ -97,6 +97,18 @@ command = "npx"
 args    = ["-y", "@linear/mcp-server"]
 ```
 
+The [gonzalo](https://github.com/caliban-ai/gonzalo) code-graph server is a
+stdio server consumed the same way — point `command` at the `gonzalo-mcp`
+binary and pass the store root (populated with `gonzalo index`) via `env`. Its
+tools then surface as `mcp__gonzalo__{search,node,callers,callees,impact,explore}`:
+
+```toml
+[mcp_servers.gonzalo]
+command = "gonzalo-mcp"
+[mcp_servers.gonzalo.env]
+GONZALO_ROOT = "/path/to/graph-store"
+```
+
 ---
 
 ## Router
