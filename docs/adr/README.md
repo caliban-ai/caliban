@@ -71,6 +71,7 @@ conventions.
 | [0048](0048-workspace-default-restricted.md) | `--workspace` restricts file/shell tools by default (amends 0010) | accepted |
 | [0049](0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
 | [0050](0050-xdg-first-path-locations.md) | XDG-first path locations on all platforms (drops macOS-native Library default; amends 0017) | accepted |
+| [0051](0051-caliband-network-transport.md) | caliband network transport: NDJSON over TCP+TLS with a bearer token (Unix socket retained for local; gRPC deferred to #314) | accepted |
 
 ## Adding a new ADR
 
