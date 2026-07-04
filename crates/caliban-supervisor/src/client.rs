@@ -48,6 +48,17 @@ impl SupervisorClient {
         }
     }
 
+    /// Build a client targeting a TCP daemon endpoint (#280 Task 7), with
+    /// optional TLS and an optional bearer token — the network counterpart to
+    /// [`SupervisorClient::new`]. `addr` is a `host:port` string.
+    pub fn new_tcp(addr: impl Into<String>, tls: Option<TlsClient>, token: Option<String>) -> Self {
+        Self {
+            spec_endpoint: Endpoint::Tcp { addr: addr.into() },
+            tls,
+            token,
+        }
+    }
+
     /// The endpoint this client dials.
     pub fn endpoint(&self) -> &Endpoint {
         &self.spec_endpoint

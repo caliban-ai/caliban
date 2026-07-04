@@ -5,7 +5,8 @@
 //! and dispatches them against the [`crate::Registry`].
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
@@ -16,12 +17,43 @@ use crate::proc::{OsSignaller, Signaller, WorkerLauncher};
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
-use crate::transport::{BindSpec, Endpoint, Listener};
+use crate::transport::{BindSpec, Endpoint, Listener, TlsServer};
+
+/// Network (TCP) configuration for a supervisor running in server mode
+/// (#280 Task 7). Absent (`None` on the [`Supervisor`]) means Unix mode —
+/// the historical default, behaviorally unchanged.
+///
+/// The supervisor owns the pod's network namespace, so it assigns each agent
+/// a distinct TCP port from a monotonic counter starting at `agent_port_base`
+/// and advertises `"{advertise_host}:{port}"`. `agent_tls`/`agent_token` are
+/// the per-agent listener's own TLS + bearer token (symmetric with the control
+/// listener), passed down to each worker so prospero's attach is secured.
+pub struct NetworkConfig {
+    /// Host clients dial to reach per-agent listeners (DNS name or IP).
+    pub advertise_host: String,
+    /// First TCP port handed to an agent; subsequent agents get base+1, +2, …
+    pub agent_port_base: u16,
+    /// TLS material each worker uses to secure its own per-agent listener.
+    pub agent_tls: Option<TlsServer>,
+    /// Bearer token each worker requires on its per-agent listener.
+    pub agent_token: Option<String>,
+}
 
 /// Per-daemon-process supervisor. Owns the registry, accept loop, and
 /// graceful-shutdown token.
 pub struct Supervisor {
-    socket_path: PathBuf,
+    /// How the control listener binds (endpoint + optional TLS + optional
+    /// token). Unix by default; TCP in network mode (#280 Task 7).
+    bind: BindSpec,
+    /// Network config when running in TCP server mode; `None` = Unix mode.
+    network: Option<NetworkConfig>,
+    /// Monotonic per-agent port offset (added to `agent_port_base`). An
+    /// `AtomicU16` gives ~64k distinct assignments before the range is
+    /// exhausted; see the ceiling note in [`Supervisor::next_endpoint`].
+    next_agent_port: AtomicU16,
+    /// The actually-bound TCP address (resolves `:0`), published after
+    /// `serve` binds so tests / callers can dial an OS-assigned port.
+    bound_addr: OnceLock<String>,
     started: Instant,
     registry: Arc<Mutex<Registry>>,
     cancel: CancellationToken,
@@ -49,19 +81,47 @@ impl Supervisor {
         Self::with_launcher(socket_path, store, agent_runtime_dir, launcher)
     }
 
-    /// Construct a supervisor with an explicit worker launcher (tests
-    /// inject a fake here so the daemon lifecycle runs without an LLM).
+    /// Construct a Unix-mode supervisor with an explicit worker launcher
+    /// (tests inject a fake here so the daemon lifecycle runs without an LLM).
+    ///
+    /// Convenience wrapper over [`Supervisor::with_bind`]: builds a Unix
+    /// [`BindSpec`] and `network: None`.
     pub fn with_launcher(
         socket_path: impl Into<PathBuf>,
         store: AgentStore,
         agent_runtime_dir: impl Into<PathBuf>,
         launcher: Arc<dyn WorkerLauncher>,
     ) -> Self {
-        let socket_path = socket_path.into();
+        let bind = BindSpec {
+            endpoint: Endpoint::Unix {
+                path: socket_path.into(),
+            },
+            tls: None,
+            token: None,
+        };
+        Self::with_bind(bind, None, store, agent_runtime_dir, launcher)
+    }
+
+    /// Construct a supervisor from an explicit [`BindSpec`] and optional
+    /// [`NetworkConfig`] (#280 Task 7). `network: None` with a Unix `bind` is
+    /// today's default; a TCP `bind` + `Some(NetworkConfig)` turns on network
+    /// server mode. The launcher is passed in fully configured (the binary
+    /// wires per-agent TLS/token/control-endpoint onto an `ExecWorkerLauncher`
+    /// before handing it here).
+    pub fn with_bind(
+        bind: BindSpec,
+        network: Option<NetworkConfig>,
+        store: AgentStore,
+        agent_runtime_dir: impl Into<PathBuf>,
+        launcher: Arc<dyn WorkerLauncher>,
+    ) -> Self {
         let agent_runtime_dir = agent_runtime_dir.into();
         let registry = Arc::new(Mutex::new(Registry::new(store)));
         Self {
-            socket_path,
+            bind,
+            network,
+            next_agent_port: AtomicU16::new(0),
+            bound_addr: OnceLock::new(),
             started: Instant::now(),
             registry,
             cancel: CancellationToken::new(),
@@ -84,9 +144,59 @@ impl Supervisor {
         self.cancel.clone()
     }
 
-    /// Control socket path.
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
+    /// Control socket path, when the control listener is a Unix socket.
+    /// `None` in network (TCP) mode (#280 Task 7).
+    pub fn socket_path(&self) -> Option<&Path> {
+        match &self.bind.endpoint {
+            Endpoint::Unix { path } => Some(path.as_path()),
+            Endpoint::Tcp { .. } => None,
+        }
+    }
+
+    /// The control listener's endpoint (Unix path or TCP `host:port`).
+    pub fn control_endpoint(&self) -> &Endpoint {
+        &self.bind.endpoint
+    }
+
+    /// The actually-bound TCP address (resolves an OS-assigned `:0` port),
+    /// published once `serve` has bound the listener. `None` before bind, or
+    /// for a Unix control listener.
+    pub fn bound_addr(&self) -> Option<String> {
+        self.bound_addr.get().cloned()
+    }
+
+    /// Assign the next per-agent [`Endpoint`]: a Unix socket path (Unix mode)
+    /// or a monotonically-numbered TCP endpoint (network mode).
+    ///
+    /// Network mode draws ports from `agent_port_base` upward via an
+    /// `AtomicU16` offset. **Ceiling (QA note, ADR 0051 "Revisit if"):** the
+    /// counter is 16-bit, so a very long-lived daemon spawning more than
+    /// ~64k agents over its lifetime would exhaust the range and this returns
+    /// `Internal`. Acceptable for the MVP (agent lifetimes are bounded; warm-
+    /// pool reuse is a later refinement). Monotonic (not `base + live-index`)
+    /// so a freshly assigned port can't collide with a still-draining worker.
+    fn next_endpoint(&self) -> Result<Endpoint, SupervisorError> {
+        match &self.network {
+            None => {
+                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
+                Ok(Endpoint::Unix {
+                    path: self.agent_runtime_dir.join(socket_name),
+                })
+            }
+            Some(net) => {
+                let offset = self.next_agent_port.fetch_add(1, Ordering::Relaxed);
+                let port = u32::from(net.agent_port_base) + u32::from(offset);
+                if port > u32::from(u16::MAX) {
+                    return Err(SupervisorError::Internal {
+                        message: "agent port range exhausted".into(),
+                    });
+                }
+                Ok(Endpoint::Tcp {
+                    addr: format!("{}:{}", net.advertise_host, port),
+                })
+            }
+        }
     }
 
     /// Bind the socket and accept clients until `cancel_token()` fires.
@@ -98,16 +208,15 @@ impl Supervisor {
         tokio::fs::create_dir_all(&self.agent_runtime_dir).await?;
 
         // `Listener::bind`'s Unix arm creates the parent dir and unlinks a
-        // stale socket from a previous run.
-        let bind = BindSpec {
-            endpoint: Endpoint::Unix {
-                path: self.socket_path.clone(),
-            },
-            tls: None,
-            token: None,
-        };
-        let listener = Listener::bind(&bind).await?;
-        tracing::info!(socket = %self.socket_path.display(), "supervisor listening");
+        // stale socket from a previous run; its TCP arm binds the address in
+        // `self.bind` (network mode, #280 Task 7).
+        let listener = Listener::bind(&self.bind).await?;
+        // Publish the real bound address (resolves an OS-assigned `:0` port)
+        // so callers/tests can dial it. Set-once; ignore a redundant re-bind.
+        if let Some(addr) = listener.local_addr() {
+            let _ = self.bound_addr.set(addr);
+        }
+        tracing::info!(endpoint = ?self.bind.endpoint, "supervisor listening");
 
         // Sweep crashed agents on startup so a daemon-restart shows the
         // right thing in `list`.
@@ -143,8 +252,11 @@ impl Supervisor {
             }
         }
 
-        // Best-effort cleanup.
-        let _ = tokio::fs::remove_file(&self.socket_path).await;
+        // Best-effort cleanup: only a Unix control socket leaves a filesystem
+        // artifact to unlink. A TCP listener has nothing to clean up here.
+        if let Endpoint::Unix { path } = &self.bind.endpoint {
+            let _ = tokio::fs::remove_file(path).await;
+        }
         Ok(())
     }
 
@@ -265,12 +377,13 @@ impl Supervisor {
                 CtlReply::Listed { agents: r.list() }
             }
             CtlRequest::Spawn { spec } => {
+                let endpoint = match self.next_endpoint() {
+                    Ok(e) => e,
+                    Err(error) => return CtlReply::Error { error },
+                };
                 let rec = {
                     let mut r = self.registry.lock().await;
-                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                    let socket_path = self.agent_runtime_dir.join(socket_name);
-                    r.register(spec, Endpoint::Unix { path: socket_path })
+                    r.register(spec, endpoint)
                 };
                 let reply = CtlReply::Spawned {
                     id: rec.id.clone(),
@@ -321,10 +434,11 @@ impl Supervisor {
                     if let Err(e) = r.remove(&id, true) {
                         return CtlReply::Error { error: e };
                     }
-                    let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                    let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
-                    let socket_path = self.agent_runtime_dir.join(socket_name);
-                    r.register(old.spec, Endpoint::Unix { path: socket_path })
+                    let endpoint = match self.next_endpoint() {
+                        Ok(e) => e,
+                        Err(error) => return CtlReply::Error { error },
+                    };
+                    r.register(old.spec, endpoint)
                 };
                 let reply = CtlReply::Respawned {
                     id: new_rec.id.clone(),
@@ -360,9 +474,7 @@ impl Supervisor {
                     pid: std::process::id(),
                     agents,
                     uptime_secs,
-                    endpoint: Endpoint::Unix {
-                        path: self.socket_path.clone(),
-                    },
+                    endpoint: self.bind.endpoint.clone(),
                 })
             }
             CtlRequest::Shutdown => CtlReply::ShutdownAck,

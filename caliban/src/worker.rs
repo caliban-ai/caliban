@@ -265,9 +265,66 @@ pub(crate) fn load_record(manifest: &Path) -> std::io::Result<AgentRecord> {
     serde_json::from_slice(&body).map_err(std::io::Error::other)
 }
 
+/// Load the worker's per-agent listener TLS from the environment (#280 Task
+/// 7). The supervisor sets `CALIBAN_AGENT_TLS_CERT`/`_KEY` to PEM file paths;
+/// returns `None` (plaintext) when either is unset. A malformed/unreadable
+/// PEM is a hard error so a misconfigured TLS deployment fails loudly rather
+/// than silently downgrading to plaintext.
+fn load_agent_tls() -> std::io::Result<Option<caliban_supervisor::transport::TlsServer>> {
+    let (Ok(cert_path), Ok(key_path)) = (
+        std::env::var("CALIBAN_AGENT_TLS_CERT"),
+        std::env::var("CALIBAN_AGENT_TLS_KEY"),
+    ) else {
+        return Ok(None);
+    };
+    let cert_pem = std::fs::read(&cert_path)?;
+    let key_pem = std::fs::read(&key_path)?;
+    caliban_supervisor::transport::tls_server_from_pem(&cert_pem, &key_pem).map(Some)
+}
+
+/// Build the client the worker uses to report Idle/Running back to the daemon.
+///
+/// Network mode (#280 Task 7): when `CALIBAN_CONTROL_ENDPOINT` (`host:port`)
+/// is set, dial the daemon over TCP, optionally with TLS
+/// (`CALIBAN_CONTROL_TLS_CA` PEM path + `CALIBAN_CONTROL_TLS_SERVER_NAME`,
+/// default `localhost`) and a bearer token (`CALIBAN_CONTROL_TOKEN`, falling
+/// back to `CALIBAN_AGENT_TOKEN`). Otherwise fall back to the Unix
+/// `--control-socket`. Best-effort: a malformed control-TLS CA disables the
+/// network sink (status reporting is non-critical) rather than failing the run.
+///
+/// NOTE (QA): the TCP status path is wired but not exercised by the Task 7
+/// deliverable test (which uses a fake launcher). It needs end-to-end QA.
+fn build_status_client(
+    control_socket: Option<&Path>,
+) -> Option<caliban_supervisor::SupervisorClient> {
+    if let Ok(endpoint) = std::env::var("CALIBAN_CONTROL_ENDPOINT") {
+        let token = std::env::var("CALIBAN_CONTROL_TOKEN")
+            .or_else(|_| std::env::var("CALIBAN_AGENT_TOKEN"))
+            .ok();
+        let tls = std::env::var("CALIBAN_CONTROL_TLS_CA").ok().and_then(|ca| {
+            let server_name = std::env::var("CALIBAN_CONTROL_TLS_SERVER_NAME")
+                .unwrap_or_else(|_| "localhost".to_string());
+            let ca_pem = std::fs::read(&ca).ok()?;
+            caliban_supervisor::transport::tls_client_from_pem(&ca_pem, &server_name).ok()
+        });
+        return Some(caliban_supervisor::SupervisorClient::new_tcp(
+            endpoint, tls, token,
+        ));
+    }
+    control_socket.map(caliban_supervisor::SupervisorClient::new)
+}
+
 /// Entry point body. Returns the process exit code.
+///
+/// Exactly one of `socket` (Unix mode) or `listen` (TCP network mode, #280
+/// Task 7) must be `Some`.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&Path>) -> i32 {
+pub(crate) async fn run(
+    manifest: &Path,
+    socket: Option<&Path>,
+    listen: Option<&str>,
+    control_socket: Option<&Path>,
+) -> i32 {
     let record = match load_record(manifest) {
         Ok(r) => r,
         Err(e) => {
@@ -283,25 +340,45 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     // can clone it immediately.
     let hub = EventHub::new();
 
-    // --- Bind the per-agent socket via the transport seam (Unix mode).
-    // The socket file's existence signals to `caliband` and `caliban agents
-    // attach` that this worker is alive. `Listener::bind`'s Unix arm creates
-    // the parent dir and unlinks any stale file at `socket` for us.
-    let listen_endpoint = caliban_supervisor::transport::Endpoint::Unix {
-        path: socket.to_path_buf(),
+    // --- Build the per-agent listener BindSpec. Unix mode (`--socket`) binds
+    // a filesystem socket whose existence signals liveness; TCP mode
+    // (`--listen`, #280 Task 7) binds a network socket secured with the
+    // per-agent TLS + token the supervisor passed via env.
+    let bind = match (listen, socket) {
+        (Some(addr), _) => {
+            let tls = match load_agent_tls() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[caliban __agent-worker] agent TLS load failed: {e}");
+                    return 74; // EX_IOERR
+                }
+            };
+            let token = std::env::var("CALIBAN_AGENT_TOKEN").ok();
+            caliban_supervisor::transport::BindSpec {
+                endpoint: caliban_supervisor::transport::Endpoint::Tcp {
+                    addr: addr.to_string(),
+                },
+                tls,
+                token,
+            }
+        }
+        (None, Some(path)) => caliban_supervisor::transport::BindSpec {
+            endpoint: caliban_supervisor::transport::Endpoint::Unix {
+                path: path.to_path_buf(),
+            },
+            tls: None,
+            token: None,
+        },
+        (None, None) => {
+            eprintln!("[caliban __agent-worker] one of --socket or --listen is required");
+            return 64; // EX_USAGE
+        }
     };
-    let bind = caliban_supervisor::transport::BindSpec {
-        endpoint: listen_endpoint,
-        tls: None,
-        token: None,
-    };
+    let bind_desc = format!("{:?}", bind.endpoint);
     let listener = match caliban_supervisor::transport::Listener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
-                "[caliban __agent-worker] bind {} failed: {e}",
-                socket.display()
-            );
+            eprintln!("[caliban __agent-worker] bind {bind_desc} failed: {e}");
             return 74; // EX_IOERR
         }
     };
@@ -323,11 +400,13 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
         Option<Arc<dyn InputProvider>>,
     ) = if record.spec.interactive {
         let (tx, rx) = mpsc::channel::<AttachInbound>(64);
-        // Build a status sink if a control socket was provided.
+        // Build a status sink from the daemon control plane, if reachable:
+        // the network endpoint (`CALIBAN_CONTROL_ENDPOINT`, #280 Task 7) takes
+        // precedence over the Unix `--control-socket`.
         let status_sink: Option<Arc<dyn StatusSink>> =
-            control_socket.map(|ctl| -> Arc<dyn StatusSink> {
+            build_status_client(control_socket).map(|client| -> Arc<dyn StatusSink> {
                 Arc::new(ControlSocketStatus {
-                    client: caliban_supervisor::SupervisorClient::new(ctl),
+                    client,
                     id: record.id.clone(),
                 })
             });

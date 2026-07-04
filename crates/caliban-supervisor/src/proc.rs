@@ -31,13 +31,23 @@ pub trait WorkerLauncher: Send + Sync {
 }
 
 /// Production launcher: spawns `caliban __agent-worker …`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecWorkerLauncher {
     /// Absolute path to the `caliban` binary to exec.
     caliban_exe: PathBuf,
     /// Optional daemon control-socket path passed to the worker so it can
     /// report Idle/Running transitions (#81).
     control_socket: Option<PathBuf>,
+    /// Network mode (#280 Task 7): per-agent TLS cert PEM path passed to the
+    /// worker via env so it can secure its own TCP per-agent listener.
+    agent_tls_cert_path: Option<PathBuf>,
+    /// Per-agent TLS private-key PEM path (env-passed alongside the cert).
+    agent_tls_key_path: Option<PathBuf>,
+    /// Per-agent bearer token the worker requires on its TCP listener.
+    agent_token: Option<String>,
+    /// Daemon control endpoint (`host:port`) the worker reports status to over
+    /// the network in TCP mode (the network counterpart to `control_socket`).
+    control_endpoint: Option<String>,
 }
 
 impl ExecWorkerLauncher {
@@ -45,7 +55,7 @@ impl ExecWorkerLauncher {
     pub fn new(caliban_exe: impl Into<PathBuf>) -> Self {
         Self {
             caliban_exe: caliban_exe.into(),
-            control_socket: None,
+            ..Self::default()
         }
     }
 
@@ -69,6 +79,26 @@ impl ExecWorkerLauncher {
         self.control_socket = Some(path.into());
         self
     }
+
+    /// Configure the per-agent network material (#280 Task 7) the worker needs
+    /// to secure its own TCP listener and to report status back over the
+    /// network: TLS cert/key PEM file paths, a bearer token, and the daemon's
+    /// control endpoint (`host:port`). All optional; passed to the child via
+    /// env only when the agent's endpoint is TCP.
+    #[must_use]
+    pub fn with_agent_network(
+        mut self,
+        tls_cert_path: Option<PathBuf>,
+        tls_key_path: Option<PathBuf>,
+        token: Option<String>,
+        control_endpoint: Option<String>,
+    ) -> Self {
+        self.agent_tls_cert_path = tls_cert_path;
+        self.agent_tls_key_path = tls_key_path;
+        self.agent_token = token;
+        self.control_endpoint = control_endpoint;
+        self
+    }
 }
 
 impl WorkerLauncher for ExecWorkerLauncher {
@@ -78,10 +108,34 @@ impl WorkerLauncher for ExecWorkerLauncher {
         cmd.arg("__agent-worker")
             .arg("--manifest")
             .arg(&manifest_path);
-        // Unix mode: pass the socket path. TCP endpoints (#280 Task 7) will
-        // add a `--listen` branch here instead.
-        if let Some(socket_path) = record.unix_socket_path() {
-            cmd.arg("--socket").arg(socket_path);
+        match &record.endpoint {
+            // Unix mode: bind the per-agent socket path.
+            crate::transport::Endpoint::Unix { path } => {
+                cmd.arg("--socket").arg(path);
+            }
+            // Network mode (#280 Task 7): the advertised endpoint is
+            // `{advertise_host}:{port}`, but the worker binds locally on the
+            // SAME port across all interfaces — `0.0.0.0:{port}`.
+            crate::transport::Endpoint::Tcp { addr } => {
+                let port = addr.rsplit(':').next().unwrap_or_default();
+                cmd.arg("--listen").arg(format!("0.0.0.0:{port}"));
+                // The worker secures its own listener with the same TLS/token
+                // as the control plane; pass them via env (symmetric wiring).
+                if let Some(cert) = &self.agent_tls_cert_path {
+                    cmd.env("CALIBAN_AGENT_TLS_CERT", cert);
+                }
+                if let Some(key) = &self.agent_tls_key_path {
+                    cmd.env("CALIBAN_AGENT_TLS_KEY", key);
+                }
+                if let Some(token) = &self.agent_token {
+                    cmd.env("CALIBAN_AGENT_TOKEN", token);
+                }
+                // How the worker reaches the daemon's control listener over the
+                // network to report Idle/Running (best-effort; QA-validated).
+                if let Some(ep) = &self.control_endpoint {
+                    cmd.env("CALIBAN_CONTROL_ENDPOINT", ep);
+                }
+            }
         }
         if let Some(ref ctl) = self.control_socket {
             cmd.arg("--control-socket").arg(ctl);

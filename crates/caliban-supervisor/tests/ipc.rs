@@ -306,7 +306,10 @@ async fn rm_unknown_agent_errors() {
 #[tokio::test]
 async fn shutdown_drops_socket() {
     let (_d, sup, h, client) = boot().await;
-    let sock = sup.socket_path().to_path_buf();
+    let sock = sup
+        .socket_path()
+        .expect("unix control socket in default mode")
+        .to_path_buf();
     client.shutdown().await.unwrap();
     // Server should exit cleanly within a generous timeout.
     let _ = tokio::time::timeout(Duration::from_secs(2), h)

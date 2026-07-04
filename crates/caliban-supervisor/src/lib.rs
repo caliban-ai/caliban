@@ -32,6 +32,6 @@ pub use proto::{
 };
 pub use registry::Registry;
 pub use runtime::{repo_socket_path, repo_socket_path_in};
-pub use server::Supervisor;
+pub use server::{NetworkConfig, Supervisor};
 pub use store::AgentStore;
 pub use transport::{BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect};
