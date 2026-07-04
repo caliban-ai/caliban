@@ -7,10 +7,14 @@
 //! transport framing below it. See ADR 0051.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 /// Where a caliband socket lives, independent of transport family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,13 +39,66 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn for T {}
 /// Boxed duplex connection handed to the NDJSON protocol layer.
 pub type BoxConn = Box<dyn Conn>;
 
-/// Server-side TLS material. Filled in Task 2.
+/// Server-side TLS material.
 #[derive(Clone)]
-pub struct TlsServer {}
+pub struct TlsServer {
+    /// Handshake acceptor built from a cert chain + private key.
+    pub acceptor: TlsAcceptor,
+}
 
-/// Client-side TLS material. Filled in Task 2.
+/// Client-side TLS material.
 #[derive(Clone)]
-pub struct TlsClient {}
+pub struct TlsClient {
+    /// Handshake connector built from a trusted CA store.
+    pub connector: TlsConnector,
+    /// Expected server name (SNI / cert validation target).
+    pub server_name: String,
+}
+
+/// Install the `ring` crypto provider as the process default, exactly once.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// Build server TLS from a PEM cert chain + private key.
+pub fn tls_server_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<TlsServer> {
+    ensure_crypto_provider();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        .collect::<Result<_, _>>()
+        .map_err(std::io::Error::other)?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_pem[..])
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::other("no private key in PEM"))?;
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(std::io::Error::other)?;
+    Ok(TlsServer {
+        acceptor: TlsAcceptor::from(Arc::new(config)),
+    })
+}
+
+/// Build client TLS trusting `ca_pem`, verifying the server presents `server_name`.
+pub fn tls_client_from_pem(ca_pem: &[u8], server_name: &str) -> std::io::Result<TlsClient> {
+    ensure_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut &ca_pem[..]) {
+        roots
+            .add(cert.map_err(std::io::Error::other)?)
+            .map_err(std::io::Error::other)?;
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(TlsClient {
+        connector: TlsConnector::from(Arc::new(config)),
+        server_name: server_name.to_string(),
+    })
+}
 
 /// How to bind a listener.
 pub struct BindSpec {
@@ -109,23 +166,31 @@ impl Listener {
         }
     }
 
-    /// Accept one connection, returning a boxed duplex stream. (TLS
-    /// handshake + token check are added in Tasks 2–3.)
+    /// Accept one connection, returning a boxed duplex stream. Performs the
+    /// TLS handshake when server TLS is configured. (Token check added in
+    /// Task 3.)
     pub async fn accept(&self) -> std::io::Result<BoxConn> {
         match self {
             Listener::Unix(l) => {
                 let (stream, _addr) = l.accept().await?;
                 Ok(Box::new(stream))
             }
-            Listener::Tcp { listener, .. } => {
+            Listener::Tcp { listener, tls, .. } => {
                 let (stream, _addr) = listener.accept().await?;
-                Ok(Box::new(stream))
+                match tls {
+                    None => Ok(Box::new(stream)),
+                    Some(t) => {
+                        let tls_stream = t.acceptor.accept(stream).await?;
+                        Ok(Box::new(tls_stream))
+                    }
+                }
             }
         }
     }
 }
 
-/// Dial a connection per `spec`. (TLS + token preamble added in Tasks 2–3.)
+/// Dial a connection per `spec`. Performs the TLS handshake when client TLS
+/// is configured. (Token preamble added in Task 3.)
 pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
     match &spec.endpoint {
         Endpoint::Unix { path } => {
@@ -134,7 +199,15 @@ pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
         }
         Endpoint::Tcp { addr } => {
             let stream = TcpStream::connect(addr).await?;
-            Ok(Box::new(stream))
+            match &spec.tls {
+                None => Ok(Box::new(stream)),
+                Some(t) => {
+                    let name = ServerName::try_from(t.server_name.clone())
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+                    let tls_stream = t.connector.connect(name, stream).await?;
+                    Ok(Box::new(tls_stream))
+                }
+            }
         }
     }
 }
@@ -210,5 +283,44 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(v["scheme"], "tcp");
         assert_eq!(v["addr"], "h:7");
+    }
+
+    fn test_certs() -> (Vec<u8>, Vec<u8>) {
+        // rcgen self-signed cert for "localhost".
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        (
+            cert.cert.pem().into_bytes(),
+            cert.key_pair.serialize_pem().into_bytes(),
+        )
+    }
+
+    #[tokio::test]
+    async fn tcp_tls_roundtrip() {
+        let (cert_pem, key_pem) = test_certs();
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: None,
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(echo_once(listener));
+        // Client trusts the self-signed cert as its CA, expects name "localhost".
+        let tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+        let mut c = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(tls_client),
+            token: None,
+        })
+        .await
+        .unwrap();
+        c.write_all(b"tls!!").await.unwrap();
+        let mut got = [0u8; 5];
+        c.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"tls!!");
+        server.await.unwrap();
     }
 }
