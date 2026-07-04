@@ -1,0 +1,9 @@
+target/
+.git/
+qa/
+docs/
+**/*.md
+.github/
+.claude/
+# ...but keep source-embedded markdown compiled into the binaries via include_str!
+!**/src/builtins/*.md
