@@ -57,7 +57,7 @@ conventions.
 | [0034](0034-bedrock-and-vertex-providers.md) | Bedrock + Vertex providers | accepted |
 | [0035](0035-auto-memory.md) | Auto-memory (model-written notes per project) | accepted |
 | [0036](0036-claudemd-ancestry-and-imports.md) | CLAUDE.md ancestor walk + `@`-imports | accepted |
-| [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by [0047](0047-interactive-background-subagents.md)) |
+| [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by [0047](0047-interactive-background-subagents.md); per-repo identity amended + worktree isolation wired by [0052](0052-workspace-scoped-caliband.md)) |
 | [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted |
 | [0039](0039-image-and-vision-input.md) | Image / vision input | accepted |
 | [0040](0040-slash-command-registry.md) | Slash command registry (extensible `SlashCommand` trait) | accepted |
@@ -72,6 +72,7 @@ conventions.
 | [0049](0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
 | [0050](0050-xdg-first-path-locations.md) | XDG-first path locations on all platforms (drops macOS-native Library default; amends 0017) | accepted |
 | [0051](0051-caliband-network-transport.md) | caliband network transport: NDJSON over TCP+TLS with a bearer token (Unix socket retained for local; gRPC deferred to #314) | accepted |
+| [0052](0052-workspace-scoped-caliband.md) | Workspace-scoped caliband: multi-source workspace identity + wired per-source worktree isolation (amends 0037) | accepted |
 
 ## Adding a new ADR
 
