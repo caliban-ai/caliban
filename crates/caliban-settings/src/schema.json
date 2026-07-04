@@ -56,10 +56,37 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "command": { "type": "string" },
-          "args":    { "type": "array", "items": { "type": "string" } },
-          "env":     { "type": "object", "additionalProperties": { "type": "string" } },
-          "cwd":     { "type": "string" },
+          "type":      { "type": "string", "enum": ["stdio", "http", "sse"] },
+          "transport": { "type": "string", "enum": ["stdio", "http", "sse"] },
+          "command":   { "type": "string" },
+          "args":      { "type": "array", "items": { "type": "string" } },
+          "env":       { "type": "object", "additionalProperties": { "type": "string" } },
+          "cwd":       { "type": "string" },
+          "url":       { "type": "string" },
+          "headers":   { "type": "object", "additionalProperties": { "type": "string" } },
+          "oauth":     { "type": "string", "enum": ["off", "auto", "manual"] },
+          "oauth_config": {
+            "type": "object",
+            "properties": {
+              "client_id":     { "type": "string" },
+              "client_secret": { "type": "string" },
+              "auth_url":      { "type": "string" },
+              "token_url":     { "type": "string" },
+              "scopes":        { "type": "array", "items": { "type": "string" } },
+              "audience":      { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "permissions": {
+            "type": "object",
+            "properties": {
+              "allow": { "type": "array", "items": { "type": "string" } },
+              "deny":  { "type": "array", "items": { "type": "string" } },
+              "ask":   { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          },
+          "lazy":     { "type": "boolean" },
           "disabled": { "type": "boolean" }
         },
         "additionalProperties": false

@@ -1151,7 +1151,7 @@ pub(crate) fn handle_mcp_overlay_key(key: KeyEvent, app: &mut App) -> bool {
         }
         (KeyCode::Char('a'), KeyModifiers::NONE) => {
             app.toast = Some(toast::Toast::info(
-                "mcp: OAuth flow auto-triggers on first call when oauth=auto or manual",
+                "mcp: oauth=auto/manual servers authenticate at startup (browser opens once); restart to re-auth",
             ));
             true
         }

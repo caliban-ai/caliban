@@ -104,6 +104,31 @@ impl Transport {
         }
     }
 
+    /// Attach an OAuth `Authorization: Bearer <token>` header to an http/sse
+    /// transport (a no-op for stdio, which has no request headers). Overwrites
+    /// any existing `Authorization` header. Called by the manager after the
+    /// OAuth authenticator resolves a token, just before the handshake.
+    ///
+    /// # Errors
+    /// [`McpError::InvalidHeader`] if the token yields an illegal header value
+    /// (e.g. it contains control characters) — should not happen for a
+    /// well-formed access token.
+    pub fn set_bearer(&mut self, server: &str, token: &str) -> Result<(), McpError> {
+        let headers = match self {
+            Self::Http { headers, .. } | Self::Sse { headers, .. } => headers,
+            Self::Stdio { .. } => return Ok(()),
+        };
+        let value = HeaderValue::try_from(format!("Bearer {token}")).map_err(|e| {
+            McpError::InvalidHeader {
+                server: server.to_string(),
+                name: "Authorization".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        headers.insert(http::header::AUTHORIZATION, value);
+        Ok(())
+    }
+
     /// Short label for the `/mcp` overlay transport column.
     #[must_use]
     pub fn kind(&self) -> &'static str {

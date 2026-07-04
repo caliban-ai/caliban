@@ -55,9 +55,19 @@ url  = "https://api.example.com/mcp/sse"
 
 For HTTP/SSE servers behind OAuth, caliban performs the authorization-code flow with PKCE and a loopback callback server.
 
-**Auto discovery** (`oauth = "auto"`): caliban discovers endpoints from the server's `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` documents.
+**Auto discovery** (`oauth = "auto"`): caliban discovers the authorization endpoints from the server's `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` documents. It still needs a **`client_id`** — caliban does not perform dynamic client registration (RFC 7591), and most hosted servers (including GitHub) don't offer it. Register an OAuth app once and put its `client_id` in an `oauth_config` block; the endpoints are still discovered for you:
 
-**Manual configuration** (`oauth = "manual"`): provide a `[mcp_servers.<name>.oauth_config]` block:
+```toml
+[mcp_servers.github]
+type  = "http"
+url   = "https://api.githubcopilot.com/mcp/"
+oauth = "auto"
+
+[mcp_servers.github.oauth_config]
+client_id = "${GITHUB_OAUTH_CLIENT_ID}"   # from a registered GitHub OAuth App
+```
+
+**Manual configuration** (`oauth = "manual"`): supply the endpoints yourself in a `[mcp_servers.<name>.oauth_config]` block:
 
 ```toml
 [mcp_servers.my-server]
@@ -72,7 +82,9 @@ token_url  = "https://auth.example.com/token"
 scopes     = ["read", "write"]
 ```
 
-Tokens are stored in the OS keyring; caliban falls back to `$XDG_DATA_HOME/caliban/mcp-tokens.json` (mode 0600) on systems without keychain support.
+The **first interactive run** opens your browser to authorize; the token is cached and reused (and silently refreshed near expiry) on later runs, so no browser is needed again until it fully expires. In **headless/`--print`/non-TTY** runs a server with no cached token fails fast with an actionable error rather than hanging on a callback — authorize it interactively once first. Tokens are stored in the OS keyring; caliban falls back to `$XDG_DATA_HOME/caliban/mcp-tokens.json` (mode 0600) on systems without keychain support.
+
+> **No OAuth app?** A no-auth alternative is a static bearer header — e.g. a GitHub PAT via `headers = { Authorization = "Bearer ${GITHUB_MCP_PAT}" }` with `oauth = "off"` — which skips the flow entirely.
 
 Use `--mcp-oauth-port <PORT>` (or `CALIBAN_MCP_OAUTH_PORT`) to fix the loopback callback port on firewalled machines instead of letting caliban pick an ephemeral one.
 

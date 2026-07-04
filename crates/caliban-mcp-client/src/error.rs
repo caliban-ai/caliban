@@ -234,6 +234,30 @@ pub enum McpError {
         /// Field that was missing (`client_id`, `auth_url`, `token_url`).
         field: &'static str,
     },
+    /// A cold token cache needs an interactive browser authorization, but
+    /// caliban is running headless (`--print` / stream-json / non-TTY). We
+    /// refuse to hang on a loopback callback that can never complete.
+    #[error(
+        "mcp: server '{server}' needs interactive OAuth authorization; run caliban \
+         interactively once (a browser will open) to cache a token, then re-run headless"
+    )]
+    OauthInteractiveRequired {
+        /// Server name.
+        server: String,
+    },
+    /// `oauth = "auto"` produced no `client_id`: there's no cached token, the
+    /// config didn't supply one, and the authorization server does not offer
+    /// dynamic client registration (RFC 7591). The operator must register an
+    /// OAuth client and set `client_id` explicitly.
+    #[error(
+        "mcp: server '{server}' has no client_id and its authorization server does not \
+         support dynamic client registration; register an OAuth app and set \
+         [mcp_servers.{server}.oauth_config].client_id"
+    )]
+    OauthNoClientId {
+        /// Server name.
+        server: String,
+    },
     /// OS keyring access failed (no backend or permission denied).
     #[error("mcp: server '{server}' keyring error: {source}")]
     Keyring {

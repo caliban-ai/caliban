@@ -9,8 +9,9 @@ use caliban_agent_core::mcp_activation::McpToolInfo;
 use caliban_agent_core::{Tool, ToolRegistry};
 
 use crate::client::{Conn, Transport};
-use crate::config::McpConfig;
+use crate::config::{McpConfig, OauthMode, ServerConfig};
 use crate::error::McpError;
+use crate::oauth::{MemoryStore, OauthAuthenticator, TokenStore, default_store};
 use crate::registry::{ServerStatus, ServerSummary};
 use crate::tool::McpTool;
 
@@ -30,6 +31,16 @@ pub struct StartOptions {
     pub startup_timeout: Duration,
     /// Per-tool-call timeout. Overrides `CALIBAN_MCP_TOOL_TIMEOUT`.
     pub tool_timeout: Duration,
+    /// Whether this run may perform interactive OAuth authorization (open a
+    /// browser + block on the loopback callback). `true` for the TUI, `false`
+    /// for headless/`--print`/non-TTY runs — a cold token cache then fails a
+    /// server with an actionable error rather than hanging.
+    pub interactive: bool,
+    /// Token store for OAuth (`auto`/`manual` servers). Production uses the
+    /// keyring→file store; tests inject a [`MemoryStore`] for isolation.
+    pub token_store: Arc<dyn TokenStore>,
+    /// HTTP client for OAuth discovery / token exchange / refresh.
+    pub http: reqwest::Client,
 }
 
 impl Default for StartOptions {
@@ -37,6 +48,12 @@ impl Default for StartOptions {
         Self {
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
+            // Defaults are the hermetic/test profile: no browser, in-memory
+            // token store. Production paths (`start`/`start_interactive`) build
+            // `StartOptions` explicitly with the real store + interactivity.
+            interactive: false,
+            token_store: Arc::new(MemoryStore::default()),
+            http: reqwest::Client::new(),
         }
     }
 }
@@ -79,6 +96,19 @@ impl McpClientManager {
     /// best-effort. The `Result` is preserved for forward compatibility with
     /// Phases B and C which may surface aggregated config errors.
     pub async fn start(cfg: &McpConfig) -> Result<Self, McpError> {
+        Self::start_interactive(cfg, false).await
+    }
+
+    /// Like [`Self::start`], but declares whether the current run may perform
+    /// interactive OAuth authorization. The TUI passes `true` (a browser may
+    /// open for `oauth = auto|manual` servers on a cold token cache); headless
+    /// / `--print` / non-TTY runs pass `false` so a cold cache fails fast with
+    /// an actionable error instead of hanging on a callback that can't
+    /// complete. Timeouts still come from the env-var path.
+    ///
+    /// # Errors
+    /// See [`Self::start`].
+    pub async fn start_interactive(cfg: &McpConfig, interactive: bool) -> Result<Self, McpError> {
         let opts = StartOptions {
             startup_timeout: duration_from_env(
                 "CALIBAN_MCP_TIMEOUT",
@@ -90,6 +120,9 @@ impl McpClientManager {
                 "MCP_TOOL_TIMEOUT",
                 DEFAULT_TOOL_TIMEOUT,
             ),
+            interactive,
+            token_store: default_store(),
+            http: reqwest::Client::new(),
         };
         Self::start_with_options(cfg, opts).await
     }
@@ -101,107 +134,194 @@ impl McpClientManager {
     /// See [`Self::start`] — never returns an error in Phase A; reserved for
     /// Phase B/C config validation.
     pub async fn start_with_options(cfg: &McpConfig, opts: StartOptions) -> Result<Self, McpError> {
-        let startup_timeout = opts.startup_timeout;
-        let tool_timeout = opts.tool_timeout;
+        // One authenticator (reqwest client + token store) shared across every
+        // server in this pass. Only consulted for `oauth = auto|manual`.
+        let authenticator = OauthAuthenticator::new(
+            opts.http.clone(),
+            Arc::clone(&opts.token_store),
+            opts.interactive,
+        );
 
         let mut mgr = Self::default();
-
         for (name, server) in &cfg.servers {
-            let transport_label = server.transport.as_str();
-            if server.disabled {
-                mgr.summaries.push(ServerSummary {
-                    name: name.clone(),
-                    status: ServerStatus::Disabled,
-                    transport: transport_label,
-                });
-                continue;
-            }
+            mgr.connect_one(
+                name,
+                server,
+                &authenticator,
+                opts.startup_timeout,
+                opts.tool_timeout,
+            )
+            .await;
+        }
+        Ok(mgr)
+    }
 
-            let transport = match Transport::from_config(name, server) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(
-                        target: caliban_common::tracing_targets::TARGET_MCP,
-                        server = %name,
-                        error = %e,
-                        "mcp server config invalid; skipping",
-                    );
-                    mgr.summaries.push(ServerSummary {
-                        name: name.clone(),
-                        status: ServerStatus::Failed {
-                            reason: e.to_string(),
-                        },
-                        transport: transport_label,
-                    });
-                    continue;
-                }
-            };
-            match Conn::start(name.clone(), transport, startup_timeout).await {
-                Ok(conn) => {
-                    let conn = Arc::new(conn);
-                    // Pull the advertised tool list. `list_tools(None)` fetches
-                    // the first page; for Phase A we don't paginate (most
-                    // stdio servers return their full list in one response).
-                    let list_result = conn.peer().list_tools(None).await;
-                    match list_result {
-                        Ok(listing) => {
-                            let advertised = listing.tools;
-                            let count = advertised.len();
-                            for adv in &advertised {
-                                let mcp_tool =
-                                    McpTool::new(name, Arc::clone(&conn), adv, tool_timeout);
-                                mgr.pending.push(Arc::new(mcp_tool));
-                            }
-                            mgr.conns.insert(name.clone(), Arc::clone(&conn));
-                            mgr.summaries.push(ServerSummary {
-                                name: name.clone(),
-                                status: ServerStatus::Connected { tools: count },
-                                transport: transport_label,
-                            });
-                            tracing::info!(
-                                target: caliban_common::tracing_targets::TARGET_MCP,
-                                server = %name,
-                                transport = transport_label,
-                                tools = count,
-                                "mcp server connected",
-                            );
-                        }
-                        Err(e) => {
-                            let reason = format!("list_tools failed: {e}");
-                            tracing::warn!(
-                                target: caliban_common::tracing_targets::TARGET_MCP,
-                                server = %name,
-                                error = %e,
-                                "mcp server list_tools failed; skipping",
-                            );
-                            mgr.summaries.push(ServerSummary {
-                                name: name.clone(),
-                                status: ServerStatus::Failed { reason },
-                                transport: transport_label,
-                            });
-                            // Drop conn so the child shuts down.
-                            drop(conn);
-                        }
-                    }
-                }
-                Err(e) => {
-                    let reason = e.to_string();
-                    tracing::warn!(
-                        target: caliban_common::tracing_targets::TARGET_MCP,
-                        server = %name,
-                        error = %e,
-                        "mcp server failed to start; skipping",
-                    );
-                    mgr.summaries.push(ServerSummary {
-                        name: name.clone(),
-                        status: ServerStatus::Failed { reason },
-                        transport: transport_label,
-                    });
-                }
-            }
+    /// Bring up a single configured server: skip if disabled, build+authorize
+    /// the transport, run the handshake, and register its tools. Every failure
+    /// path records a `Failed` summary and returns — one server never aborts
+    /// the pass.
+    async fn connect_one(
+        &mut self,
+        name: &str,
+        server: &ServerConfig,
+        authenticator: &OauthAuthenticator,
+        startup_timeout: Duration,
+        tool_timeout: Duration,
+    ) {
+        let transport_label = server.transport.as_str();
+        if server.disabled {
+            self.summaries.push(ServerSummary {
+                name: name.to_string(),
+                status: ServerStatus::Disabled,
+                transport: transport_label,
+            });
+            return;
         }
 
-        Ok(mgr)
+        let mut transport = match Transport::from_config(name, server) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_failed(
+                    name,
+                    transport_label,
+                    &e,
+                    "mcp server config invalid; skipping",
+                );
+                return;
+            }
+        };
+
+        // OAuth (ADR 0023 Phase C): for `auto`/`manual` servers, resolve a
+        // Bearer token (reuse cached / silent refresh / interactive flow) and
+        // attach it before the handshake. A failure here means the handshake
+        // would just bounce with `AuthRequired`, so mark the server Failed with
+        // the (actionable) auth error and skip it.
+        if let Err(e) = Self::attach_oauth(authenticator, name, server, &mut transport).await {
+            self.record_failed(
+                name,
+                transport_label,
+                &e,
+                "mcp server oauth authorization failed; skipping",
+            );
+            return;
+        }
+
+        match Conn::start(name.to_string(), transport, startup_timeout).await {
+            Ok(conn) => {
+                self.register_connected(name, transport_label, Arc::new(conn), tool_timeout)
+                    .await;
+            }
+            Err(e) => {
+                self.record_failed(
+                    name,
+                    transport_label,
+                    &e,
+                    "mcp server failed to start; skipping",
+                );
+            }
+        }
+    }
+
+    /// List a connected server's tools and register them, or record a `Failed`
+    /// summary (and drop the connection) if the listing fails.
+    async fn register_connected(
+        &mut self,
+        name: &str,
+        transport_label: &'static str,
+        conn: Arc<Conn>,
+        tool_timeout: Duration,
+    ) {
+        // `list_tools(None)` fetches the first page; we don't paginate (most
+        // servers return their full list in one response).
+        let list_result = conn.peer().list_tools(None).await;
+        match list_result {
+            Ok(listing) => {
+                let advertised = listing.tools;
+                let count = advertised.len();
+                for adv in &advertised {
+                    let mcp_tool = McpTool::new(name, Arc::clone(&conn), adv, tool_timeout);
+                    self.pending.push(Arc::new(mcp_tool));
+                }
+                self.conns.insert(name.to_string(), Arc::clone(&conn));
+                self.summaries.push(ServerSummary {
+                    name: name.to_string(),
+                    status: ServerStatus::Connected { tools: count },
+                    transport: transport_label,
+                });
+                tracing::info!(
+                    target: caliban_common::tracing_targets::TARGET_MCP,
+                    server = %name,
+                    transport = transport_label,
+                    tools = count,
+                    "mcp server connected",
+                );
+            }
+            Err(e) => {
+                let reason = format!("list_tools failed: {e}");
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_MCP,
+                    server = %name,
+                    error = %e,
+                    "mcp server list_tools failed; skipping",
+                );
+                self.summaries.push(ServerSummary {
+                    name: name.to_string(),
+                    status: ServerStatus::Failed { reason },
+                    transport: transport_label,
+                });
+                // Drop conn so the child shuts down.
+                drop(conn);
+            }
+        }
+    }
+
+    /// Push a `Failed` summary for `name` and log `msg` at warn level.
+    fn record_failed(
+        &mut self,
+        name: &str,
+        transport_label: &'static str,
+        error: &McpError,
+        msg: &str,
+    ) {
+        tracing::warn!(
+            target: caliban_common::tracing_targets::TARGET_MCP,
+            server = %name,
+            error = %error,
+            "{msg}",
+        );
+        self.summaries.push(ServerSummary {
+            name: name.to_string(),
+            status: ServerStatus::Failed {
+                reason: error.to_string(),
+            },
+            transport: transport_label,
+        });
+    }
+
+    /// Resolve and attach an OAuth Bearer token to `transport` for one server.
+    /// A no-op for `oauth = "off"`. Requires a URL (guaranteed for http/sse,
+    /// the only transports that accept oauth — config validation rejects
+    /// `stdio + oauth`).
+    async fn attach_oauth(
+        authenticator: &OauthAuthenticator,
+        name: &str,
+        server: &ServerConfig,
+        transport: &mut Transport,
+    ) -> Result<(), McpError> {
+        if matches!(server.oauth, OauthMode::Off) {
+            return Ok(());
+        }
+        let url = server.url.as_ref().ok_or_else(|| McpError::MissingUrl {
+            server: name.to_string(),
+            transport: server.transport.as_str(),
+        })?;
+        if let Some(token) = authenticator
+            .bearer_for(name, server.oauth, url, &server.manual_oauth)
+            .await?
+        {
+            transport.set_bearer(name, &token)?;
+        }
+        Ok(())
     }
 
     /// Number of `Connected` servers.

@@ -60,6 +60,37 @@ it's what Claude Code uses and what RFC 8252 recommends for native
 clients. A v2.1 follow-up may add a paste-back fallback if real
 demand emerges from operators on hardened networks.
 
+#### Amendment (#300): the flow is wired into the connect path; `auto` needs a `client_id`
+
+The Phase-C building blocks above (`discover_endpoints`, `OauthFlow`,
+`refresh_tokens`, the token store) originally shipped **unwired** — nothing
+invoked them during connection, so `oauth = "auto"`/`"manual"` servers silently
+failed the handshake with `AuthRequired` and no browser ever opened. #300
+closes that gap:
+
+- **`OauthAuthenticator` (in `oauth.rs`) drives the connect path.** Before the
+  handshake, the manager resolves a Bearer token per server — reuse a cached
+  token, silently refresh a near-expiry one, or (on a cold cache) run the
+  interactive PKCE flow and persist the result — and attaches it as
+  `Authorization: Bearer …`. Interactivity is gated: only a TUI run may open a
+  browser and block on the loopback callback; headless/`--print`/non-TTY runs
+  fail a cold-cache server with an actionable "authorize interactively once"
+  error instead of hanging.
+- **`auto` discovers *endpoints*, not a client.** Dynamic Client Registration
+  (RFC 7591) is **not** implemented, and the flagship hosted server (GitHub,
+  `api.githubcopilot.com/mcp/`) advertises `registration_endpoint: null` — so
+  auto-registration would not help it anyway. `auto` therefore still requires a
+  `client_id` from `[mcp_servers.X.oauth_config]` (register an OAuth app once);
+  a cold cache with no `client_id` and no DCR fails with a clear error. DCR
+  remains a possible follow-up for servers that do offer it.
+- **Discovery is RFC 8414/9728 path-preserving.** The well-known lookup inserts
+  `/.well-known/<doc>` between host and issuer path
+  (`github.com/login/oauth` → `github.com/.well-known/oauth-authorization-server/login/oauth`)
+  rather than replacing the path — the earlier path-stripping 404'd against any
+  sub-path issuer/resource.
+- **`OauthTokens` carries the issuing `client_id`** so a later refresh targets
+  the same client the `refresh_token` is bound to.
+
 ### Elicitation is a side-channel, not a tool
 
 `ElicitationBridge` is a separate caliban-side type with its own mpsc
