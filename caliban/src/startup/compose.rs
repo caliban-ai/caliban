@@ -573,8 +573,17 @@ pub(crate) async fn start_mcp(
     // `interactive` gates the OAuth browser flow: only an interactive (TUI) run
     // may open a browser and block on the loopback callback. Headless/`--print`
     // runs pass `false` so a cold-cache `oauth = auto|manual` server fails with
-    // an actionable error instead of hanging (ADR 0023 Phase C).
-    match caliban_mcp_client::McpClientManager::start_interactive(&cfg, interactive).await {
+    // an actionable error instead of hanging (ADR 0023 Phase C). The callback
+    // port (`--mcp-oauth-port` / `CALIBAN_MCP_OAUTH_PORT`, folded into
+    // `args.mcp_oauth_port` by clap) pins the loopback `redirect_uri` for auth
+    // servers that require an exact registered callback URL (GitHub OAuth Apps).
+    match caliban_mcp_client::McpClientManager::start_interactive(
+        &cfg,
+        interactive,
+        args.mcp_oauth_port,
+    )
+    .await
+    {
         Ok(mgr) => {
             // Snapshot the MCP tool directory for ToolSearch (ADR-0046)
             // BEFORE register_all consumes the manager state.

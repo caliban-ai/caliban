@@ -41,6 +41,10 @@ pub struct StartOptions {
     pub token_store: Arc<dyn TokenStore>,
     /// HTTP client for OAuth discovery / token exchange / refresh.
     pub http: reqwest::Client,
+    /// Fixed loopback OAuth callback port (`--mcp-oauth-port` /
+    /// `CALIBAN_MCP_OAUTH_PORT`). `None` → ephemeral. Required for auth servers
+    /// that pin the `redirect_uri` (GitHub OAuth Apps).
+    pub oauth_callback_port: Option<u16>,
 }
 
 impl Default for StartOptions {
@@ -54,6 +58,7 @@ impl Default for StartOptions {
             interactive: false,
             token_store: Arc::new(MemoryStore::default()),
             http: reqwest::Client::new(),
+            oauth_callback_port: None,
         }
     }
 }
@@ -96,7 +101,7 @@ impl McpClientManager {
     /// best-effort. The `Result` is preserved for forward compatibility with
     /// Phases B and C which may surface aggregated config errors.
     pub async fn start(cfg: &McpConfig) -> Result<Self, McpError> {
-        Self::start_interactive(cfg, false).await
+        Self::start_interactive(cfg, false, None).await
     }
 
     /// Like [`Self::start`], but declares whether the current run may perform
@@ -104,11 +109,17 @@ impl McpClientManager {
     /// open for `oauth = auto|manual` servers on a cold token cache); headless
     /// / `--print` / non-TTY runs pass `false` so a cold cache fails fast with
     /// an actionable error instead of hanging on a callback that can't
-    /// complete. Timeouts still come from the env-var path.
+    /// complete. Timeouts still come from the env-var path. `oauth_callback_port`
+    /// pins the loopback OAuth callback port (`--mcp-oauth-port` /
+    /// `CALIBAN_MCP_OAUTH_PORT`); `None` keeps it ephemeral.
     ///
     /// # Errors
     /// See [`Self::start`].
-    pub async fn start_interactive(cfg: &McpConfig, interactive: bool) -> Result<Self, McpError> {
+    pub async fn start_interactive(
+        cfg: &McpConfig,
+        interactive: bool,
+        oauth_callback_port: Option<u16>,
+    ) -> Result<Self, McpError> {
         let opts = StartOptions {
             startup_timeout: duration_from_env(
                 "CALIBAN_MCP_TIMEOUT",
@@ -123,6 +134,7 @@ impl McpClientManager {
             interactive,
             token_store: default_store(),
             http: reqwest::Client::new(),
+            oauth_callback_port,
         };
         Self::start_with_options(cfg, opts).await
     }
@@ -140,6 +152,7 @@ impl McpClientManager {
             opts.http.clone(),
             Arc::clone(&opts.token_store),
             opts.interactive,
+            opts.oauth_callback_port,
         );
 
         let mut mgr = Self::default();

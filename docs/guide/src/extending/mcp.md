@@ -67,6 +67,8 @@ oauth = "auto"
 client_id = "${GITHUB_OAUTH_CLIENT_ID}"   # from a registered GitHub OAuth App
 ```
 
+> **GitHub OAuth App setup.** GitHub matches the OAuth App's *Authorization callback URL* exactly, so pin the loopback port: register the callback URL as `http://127.0.0.1:41870/callback` and run caliban with `CALIBAN_MCP_OAUTH_PORT=41870` (or `--mcp-oauth-port 41870`). The scopes are requested from GitHub's protected-resource metadata (`repo`, `read:org`, …); GitHub OAuth Apps also require a `client_secret` (add `client_secret = "${GITHUB_OAUTH_CLIENT_SECRET}"`).
+
 **Manual configuration** (`oauth = "manual"`): supply the endpoints yourself in a `[mcp_servers.<name>.oauth_config]` block:
 
 ```toml
@@ -84,9 +86,25 @@ scopes     = ["read", "write"]
 
 The **first interactive run** opens your browser to authorize; the token is cached and reused (and silently refreshed near expiry) on later runs, so no browser is needed again until it fully expires. In **headless/`--print`/non-TTY** runs a server with no cached token fails fast with an actionable error rather than hanging on a callback — authorize it interactively once first. Tokens are stored in the OS keyring; caliban falls back to `$XDG_DATA_HOME/caliban/mcp-tokens.json` (mode 0600) on systems without keychain support.
 
-> **No OAuth app?** A no-auth alternative is a static bearer header — e.g. a GitHub PAT via `headers = { Authorization = "Bearer ${GITHUB_MCP_PAT}" }` with `oauth = "off"` — which skips the flow entirely.
+> **Easiest path for GitHub — reuse the GitHub CLI's token.** If you're logged in with `gh`, its token already authenticates the GitHub MCP server, so you can skip OAuth entirely with a static bearer header and no app registration:
+>
+> ```toml
+> [mcp_servers.github]
+> type    = "http"
+> url     = "https://api.githubcopilot.com/mcp/"
+> oauth   = "off"
+> headers = { Authorization = "Bearer ${GITHUB_MCP_TOKEN}" }
+> ```
+>
+> then launch with `GITHUB_MCP_TOKEN=$(gh auth token) caliban …`. Nothing secret is stored on disk and the token is always current. (Any GitHub PAT with the needed scopes works the same way.)
 
-Use `--mcp-oauth-port <PORT>` (or `CALIBAN_MCP_OAUTH_PORT`) to fix the loopback callback port on firewalled machines instead of letting caliban pick an ephemeral one.
+### Environment-variable expansion
+
+Every string value in an `[mcp_servers.<name>]` block — `url`, `headers.*`, `command`, `args`, `env.*`, and the `oauth_config.*` fields — supports `${VAR}`, `${VAR:-default}`, and `${CLAUDE_PROJECT_DIR}` expansion, so credentials can live in the environment instead of in `settings.toml`. A `${VAR}` with no value (and no default) is left as-is and the server is reported as failed rather than silently mis-configured.
+
+### Fixed callback port
+
+Use `--mcp-oauth-port <PORT>` (or `CALIBAN_MCP_OAUTH_PORT`) to pin the loopback callback port instead of an ephemeral one. This is **required** for authorization servers that match the `redirect_uri` exactly (GitHub OAuth Apps) and useful on firewalled machines.
 
 ## Per-server permissions
 
