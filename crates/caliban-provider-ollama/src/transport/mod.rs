@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 use crate::error::OllamaError;
-use crate::schema::{ModelShow, NativeRequest, NativeResponse, RunningModel};
+use crate::schema::{ModelShow, NativeRequest, NativeResponse, RunningModel, TagEntry};
 
 /// Abstraction over how Ollama `/api/chat` requests are sent.
 #[async_trait]
@@ -30,6 +30,14 @@ pub trait Transport: Send + Sync + 'static {
     /// Map a canonical model ID to the wire model ID for this transport.
     fn wire_model_id(&self, canonical: &str) -> String {
         canonical.to_string()
+    }
+
+    /// A stable identifier for the server this transport talks to, used to key
+    /// the persisted discovery cache (#316). Different servers cache
+    /// independently. The default is a single shared key; `DirectTransport`
+    /// returns `host:port`.
+    fn server_id(&self) -> String {
+        "default".to_string()
     }
 
     /// Apply any transport-specific mutations to the request before sending.
@@ -62,6 +70,21 @@ pub trait Transport: Send + Sync + 'static {
     /// deserialization failure. Callers treat any error as "no data".
     async fn show_model(&self, _model: &str) -> Result<Option<ModelShow>, OllamaError> {
         Ok(None)
+    }
+
+    /// List the models the server has available/pulled (`GET /api/tags`).
+    ///
+    /// Backs runtime model discovery (#316): the returned names are the wire
+    /// ids the picker offers. The default returns an empty list so non-probing
+    /// transports (mocks, alternative back ends) fall through to the persisted
+    /// discovery cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OllamaError)` on network failure, non-2xx status, or a
+    /// deserialization failure. Callers treat any error as "no data".
+    async fn list_tags(&self) -> Result<Vec<TagEntry>, OllamaError> {
+        Ok(Vec::new())
     }
 }
 

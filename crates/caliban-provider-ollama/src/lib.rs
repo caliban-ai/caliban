@@ -9,15 +9,15 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod config;
+pub mod discovery;
 pub mod error;
 pub mod ir_convert;
-pub mod models;
 pub mod schema;
 pub mod transport;
 
 mod stream_parse;
 
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -32,16 +32,23 @@ use crate::transport::direct::DirectTransport;
 
 /// Ollama `/api/chat` provider, generic over its transport.
 ///
-/// Holds a small interior-mutable cache of server-detected context-window
-/// sizes (issue #60). The sync [`Provider::capabilities`] reader cannot make
-/// HTTP calls, so the async [`Provider::complete`]/[`Provider::stream`] paths
-/// refresh the cache via `/api/ps` and `/api/show`, and `capabilities` overlays
-/// the cached value onto the static table.
+/// The Ollama server is the source of truth for the model list and their
+/// capabilities (#316) — there is no static model table. `discovered` holds the
+/// current models, seeded synchronously at construction from the persisted
+/// cache (last successful discovery) so the sync [`Provider::capabilities`] /
+/// [`Provider::list_models`] readers have correct last-known-good values
+/// immediately, and refreshed by the async [`Provider::refresh_models`] and the
+/// per-request [`Self::resolve_and_cache`] paths (which hit `/api/tags`,
+/// `/api/show`, `/api/ps`).
 #[derive(Debug)]
 pub struct OllamaProvider<T: Transport> {
     transport: T,
-    /// Canonical model id → server-detected context length (input-token cap).
-    ctx_cache: RwLock<HashMap<String, u32>>,
+    /// The discovered models (source of truth). Seeded from the persisted cache
+    /// at construction; updated by discovery.
+    discovered: RwLock<Vec<ModelInfo>>,
+    /// Where the discovery result is persisted. `None` disables persistence
+    /// (tests, or when no cache dir is resolvable).
+    cache_path: Option<PathBuf>,
 }
 
 impl OllamaProvider<DirectTransport> {
@@ -67,60 +74,112 @@ impl OllamaProvider<DirectTransport> {
 }
 
 impl<T: Transport> OllamaProvider<T> {
-    /// Construct an `OllamaProvider` from an arbitrary `Transport`.
+    /// Construct an `OllamaProvider` from an arbitrary `Transport`, persisting
+    /// discovery to the default cache path for this transport's server.
     pub fn from_transport(transport: T) -> Self {
+        let cache_path = discovery::default_cache_path(&transport.server_id());
+        Self::from_transport_with_cache(transport, cache_path)
+    }
+
+    /// Like [`Self::from_transport`] but with an explicit cache path. `None`
+    /// disables persistence (used by tests to avoid touching the real cache).
+    /// The provider seeds its model list from `cache_path` if it exists.
+    pub fn from_transport_with_cache(transport: T, cache_path: Option<PathBuf>) -> Self {
+        let seeded = cache_path
+            .as_deref()
+            .map(discovery::load_cache)
+            .unwrap_or_default();
         Self {
             transport,
-            ctx_cache: RwLock::new(HashMap::new()),
+            discovered: RwLock::new(seeded),
+            cache_path,
         }
     }
 
-    /// Read the cached context length for a canonical model id, if resolved.
-    fn cached_ctx(&self, canonical: &str) -> Option<u32> {
-        self.ctx_cache.read().ok()?.get(canonical).copied()
+    /// Look up a discovered model's capabilities by id (exact, then tag-strip).
+    fn find_caps(&self, model: &str) -> Option<Capabilities> {
+        let d = self.discovered.read().ok()?;
+        if let Some(m) = d.iter().find(|m| m.id == model || m.native_id == model) {
+            return Some(m.capabilities);
+        }
+        // Tag-strip: `qwen3.6:27b-mlx` → base `qwen3.6`.
+        let base = model.split_once(':').map(|(b, _)| b)?;
+        d.iter()
+            .find(|m| m.id == base || m.native_id == base)
+            .map(|m| m.capabilities)
     }
 
-    fn store_ctx(&self, canonical: &str, ctx: u32) {
-        if let Ok(mut cache) = self.ctx_cache.write() {
-            cache.insert(canonical.to_string(), ctx);
+    /// Insert or replace a discovered model, keyed by id.
+    fn upsert(&self, info: ModelInfo) {
+        if let Ok(mut d) = self.discovered.write() {
+            if let Some(existing) = d.iter_mut().find(|m| m.id == info.id) {
+                *existing = info;
+            } else {
+                d.push(info);
+            }
         }
     }
 
-    /// Resolve a model's real context window from the server and cache it,
-    /// keyed by canonical id. Resolution order (issue #60):
+    /// Persist the current discovered set to the cache (best-effort).
+    fn persist(&self) {
+        if let Some(path) = &self.cache_path
+            && let Ok(d) = self.discovered.read()
+        {
+            discovery::save_cache(path, &d);
+        }
+    }
+
+    /// Resolve a single model's capabilities from the server and upsert it into
+    /// the discovered set, so the active model has correct capabilities + live
+    /// context even in a headless run that never opens the picker. Resolution
+    /// (issue #60 + #316):
     ///
-    /// 1. `/api/ps` `context_length` for the loaded model — the live value.
-    /// 2. an already-cached value — keep it (don't downgrade, don't re-hit
-    ///    `/api/show` once we have a number).
-    /// 3. `/api/show` `model_info[*.context_length]` — the model maximum,
-    ///    available even when the model is not loaded.
-    /// 4. nothing — leave unset so `capabilities` uses the static table.
+    /// - `/api/show` → capabilities (`vision`/`tools`/`thinking`) + context max.
+    /// - `/api/ps` live `context_length` for the loaded model overrides the
+    ///   show/max value; a known-good larger value is never downgraded by a
+    ///   later, smaller `/api/show` reading.
     ///
-    /// Every transport error is treated as "no data" and falls through, so a
-    /// server that lacks the endpoints (older Ollama) or is briefly unreachable
-    /// degrades gracefully rather than failing the turn.
+    /// Every transport error is treated as "no data": if we learn nothing new
+    /// and already know the model, this is a no-op, so a briefly-unreachable or
+    /// older server degrades gracefully rather than failing the turn.
     pub(crate) async fn resolve_and_cache(&self, canonical: &str, wire: &str) {
-        if let Ok(running) = self.transport.running_models().await
-            && let Some(ctx) = running
-                .iter()
-                .find(|m| m.matches(wire))
-                .and_then(|m| m.context_length)
-            && ctx > 0
-        {
-            self.store_ctx(canonical, ctx);
+        let live = self
+            .transport
+            .running_models()
+            .await
+            .ok()
+            .and_then(|r| {
+                r.into_iter()
+                    .find(|m| m.matches(wire))
+                    .and_then(|m| m.context_length)
+            })
+            .filter(|c| *c > 0);
+        let show = self.transport.show_model(wire).await.ok().flatten();
+
+        // Nothing learned and already known → no-op.
+        if live.is_none() && show.is_none() && self.find_caps(canonical).is_some() {
             return;
         }
 
-        if self.cached_ctx(canonical).is_some() {
-            return;
+        let existing = self.find_caps(canonical);
+        let mut caps = match show.as_ref() {
+            Some(s) => discovery::capabilities_from_show(s),
+            None => existing.unwrap_or_else(discovery::bootstrap_capabilities),
+        };
+        if let Some(c) = live {
+            caps.max_input_tokens = c;
+        } else if let Some(prev) = existing {
+            // Don't downgrade a known-good (e.g. live) window with a smaller max.
+            caps.max_input_tokens = caps.max_input_tokens.max(prev.max_input_tokens);
         }
 
-        if let Ok(Some(show)) = self.transport.show_model(wire).await
-            && let Some(ctx) = show.context_length()
-            && ctx > 0
-        {
-            self.store_ctx(canonical, ctx);
-        }
+        self.upsert(ModelInfo {
+            id: canonical.to_string(),
+            native_id: wire.to_string(),
+            display_name: canonical.to_string(),
+            capabilities: caps,
+        });
+        self.persist();
     }
 }
 
@@ -151,40 +210,60 @@ impl<T: Transport> Provider for OllamaProvider<T> {
     }
 
     fn capabilities(&self, model: &str) -> Capabilities {
-        let mut caps = models::capabilities_for(model);
-        // Overlay a server-detected context window when one has been resolved
-        // (issue #60); otherwise the static-table value stands.
-        if let Some(ctx) = self.cached_ctx(model) {
-            caps.max_input_tokens = ctx;
-        }
-        caps
+        // Discovered/cached value is the source of truth; an unknown model gets
+        // the honest bootstrap default (never a static per-model guess).
+        self.find_caps(model)
+            .unwrap_or_else(discovery::bootstrap_capabilities)
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        models::models()
+        // The discovered set, seeded from the persisted cache at construction.
+        self.discovered
+            .read()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
-        // Probe the server's loaded models (`/api/ps`) and overlay each live
-        // context window onto the static catalog, so the trait returns
-        // server-detected data instead of the static table. Also seeds the
-        // ctx cache the sync `capabilities` reader overlays (#60) — folding the
-        // probe that used to be a `complete`/`stream` side effect into the
-        // trait surface (the #34 refresh hook).
-        let running = self.transport.running_models().await.map_err(Error::from)?;
-        let mut models = models::models();
-        for info in &mut models {
+        // Full discovery (#316): the available models (`/api/tags`), each
+        // enriched with server-reported capabilities + context (`/api/show`),
+        // with the live loaded context (`/api/ps`) overlaid. The result becomes
+        // the source of truth and is persisted for the next cold start. A
+        // `/api/tags` failure surfaces as an error so the caller keeps the
+        // last-known-good (seeded) list rather than blanking it.
+        let tags = self.transport.list_tags().await.map_err(Error::from)?;
+        let running = self.transport.running_models().await.unwrap_or_default();
+
+        let mut infos = Vec::with_capacity(tags.len());
+        for tag in &tags {
+            // `/api/show` per model (sequential — model counts are small, and
+            // this runs on picker-open, not per turn). Errors → bootstrap caps.
+            let show = self.transport.show_model(&tag.name).await.ok().flatten();
+            let mut caps = show.as_ref().map_or_else(
+                discovery::bootstrap_capabilities,
+                discovery::capabilities_from_show,
+            );
             if let Some(ctx) = running
                 .iter()
-                .find(|m| m.matches(&info.native_id))
+                .find(|m| m.matches(&tag.name))
                 .and_then(|m| m.context_length)
-                && ctx > 0
+                .filter(|c| *c > 0)
             {
-                info.capabilities.max_input_tokens = ctx;
-                self.store_ctx(&info.id, ctx);
+                caps.max_input_tokens = ctx;
             }
+            infos.push(ModelInfo {
+                id: tag.name.clone(),
+                native_id: tag.name.clone(),
+                display_name: tag.name.clone(),
+                capabilities: caps,
+            });
         }
-        Ok(models)
+
+        if let Ok(mut d) = self.discovered.write() {
+            d.clone_from(&infos);
+        }
+        self.persist();
+        Ok(infos)
     }
 
     fn name(&self) -> &'static str {
@@ -201,15 +280,20 @@ mod tests {
 
     use super::*;
     use crate::error::OllamaError;
-    use crate::schema::{ModelShow, NativeRequest, NativeResponse, RunningModel};
+    use crate::schema::{ModelShow, NativeRequest, NativeResponse, RunningModel, TagEntry};
+    use caliban_provider::ToolUseCapability;
 
     const MODEL: &str = "qwen3.6:27b-mlx";
+
+    fn no_send() -> ! {
+        unimplemented!("send/stream are not exercised by discovery")
+    }
 
     /// Transport whose `/api/ps` answer depends on how many times it has been
     /// asked, so a test can simulate "model not loaded yet → loaded → unloaded
     /// again" across turns without any HTTP. `/api/show` always reports a
     /// smaller (configured) window than `/api/ps` so we can tell which source
-    /// won. `send`/`stream` are never called by `resolve_and_cache`.
+    /// won.
     struct SequencedProbe {
         ps_calls: AtomicUsize,
     }
@@ -217,9 +301,8 @@ mod tests {
     #[async_trait]
     impl Transport for SequencedProbe {
         async fn send(&self, _: NativeRequest) -> std::result::Result<NativeResponse, OllamaError> {
-            unimplemented!("send is not exercised by resolve_and_cache")
+            no_send()
         }
-
         async fn stream(
             &self,
             _: NativeRequest,
@@ -227,9 +310,8 @@ mod tests {
             BoxStream<'static, std::result::Result<Bytes, OllamaError>>,
             OllamaError,
         > {
-            unimplemented!("stream is not exercised by resolve_and_cache")
+            no_send()
         }
-
         async fn running_models(&self) -> std::result::Result<Vec<RunningModel>, OllamaError> {
             // Loaded only on the 2nd probe (index 1); empty otherwise.
             if self.ps_calls.fetch_add(1, Ordering::SeqCst) == 1 {
@@ -242,18 +324,21 @@ mod tests {
                 Ok(Vec::new())
             }
         }
-
         async fn show_model(&self, _: &str) -> std::result::Result<Option<ModelShow>, OllamaError> {
-            let body = r#"{"model_info":{"general.architecture":"qwen3_5","qwen3_5.context_length":131072}}"#;
+            let body = r#"{"model_info":{"general.architecture":"qwen3_5","qwen3_5.context_length":131072},"capabilities":["completion","tools"]}"#;
             Ok(Some(serde_json::from_str(body).unwrap()))
         }
     }
 
     #[tokio::test]
     async fn ps_overrides_show_and_value_is_not_downgraded() {
-        let provider = OllamaProvider::from_transport(SequencedProbe {
-            ps_calls: AtomicUsize::new(0),
-        });
+        // `None` cache: don't touch the real discovery cache during tests.
+        let provider = OllamaProvider::from_transport_with_cache(
+            SequencedProbe {
+                ps_calls: AtomicUsize::new(0),
+            },
+            None,
+        );
 
         // Turn 1: not loaded → /api/show max (131072).
         provider.resolve_and_cache(MODEL, MODEL).await;
@@ -267,5 +352,173 @@ mod tests {
         // downgrading back to the smaller /api/show number.
         provider.resolve_and_cache(MODEL, MODEL).await;
         assert_eq!(provider.capabilities(MODEL).max_input_tokens, 262_144);
+    }
+
+    /// A full-discovery transport: two tags, per-model `/api/show` capabilities,
+    /// and one model loaded in `/api/ps` with a larger live context.
+    struct DiscoveryProbe;
+
+    #[async_trait]
+    impl Transport for DiscoveryProbe {
+        async fn send(&self, _: NativeRequest) -> std::result::Result<NativeResponse, OllamaError> {
+            no_send()
+        }
+        async fn stream(
+            &self,
+            _: NativeRequest,
+        ) -> std::result::Result<
+            BoxStream<'static, std::result::Result<Bytes, OllamaError>>,
+            OllamaError,
+        > {
+            no_send()
+        }
+        async fn list_tags(&self) -> std::result::Result<Vec<TagEntry>, OllamaError> {
+            Ok(vec![
+                TagEntry {
+                    name: MODEL.into(),
+                    details: crate::schema::TagDetails::default(),
+                },
+                TagEntry {
+                    name: "gemma3:1b".into(),
+                    details: crate::schema::TagDetails::default(),
+                },
+            ])
+        }
+        async fn running_models(&self) -> std::result::Result<Vec<RunningModel>, OllamaError> {
+            // Only the qwen model is loaded, at 256K live.
+            Ok(vec![RunningModel {
+                name: MODEL.into(),
+                model: MODEL.into(),
+                context_length: Some(262_144),
+            }])
+        }
+        async fn show_model(
+            &self,
+            model: &str,
+        ) -> std::result::Result<Option<ModelShow>, OllamaError> {
+            let body = if model == MODEL {
+                r#"{"model_info":{"general.architecture":"qwen3_5","qwen3_5.context_length":131072},"capabilities":["completion","vision","thinking","tools"]}"#
+            } else {
+                r#"{"model_info":{"general.architecture":"gemma3","gemma3.context_length":8192},"capabilities":["completion"]}"#
+            };
+            Ok(Some(serde_json::from_str(body).unwrap()))
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_discovers_models_with_server_caps_and_live_ctx() {
+        let p = OllamaProvider::from_transport_with_cache(DiscoveryProbe, None);
+        let models = p.refresh_models().await.unwrap();
+        assert_eq!(models.len(), 2, "both tags discovered");
+
+        let qwen = models.iter().find(|m| m.id == MODEL).unwrap();
+        // /api/ps live (262144) wins over /api/show max (131072).
+        assert_eq!(qwen.capabilities.max_input_tokens, 262_144);
+        assert!(qwen.capabilities.vision);
+        assert!(qwen.capabilities.thinking);
+        assert_eq!(qwen.capabilities.tool_use, ToolUseCapability::ParallelCalls);
+
+        let gemma = models.iter().find(|m| m.id == "gemma3:1b").unwrap();
+        assert_eq!(gemma.capabilities.max_input_tokens, 8_192);
+        assert!(!gemma.capabilities.vision);
+        assert_eq!(gemma.capabilities.tool_use, ToolUseCapability::None);
+
+        // Sync readers reflect the discovery.
+        assert_eq!(p.capabilities(MODEL).max_input_tokens, 262_144);
+        assert_eq!(p.list_models().len(), 2);
+    }
+
+    /// Refresh persists; a fresh provider (even with an empty server) is seeded
+    /// from the cache — no wrong static default.
+    #[tokio::test]
+    async fn refresh_persists_and_seeds_next_start() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ollama-test.json");
+        {
+            let p = OllamaProvider::from_transport_with_cache(DiscoveryProbe, Some(path.clone()));
+            p.refresh_models().await.unwrap();
+        }
+        // New provider, empty-server transport, SAME cache → seeded from disk.
+        let p2 = OllamaProvider::from_transport_with_cache(EmptyProbe, Some(path));
+        assert_eq!(
+            p2.list_models().len(),
+            2,
+            "seeded from cache before refresh"
+        );
+        assert_eq!(p2.capabilities(MODEL).max_input_tokens, 262_144);
+    }
+
+    /// Empty server (no tags, no show, no ps) — models a fresh/unreachable box.
+    struct EmptyProbe;
+
+    #[async_trait]
+    impl Transport for EmptyProbe {
+        async fn send(&self, _: NativeRequest) -> std::result::Result<NativeResponse, OllamaError> {
+            no_send()
+        }
+        async fn stream(
+            &self,
+            _: NativeRequest,
+        ) -> std::result::Result<
+            BoxStream<'static, std::result::Result<Bytes, OllamaError>>,
+            OllamaError,
+        > {
+            no_send()
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_model_uses_honest_bootstrap_not_static_32k() {
+        // No discovery, no cache → the conservative bootstrap window, NOT the
+        // retired static 32K fallback that caused the original bug.
+        let p = OllamaProvider::from_transport_with_cache(EmptyProbe, None);
+        assert_eq!(
+            p.capabilities(MODEL).max_input_tokens,
+            discovery::BOOTSTRAP_CONTEXT
+        );
+        assert_ne!(p.capabilities(MODEL).max_input_tokens, 32_768);
+    }
+
+    /// A transport whose `/api/tags` errors — refresh must fail so the caller
+    /// keeps the seeded/last-known list rather than blanking it.
+    struct UnreachableProbe;
+
+    #[async_trait]
+    impl Transport for UnreachableProbe {
+        async fn send(&self, _: NativeRequest) -> std::result::Result<NativeResponse, OllamaError> {
+            no_send()
+        }
+        async fn stream(
+            &self,
+            _: NativeRequest,
+        ) -> std::result::Result<
+            BoxStream<'static, std::result::Result<Bytes, OllamaError>>,
+            OllamaError,
+        > {
+            no_send()
+        }
+        async fn list_tags(&self) -> std::result::Result<Vec<TagEntry>, OllamaError> {
+            Err(OllamaError::Transport("unreachable".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_error_keeps_seeded_list() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ollama-seed.json");
+        // Seed a cache via a good discovery.
+        OllamaProvider::from_transport_with_cache(DiscoveryProbe, Some(path.clone()))
+            .refresh_models()
+            .await
+            .unwrap();
+        // Unreachable server, same cache → seeded from disk; refresh errors; list intact.
+        let p = OllamaProvider::from_transport_with_cache(UnreachableProbe, Some(path));
+        assert_eq!(p.list_models().len(), 2);
+        assert!(p.refresh_models().await.is_err());
+        assert_eq!(
+            p.list_models().len(),
+            2,
+            "seeded list unchanged after error"
+        );
     }
 }

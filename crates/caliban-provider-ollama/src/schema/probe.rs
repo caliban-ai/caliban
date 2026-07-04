@@ -54,6 +54,41 @@ pub struct ModelShow {
     /// itself is under `general.architecture`.
     #[serde(default)]
     pub model_info: HashMap<String, serde_json::Value>,
+    /// Server-reported capability tags, e.g. `["completion", "vision",
+    /// "thinking", "tools"]`. Absent on older Ollama builds (defaults empty).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Response body of `GET /api/tags` (the available/pulled model list).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TagList {
+    /// Available models. Empty when none are pulled.
+    #[serde(default)]
+    pub models: Vec<TagEntry>,
+}
+
+/// A single entry in the `GET /api/tags` list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TagEntry {
+    /// The model's user-facing name / wire id (e.g. `qwen3.6:27b-mlx`).
+    #[serde(default)]
+    pub name: String,
+    /// Free-form details (family, format, quantization). Often sparse for
+    /// safetensors/MLX builds — `/api/show` is the authoritative source.
+    #[serde(default)]
+    pub details: TagDetails,
+}
+
+/// The `details` sub-object of a `/api/tags` entry.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TagDetails {
+    /// Model family (e.g. `gemma3`); empty for MLX/safetensors builds.
+    #[serde(default)]
+    pub family: String,
+    /// Weight format (`gguf`, `safetensors`).
+    #[serde(default)]
+    pub format: String,
 }
 
 impl ModelShow {
@@ -161,5 +196,44 @@ mod tests {
     fn show_missing_model_info_is_empty() {
         let show: ModelShow = serde_json::from_str("{}").unwrap();
         assert_eq!(show.context_length(), None);
+    }
+
+    #[test]
+    fn show_parses_capabilities_array() {
+        // Real /api/show shape (Ollama 0.30.6) for qwen3.6:27b-mlx.
+        let body = r#"{"model_info": {"general.architecture": "qwen3_5",
+            "qwen3_5.context_length": 262144},
+            "capabilities": ["completion", "vision", "thinking", "tools"]}"#;
+        let show: ModelShow = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            show.capabilities,
+            vec!["completion", "vision", "thinking", "tools"]
+        );
+        assert_eq!(show.context_length(), Some(262_144));
+    }
+
+    #[test]
+    fn show_missing_capabilities_is_empty() {
+        let show: ModelShow = serde_json::from_str(r#"{"model_info": {}}"#).unwrap();
+        assert!(show.capabilities.is_empty());
+    }
+
+    #[test]
+    fn tags_parses_available_models() {
+        // Real /api/tags shape: MLX safetensors entries have empty family.
+        let body = r#"{"models": [
+            {"name": "qwen3.6:27b-mlx", "details": {"family": "", "format": "safetensors"}},
+            {"name": "gemma3:1b", "details": {"family": "gemma3", "format": "gguf"}}
+        ]}"#;
+        let list: TagList = serde_json::from_str(body).unwrap();
+        assert_eq!(list.models.len(), 2);
+        assert_eq!(list.models[0].name, "qwen3.6:27b-mlx");
+        assert_eq!(list.models[1].name, "gemma3:1b");
+    }
+
+    #[test]
+    fn tags_empty_when_no_models() {
+        let list: TagList = serde_json::from_str(r#"{"models": []}"#).unwrap();
+        assert!(list.models.is_empty());
     }
 }

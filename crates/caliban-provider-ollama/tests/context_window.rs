@@ -1,13 +1,16 @@
 #![allow(missing_docs)]
-//! Runtime context-window detection (issue #60).
+//! Runtime model discovery + context-window detection (#316, issue #60).
 //!
 //! Exercises the real `DirectTransport` against a mocked Ollama server so the
-//! `/api/ps` and `/api/show` HTTP parsing and the `OllamaProvider` resolution
-//! chain are covered end to end. Fixtures mirror bodies captured from a live
-//! server (Ollama 0.30.6): `qwen3.6:27b-mlx` reports a 262144-token window,
-//! 8× the 32768 the static table would guess.
+//! `/api/tags`, `/api/ps` and `/api/show` HTTP parsing and the `OllamaProvider`
+//! discovery chain are covered end to end. Fixtures mirror bodies captured from
+//! a live server (Ollama 0.30.6): `qwen3.6:27b-mlx` reports a 262144-token
+//! window and `["completion","vision","thinking","tools"]` capabilities. There
+//! is no static table — an undiscovered model gets the conservative bootstrap
+//! window, not a wrong hardcoded value.
 
-use caliban_provider::{CompletionRequest, Provider};
+use caliban_provider::{CompletionRequest, Provider, ToolUseCapability};
+use caliban_provider_ollama::discovery::BOOTSTRAP_CONTEXT;
 use caliban_provider_ollama::transport::Transport;
 use caliban_provider_ollama::transport::direct::DirectTransport;
 use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
@@ -18,7 +21,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MODEL: &str = "qwen3.6:27b-mlx";
 const REAL_CTX: u32 = 262_144;
-const STATIC_FALLBACK: u32 = 32_768;
 
 fn transport_for(server: &MockServer) -> DirectTransport {
     DirectTransport::new(DirectConfig {
@@ -30,7 +32,16 @@ fn transport_for(server: &MockServer) -> DirectTransport {
 }
 
 fn provider_for(server: &MockServer) -> OllamaProvider<DirectTransport> {
-    OllamaProvider::from_transport(transport_for(server))
+    // `None` cache: never touch the real discovery cache dir from a test.
+    OllamaProvider::from_transport_with_cache(transport_for(server), None)
+}
+
+async fn mount_tags(server: &MockServer, body: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
 }
 
 async fn mount_ps(server: &MockServer, body: serde_json::Value) {
@@ -56,10 +67,13 @@ fn ps_loaded() -> serde_json::Value {
 }
 
 fn show_body() -> serde_json::Value {
-    json!({ "model_info": {
-        "general.architecture": "qwen3_5",
-        "qwen3_5.context_length": REAL_CTX
-    } })
+    json!({
+        "model_info": {
+            "general.architecture": "qwen3_5",
+            "qwen3_5.context_length": REAL_CTX
+        },
+        "capabilities": ["completion", "vision", "thinking", "tools"]
+    })
 }
 
 // ---- transport layer ---------------------------------------------------
@@ -130,21 +144,22 @@ fn request() -> CompletionRequest {
 }
 
 #[tokio::test]
-async fn ps_context_length_overrides_static_table() {
+async fn ps_context_length_resolves_via_complete() {
     let server = MockServer::start().await;
     mount_chat(&server).await;
     mount_ps(&server, ps_loaded()).await;
     let provider = provider_for(&server);
 
-    // Before any turn, capabilities() reflects only the static table.
+    // Cold (no discovery, no cache): the honest bootstrap window — never a
+    // wrong static per-model value.
     assert_eq!(
         provider.capabilities(MODEL).max_input_tokens,
-        STATIC_FALLBACK
+        BOOTSTRAP_CONTEXT
     );
 
     provider.complete(request()).await.unwrap();
 
-    // After a turn, the live /api/ps value wins.
+    // After a turn, the live /api/ps value is resolved.
     assert_eq!(provider.capabilities(MODEL).max_input_tokens, REAL_CTX);
 }
 
@@ -164,8 +179,10 @@ async fn show_resolves_when_model_not_loaded() {
 }
 
 #[tokio::test]
-async fn static_fallback_when_endpoints_absent() {
-    // Neither probe endpoint is mounted → both error → static table stands.
+async fn bootstrap_when_endpoints_absent() {
+    // Neither probe endpoint is mounted → both error → the honest bootstrap
+    // window stands (no static table). This is the "server unreachable, no
+    // cache" degenerate case.
     let server = MockServer::start().await;
     mount_chat(&server).await;
     let provider = provider_for(&server);
@@ -174,34 +191,35 @@ async fn static_fallback_when_endpoints_absent() {
 
     assert_eq!(
         provider.capabilities(MODEL).max_input_tokens,
-        STATIC_FALLBACK
+        BOOTSTRAP_CONTEXT
     );
 }
 
 #[tokio::test]
-async fn refresh_models_overlays_live_context_window() {
-    // `refresh_models` is the trait's live-discovery hook (#161): it probes
-    // `/api/ps` and overlays each loaded model's real window onto the static
-    // catalog, instead of returning the static table verbatim. `qwen3.5` is a
-    // catalog entry; report a live, non-default window for it.
-    const LIVE_CTX: u32 = 200_000;
+async fn refresh_models_discovers_from_tags_with_caps_and_live_ctx() {
+    // `refresh_models` lists `/api/tags`, enriches each via `/api/show`
+    // (capabilities + context), and overlays the live `/api/ps` window. The
+    // model is not in any static table — it's discovered entirely from the
+    // server.
     let server = MockServer::start().await;
-    mount_ps(
+    mount_tags(
         &server,
-        json!({ "models": [
-            { "name": "qwen3.5", "model": "qwen3.5", "context_length": LIVE_CTX }
-        ] }),
+        json!({ "models": [ { "name": MODEL, "details": { "family": "" } } ] }),
     )
     .await;
+    mount_show(&server, show_body()).await;
+    mount_ps(&server, ps_loaded()).await;
     let provider = provider_for(&server);
 
     let models = provider.refresh_models().await.expect("refresh");
-    let q = models
-        .iter()
-        .find(|m| m.id == "qwen3.5")
-        .expect("qwen3.5 present in catalog");
-    assert_eq!(q.capabilities.max_input_tokens, LIVE_CTX);
+    let m = models.iter().find(|m| m.id == MODEL).expect("discovered");
+    // /api/ps live window wins; server capabilities are mapped.
+    assert_eq!(m.capabilities.max_input_tokens, REAL_CTX);
+    assert!(m.capabilities.vision);
+    assert!(m.capabilities.thinking);
+    assert_eq!(m.capabilities.tool_use, ToolUseCapability::ParallelCalls);
 
-    // The probe also seeds the cache the sync `capabilities` reader overlays.
-    assert_eq!(provider.capabilities("qwen3.5").max_input_tokens, LIVE_CTX);
+    // The sync readers reflect the discovery.
+    assert_eq!(provider.capabilities(MODEL).max_input_tokens, REAL_CTX);
+    assert_eq!(provider.list_models().len(), 1);
 }
