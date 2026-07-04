@@ -50,10 +50,15 @@ fn git(args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// True when the working tree has staged or unstaged changes.
+/// True when the working tree has staged or unstaged changes to **tracked**
+/// files.
 fn worktree_dirty() -> bool {
-    // `--porcelain` prints one line per changed path; empty output = clean.
-    !git(&["status", "--porcelain"]).is_empty()
+    // `--untracked-files=no` matches `git describe --dirty` semantics: only
+    // tracked modifications count. An untracked scratch file in the repo must
+    // not flip an otherwise-pristine checkout's build to `-dirty` (#306).
+    // `git status` refreshes the index first, avoiding the stale-stat false
+    // positives a bare `git diff-index` can report. Empty output = clean.
+    !git(&["status", "--porcelain", "--untracked-files=no"]).is_empty()
 }
 
 /// Rebuild when the checked-out commit changes so the embedded SHA never goes
