@@ -447,6 +447,39 @@ async fn refresh_request_body_includes_required_fields() {
     );
 }
 
+/// GitHub-style failure: HTTP 200 with an `error` body (not a 4xx). Must
+/// surface a clear error, not a "missing access_token" decode failure.
+#[tokio::test]
+async fn token_endpoint_200_with_error_body_surfaces_error() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "error": "bad_verification_code",
+            "error_description": "The code passed is incorrect or expired."
+        })))
+        .mount(&server)
+        .await;
+    let endpoints = OauthEndpoints {
+        auth_url: Url::parse(&format!("{}/oauth/authorize", server.uri())).unwrap(),
+        token_url: Url::parse(&format!("{}/oauth/token", server.uri())).unwrap(),
+        scopes: vec![],
+        audience: "aud".to_string(),
+    };
+    let old = OauthTokens {
+        access_token: "x".to_string(),
+        refresh_token: Some("r".to_string()),
+        expires_at: None,
+        scopes: vec![],
+        client_id: None,
+    };
+    let err = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
+        .await
+        .expect_err("200+error body must be an error");
+    let s = err.to_string();
+    assert!(s.contains("bad_verification_code"), "got: {s}");
+}
+
 // ---------------------------------------------------------------------------
 // OauthAuthenticator — connect-path orchestration (the wiring under test in
 // #300). These prove the reuse / refresh / headless-no-hang / no-client-id

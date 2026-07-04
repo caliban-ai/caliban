@@ -911,6 +911,10 @@ async fn exchange_code(
     }
     parse_token_response(
         http.post(args.endpoints.token_url.clone())
+            // GitHub's token endpoint returns form-encoded by default; force
+            // JSON so `parse_token_response` can decode it. Spec-compliant
+            // servers already return JSON, so this is harmless there.
+            .header(reqwest::header::ACCEPT, "application/json")
             .form(&form)
             .send()
             .await
@@ -925,13 +929,22 @@ async fn exchange_code(
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    /// Optional so we can distinguish a real error body (which omits it) from a
+    /// genuine success — GitHub returns HTTP 200 even for token errors.
+    #[serde(default)]
+    access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
     #[serde(default)]
     scope: Option<String>,
+    // OAuth error fields (RFC 6749 §5.2). GitHub reports token-exchange
+    // failures as HTTP 200 with these set, not a 4xx.
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
 }
 
 async fn parse_token_response(
@@ -950,6 +963,19 @@ async fn parse_token_response(
         server: server.to_string(),
         message: format!("malformed token response: {e}"),
     })?;
+    // GitHub (and RFC 6749 §5.2) can report failure with HTTP 200 + an `error`
+    // field. Surface it clearly instead of a confusing "missing access_token".
+    if let Some(err) = body.error {
+        let desc = body.error_description.unwrap_or_default();
+        return Err(McpError::OauthExchange {
+            server: server.to_string(),
+            message: format!("token endpoint error '{err}': {desc}"),
+        });
+    }
+    let access_token = body.access_token.ok_or_else(|| McpError::OauthExchange {
+        server: server.to_string(),
+        message: "token response had neither access_token nor error".to_string(),
+    })?;
     let expires_at = body
         .expires_in
         .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
@@ -958,7 +984,7 @@ async fn parse_token_response(
         .map(|s| s.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default();
     Ok(OauthTokens {
-        access_token: body.access_token,
+        access_token,
         refresh_token: body.refresh_token,
         expires_at,
         scopes,
@@ -1003,6 +1029,8 @@ pub async fn refresh_tokens(
     }
     let response = http
         .post(endpoints.token_url.clone())
+        // Force JSON — GitHub's token endpoint otherwise returns form-encoded.
+        .header(reqwest::header::ACCEPT, "application/json")
         .form(&form)
         .send()
         .await
