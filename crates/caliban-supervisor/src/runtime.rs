@@ -99,13 +99,17 @@ mod tests {
     }
 
     /// Back-compat: a single-repo workspace root == old `repo_root` must
-    /// hash the same, so existing sockets/stores are found unchanged.
+    /// hash the same, so existing sockets/stores are found unchanged. This
+    /// pins the exact output the pre-rename `repo_hash` produced for this
+    /// path — `sha256("/some/repo/root")[..8].to_hex()` — computed
+    /// independently via:
+    /// `python3 -c "import hashlib; print(hashlib.sha256(b'/some/repo/root').hexdigest()[:16])"`
+    /// If this ever fails, the hashing algorithm changed and existing
+    /// on-disk sockets/stores would silently stop resolving.
     #[test]
     fn workspace_hash_matches_legacy_repo_hash_for_same_path() {
         let p = std::path::Path::new("/some/repo/root");
-        // 16 lowercase hex chars, stable, same as the pre-rename repo_hash.
-        assert_eq!(workspace_hash(p).len(), 16);
-        assert_eq!(workspace_hash(p), workspace_hash(p));
+        assert_eq!(workspace_hash(p), "ae89cb2b620ea8fc");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! and ADR 0037.
 //!
 //! The daemon (`caliband` binary) listens on a Unix domain socket at
-//! `$XDG_RUNTIME_DIR/caliban/<hash(repo_root)>.sock` and serves a small
+//! `$XDG_RUNTIME_DIR/caliban/<hash(workspace_root)>.sock` and serves a small
 //! line-delimited JSON IPC protocol: `list`, `spawn`, `attach`, `kill`,
 //! `respawn`, `rm`, `status`.
 //!

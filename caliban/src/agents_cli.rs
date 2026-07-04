@@ -42,7 +42,7 @@ fn try_spawn_daemon(repo_root: &Path, socket_path: &Path) -> Result<()> {
         daemon_exe = PathBuf::from("caliband");
     }
     let mut cmd = std::process::Command::new(&daemon_exe);
-    cmd.arg("--repo-root")
+    cmd.arg("--workspace-root")
         .arg(repo_root)
         .arg("--socket-path")
         .arg(socket_path)
