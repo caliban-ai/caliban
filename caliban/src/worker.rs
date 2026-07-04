@@ -14,7 +14,6 @@ use caliban_supervisor::proto::AgentRecord;
 use clap::Parser as _;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::UnixListener;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use crate::attach::AttachInbound;
@@ -201,7 +200,7 @@ impl InputProvider for SocketInputProvider {
 /// to `inbox`. Malformed lines are skipped. Returns on EOF or inbox closed.
 async fn read_inbound_frames<R>(reader: R, inbox: mpsc::Sender<AttachInbound>)
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin + Send,
 {
     use tokio::io::AsyncBufReadExt as _;
     use tokio::sync::mpsc::error::TrySendError;
@@ -266,9 +265,83 @@ pub(crate) fn load_record(manifest: &Path) -> std::io::Result<AgentRecord> {
     serde_json::from_slice(&body).map_err(std::io::Error::other)
 }
 
+/// Load the worker's per-agent listener TLS from the environment (#280 Task
+/// 7). The supervisor sets `CALIBAN_AGENT_TLS_CERT`/`_KEY` to PEM file paths;
+/// returns `None` (plaintext) when either is unset. A malformed/unreadable
+/// PEM is a hard error so a misconfigured TLS deployment fails loudly rather
+/// than silently downgrading to plaintext.
+fn load_agent_tls() -> std::io::Result<Option<caliban_supervisor::transport::TlsServer>> {
+    let (Ok(cert_path), Ok(key_path)) = (
+        std::env::var("CALIBAN_AGENT_TLS_CERT"),
+        std::env::var("CALIBAN_AGENT_TLS_KEY"),
+    ) else {
+        return Ok(None);
+    };
+    let cert_pem = std::fs::read(&cert_path)?;
+    let key_pem = std::fs::read(&key_path)?;
+    caliban_supervisor::transport::tls_server_from_pem(&cert_pem, &key_pem).map(Some)
+}
+
+/// Build the client the worker uses to report Idle/Running back to the daemon.
+///
+/// Network mode (#280 Task 7): when `CALIBAN_CONTROL_ENDPOINT` (`host:port`)
+/// is set, dial the daemon over TCP, optionally with TLS
+/// (`CALIBAN_CONTROL_TLS_CA` PEM path + `CALIBAN_CONTROL_TLS_SERVER_NAME`,
+/// default `localhost`) and a bearer token (`CALIBAN_CONTROL_TOKEN`, falling
+/// back to `CALIBAN_AGENT_TOKEN`). Otherwise fall back to the Unix
+/// `--control-socket`.
+///
+/// Security posture (#280 fix-before-merge): `CALIBAN_CONTROL_TLS_CA` unset
+/// is an intentional plaintext choice and stays best-effort. But a CA that
+/// IS set and fails to load (unreadable file or unparseable PEM) must not
+/// silently downgrade to a plaintext dial while still carrying the bearer
+/// token — that would leak it to an on-path observer. So that case is
+/// `Err`; the caller logs it and disables the (non-critical) status sink
+/// entirely rather than ever building a plaintext+token client.
+///
+/// NOTE (QA): the TCP status path is wired but not exercised by the Task 7
+/// deliverable test (which uses a fake launcher). It needs end-to-end QA.
+fn build_status_client(
+    control_socket: Option<&Path>,
+) -> Result<Option<caliban_supervisor::SupervisorClient>, String> {
+    if let Ok(endpoint) = std::env::var("CALIBAN_CONTROL_ENDPOINT") {
+        let token = std::env::var("CALIBAN_CONTROL_TOKEN")
+            .or_else(|_| std::env::var("CALIBAN_AGENT_TOKEN"))
+            .ok();
+        let tls = match std::env::var("CALIBAN_CONTROL_TLS_CA").ok() {
+            None => None,
+            Some(ca) => {
+                let server_name = std::env::var("CALIBAN_CONTROL_TLS_SERVER_NAME")
+                    .unwrap_or_else(|_| "localhost".to_string());
+                let ca_pem = std::fs::read(&ca).map_err(|e| {
+                    format!("CALIBAN_CONTROL_TLS_CA is set but could not be read ({ca}): {e}")
+                })?;
+                let client =
+                    caliban_supervisor::transport::tls_client_from_pem(&ca_pem, &server_name)
+                        .map_err(|e| {
+                            format!("CALIBAN_CONTROL_TLS_CA is set but could not be loaded: {e}")
+                        })?;
+                Some(client)
+            }
+        };
+        return Ok(Some(caliban_supervisor::SupervisorClient::new_tcp(
+            endpoint, tls, token,
+        )));
+    }
+    Ok(control_socket.map(caliban_supervisor::SupervisorClient::new))
+}
+
 /// Entry point body. Returns the process exit code.
+///
+/// Exactly one of `socket` (Unix mode) or `listen` (TCP network mode, #280
+/// Task 7) must be `Some`.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&Path>) -> i32 {
+pub(crate) async fn run(
+    manifest: &Path,
+    socket: Option<&Path>,
+    listen: Option<&str>,
+    control_socket: Option<&Path>,
+) -> i32 {
     let record = match load_record(manifest) {
         Ok(r) => r,
         Err(e) => {
@@ -284,20 +357,45 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     // can clone it immediately.
     let hub = EventHub::new();
 
-    // --- Bind the per-agent Unix socket.
-    // The socket file's existence signals to `caliband` and `caliban agents
-    // attach` that this worker is alive.
-    if let Some(parent) = socket.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let _ = tokio::fs::remove_file(socket).await;
-    let listener = match UnixListener::bind(socket) {
+    // --- Build the per-agent listener BindSpec. Unix mode (`--socket`) binds
+    // a filesystem socket whose existence signals liveness; TCP mode
+    // (`--listen`, #280 Task 7) binds a network socket secured with the
+    // per-agent TLS + token the supervisor passed via env.
+    let bind = match (listen, socket) {
+        (Some(addr), _) => {
+            let tls = match load_agent_tls() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[caliban __agent-worker] agent TLS load failed: {e}");
+                    return 74; // EX_IOERR
+                }
+            };
+            let token = std::env::var("CALIBAN_AGENT_TOKEN").ok();
+            caliban_supervisor::transport::BindSpec {
+                endpoint: caliban_supervisor::transport::Endpoint::Tcp {
+                    addr: addr.to_string(),
+                },
+                tls,
+                token,
+            }
+        }
+        (None, Some(path)) => caliban_supervisor::transport::BindSpec {
+            endpoint: caliban_supervisor::transport::Endpoint::Unix {
+                path: path.to_path_buf(),
+            },
+            tls: None,
+            token: None,
+        },
+        (None, None) => {
+            eprintln!("[caliban __agent-worker] one of --socket or --listen is required");
+            return 64; // EX_USAGE
+        }
+    };
+    let bind_desc = format!("{:?}", bind.endpoint);
+    let listener = match caliban_supervisor::transport::Listener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
-                "[caliban __agent-worker] bind {} failed: {e}",
-                socket.display()
-            );
+            eprintln!("[caliban __agent-worker] bind {bind_desc} failed: {e}");
             return 74; // EX_IOERR
         }
     };
@@ -319,14 +417,28 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
         Option<Arc<dyn InputProvider>>,
     ) = if record.spec.interactive {
         let (tx, rx) = mpsc::channel::<AttachInbound>(64);
-        // Build a status sink if a control socket was provided.
-        let status_sink: Option<Arc<dyn StatusSink>> =
-            control_socket.map(|ctl| -> Arc<dyn StatusSink> {
+        // Build a status sink from the daemon control plane, if reachable:
+        // the network endpoint (`CALIBAN_CONTROL_ENDPOINT`, #280 Task 7) takes
+        // precedence over the Unix `--control-socket`. A misconfigured
+        // control-TLS CA (set but unreadable/unparseable) is a hard `Err`
+        // from `build_status_client` — never a plaintext dial carrying the
+        // bearer token. Status reporting is non-critical, so we just log and
+        // disable the sink rather than failing the whole run.
+        let status_sink: Option<Arc<dyn StatusSink>> = match build_status_client(control_socket) {
+            Ok(client_opt) => client_opt.map(|client| -> Arc<dyn StatusSink> {
                 Arc::new(ControlSocketStatus {
-                    client: caliban_supervisor::SupervisorClient::new(ctl),
+                    client,
                     id: record.id.clone(),
                 })
-            });
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "control-plane status client misconfigured; disabling status reporting"
+                );
+                None
+            }
+        };
         let provider: Arc<dyn InputProvider> = Arc::new(SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: status_sink,
@@ -344,19 +456,12 @@ pub(crate) async fn run(manifest: &Path, socket: &Path, control_socket: Option<&
     let accept_hub = Arc::clone(&hub);
     let accept_inbox_tx = inbox_keepalive.clone();
     let accept_has_clients = Arc::clone(&has_clients);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let conn_hub = Arc::clone(&accept_hub);
-            let conn_inbox = accept_inbox_tx.clone();
-            let conn_clients = Arc::clone(&accept_has_clients);
-            tokio::spawn(serve_attach_client(
-                stream,
-                conn_hub,
-                conn_inbox,
-                conn_clients,
-            ));
-        }
-    });
+    tokio::spawn(run_agent_accept_loop(
+        listener,
+        accept_hub,
+        accept_inbox_tx,
+        accept_has_clients,
+    ));
     // Keep the sender alive so the channel doesn't close between connections.
     let _ = &inbox_keepalive;
 
@@ -633,6 +738,43 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
     rules
 }
 
+/// Per-agent accept loop: spawns [`serve_attach_client`] for every accepted
+/// connection, forever.
+///
+/// In network mode (#280), `listener.accept()` performs a TLS handshake and
+/// bearer-token preamble check and returns `Err(io::Error)` (kind
+/// `PermissionDenied`, or an I/O error from a failed handshake) for a
+/// wrong/missing token or a garbage dial — e.g. a mistyped token or a port
+/// scan. That must not be fatal to the loop: a single rejected connection
+/// used to permanently disable all future attaches to this agent (the old
+/// shape was `while let Ok(conn) = listener.accept().await { … }`, which
+/// exits forever on the first `Err`). Instead we log and keep accepting.
+async fn run_agent_accept_loop(
+    listener: caliban_supervisor::transport::Listener,
+    hub: Arc<EventHub>,
+    inbox: Option<mpsc::Sender<AttachInbound>>,
+    has_clients: Arc<AtomicUsize>,
+) {
+    loop {
+        match listener.accept().await {
+            Ok(conn) => {
+                let conn_hub = Arc::clone(&hub);
+                let conn_inbox = inbox.clone();
+                let conn_clients = Arc::clone(&has_clients);
+                tokio::spawn(serve_attach_client(
+                    conn,
+                    conn_hub,
+                    conn_inbox,
+                    conn_clients,
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "per-agent accept failed");
+            }
+        }
+    }
+}
+
 /// Serve one attached client: replay the event history, then forward live
 /// events until the agent finishes (`Closed`) or the client disconnects.
 ///
@@ -646,7 +788,7 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
 /// so the `SocketInputProvider` knows at least one operator is watching and
 /// resets its idle timer (#81 ticket 5).
 async fn serve_attach_client(
-    stream: tokio::net::UnixStream,
+    conn: caliban_supervisor::transport::BoxConn,
     hub: Arc<EventHub>,
     inbox: Option<mpsc::Sender<AttachInbound>>,
     clients: Arc<AtomicUsize>,
@@ -655,7 +797,7 @@ async fn serve_attach_client(
     // returns (e.g. write errors in history replay) are covered by Drop.
     let _client_guard = ClientCountGuard::new(clients);
 
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(conn);
 
     // Spawn the inbound read task when in interactive mode.
     if let Some(tx) = inbox {
@@ -691,8 +833,8 @@ async fn serve_attach_client(
 }
 
 /// Write one NDJSON line (event + trailing newline) to the client.
-async fn write_line(
-    stream: &mut tokio::net::unix::OwnedWriteHalf,
+async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
     line: &str,
 ) -> std::io::Result<()> {
     stream.write_all(line.as_bytes()).await?;
@@ -812,7 +954,9 @@ mod tests {
             status: caliban_supervisor::proto::AgentStatus::Spawning,
             started_at: "2026-06-09T00:00:00Z".into(),
             session_dir: store.session_dir("w1"),
-            socket_path: dir.path().join("w1.sock"),
+            endpoint: caliban_supervisor::Endpoint::Unix {
+                path: dir.path().join("w1.sock"),
+            },
             spec: caliban_supervisor::proto::SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -1549,5 +1693,288 @@ mod tests {
             matches!(decision, HookDecision::Allow),
             "config allow must stand without an inherited runtime rule, got {decision:?}"
         );
+    }
+
+    // --- attach over the network (#280 Task 8 acceptance test) ---
+
+    /// The #280 acceptance criterion: a real per-agent listener bound with
+    /// TCP+TLS+token, served by the worker's own `serve_attach_client`, and a
+    /// client attaching *over the network* — asserting `TurnEvent` NDJSON
+    /// flows outbound (rendered exactly as `agents attach` renders it) and an
+    /// `AttachInbound::UserMessage` flows inbound to the worker's inbox.
+    ///
+    /// This exercises the actual worker path (real `Listener`/`connect` from
+    /// `caliban_supervisor::transport`, the real `EventHub` +
+    /// `serve_attach_client` + `read_inbound_frames`), not a stand-in server.
+    /// It deliberately reads a bounded number of known NDJSON lines rather
+    /// than driving `stream_attach` to EOF: `serve_attach_client` only closes
+    /// the socket when its broadcast receiver reports `Closed` (all
+    /// `Arc<EventHub>` clones dropped) or a write fails — neither of which a
+    /// single still-attached client can trigger from the outside, mirroring
+    /// how a real worker's socket is torn down by process exit, not a
+    /// graceful in-band shutdown.
+    #[tokio::test]
+    async fn attach_over_tcp_tls_token_streams_turnevents_and_accepts_inbound() {
+        use caliban_supervisor::transport::{
+            BindSpec, ConnectSpec, Endpoint, Listener, connect, tls_client_from_pem,
+            tls_server_from_pem,
+        };
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+        let token = "worker-attach-tok".to_string();
+
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: Some(token.clone()),
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Publish exactly the two events the deliverable calls for: a text
+        // delta ("hello world") and a RunEnd (renders as "done"). Order vs.
+        // `listener.accept()` below doesn't matter — `EventHub` replays its
+        // full history to a client that subscribes after publish (#79).
+        let hub = EventHub::new();
+        let delta = caliban_agent_core::TurnEvent::AssistantTextDelta {
+            turn_index: 0,
+            content_block_index: 0,
+            text: "hello world".into(),
+        };
+        hub.publish(Arc::from(serde_json::to_string(&delta).unwrap().as_str()));
+        let end = caliban_agent_core::TurnEvent::RunEnd {
+            final_messages: vec![],
+            total_usage: caliban_agent_core::Usage::default(),
+            turn_count: 1,
+            stopped_for: caliban_agent_core::StopCondition::EndOfTurn,
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
+        };
+        hub.publish(Arc::from(serde_json::to_string(&end).unwrap().as_str()));
+
+        // Serve the one connection with the REAL worker attach path —
+        // interactive mode, so inbound `AttachInbound` frames feed `inbox`.
+        let has_clients = Arc::new(AtomicUsize::new(0));
+        let (inbox_tx, mut inbox_rx) = mpsc::channel::<AttachInbound>(8);
+        let server_hub = Arc::clone(&hub);
+        let server = tokio::spawn(async move {
+            let conn = listener.accept().await.unwrap();
+            serve_attach_client(conn, server_hub, Some(inbox_tx), has_clients).await;
+        });
+
+        // Client attaches over TCP + TLS + token — the real network path.
+        let tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+        let conn = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(tls_client),
+            token: Some(token),
+        })
+        .await
+        .unwrap();
+        let (read_half, mut write_half) = tokio::io::split(conn);
+        let mut ndjson_reader = BufReader::new(read_half).lines();
+
+        // OUTBOUND: real NDJSON `TurnEvent` lines over the wire, rendered
+        // exactly as `caliban agents attach` renders them (#79).
+        let delta_line = ndjson_reader
+            .next_line()
+            .await
+            .unwrap()
+            .expect("outbound line 1 (text delta)");
+        let delta_event: caliban_agent_core::TurnEvent = serde_json::from_str(&delta_line).unwrap();
+        let delta_rendered = crate::attach::render_event(&delta_event);
+        assert!(
+            delta_rendered.contains("hello world"),
+            "got: {delta_rendered:?}"
+        );
+
+        let end_line = ndjson_reader
+            .next_line()
+            .await
+            .unwrap()
+            .expect("outbound line 2 (RunEnd)");
+        let end_event: caliban_agent_core::TurnEvent = serde_json::from_str(&end_line).unwrap();
+        let end_rendered = crate::attach::render_event(&end_event);
+        assert!(end_rendered.contains("done"), "got: {end_rendered:?}");
+
+        // INBOUND: the client writes an `AttachInbound::UserMessage` frame;
+        // the worker's `read_inbound_frames` (spawned by `serve_attach_client`)
+        // must forward it to the shared inbox — bidirectional attach over the
+        // network (ADR 0047 / #81).
+        let frame = AttachInbound::UserMessage {
+            text: "ping from client".into(),
+        };
+        let mut buf = serde_json::to_vec(&frame).unwrap();
+        buf.push(b'\n');
+        write_half.write_all(&buf).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), inbox_rx.recv())
+            .await
+            .expect("inbound frame timed out")
+            .expect("inbox closed unexpectedly");
+        assert_eq!(got, frame, "worker did not receive the inbound frame");
+
+        server.abort();
+    }
+
+    /// The per-agent listener rejects a wrong bearer token exactly like the
+    /// control-plane listener does (Task 7's `tcp_token_accept_and_reject` in
+    /// `caliban-supervisor/src/transport.rs`) — same `Listener::accept()`
+    /// code path, so the guarantee carries over unchanged to the worker's
+    /// socket. Pinned here too so a worker-side regression (e.g. a future
+    /// worker-specific accept wrapper that skips the token check) is caught
+    /// where the worker actually uses it.
+    #[tokio::test]
+    async fn attach_listener_rejects_wrong_token() {
+        use caliban_supervisor::transport::{BindSpec, ConnectSpec, Endpoint, Listener, connect};
+
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: None,
+            token: Some("right-token".into()),
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let srv = tokio::spawn(async move { listener.accept().await });
+
+        let mut bad_conn = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: None,
+            token: Some("wrong-token".into()),
+        })
+        .await
+        .unwrap();
+        // Keep the connection open briefly so the server-side accept has a
+        // chance to read the (bad) preamble before we drop it.
+        let _ = bad_conn.write_all(b"x").await;
+
+        let result = srv.await.unwrap();
+        assert_eq!(
+            result.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "wrong token must be rejected at accept-time"
+        );
+    }
+
+    /// Regression for the fix-before-merge finding: the per-agent accept loop
+    /// used to be `while let Ok(conn) = listener.accept().await { … }`, which
+    /// permanently exits on the FIRST rejected connection (wrong token,
+    /// failed TLS handshake, or a bare port-scan probe) — one bad dial would
+    /// disable attach for the rest of the agent's life. `run_agent_accept_loop`
+    /// must instead log the error and keep accepting.
+    ///
+    /// Drives the real accept loop end-to-end: one wrong-token connection
+    /// (asserted rejected — the server closes it without ever streaming
+    /// protocol data), then a good TLS+token connection on the SAME listener,
+    /// asserting it still attaches and receives a published `TurnEvent`.
+    #[tokio::test]
+    async fn per_agent_accept_loop_survives_a_rejected_connection() {
+        use caliban_supervisor::transport::{
+            BindSpec, ConnectSpec, Endpoint, Listener, connect, tls_client_from_pem,
+            tls_server_from_pem,
+        };
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+        let token = "loop-survives-tok".to_string();
+
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: Some(token.clone()),
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let hub = EventHub::new();
+        let end = caliban_agent_core::TurnEvent::RunEnd {
+            final_messages: vec![],
+            total_usage: caliban_agent_core::Usage::default(),
+            turn_count: 1,
+            stopped_for: caliban_agent_core::StopCondition::EndOfTurn,
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
+        };
+        hub.publish(Arc::from(serde_json::to_string(&end).unwrap().as_str()));
+
+        let has_clients = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(run_agent_accept_loop(
+            listener,
+            Arc::clone(&hub),
+            None,
+            has_clients,
+        ));
+
+        // 1) A wrong-token connection: TLS handshake succeeds, but the token
+        // preamble is wrong, so the server rejects it at accept-time (same
+        // `PermissionDenied` path as `attach_listener_rejects_wrong_token`)
+        // and closes the socket without ever reaching `serve_attach_client`.
+        let bad_tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+        let mut bad_conn = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr: addr.clone() },
+            tls: Some(bad_tls_client),
+            token: Some("wrong-token".into()),
+        })
+        .await
+        .unwrap();
+        let mut buf = [0u8; 8];
+        let read_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), bad_conn.read(&mut buf))
+                .await
+                .expect("server should close the rejected connection promptly");
+        // The server drops the TCP stream as soon as the token check fails,
+        // without a graceful TLS `close_notify` — rustls surfaces that as an
+        // `UnexpectedEof` error rather than a clean `Ok(0)`. Either outcome
+        // means the same thing here: no protocol data was ever streamed.
+        match read_result {
+            Ok(n) => assert_eq!(
+                n, 0,
+                "a rejected connection must not stream any protocol data"
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::UnexpectedEof,
+                "expected a clean close (or EOF-without-close_notify) for a rejected connection, got {e:?}"
+            ),
+        }
+
+        // 2) A good TLS+token connection on the SAME listener must still be
+        // accepted and attach normally. Under the old `while let Ok` shape
+        // the loop would already be dead at this point and this dial would
+        // hang forever waiting for data that never comes.
+        let good_tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+        let conn = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(good_tls_client),
+            token: Some(token),
+        })
+        .await
+        .unwrap();
+        let (read_half, _write_half) = tokio::io::split(conn);
+        let mut ndjson_reader = BufReader::new(read_half).lines();
+        let line =
+            tokio::time::timeout(std::time::Duration::from_secs(5), ndjson_reader.next_line())
+                .await
+                .expect("accept loop must still be alive after a prior rejected connection")
+                .unwrap()
+                .expect("expected a replayed TurnEvent line");
+        let event: caliban_agent_core::TurnEvent = serde_json::from_str(&line).unwrap();
+        let rendered = crate::attach::render_event(&event);
+        assert!(rendered.contains("done"), "got: {rendered:?}");
     }
 }

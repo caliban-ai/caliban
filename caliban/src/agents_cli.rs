@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use caliban_supervisor::proto::{AgentRecord, AgentStatus, SpawnSpec};
-use caliban_supervisor::{ClientError, SupervisorClient, repo_socket_path};
+use caliban_supervisor::{ClientError, Endpoint, SupervisorClient, repo_socket_path};
 
 /// Discover the repo root containing `start_dir`. Walks up looking for
 /// `.git/`. Falls back to `start_dir` itself if none is found (the
@@ -54,6 +54,75 @@ fn try_spawn_daemon(repo_root: &Path, socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Client-side network target for dialing the daemon over TCP (#280 Task 8),
+/// resolved from `CALIBAN_DAEMON_LISTEN` / `_TOKEN` / `_TLS_CA` /
+/// `_TLS_SERVER_NAME`. `None` when no network env is set — the CLI then
+/// stays on the default local Unix-socket path, unchanged.
+struct DaemonNetworkEnv {
+    /// `host:port` to dial for the control-plane socket.
+    listen: String,
+    /// Trust root for both the control-plane dial and the per-agent attach
+    /// dial (ADR 0051 assumes one CA for a caliband network deployment).
+    tls: Option<caliban_supervisor::transport::TlsClient>,
+    /// Bearer token presented on both the control-plane dial and the
+    /// per-agent attach dial.
+    token: Option<String>,
+}
+
+/// Pure resolver behind [`daemon_network_env`] — no env access, so it's
+/// directly unit-testable (mirrors the `parse_idle_timeout` /
+/// `worker_idle_timeout` split in `worker.rs`).
+///
+/// Security posture (#280 fix-before-merge): `tls_ca_pem: None` means the CA
+/// env var itself was absent — plaintext is an intentional choice (e.g.
+/// loopback dev) and stays `tls: None`. But when the caller *did* find a CA
+/// PEM and it fails to parse into a working [`TlsClient`], that is a hard
+/// misconfiguration, NOT a signal to fall back to plaintext: silently
+/// dropping `tls` while keeping `token` would dial plaintext TCP and write
+/// the bearer token in cleartext before the TLS server ever gets a chance to
+/// reject the handshake, handing the daemon token to any on-path observer.
+/// So a present-but-broken CA is a hard `Err`, never a downgrade.
+fn resolve_daemon_network_env(
+    listen: Option<String>,
+    token: Option<String>,
+    tls_ca_pem: Option<Vec<u8>>,
+    tls_server_name: Option<String>,
+) -> Result<Option<DaemonNetworkEnv>, String> {
+    let Some(listen) = listen else {
+        return Ok(None);
+    };
+    let tls = match tls_ca_pem {
+        None => None,
+        Some(pem) => {
+            let server_name = tls_server_name.unwrap_or_else(|| "localhost".to_string());
+            let client = caliban_supervisor::transport::tls_client_from_pem(&pem, &server_name)
+                .map_err(|e| {
+                    format!("CALIBAN_DAEMON_TLS_CA is set but could not be loaded: {e}")
+                })?;
+            Some(client)
+        }
+    };
+    Ok(Some(DaemonNetworkEnv { listen, tls, token }))
+}
+
+/// Env-reading wrapper around [`resolve_daemon_network_env`] (thin; see that
+/// function for the tested logic). A `CALIBAN_DAEMON_TLS_CA` that's set but
+/// whose file can't even be read is folded into the same hard error as a
+/// present-but-unparseable PEM — both are "the operator asked for TLS and we
+/// can't deliver it," never a silent downgrade to plaintext-with-token.
+fn daemon_network_env() -> Result<Option<DaemonNetworkEnv>, String> {
+    let listen = std::env::var("CALIBAN_DAEMON_LISTEN").ok();
+    let token = std::env::var("CALIBAN_DAEMON_TOKEN").ok();
+    let tls_ca_pem = match std::env::var("CALIBAN_DAEMON_TLS_CA").ok() {
+        None => None,
+        Some(path) => Some(std::fs::read(&path).map_err(|e| {
+            format!("CALIBAN_DAEMON_TLS_CA is set but could not be read ({path}): {e}")
+        })?),
+    };
+    let tls_server_name = std::env::var("CALIBAN_DAEMON_TLS_SERVER_NAME").ok();
+    resolve_daemon_network_env(listen, token, tls_ca_pem, tls_server_name)
+}
+
 /// Public re-export of [`ensure_daemon`] for the `AgentTool` background
 /// spawner wired in `main`.
 pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<SupervisorClient> {
@@ -62,7 +131,18 @@ pub(crate) async fn ensure_daemon_for_repo(repo_root: &Path) -> Result<Superviso
 
 /// Ensure a daemon is running for the given repo. Polls the socket for
 /// existence up to 2s; returns a connected client.
+///
+/// Network mode (#280 Task 8): when `CALIBAN_DAEMON_LISTEN` is set, dial the
+/// daemon over TCP (optionally TLS + a bearer token) instead — the client
+/// assumes a daemon is already reachable there, so it skips the Unix
+/// socket-file poll/auto-spawn entirely. A `CALIBAN_DAEMON_TLS_CA` that's set
+/// but unreadable/unparseable is a hard error here (surfaced to the user)
+/// rather than a silent downgrade to a plaintext dial carrying the bearer
+/// token in the clear.
 async fn ensure_daemon(repo_root: &Path) -> Result<SupervisorClient> {
+    if let Some(net) = daemon_network_env().map_err(|e| anyhow::anyhow!(e))? {
+        return Ok(SupervisorClient::new_tcp(net.listen, net.tls, net.token));
+    }
     let socket_path = repo_socket_path(repo_root);
     if !socket_path.exists() {
         try_spawn_daemon(repo_root, &socket_path)?;
@@ -104,8 +184,16 @@ fn print_list(agents: &[AgentRecord]) {
             truncate(&a.name, 24),
             fmt_status(a.status),
             a.started_at,
-            a.socket_path.display()
+            fmt_endpoint(&a.endpoint)
         );
+    }
+}
+
+/// Render an endpoint for human-readable CLI output (Unix path or `host:port`).
+fn fmt_endpoint(e: &Endpoint) -> String {
+    match e {
+        Endpoint::Unix { path } => path.display().to_string(),
+        Endpoint::Tcp { addr } => addr.clone(),
     }
 }
 
@@ -154,7 +242,24 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
-            Ok(socket_path) => run_attach(&socket_path, id).await,
+            Ok(endpoint) => {
+                // Reuse the same client TLS + token used to dial the daemon
+                // (#280 Task 8) for the per-agent socket. Unix mode: both
+                // `None`, matching the pre-Task-8 hardcoded values exactly. A
+                // broken `CALIBAN_DAEMON_TLS_CA` is a hard error, not a silent
+                // downgrade to a plaintext dial carrying the bearer token
+                // (in practice `ensure_daemon` above already validated this
+                // once; re-checking keeps this call site honest on its own).
+                let (tls, token) = match daemon_network_env() {
+                    Ok(Some(net)) => (net.tls, net.token),
+                    Ok(None) => (None, None),
+                    Err(e) => {
+                        eprintln!("caliban: {e}");
+                        return 1;
+                    }
+                };
+                run_attach(&endpoint, id, tls, token).await
+            }
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
@@ -226,8 +331,8 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 inherited_hooks_config: None,
             };
             match client.spawn(spec).await {
-                Ok((id, sock)) => {
-                    println!("spawned {id} (socket: {})", sock.display());
+                Ok((id, endpoint)) => {
+                    println!("spawned {id} (socket: {})", fmt_endpoint(&endpoint));
                     0
                 }
                 Err(e) => map_client_error(e),
@@ -265,7 +370,7 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
                     s.pid,
                     s.agents,
                     s.uptime_secs,
-                    s.socket_path.display(),
+                    fmt_endpoint(&s.endpoint),
                 );
                 0
             }
@@ -285,14 +390,31 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
 /// stdout until the agent finishes (EOF) or the user detaches with Ctrl+C.
 /// Also pumps operator stdin as `AttachInbound` NDJSON frames to the write
 /// half of the socket (bidirectional attach for interactive agents, ADR 0047 / #81).
-async fn run_attach(socket_path: &Path, id: &str) -> i32 {
-    use tokio::net::UnixStream;
-    let stream = match UnixStream::connect(socket_path).await {
-        Ok(s) => s,
+///
+/// `tls`/`token` are the client-side network credentials (#280 Task 8):
+/// `None`/`None` in the default Unix mode (the pre-Task-8 behavior,
+/// unchanged); when the CLI is running in network mode
+/// (`CALIBAN_DAEMON_LISTEN` set) and `endpoint` is `Tcp`, these are the same
+/// TLS trust root + bearer token used to dial the daemon's control socket.
+async fn run_attach(
+    endpoint: &Endpoint,
+    id: &str,
+    tls: Option<caliban_supervisor::transport::TlsClient>,
+    token: Option<String>,
+) -> i32 {
+    let conn = match caliban_supervisor::transport::connect(
+        &caliban_supervisor::transport::ConnectSpec {
+            endpoint: endpoint.clone(),
+            tls,
+            token,
+        },
+    )
+    .await
+    {
+        Ok(c) => c,
         Err(e) => {
             eprintln!(
-                "caliban: cannot attach to {id} at {} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`",
-                socket_path.display()
+                "caliban: cannot attach to {id} at {endpoint:?} ({e}); the agent may have finished \u{2014} try `caliban logs {id}`"
             );
             return 74;
         }
@@ -300,7 +422,7 @@ async fn run_attach(socket_path: &Path, id: &str) -> i32 {
     eprintln!(
         "caliban: attached to {id} (type to send \u{00b7} Ctrl+D end-of-input \u{00b7} Ctrl+C detach)"
     );
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(conn);
 
     // Pump operator stdin → inbound frames on a background task. Harmless
     // for non-interactive agents (the worker drops its read half; our
@@ -354,8 +476,8 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         inherited_hooks_config: None,
     };
     match client.spawn(spec).await {
-        Ok((id, sock)) => {
-            println!("backgrounded as {id} (socket: {})", sock.display());
+        Ok((id, endpoint)) => {
+            println!("backgrounded as {id} (socket: {})", fmt_endpoint(&endpoint));
             0
         }
         Err(e) => map_client_error(e),
@@ -408,5 +530,85 @@ mod tests {
     fn truncate_long_string_ellipsized() {
         let out = truncate("abcdefghijklmnop", 5);
         assert_eq!(out, "abcd…");
+    }
+
+    // --- resolve_daemon_network_env (#280 Task 8) ---
+
+    #[test]
+    fn daemon_network_env_none_when_listen_absent() {
+        // No `CALIBAN_DAEMON_LISTEN` → CLI stays on the default Unix path,
+        // regardless of what the other network vars say.
+        assert!(
+            resolve_daemon_network_env(
+                None,
+                Some("tok".into()),
+                Some(b"garbage".to_vec()),
+                Some("localhost".into()),
+            )
+            .expect("no listen -> Ok(None), not an error")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn daemon_network_env_plaintext_carries_listen_and_token() {
+        let net = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            Some("s3cret".into()),
+            None,
+            None,
+        )
+        .expect("listen present -> Ok(Some(..))")
+        .expect("listen present -> Some");
+        assert_eq!(net.listen, "example.test:9000");
+        assert_eq!(net.token.as_deref(), Some("s3cret"));
+        assert!(
+            net.tls.is_none(),
+            "no CA PEM given -> plaintext is intentional"
+        );
+    }
+
+    #[test]
+    fn daemon_network_env_builds_tls_from_valid_ca_pem() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let net = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            None,
+            Some(cert_pem),
+            Some("localhost".into()),
+        )
+        .expect("listen present -> Ok(Some(..))")
+        .expect("listen present -> Some");
+        assert!(
+            net.tls.is_some(),
+            "valid CA PEM + server name should build a TlsClient"
+        );
+    }
+
+    #[test]
+    fn daemon_network_env_malformed_ca_pem_is_a_hard_error() {
+        // Security fix (#280 fix-before-merge): a CA PEM that's present but
+        // fails to parse (a cert block whose base64 body doesn't decode) must
+        // NOT silently fall back to a plaintext-with-token dial — that would
+        // hand the bearer token to any on-path observer before the TLS server
+        // gets a chance to reject the handshake. It must be a hard `Err`
+        // instead, so no `DaemonNetworkEnv` (and no token dial) is ever built.
+        let bad_pem =
+            b"-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----\n"
+                .to_vec();
+        let result = resolve_daemon_network_env(
+            Some("example.test:9000".into()),
+            Some("tok".into()),
+            Some(bad_pem),
+            Some("localhost".into()),
+        );
+        let Err(err) = result else {
+            panic!("a present-but-unparseable CA PEM must be a hard error, not Ok(tls: None)")
+        };
+        assert!(
+            err.contains("CALIBAN_DAEMON_TLS_CA"),
+            "error should name the offending env var, got: {err}"
+        );
     }
 }

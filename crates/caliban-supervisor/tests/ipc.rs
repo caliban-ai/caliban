@@ -19,9 +19,12 @@ struct ShLauncher {
 impl WorkerLauncher for ShLauncher {
     fn launch(&self, record: &AgentRecord) -> std::io::Result<WorkerHandle> {
         let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.arg("-c")
-            .arg(&self.script)
-            .env("SOCK", &record.socket_path);
+        cmd.arg("-c").arg(&self.script).env(
+            "SOCK",
+            record
+                .unix_socket_path()
+                .expect("test launcher only ever registers Unix endpoints"),
+        );
         let child = cmd.spawn()?;
         let pid = child.id().expect("sh pid");
         Ok(WorkerHandle { pid, child })
@@ -116,7 +119,10 @@ async fn spawn_registers_and_returns_socket() {
         script: "touch \"$SOCK\"; sleep 5".into(),
     });
     let (_d, sup, _h, client) = boot_with(launcher).await;
-    let (id, sock) = client.spawn(spec()).await.unwrap();
+    let (id, endpoint) = client.spawn(spec()).await.unwrap();
+    let caliban_supervisor::Endpoint::Unix { path: sock } = endpoint else {
+        panic!("expected unix endpoint")
+    };
     assert!(!id.is_empty());
     assert!(
         sock.to_string_lossy().ends_with("-agent.sock"),
@@ -300,7 +306,10 @@ async fn rm_unknown_agent_errors() {
 #[tokio::test]
 async fn shutdown_drops_socket() {
     let (_d, sup, h, client) = boot().await;
-    let sock = sup.socket_path().to_path_buf();
+    let sock = sup
+        .socket_path()
+        .expect("unix control socket in default mode")
+        .to_path_buf();
     client.shutdown().await.unwrap();
     // Server should exit cleanly within a generous timeout.
     let _ = tokio::time::timeout(Duration::from_secs(2), h)
@@ -351,7 +360,10 @@ async fn spawn_launches_worker_and_reaches_done() {
         interactive: false,
         inherited_hooks_config: None,
     };
-    let (id, socket_path) = client.spawn(spec).await.unwrap();
+    let (id, endpoint) = client.spawn(spec).await.unwrap();
+    let caliban_supervisor::Endpoint::Unix { path: socket_path } = endpoint else {
+        panic!("expected unix endpoint")
+    };
     let mut socket_created = false;
     for _ in 0..200 {
         if socket_path.exists() {
@@ -392,7 +404,10 @@ async fn kill_signals_the_worker_child() {
         script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; exec sleep 30"#.into(),
     });
     let (_d, sup, _h, client) = boot_with(launcher).await;
-    let (id, sock) = client.spawn(spec()).await.unwrap();
+    let (id, endpoint) = client.spawn(spec()).await.unwrap();
+    let caliban_supervisor::Endpoint::Unix { path: sock } = endpoint else {
+        panic!("expected unix endpoint")
+    };
 
     // Poll until the agent reaches Running.
     let mut running = false;
@@ -496,7 +511,10 @@ async fn rm_force_signals_running_worker() {
         script: r#"echo $$ > "${SOCK}.pid"; touch "$SOCK"; exec sleep 30"#.into(),
     });
     let (_d, sup, _h, client) = boot_with(launcher).await;
-    let (id, sock) = client.spawn(spec()).await.unwrap();
+    let (id, endpoint) = client.spawn(spec()).await.unwrap();
+    let caliban_supervisor::Endpoint::Unix { path: sock } = endpoint else {
+        panic!("expected unix endpoint")
+    };
 
     // Wait for Running.
     let mut running = false;
@@ -861,7 +879,10 @@ async fn socket_file_removed_after_worker_exits() {
         script: r#"touch "$SOCK"; exit 0"#.into(),
     });
     let (_d, sup, _h, client) = boot_with(launcher).await;
-    let (id, sock) = client.spawn(spec()).await.unwrap();
+    let (id, endpoint) = client.spawn(spec()).await.unwrap();
+    let caliban_supervisor::Endpoint::Unix { path: sock } = endpoint else {
+        panic!("expected unix endpoint")
+    };
 
     // Wait until the agent reaches Done.
     let mut done = false;

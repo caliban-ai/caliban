@@ -22,6 +22,7 @@ pub mod registry;
 pub mod runtime;
 pub mod server;
 pub mod store;
+pub mod transport;
 
 pub use client::{ClientError, SupervisorClient};
 pub use proc::{ExecWorkerLauncher, OsSignaller, Signaller, WorkerHandle, WorkerLauncher};
@@ -31,5 +32,6 @@ pub use proto::{
 };
 pub use registry::Registry;
 pub use runtime::{repo_socket_path, repo_socket_path_in};
-pub use server::Supervisor;
+pub use server::{NetworkConfig, Supervisor};
 pub use store::AgentStore;
+pub use transport::{BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect};

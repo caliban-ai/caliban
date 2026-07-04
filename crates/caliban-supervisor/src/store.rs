@@ -123,6 +123,7 @@ impl AgentStore {
 mod tests {
     use super::*;
     use crate::proto::{AgentRecord, AgentStatus, SpawnSpec};
+    use crate::transport::Endpoint;
 
     fn fake_record(id: &str) -> AgentRecord {
         AgentRecord {
@@ -131,7 +132,9 @@ mod tests {
             status: AgentStatus::Spawning,
             started_at: "2026-05-24T00:00:00Z".into(),
             session_dir: PathBuf::from("/tmp/x"),
-            socket_path: PathBuf::from("/tmp/x.sock"),
+            endpoint: Endpoint::Unix {
+                path: PathBuf::from("/tmp/x.sock"),
+            },
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -185,7 +188,9 @@ mod tests {
         let mut rec = fake_record("full");
         rec.status = AgentStatus::Running;
         rec.session_dir = PathBuf::from("/data/sessions/full");
-        rec.socket_path = PathBuf::from("/data/sessions/full/agent.sock");
+        rec.endpoint = Endpoint::Unix {
+            path: PathBuf::from("/data/sessions/full/agent.sock"),
+        };
         rec.spec = SpawnSpec {
             label: Some("worker".into()),
             frontmatter_path: Some(PathBuf::from("/fm/agent.md")),
@@ -206,8 +211,10 @@ mod tests {
         assert_eq!(loaded.started_at, rec.started_at);
         assert_eq!(loaded.session_dir, PathBuf::from("/data/sessions/full"));
         assert_eq!(
-            loaded.socket_path,
-            PathBuf::from("/data/sessions/full/agent.sock")
+            loaded.endpoint,
+            Endpoint::Unix {
+                path: PathBuf::from("/data/sessions/full/agent.sock")
+            }
         );
         assert_eq!(loaded.spec.label.as_deref(), Some("worker"));
         assert_eq!(
@@ -384,7 +391,7 @@ mod tests {
             "status": "spawning",
             "started_at": "2026-01-01T00:00:00Z",
             "session_dir": "/tmp/old",
-            "socket_path": "/tmp/old.sock",
+            "endpoint": {"scheme": "unix", "path": "/tmp/old.sock"},
             "spec": {
                 "initial_prompt": "hi",
                 "inherit_hooks": true

@@ -63,10 +63,17 @@ async fn main() -> Result<()> {
     if let Some(CalibanCommand::AgentWorker {
         manifest,
         socket,
+        listen,
         control_socket,
     }) = &args.command
     {
-        let code = worker::run(manifest, socket, control_socket.as_deref()).await;
+        let code = worker::run(
+            manifest,
+            socket.as_deref(),
+            listen.as_deref(),
+            control_socket.as_deref(),
+        )
+        .await;
         std::process::exit(code);
     }
 

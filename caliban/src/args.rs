@@ -723,9 +723,15 @@ pub(crate) enum CalibanCommand {
         /// Path to the agent's `manifest.json` (carries the `SpawnSpec`).
         #[arg(long)]
         manifest: PathBuf,
-        /// Per-agent Unix socket the worker must bind.
+        /// Per-agent Unix socket the worker must bind (Unix mode). Mutually
+        /// exclusive with `--listen`; exactly one is required.
         #[arg(long)]
-        socket: PathBuf,
+        socket: Option<PathBuf>,
+        /// Per-agent TCP listen address, e.g. `0.0.0.0:7101` (network mode,
+        /// #280 Task 7). Alternative to `--socket`. TLS/token for the listener
+        /// come from `CALIBAN_AGENT_TLS_CERT`/`_KEY`/`CALIBAN_AGENT_TOKEN`.
+        #[arg(long)]
+        listen: Option<String>,
         /// Daemon control socket the worker reports Idle/Running to (#81).
         #[arg(long)]
         control_socket: Option<PathBuf>,

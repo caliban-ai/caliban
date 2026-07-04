@@ -26,6 +26,7 @@ uuid        = { workspace = true }
 dirs        = { workspace = true }
 sha2        = { workspace = true }
 futures     = { workspace = true }
+tokio-rustls   = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix  = { workspace = true }
@@ -33,6 +34,7 @@ nix  = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rcgen    = { workspace = true }
 
 [lints]
 workspace = true
