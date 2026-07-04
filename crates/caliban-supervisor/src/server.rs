@@ -367,11 +367,7 @@ impl Supervisor {
                     if let Some(socket_path) = socket_path {
                         let _ = tokio::fs::remove_file(&socket_path).await;
                     }
-                    if let Some((source_dir, wt_name)) = worktree_cleanup
-                        && let Ok(mgr) = caliban_worktrees::WorktreeManager::new(&source_dir)
-                    {
-                        let _ = mgr.remove(&wt_name, true); // best-effort, like the socket unlink
-                    }
+                    cleanup_worktree(worktree_cleanup); // best-effort, like the socket unlink
                 });
             }
             Err(e) => {
@@ -383,11 +379,7 @@ impl Supervisor {
                     .ok();
                 // The worktree (if any) was already materialized before the
                 // launch attempt; a failed launch must not leak it.
-                if let Some((source_dir, wt_name)) = worktree_cleanup
-                    && let Ok(mgr) = caliban_worktrees::WorktreeManager::new(&source_dir)
-                {
-                    let _ = mgr.remove(&wt_name, true);
-                }
+                cleanup_worktree(worktree_cleanup);
             }
         }
     }
@@ -414,10 +406,6 @@ impl Supervisor {
                 CtlReply::Listed { agents: r.list() }
             }
             CtlRequest::Spawn { spec } => {
-                let endpoint = match self.next_endpoint() {
-                    Ok(e) => e,
-                    Err(error) => return CtlReply::Error { error },
-                };
                 let id_prefix = uuid::Uuid::new_v4().simple().to_string();
                 // Resolve the source directory (None -> workspace root).
                 let source_dir = match crate::sources::resolve_source(
@@ -449,6 +437,17 @@ impl Supervisor {
                     }
                 } else {
                     (source_dir.clone(), None)
+                };
+                // Resolve the endpoint last: source/worktree resolution can
+                // fail (bad source, git error, disk full), and a failure
+                // there must not have already burned a network port (#281
+                // task-4 review, cheap ordering fix).
+                let endpoint = match self.next_endpoint() {
+                    Ok(e) => e,
+                    Err(error) => {
+                        cleanup_worktree(worktree_cleanup);
+                        return CtlReply::Error { error };
+                    }
                 };
                 let rec = {
                     let mut r = self.registry.lock().await;
@@ -489,31 +488,32 @@ impl Supervisor {
                 }
             }
             CtlRequest::Respawn { id } => {
+                // Lock 1: read-only lookup of the current spec. Deliberately
+                // does NOT remove the old record here (that used to happen
+                // in this same critical section, but every fallible step
+                // below — source resolution, worktree creation, endpoint
+                // allocation — ran AFTER the removal, so any of them failing
+                // returned an error having already destroyed the agent with
+                // no way back; a failed Respawn is a recovery operation and
+                // must never be more destructive than a no-op). The old
+                // record stays intact and visible in `list()` until the
+                // second critical section below actually supersedes it.
                 let old_spec = {
-                    let mut r = self.registry.lock().await;
-                    let Some(old) = r.get(&id).cloned() else {
-                        return CtlReply::Error {
-                            error: SupervisorError::NotFound { id },
-                        };
-                    };
-                    // Drop old (force=true so it can be running); `remove`
-                    // also forgets the old pid, all under this one registry
-                    // lock — a concurrent `Kill` cannot observe a torn
-                    // pid/record state (#115, #140). Re-registration with the
-                    // same spec happens below, once source/worktree
-                    // resolution (which can do real filesystem/git I/O) is
-                    // done OUTSIDE the lock.
-                    if let Err(e) = r.remove(&id, true) {
-                        return CtlReply::Error { error: e };
+                    let r = self.registry.lock().await;
+                    match r.get(&id) {
+                        Some(rec) => rec.spec.clone(),
+                        None => {
+                            return CtlReply::Error {
+                                error: SupervisorError::NotFound { id },
+                            };
+                        }
                     }
-                    old.spec
                 };
-                let endpoint = match self.next_endpoint() {
-                    Ok(e) => e,
-                    Err(error) => return CtlReply::Error { error },
-                };
+                // Resolve the source directory and (optionally) materialize
+                // a fresh worktree OUTSIDE any lock — real filesystem/git
+                // I/O. Nothing has been removed yet, so any failure here
+                // returns cleanly with the original agent still registered.
                 let id_prefix = uuid::Uuid::new_v4().simple().to_string();
-                // Resolve the source directory (None -> workspace root).
                 let source_dir = match crate::sources::resolve_source(
                     &self.workspace_root,
                     old_spec.source.as_deref(),
@@ -527,7 +527,6 @@ impl Supervisor {
                         };
                     }
                 };
-                // Optionally materialize a per-source worktree.
                 let (working_dir, worktree_cleanup) = if old_spec.isolation_worktree {
                     match worktree_for_agent(&source_dir, &id_prefix) {
                         Ok(handle) => {
@@ -544,8 +543,34 @@ impl Supervisor {
                 } else {
                     (source_dir.clone(), None)
                 };
+                // Resolve the endpoint last (same cheap ordering fix as
+                // Spawn): a failed source/worktree resolution must not have
+                // already burned a network port. If a worktree WAS just
+                // materialized and this still fails, it must not leak.
+                let endpoint = match self.next_endpoint() {
+                    Ok(e) => e,
+                    Err(error) => {
+                        cleanup_worktree(worktree_cleanup);
+                        return CtlReply::Error { error };
+                    }
+                };
+                // Lock 2: remove the old record and register the new one
+                // atomically, in the SAME critical section. This is the
+                // fix — a concurrent `Kill`/`Rm --force` holding the lock
+                // mid-signal still can't observe a torn pid/record state
+                // (#115/#140), and the old agent is only ever destroyed once
+                // its replacement is guaranteed to take its place.
                 let new_rec = {
                     let mut r = self.registry.lock().await;
+                    if let Err(e) = r.remove(&id, true) {
+                        drop(r);
+                        // Lost a race (e.g. a concurrent Respawn/Rm already
+                        // removed `id` between Lock 1 and here): don't leak
+                        // the worktree we just created for a respawn that
+                        // isn't going to happen.
+                        cleanup_worktree(worktree_cleanup);
+                        return CtlReply::Error { error: e };
+                    }
                     r.register(old_spec, endpoint, working_dir)
                 };
                 let reply = CtlReply::Respawned {
@@ -592,6 +617,19 @@ impl Supervisor {
                 CtlReply::StatusReported
             }
         }
+    }
+}
+
+/// Best-effort remove a just-created worktree, so a later failure (a launch
+/// failure, an exhausted port counter, a lock-ordering race that loses) never
+/// leaks it. Mirrors the terminal-worker cleanup in `launch_and_monitor`;
+/// shared so `Spawn` and `Respawn` can call it from their own late-failure
+/// paths too (#281 task-4 review).
+fn cleanup_worktree(cleanup: Option<(PathBuf, String)>) {
+    if let Some((source_dir, wt_name)) = cleanup
+        && let Ok(mgr) = caliban_worktrees::WorktreeManager::new(&source_dir)
+    {
+        let _ = mgr.remove(&wt_name, true);
     }
 }
 

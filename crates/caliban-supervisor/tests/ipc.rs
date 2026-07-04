@@ -225,6 +225,116 @@ async fn respawn_launches_a_fresh_worker() {
     sup.cancel_token().cancel();
 }
 
+/// Regression for the task-review finding on #281 Task 4: a `Respawn` whose
+/// worktree resolution fails must leave the original agent completely
+/// intact — not delete it. Before the fix, `Respawn` removed the old agent
+/// under its FIRST registry lock, before doing any of the fallible
+/// source/worktree I/O; a failure there returned an error having already
+/// destroyed the agent, with no way back (worse than a no-op for what is
+/// meant to be a recovery operation).
+///
+/// Reproduces the failure deterministically: spawn an agent with
+/// `isolation_worktree: true` against a real git checkout (so the initial
+/// `Spawn` succeeds and materializes a worktree), then delete that
+/// checkout's `.git` directory before respawning. `resolve_source` still
+/// finds the (now non-git) directory, but `worktree_for_agent` fails with
+/// `NotARepo` — the exact "fallible I/O between the two locks" this test
+/// targets.
+#[tokio::test]
+async fn respawn_preserves_agent_when_worktree_resolution_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace");
+    let source = workspace_root.join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    // A real git checkout, so the initial Spawn (isolation_worktree: true)
+    // succeeds and actually materializes a worktree.
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&source)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "init",
+        ])
+        .current_dir(&source)
+        .status()
+        .unwrap();
+
+    let socket_path = dir.path().join("caliband.sock");
+    let agent_dir = dir.path().join("agents-rt");
+    let store = AgentStore::new(dir.path().join("data"));
+    let launcher = Arc::new(ShLauncher {
+        script: "touch \"$SOCK\"; exit 0".into(),
+    });
+    let supervisor = Arc::new(
+        Supervisor::with_launcher(socket_path.clone(), store, agent_dir, launcher)
+            .with_workspace_root(&workspace_root),
+    );
+    let server = Arc::clone(&supervisor);
+    let _handle = tokio::spawn(async move { Arc::clone(&server).serve().await });
+    for _ in 0..200 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let client = SupervisorClient::new(socket_path);
+
+    let mut worktree_spec = spec();
+    worktree_spec.isolation_worktree = true;
+    worktree_spec.source = Some("src".into());
+    let (id, _) = client
+        .spawn(worktree_spec)
+        .await
+        .expect("initial spawn against a real checkout must succeed");
+    let original = client
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .expect("spawned agent must be listed");
+
+    // Break the checkout: `resolve_source` still finds `src` on disk (it
+    // only checks existence for the non-discovered fallback path), but
+    // `worktree_for_agent` -> `WorktreeManager::new` opens it as a real git
+    // repo and must now fail.
+    std::fs::remove_dir_all(source.join(".git")).unwrap();
+
+    let err = client
+        .respawn(&id)
+        .await
+        .expect_err("respawn must fail when the source is no longer a git checkout");
+    let msg = format!("{err}");
+    assert!(msg.contains("worktree create"), "got {msg}");
+
+    // The original agent must still be present, untouched, under its
+    // original id — a failed Respawn must not have destroyed it.
+    let after = client.list().await.unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "original agent must survive the failed respawn"
+    );
+    let still_there = after.iter().find(|a| a.id == id).expect(
+        "original agent id must still be registered after a failed respawn \
+         (this is the exact bug: Respawn used to remove the old agent before \
+         the fallible source/worktree I/O, so a failure here permanently lost it)",
+    );
+    assert_eq!(still_there.status, original.status);
+    assert_eq!(still_there.spec.source, original.spec.source);
+
+    supervisor.cancel_token().cancel();
+}
+
 #[tokio::test]
 async fn rm_requires_stopped_state_without_force() {
     // Use a long-running fake launcher so the agent stays Running
