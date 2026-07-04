@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-07-04
-- **Source:** [`docs/superpowers/specs/2026-07-03-caliban-k8s-system-design.md`](../superpowers/specs/2026-07-03-caliban-k8s-system-design.md) §"Transport lift" · caliban #280
+- **Source:** [`docs/superpowers/plans/2026-07-04-p1-caliband-network-transport.md`](../superpowers/plans/2026-07-04-p1-caliband-network-transport.md) · caliban [#280](https://github.com/caliban-ai/caliban/issues/280) · epic [#274](https://github.com/caliban-ai/caliban/issues/274). The originating design (`2026-07-03-caliban-k8s-system-design.md`, §"Transport lift") is a cross-repo epic spec in the caliban-ai docs hub, not in this repo.
 
 ## Context
 
