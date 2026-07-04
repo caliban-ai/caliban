@@ -10,6 +10,7 @@ use chrono::Utc;
 
 use crate::proto::{AgentId, AgentRecord, AgentStatus, SpawnSpec, SupervisorError};
 use crate::store::AgentStore;
+use crate::transport::Endpoint;
 
 /// Live registry. Cheap to construct; one per daemon.
 #[derive(Debug)]
@@ -81,8 +82,9 @@ impl Registry {
     }
 
     /// Register a new agent. Picks a fresh id, persists the manifest,
-    /// and returns the assigned record.
-    pub fn register(&mut self, spec: SpawnSpec, socket_path: std::path::PathBuf) -> AgentRecord {
+    /// and returns the assigned record. Transport-agnostic: `endpoint` may
+    /// be any [`Endpoint`] variant (Unix today; TCP from #280 Task 7).
+    pub fn register(&mut self, spec: SpawnSpec, endpoint: Endpoint) -> AgentRecord {
         let id = new_id();
         let session_dir = self.store.session_dir(&id);
         let record = AgentRecord {
@@ -91,7 +93,7 @@ impl Registry {
             status: AgentStatus::Spawning,
             started_at: Utc::now().to_rfc3339(),
             session_dir,
-            socket_path,
+            endpoint,
             spec,
         };
         // Best-effort persistence — IO errors get logged but don't block
@@ -273,7 +275,12 @@ mod tests {
     fn register_assigns_id_and_persists() {
         let (_d, s) = store();
         let mut r = Registry::new(s.clone());
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         assert_eq!(rec.status, AgentStatus::Spawning);
         assert_eq!(r.len(), 1);
         // Persisted to disk.
@@ -285,7 +292,12 @@ mod tests {
     fn rm_refuses_running_without_force() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         let err = r.remove(&rec.id, false).unwrap_err();
         assert!(matches!(err, SupervisorError::InvalidState { .. }));
     }
@@ -294,7 +306,12 @@ mod tests {
     fn rm_with_force_drops_running() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         r.remove(&rec.id, true).unwrap();
         assert!(r.get(&rec.id).is_none());
     }
@@ -303,7 +320,12 @@ mod tests {
     fn rm_stopped_succeeds() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         r.set_status(&rec.id, AgentStatus::Done).unwrap();
         r.remove(&rec.id, false).unwrap();
         assert!(r.get(&rec.id).is_none());
@@ -313,7 +335,12 @@ mod tests {
     fn set_status_if_running_guards_terminal_states() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         // Spawning -> Running allowed.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
         // Move to a terminal state directly.
@@ -327,7 +354,12 @@ mod tests {
     fn sweep_crashed_marks_running_agents() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         let swept = r.sweep_crashed();
         assert_eq!(swept, vec![rec.id.clone()]);
         assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Crashed);
@@ -337,7 +369,12 @@ mod tests {
     fn report_status_running_to_idle_and_back() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         // Put agent in Running state.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
         assert_eq!(r.get(&rec.id).unwrap().status, AgentStatus::Running);
@@ -353,7 +390,12 @@ mod tests {
     fn report_status_refuses_terminal() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         r.set_status(&rec.id, AgentStatus::Killed).unwrap();
         // report_status must refuse to change a terminal state.
         assert!(!r.report_status(&rec.id, AgentStatus::Idle));
@@ -367,7 +409,12 @@ mod tests {
         // resurrected — terminal states are sticky (#81 ticket 4).
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
         assert!(r.report_status(&rec.id, AgentStatus::Idle));
         // Operator kills the idle agent.
@@ -381,7 +428,12 @@ mod tests {
     fn tracked_pid_is_runtime_only_not_persisted() {
         let (_d, s) = store();
         let mut r = Registry::new(s.clone());
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         r.track_pid(&rec.id, 4242);
         assert_eq!(r.pid_of(&rec.id), Some(4242));
         // A fresh registry over the same store reloads records but NOT pids:
@@ -395,7 +447,12 @@ mod tests {
     fn remove_forgets_tracked_pid() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         r.track_pid(&rec.id, 99);
         r.remove(&rec.id, true).unwrap();
         // Removing the agent drops its pid too — no orphaned pid can outlive
@@ -407,7 +464,12 @@ mod tests {
     fn set_status_if_running_finalizes_idle() {
         let (_d, s) = store();
         let mut r = Registry::new(s);
-        let rec = r.register(spec(), std::path::PathBuf::from("/tmp/x.sock"));
+        let rec = r.register(
+            spec(),
+            Endpoint::Unix {
+                path: std::path::PathBuf::from("/tmp/x.sock"),
+            },
+        );
         // Advance to Running then to Idle.
         assert!(r.set_status_if_running(&rec.id, AgentStatus::Running));
         assert!(r.report_status(&rec.id, AgentStatus::Idle));

@@ -25,7 +25,8 @@ pub struct WorkerHandle {
 /// Strategy for turning an [`AgentRecord`] into a running worker process.
 pub trait WorkerLauncher: Send + Sync {
     /// Launch a worker for `record`. The worker is expected to bind
-    /// `record.socket_path` and run the agent described by `record.spec`.
+    /// `record.endpoint` (a Unix socket path today; TCP from #280 Task 7)
+    /// and run the agent described by `record.spec`.
     fn launch(&self, record: &AgentRecord) -> std::io::Result<WorkerHandle>;
 }
 
@@ -76,9 +77,12 @@ impl WorkerLauncher for ExecWorkerLauncher {
         let mut cmd = tokio::process::Command::new(&self.caliban_exe);
         cmd.arg("__agent-worker")
             .arg("--manifest")
-            .arg(&manifest_path)
-            .arg("--socket")
-            .arg(&record.socket_path);
+            .arg(&manifest_path);
+        // Unix mode: pass the socket path. TCP endpoints (#280 Task 7) will
+        // add a `--listen` branch here instead.
+        if let Some(socket_path) = record.unix_socket_path() {
+            cmd.arg("--socket").arg(socket_path);
+        }
         if let Some(ref ctl) = self.control_socket {
             cmd.arg("--control-socket").arg(ctl);
         }
@@ -144,7 +148,7 @@ mod tests {
             status: AgentStatus::Spawning,
             started_at: "2026-06-09T00:00:00Z".into(),
             session_dir,
-            socket_path: socket,
+            endpoint: crate::transport::Endpoint::Unix { path: socket },
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,

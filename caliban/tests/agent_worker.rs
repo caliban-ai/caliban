@@ -13,7 +13,9 @@ async fn worker_runs_and_writes_ndjson() {
         status: caliban_supervisor::proto::AgentStatus::Spawning,
         started_at: "2026-06-09T00:00:00Z".into(),
         session_dir: store.session_dir("smoke"),
-        socket_path: dir.path().join("smoke.sock"),
+        endpoint: caliban_supervisor::Endpoint::Unix {
+            path: dir.path().join("smoke.sock"),
+        },
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
@@ -29,7 +31,10 @@ async fn worker_runs_and_writes_ndjson() {
     };
     store.write_manifest(&rec).unwrap();
     let manifest = store.session_dir("smoke").join("manifest.json");
-    let socket = rec.socket_path.clone();
+    let socket = rec
+        .unix_socket_path()
+        .expect("test record is always a unix endpoint")
+        .to_path_buf();
     let exe = env!("CARGO_BIN_EXE_caliban");
     let status = tokio::process::Command::new(exe)
         .arg("__agent-worker")
@@ -59,7 +64,9 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
         status: caliban_supervisor::proto::AgentStatus::Spawning,
         started_at: "2026-06-13T00:00:00Z".into(),
         session_dir: store.session_dir("badprov"),
-        socket_path: dir.path().join("badprov.sock"),
+        endpoint: caliban_supervisor::Endpoint::Unix {
+            path: dir.path().join("badprov.sock"),
+        },
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
@@ -81,7 +88,10 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
         .arg("--manifest")
         .arg(&manifest)
         .arg("--socket")
-        .arg(rec.socket_path)
+        .arg(
+            rec.unix_socket_path()
+                .expect("test record is always a unix endpoint"),
+        )
         .status()
         .await
         .unwrap();

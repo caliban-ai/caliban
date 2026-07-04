@@ -812,7 +812,9 @@ mod tests {
             status: caliban_supervisor::proto::AgentStatus::Spawning,
             started_at: "2026-06-09T00:00:00Z".into(),
             session_dir: store.session_dir("w1"),
-            socket_path: dir.path().join("w1.sock"),
+            endpoint: caliban_supervisor::Endpoint::Unix {
+                path: dir.path().join("w1.sock"),
+            },
             spec: caliban_supervisor::proto::SpawnSpec {
                 label: None,
                 frontmatter_path: None,

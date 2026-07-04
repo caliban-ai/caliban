@@ -781,7 +781,7 @@ pub(crate) fn install_sub_agent(
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;
             // block on a fresh task instead.
-            let (id, socket_path) = rt
+            let (id, endpoint) = rt
                 .block_on(async move {
                     let client = agents_cli::ensure_daemon_for_repo(&repo).await?;
                     client.spawn(spec).await.map_err(anyhow::Error::from)
@@ -790,9 +790,24 @@ pub(crate) fn install_sub_agent(
                     tracing::warn!(error = %e, "background spawn failed");
                     (
                         format!("err-{}", uuid::Uuid::new_v4().simple()),
-                        std::path::PathBuf::from("/dev/null"),
+                        caliban_supervisor::Endpoint::Unix {
+                            path: std::path::PathBuf::from("/dev/null"),
+                        },
                     )
                 });
+            // `BackgroundSpawnResult` deliberately stays `caliban-supervisor`-free
+            // (see its doc comment), so extract the Unix path here rather than
+            // widening it to `Endpoint`. Unreachable `Tcp` branch (this task
+            // never produces one) logs and falls back rather than panicking.
+            let socket_path = match endpoint {
+                caliban_supervisor::Endpoint::Unix { path } => path,
+                caliban_supervisor::Endpoint::Tcp { .. } => {
+                    tracing::warn!(
+                        "background spawn returned a TCP endpoint; unsupported by this build"
+                    );
+                    std::path::PathBuf::from("/dev/null")
+                }
+            };
             caliban_tools_builtin::BackgroundSpawnResult { id, socket_path }
         })
     };

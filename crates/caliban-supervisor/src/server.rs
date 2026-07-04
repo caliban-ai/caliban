@@ -17,6 +17,7 @@ use crate::proc::{OsSignaller, Signaller, WorkerLauncher};
 use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
+use crate::transport::Endpoint;
 
 /// Per-daemon-process supervisor. Owns the registry, accept loop, and
 /// graceful-shutdown token.
@@ -200,7 +201,9 @@ impl Supervisor {
                 let registry = Arc::clone(&self.registry);
                 // Once the worker exits, its per-agent socket is stale —
                 // unlink it (the worker can't reliably clean up on exit; #77).
-                let socket_path = rec.socket_path.clone();
+                // Only Unix endpoints have a filesystem path to unlink; a TCP
+                // endpoint (#280 Task 7) has nothing to clean up here.
+                let socket_path = rec.unix_socket_path().map(std::path::Path::to_path_buf);
                 tokio::spawn(async move {
                     // The wait MUST stay outside the registry lock — holding it
                     // across the child's lifetime would serialize the daemon.
@@ -218,7 +221,9 @@ impl Supervisor {
                         r.set_status_if_running(&id, terminal);
                         r.forget_pid(&id);
                     }
-                    let _ = tokio::fs::remove_file(&socket_path).await;
+                    if let Some(socket_path) = socket_path {
+                        let _ = tokio::fs::remove_file(&socket_path).await;
+                    }
                 });
             }
             Err(e) => {
@@ -259,11 +264,11 @@ impl Supervisor {
                     let id_prefix = uuid::Uuid::new_v4().simple().to_string();
                     let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
                     let socket_path = self.agent_runtime_dir.join(socket_name);
-                    r.register(spec, socket_path)
+                    r.register(spec, Endpoint::Unix { path: socket_path })
                 };
                 let reply = CtlReply::Spawned {
                     id: rec.id.clone(),
-                    socket_path: rec.socket_path.clone(),
+                    endpoint: rec.endpoint.clone(),
                 };
                 self.launch_and_monitor(rec).await;
                 reply
@@ -272,7 +277,7 @@ impl Supervisor {
                 let r = self.registry.lock().await;
                 match r.get(&id) {
                     Some(rec) => CtlReply::AttachAck {
-                        socket_path: rec.socket_path.clone(),
+                        endpoint: rec.endpoint.clone(),
                     },
                     None => CtlReply::Error {
                         error: SupervisorError::NotFound { id },
@@ -313,7 +318,7 @@ impl Supervisor {
                     let id_prefix = uuid::Uuid::new_v4().simple().to_string();
                     let socket_name = format!("{}-agent.sock", &id_prefix[..8]);
                     let socket_path = self.agent_runtime_dir.join(socket_name);
-                    r.register(old.spec, socket_path)
+                    r.register(old.spec, Endpoint::Unix { path: socket_path })
                 };
                 let reply = CtlReply::Respawned {
                     id: new_rec.id.clone(),
@@ -349,7 +354,9 @@ impl Supervisor {
                     pid: std::process::id(),
                     agents,
                     uptime_secs,
-                    socket_path: self.socket_path.clone(),
+                    endpoint: Endpoint::Unix {
+                        path: self.socket_path.clone(),
+                    },
                 })
             }
             CtlRequest::Shutdown => CtlReply::ShutdownAck,

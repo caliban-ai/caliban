@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use caliban_supervisor::proto::{AgentRecord, AgentStatus, SpawnSpec};
-use caliban_supervisor::{ClientError, SupervisorClient, repo_socket_path};
+use caliban_supervisor::{ClientError, Endpoint, SupervisorClient, repo_socket_path};
 
 /// Discover the repo root containing `start_dir`. Walks up looking for
 /// `.git/`. Falls back to `start_dir` itself if none is found (the
@@ -104,8 +104,16 @@ fn print_list(agents: &[AgentRecord]) {
             truncate(&a.name, 24),
             fmt_status(a.status),
             a.started_at,
-            a.socket_path.display()
+            fmt_endpoint(&a.endpoint)
         );
+    }
+}
+
+/// Render an endpoint for human-readable CLI output (Unix path or `host:port`).
+fn fmt_endpoint(e: &Endpoint) -> String {
+    match e {
+        Endpoint::Unix { path } => path.display().to_string(),
+        Endpoint::Tcp { addr } => addr.clone(),
     }
 }
 
@@ -154,7 +162,17 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Attach { id } => match client.attach(id.clone()).await {
-            Ok(socket_path) => run_attach(&socket_path, id).await,
+            Ok(endpoint) => {
+                if let Endpoint::Unix { path } = &endpoint {
+                    run_attach(path, id).await
+                } else {
+                    // Unreachable in Unix-only mode (this task never produces
+                    // a TCP endpoint); Task 6 generalizes `run_attach` to
+                    // dial any `Endpoint`.
+                    eprintln!("caliban: attach to a non-Unix endpoint is not yet supported");
+                    1
+                }
+            }
             Err(e) => map_client_error(e),
         },
         crate::AgentsCommand::Logs { id } => {
@@ -226,8 +244,8 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 inherited_hooks_config: None,
             };
             match client.spawn(spec).await {
-                Ok((id, sock)) => {
-                    println!("spawned {id} (socket: {})", sock.display());
+                Ok((id, endpoint)) => {
+                    println!("spawned {id} (socket: {})", fmt_endpoint(&endpoint));
                     0
                 }
                 Err(e) => map_client_error(e),
@@ -265,7 +283,7 @@ pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> 
                     s.pid,
                     s.agents,
                     s.uptime_secs,
-                    s.socket_path.display(),
+                    fmt_endpoint(&s.endpoint),
                 );
                 0
             }
@@ -354,8 +372,8 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         inherited_hooks_config: None,
     };
     match client.spawn(spec).await {
-        Ok((id, sock)) => {
-            println!("backgrounded as {id} (socket: {})", sock.display());
+        Ok((id, endpoint)) => {
+            println!("backgrounded as {id} (socket: {})", fmt_endpoint(&endpoint));
             0
         }
         Err(e) => map_client_error(e),

@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
 use crate::proto::{CtlReply, CtlRequest, SupervisorError};
+use crate::transport::Endpoint;
 
 /// Errors talking to the supervisor.
 #[derive(thiserror::Error, Debug)]
@@ -86,9 +87,9 @@ impl SupervisorClient {
     pub async fn spawn(
         &self,
         spec: crate::proto::SpawnSpec,
-    ) -> Result<(crate::proto::AgentId, PathBuf), ClientError> {
+    ) -> Result<(crate::proto::AgentId, Endpoint), ClientError> {
         match self.request(&CtlRequest::Spawn { spec }).await? {
-            CtlReply::Spawned { id, socket_path } => Ok((id, socket_path)),
+            CtlReply::Spawned { id, endpoint } => Ok((id, endpoint)),
             CtlReply::Error { error } => Err(error.into()),
             other => Err(ClientError::Unexpected(format!("{other:?}"))),
         }
@@ -131,10 +132,10 @@ impl SupervisorClient {
     }
 
     /// Convenience: attach to an existing agent. Returns the per-agent
-    /// socket path the caller can stream from.
-    pub async fn attach(&self, id: impl Into<String>) -> Result<PathBuf, ClientError> {
+    /// endpoint the caller can stream from.
+    pub async fn attach(&self, id: impl Into<String>) -> Result<Endpoint, ClientError> {
         match self.request(&CtlRequest::Attach { id: id.into() }).await? {
-            CtlReply::AttachAck { socket_path } => Ok(socket_path),
+            CtlReply::AttachAck { endpoint } => Ok(endpoint),
             CtlReply::Error { error } => Err(error.into()),
             other => Err(ClientError::Unexpected(format!("{other:?}"))),
         }
