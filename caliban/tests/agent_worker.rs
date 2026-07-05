@@ -16,6 +16,7 @@ async fn worker_runs_and_writes_ndjson() {
         endpoint: caliban_supervisor::Endpoint::Unix {
             path: dir.path().join("smoke.sock"),
         },
+        working_dir: std::path::PathBuf::new(),
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
@@ -27,6 +28,7 @@ async fn worker_runs_and_writes_ndjson() {
             inherit_hooks: true,
             interactive: false,
             inherited_hooks_config: None,
+            source: None,
         },
     };
     store.write_manifest(&rec).unwrap();
@@ -67,6 +69,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
         endpoint: caliban_supervisor::Endpoint::Unix {
             path: dir.path().join("badprov.sock"),
         },
+        working_dir: std::path::PathBuf::new(),
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
@@ -78,6 +81,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
             inherit_hooks: true,
             interactive: false,
             inherited_hooks_config: None,
+            source: None,
         },
     };
     store.write_manifest(&rec).unwrap();

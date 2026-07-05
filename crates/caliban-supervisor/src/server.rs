@@ -64,6 +64,9 @@ pub struct Supervisor {
     cancel: CancellationToken,
     /// Per-agent runtime-dir (where per-agent sockets are created).
     agent_runtime_dir: PathBuf,
+    /// Workspace root the daemon resolves `SpawnSpec.source` against (#281).
+    /// Defaults to `.` when not explicitly set via [`Supervisor::with_workspace_root`].
+    workspace_root: PathBuf,
     /// Strategy for launching worker processes.
     launcher: Arc<dyn WorkerLauncher>,
     /// Strategy for delivering termination signals to worker pids.
@@ -131,6 +134,7 @@ impl Supervisor {
             registry,
             cancel: CancellationToken::new(),
             agent_runtime_dir,
+            workspace_root: PathBuf::from("."),
             launcher,
             signaller: Arc::new(OsSignaller),
         }
@@ -141,6 +145,13 @@ impl Supervisor {
     #[must_use]
     pub fn with_signaller(mut self, signaller: Arc<dyn Signaller>) -> Self {
         self.signaller = signaller;
+        self
+    }
+
+    /// Set the workspace root the daemon resolves sources against (#281).
+    #[must_use]
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = root.into();
         self
     }
 
@@ -310,8 +321,14 @@ impl Supervisor {
     /// Launch a worker for `rec`, record its pid, flip the registry to
     /// `Running`, and spawn a monitor task that writes the terminal
     /// status when the child exits. On launch failure the agent is
-    /// marked `Failed`.
-    async fn launch_and_monitor(&self, rec: crate::proto::AgentRecord) {
+    /// marked `Failed`. `worktree_cleanup` (source dir, worktree name),
+    /// when set, is removed alongside the stale per-agent socket once the
+    /// worker exits (#281 Task 4).
+    async fn launch_and_monitor(
+        &self,
+        rec: crate::proto::AgentRecord,
+        worktree_cleanup: Option<(PathBuf, String)>,
+    ) {
         let id = rec.id.clone();
         match self.launcher.launch(&rec) {
             Ok(handle) => {
@@ -350,6 +367,7 @@ impl Supervisor {
                     if let Some(socket_path) = socket_path {
                         let _ = tokio::fs::remove_file(&socket_path).await;
                     }
+                    cleanup_worktree(worktree_cleanup); // best-effort, like the socket unlink
                 });
             }
             Err(e) => {
@@ -359,6 +377,9 @@ impl Supervisor {
                     .await
                     .set_status(&id, crate::proto::AgentStatus::Failed)
                     .ok();
+                // The worktree (if any) was already materialized before the
+                // launch attempt; a failed launch must not leak it.
+                cleanup_worktree(worktree_cleanup);
             }
         }
     }
@@ -385,19 +406,58 @@ impl Supervisor {
                 CtlReply::Listed { agents: r.list() }
             }
             CtlRequest::Spawn { spec } => {
+                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                // Resolve the source directory (None -> workspace root).
+                let source_dir = match crate::sources::resolve_source(
+                    &self.workspace_root,
+                    spec.source.as_deref(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return CtlReply::Error {
+                            error: SupervisorError::Internal {
+                                message: format!("source resolve: {e}"),
+                            },
+                        };
+                    }
+                };
+                // Optionally materialize a per-source worktree.
+                let (working_dir, worktree_cleanup) = if spec.isolation_worktree {
+                    match worktree_for_agent(&source_dir, &id_prefix) {
+                        Ok(handle) => {
+                            (handle.path.clone(), Some((source_dir.clone(), handle.name)))
+                        }
+                        Err(e) => {
+                            return CtlReply::Error {
+                                error: SupervisorError::Internal {
+                                    message: format!("worktree create: {e}"),
+                                },
+                            };
+                        }
+                    }
+                } else {
+                    (source_dir.clone(), None)
+                };
+                // Resolve the endpoint last: source/worktree resolution can
+                // fail (bad source, git error, disk full), and a failure
+                // there must not have already burned a network port (#281
+                // task-4 review, cheap ordering fix).
                 let endpoint = match self.next_endpoint() {
                     Ok(e) => e,
-                    Err(error) => return CtlReply::Error { error },
+                    Err(error) => {
+                        cleanup_worktree(worktree_cleanup);
+                        return CtlReply::Error { error };
+                    }
                 };
                 let rec = {
                     let mut r = self.registry.lock().await;
-                    r.register(spec, endpoint)
+                    r.register(spec, endpoint, working_dir)
                 };
                 let reply = CtlReply::Spawned {
                     id: rec.id.clone(),
                     endpoint: rec.endpoint.clone(),
                 };
-                self.launch_and_monitor(rec).await;
+                self.launch_and_monitor(rec, worktree_cleanup).await;
                 reply
             }
             CtlRequest::Attach { id } => {
@@ -428,30 +488,95 @@ impl Supervisor {
                 }
             }
             CtlRequest::Respawn { id } => {
+                // Lock 1: read-only lookup of the current spec. Deliberately
+                // does NOT remove the old record here (that used to happen
+                // in this same critical section, but every fallible step
+                // below — source resolution, worktree creation, endpoint
+                // allocation — ran AFTER the removal, so any of them failing
+                // returned an error having already destroyed the agent with
+                // no way back; a failed Respawn is a recovery operation and
+                // must never be more destructive than a no-op). The old
+                // record stays intact and visible in `list()` until the
+                // second critical section below actually supersedes it.
+                let old_spec = {
+                    let r = self.registry.lock().await;
+                    match r.get(&id) {
+                        Some(rec) => rec.spec.clone(),
+                        None => {
+                            return CtlReply::Error {
+                                error: SupervisorError::NotFound { id },
+                            };
+                        }
+                    }
+                };
+                // Resolve the source directory and (optionally) materialize
+                // a fresh worktree OUTSIDE any lock — real filesystem/git
+                // I/O. Nothing has been removed yet, so any failure here
+                // returns cleanly with the original agent still registered.
+                let id_prefix = uuid::Uuid::new_v4().simple().to_string();
+                let source_dir = match crate::sources::resolve_source(
+                    &self.workspace_root,
+                    old_spec.source.as_deref(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return CtlReply::Error {
+                            error: SupervisorError::Internal {
+                                message: format!("source resolve: {e}"),
+                            },
+                        };
+                    }
+                };
+                let (working_dir, worktree_cleanup) = if old_spec.isolation_worktree {
+                    match worktree_for_agent(&source_dir, &id_prefix) {
+                        Ok(handle) => {
+                            (handle.path.clone(), Some((source_dir.clone(), handle.name)))
+                        }
+                        Err(e) => {
+                            return CtlReply::Error {
+                                error: SupervisorError::Internal {
+                                    message: format!("worktree create: {e}"),
+                                },
+                            };
+                        }
+                    }
+                } else {
+                    (source_dir.clone(), None)
+                };
+                // Resolve the endpoint last (same cheap ordering fix as
+                // Spawn): a failed source/worktree resolution must not have
+                // already burned a network port. If a worktree WAS just
+                // materialized and this still fails, it must not leak.
+                let endpoint = match self.next_endpoint() {
+                    Ok(e) => e,
+                    Err(error) => {
+                        cleanup_worktree(worktree_cleanup);
+                        return CtlReply::Error { error };
+                    }
+                };
+                // Lock 2: remove the old record and register the new one
+                // atomically, in the SAME critical section. This is the
+                // fix — a concurrent `Kill`/`Rm --force` holding the lock
+                // mid-signal still can't observe a torn pid/record state
+                // (#115/#140), and the old agent is only ever destroyed once
+                // its replacement is guaranteed to take its place.
                 let new_rec = {
                     let mut r = self.registry.lock().await;
-                    let Some(old) = r.get(&id).cloned() else {
-                        return CtlReply::Error {
-                            error: SupervisorError::NotFound { id },
-                        };
-                    };
-                    // Drop old (force=true so it can be running) and
-                    // re-register with the same spec. `remove` also forgets the
-                    // old pid, all under this one registry lock — a concurrent
-                    // `Kill` cannot observe a torn pid/record state (#115, #140).
                     if let Err(e) = r.remove(&id, true) {
+                        drop(r);
+                        // Lost a race (e.g. a concurrent Respawn/Rm already
+                        // removed `id` between Lock 1 and here): don't leak
+                        // the worktree we just created for a respawn that
+                        // isn't going to happen.
+                        cleanup_worktree(worktree_cleanup);
                         return CtlReply::Error { error: e };
                     }
-                    let endpoint = match self.next_endpoint() {
-                        Ok(e) => e,
-                        Err(error) => return CtlReply::Error { error },
-                    };
-                    r.register(old.spec, endpoint)
+                    r.register(old_spec, endpoint, working_dir)
                 };
                 let reply = CtlReply::Respawned {
                     id: new_rec.id.clone(),
                 };
-                self.launch_and_monitor(new_rec).await;
+                self.launch_and_monitor(new_rec, worktree_cleanup).await;
                 reply
             }
             CtlRequest::Rm { id, force } => {
@@ -493,6 +618,29 @@ impl Supervisor {
             }
         }
     }
+}
+
+/// Best-effort remove a just-created worktree, so a later failure (a launch
+/// failure, an exhausted port counter, a lock-ordering race that loses) never
+/// leaks it. Mirrors the terminal-worker cleanup in `launch_and_monitor`;
+/// shared so `Spawn` and `Respawn` can call it from their own late-failure
+/// paths too (#281 task-4 review).
+fn cleanup_worktree(cleanup: Option<(PathBuf, String)>) {
+    if let Some((source_dir, wt_name)) = cleanup
+        && let Ok(mgr) = caliban_worktrees::WorktreeManager::new(&source_dir)
+    {
+        let _ = mgr.remove(&wt_name, true);
+    }
+}
+
+/// Create a per-agent git worktree rooted at `source_dir`. Returns the handle
+/// (its `.path` is the worktree root). Errors if the source is not a checkout.
+fn worktree_for_agent(
+    source_dir: &Path,
+    agent_name: &str,
+) -> Result<caliban_worktrees::WorktreeHandle, caliban_worktrees::WorktreeError> {
+    let mgr = caliban_worktrees::WorktreeManager::new(source_dir)?;
+    mgr.create(&caliban_worktrees::WorktreeSpec::new(agent_name))
 }
 
 async fn write_reply<W: AsyncWrite + Unpin>(
@@ -580,5 +728,39 @@ mod tests {
                 other => panic!("call {i}: expected a latched Internal error, got {other:?}"),
             }
         }
+    }
+
+    /// `worktree_for_agent` (#281 Task 4) materializes a real git worktree
+    /// under `<source>/.caliban/worktrees/<name>` given a real git checkout.
+    #[test]
+    fn worktree_for_agent_materializes_under_source() {
+        let repo = tempfile::tempdir().unwrap();
+        // init a real git repo with one commit so HEAD exists
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        let handle = worktree_for_agent(repo.path(), "agent0001").unwrap();
+        assert!(handle.path.exists());
+        assert!(
+            handle
+                .path
+                .starts_with(repo.path().join(".caliban").join("worktrees"))
+        );
     }
 }

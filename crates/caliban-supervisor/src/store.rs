@@ -35,12 +35,12 @@ impl AgentStore {
         Self { base: base.into() }
     }
 
-    /// Default `<base>/agents` directory for the given repo root.
+    /// Default `<base>/agents` directory for the given workspace root.
     /// Falls back to `<tempdir>/caliban-agents/<sanitized>` when the
     /// user has no data dir configured.
     #[must_use]
-    pub fn default_for(repo_root: &Path) -> Self {
-        let sanitized = caliban_common::paths::sanitize_cwd_for_path(repo_root);
+    pub fn default_for(workspace_root: &Path) -> Self {
+        let sanitized = caliban_common::paths::sanitize_cwd_for_path(workspace_root);
         let data_root = caliban_common::paths::platform_data_dir()
             .map_or_else(std::env::temp_dir, |d| d.join("caliban"))
             .join("projects")
@@ -135,6 +135,7 @@ mod tests {
             endpoint: Endpoint::Unix {
                 path: PathBuf::from("/tmp/x.sock"),
             },
+            working_dir: PathBuf::new(),
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -146,6 +147,7 @@ mod tests {
                 inherit_hooks: true,
                 interactive: false,
                 inherited_hooks_config: None,
+                source: None,
             },
         }
     }
@@ -202,6 +204,7 @@ mod tests {
             inherit_hooks: false,
             interactive: false,
             inherited_hooks_config: None,
+            source: None,
         };
         store.write_manifest(&rec).unwrap();
 
@@ -400,5 +403,32 @@ mod tests {
         fs::write(sdir.join("manifest.json"), json.as_bytes()).unwrap();
         let loaded = store.load_manifest("old").unwrap().unwrap();
         assert_eq!(loaded.spec.provider, None);
+    }
+
+    // --- AgentRecord.working_dir / SpawnSpec.source serde (#281) ---
+
+    #[test]
+    fn working_dir_and_source_absent_in_old_manifest_default() {
+        // Simulate a manifest written before #281 (no "working_dir" on the
+        // record, no "source" on the spec).
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        let sdir = store.ensure_dir("legacy281").unwrap();
+        let json = r#"{
+            "id": "legacy281",
+            "name": "legacy281",
+            "status": "spawning",
+            "started_at": "2026-01-01T00:00:00Z",
+            "session_dir": "/tmp/legacy281",
+            "endpoint": {"scheme": "unix", "path": "/tmp/legacy281.sock"},
+            "spec": {
+                "initial_prompt": "hi",
+                "inherit_hooks": true
+            }
+        }"#;
+        fs::write(sdir.join("manifest.json"), json.as_bytes()).unwrap();
+        let loaded = store.load_manifest("legacy281").unwrap().unwrap();
+        assert_eq!(loaded.working_dir, PathBuf::new());
+        assert_eq!(loaded.spec.source, None);
     }
 }

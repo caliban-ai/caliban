@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use caliban_supervisor::proto::{AgentRecord, AgentStatus, SpawnSpec};
-use caliban_supervisor::{ClientError, Endpoint, SupervisorClient, repo_socket_path};
+use caliban_supervisor::{ClientError, Endpoint, SupervisorClient, workspace_socket_path};
 
 /// Discover the repo root containing `start_dir`. Walks up looking for
 /// `.git/`. Falls back to `start_dir` itself if none is found (the
@@ -42,7 +42,7 @@ fn try_spawn_daemon(repo_root: &Path, socket_path: &Path) -> Result<()> {
         daemon_exe = PathBuf::from("caliband");
     }
     let mut cmd = std::process::Command::new(&daemon_exe);
-    cmd.arg("--repo-root")
+    cmd.arg("--workspace-root")
         .arg(repo_root)
         .arg("--socket-path")
         .arg(socket_path)
@@ -143,7 +143,7 @@ async fn ensure_daemon(repo_root: &Path) -> Result<SupervisorClient> {
     if let Some(net) = daemon_network_env().map_err(|e| anyhow::anyhow!(e))? {
         return Ok(SupervisorClient::new_tcp(net.listen, net.tls, net.token));
     }
-    let socket_path = repo_socket_path(repo_root);
+    let socket_path = workspace_socket_path(repo_root);
     if !socket_path.exists() {
         try_spawn_daemon(repo_root, &socket_path)?;
         for _ in 0..200 {
@@ -329,6 +329,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 inherit_hooks: true,
                 interactive: *interactive,
                 inherited_hooks_config: None,
+                source: None,
             };
             match client.spawn(spec).await {
                 Ok((id, endpoint)) => {
@@ -349,7 +350,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
 /// (status: 0 with a "not running" line, stop: 0 with a "no daemon"
 /// line — both are valid steady states).
 pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> i32 {
-    let socket_path = caliban_supervisor::repo_socket_path(repo_root);
+    let socket_path = caliban_supervisor::workspace_socket_path(repo_root);
     if !socket_path.exists() {
         match cmd {
             crate::DaemonCommand::Status => {
@@ -474,6 +475,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         inherit_hooks: true,
         interactive: false,
         inherited_hooks_config: None,
+        source: None,
     };
     match client.spawn(spec).await {
         Ok((id, endpoint)) => {

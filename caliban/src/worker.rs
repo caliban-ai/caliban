@@ -957,6 +957,7 @@ mod tests {
             endpoint: caliban_supervisor::Endpoint::Unix {
                 path: dir.path().join("w1.sock"),
             },
+            working_dir: std::path::PathBuf::new(),
             spec: caliban_supervisor::proto::SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -968,6 +969,7 @@ mod tests {
                 inherit_hooks: true,
                 interactive: false,
                 inherited_hooks_config: None,
+                source: None,
             },
         };
         store.write_manifest(&rec).unwrap();

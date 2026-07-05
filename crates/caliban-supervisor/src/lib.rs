@@ -4,7 +4,7 @@
 //! and ADR 0037.
 //!
 //! The daemon (`caliband` binary) listens on a Unix domain socket at
-//! `$XDG_RUNTIME_DIR/caliban/<hash(repo_root)>.sock` and serves a small
+//! `$XDG_RUNTIME_DIR/caliban/<hash(workspace_root)>.sock` and serves a small
 //! line-delimited JSON IPC protocol: `list`, `spawn`, `attach`, `kill`,
 //! `respawn`, `rm`, `status`.
 //!
@@ -21,6 +21,7 @@ pub mod proto;
 pub mod registry;
 pub mod runtime;
 pub mod server;
+pub mod sources;
 pub mod store;
 pub mod transport;
 
@@ -31,7 +32,8 @@ pub use proto::{
     SupervisorError,
 };
 pub use registry::Registry;
-pub use runtime::{repo_socket_path, repo_socket_path_in};
+pub use runtime::{workspace_socket_path, workspace_socket_path_in};
 pub use server::{NetworkConfig, Supervisor};
+pub use sources::{Source, discover_sources, resolve_source};
 pub use store::AgentStore;
 pub use transport::{BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect};

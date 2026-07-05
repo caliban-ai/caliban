@@ -140,6 +140,12 @@ impl WorkerLauncher for ExecWorkerLauncher {
         if let Some(ref ctl) = self.control_socket {
             cmd.arg("--control-socket").arg(ctl);
         }
+        // Set the worker's cwd from the resolved working dir (#281 Task 4).
+        // Empty means "leave unset" — legacy behavior, worker inherits the
+        // daemon's cwd.
+        if !record.working_dir.as_os_str().is_empty() {
+            cmd.current_dir(&record.working_dir);
+        }
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -203,6 +209,7 @@ mod tests {
             started_at: "2026-06-09T00:00:00Z".into(),
             session_dir,
             endpoint: crate::transport::Endpoint::Unix { path: socket },
+            working_dir: PathBuf::new(),
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
@@ -214,6 +221,7 @@ mod tests {
                 inherit_hooks: true,
                 interactive: false,
                 inherited_hooks_config: None,
+                source: None,
             },
         }
     }

@@ -51,6 +51,11 @@ pub struct AgentRecord {
     pub session_dir: PathBuf,
     /// Endpoint for the agent's per-agent socket (for `attach`).
     pub endpoint: Endpoint,
+    /// Resolved working directory for the worker (the source dir, or its
+    /// per-source worktree when `spec.isolation_worktree`). Empty = inherit
+    /// the daemon's cwd (legacy records). (#281)
+    #[serde(default)]
+    pub working_dir: PathBuf,
     /// Original spawn spec (preserved so `respawn` can re-run).
     pub spec: SpawnSpec,
 }
@@ -117,10 +122,35 @@ pub struct SpawnSpec {
     /// this verbatim; only the `caliban` worker interprets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_hooks_config: Option<String>,
+    /// Which workspace source (checkout) this agent runs against. `None`
+    /// means the workspace root (single-source back-compat). (#281)
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 fn true_default() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawnspec_source_defaults_and_roundtrips() {
+        let legacy = r#"{"initial_prompt":"hi"}"#; // no source field
+        let spec: SpawnSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(spec.source, None);
+        let with_src = SpawnSpec {
+            source: Some("gonzalo".into()),
+            ..spec
+        };
+        let json = serde_json::to_string(&with_src).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SpawnSpec>(&json).unwrap().source,
+            Some("gonzalo".into())
+        );
+    }
 }
 
 /// Control-plane requests from the CLI / parent agent to the daemon.
