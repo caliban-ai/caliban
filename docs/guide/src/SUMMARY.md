@@ -104,6 +104,10 @@
 - [Crate Map](./appendix/crate-map.md)
 - [Architecture & ADRs](./appendix/adrs.md)
 
+# Changelog
+
+- [Changelog](./changelog.md)
+
 # Architecture Decisions
 
 - [ADR Index](./adr/index.md)
