@@ -359,30 +359,15 @@ impl FileStore {
         }
         let body = serde_json::to_string_pretty(all)
             .map_err(|e| McpError::TokenStore(format!("serialize: {e}")))?;
-        write_mode_0600(&self.path, &body)
+        // Atomic temp-file + rename with an explicit 0600 chmod (#341): the old
+        // `OpenOptions create+truncate` write was non-atomic (a crash mid-write
+        // corrupted the token file) and its `.mode(0o600)` was ignored when the
+        // file already existed, leaving a pre-existing looser-perm file
+        // unchanged. `write_atomic_with_mode` fixes both, matching the other
+        // secure writers.
+        caliban_common::fs::write_atomic_with_mode(&self.path, body.as_bytes(), 0o600)
+            .map_err(|e| McpError::TokenStore(format!("write {}: {e}", self.path.display())))
     }
-}
-
-#[cfg(unix)]
-fn write_mode_0600(path: &std::path::Path, body: &str) -> Result<(), McpError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| McpError::TokenStore(format!("open {}: {e}", path.display())))?;
-    f.write_all(body.as_bytes())
-        .map_err(|e| McpError::TokenStore(format!("write {}: {e}", path.display())))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_mode_0600(path: &std::path::Path, body: &str) -> Result<(), McpError> {
-    std::fs::write(path, body)
-        .map_err(|e| McpError::TokenStore(format!("write {}: {e}", path.display())))
 }
 
 impl TokenStore for FileStore {
@@ -1639,6 +1624,36 @@ mod tests {
             .expect("put");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    /// #341: a pre-existing token file with looser permissions must be
+    /// re-chmod'd to 0600 on write. The old `create+truncate` open ignored
+    /// `.mode()` when the file already existed, so a 0644 file stayed 0644.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_rechmods_existing_loose_file_to_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp-tokens.json");
+        // Seed a pre-existing, world-readable token file.
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = FileStore::new(path.clone());
+        store
+            .put(
+                "svc",
+                "aud",
+                &OauthTokens {
+                    access_token: "x".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("put");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing loose file not re-chmod'd, got {mode:o}"
+        );
     }
 
     #[test]
