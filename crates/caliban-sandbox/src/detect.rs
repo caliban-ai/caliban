@@ -159,10 +159,10 @@ fn detect_bwrap(policy: &Policy) -> Result<Backend, SandboxError> {
     let parsed = parse_bwrap_version(&version_str);
 
     match parsed {
-        Some(v) if v >= MIN_BWRAP_VERSION => Ok(Backend::Bwrap {
-            path,
-            version: version_str.trim().to_string(),
-        }),
+        // Present + supported version is necessary but not sufficient: the
+        // runtime may install bwrap yet forbid unprivileged user namespaces
+        // (#345). Probe an actual userns before committing to the sandbox.
+        Some(v) if v >= MIN_BWRAP_VERSION => finalize_bwrap(path, &version_str, policy),
         Some(v) => {
             if policy.fail_if_unavailable {
                 return Err(SandboxError::BackendTooOld {
@@ -195,6 +195,62 @@ fn detect_bwrap(policy: &Policy) -> Result<Backend, SandboxError> {
             Ok(Backend::Unavailable)
         }
     }
+}
+
+/// Argv (excluding the `bwrap` binary) for a minimal user-namespace probe:
+/// create a user namespace over a read-only view of `/` and run `/bin/true`.
+/// Succeeds iff the runtime permits `--unshare-user`.
+#[cfg(any(target_os = "linux", test))]
+fn userns_probe_args() -> Vec<std::ffi::OsString> {
+    ["--ro-bind", "/", "/", "--unshare-user", "--", "/bin/true"]
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// Run the userns probe with `bwrap` at `path`; `true` iff it can create a
+/// user namespace on this host.
+#[cfg(any(target_os = "linux", test))]
+fn probe_userns(path: &Path) -> bool {
+    std::process::Command::new(path)
+        .args(userns_probe_args())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Given a present, version-OK `bwrap`, confirm the runtime actually permits
+/// user namespaces before committing to the sandbox. On denial, degrade like
+/// any other unavailable backend (or error under `fail_if_unavailable`).
+///
+/// Skipped when `enable_weaker_nested_sandbox` is set — that mode deliberately
+/// omits `--unshare-user`, so userns availability is irrelevant.
+#[cfg(any(target_os = "linux", test))]
+fn finalize_bwrap(
+    path: PathBuf,
+    version_str: &str,
+    policy: &Policy,
+) -> Result<Backend, SandboxError> {
+    if !policy.enable_weaker_nested_sandbox && !probe_userns(&path) {
+        if policy.fail_if_unavailable {
+            return Err(SandboxError::BackendUnavailable {
+                backend: "bwrap",
+                looked_at: path,
+            });
+        }
+        tracing::warn!(
+            "sandbox: bwrap at {} cannot create a user namespace \
+             (runtime denies unprivileged userns); running unsandboxed",
+            path.display()
+        );
+        return Ok(Backend::Unavailable);
+    }
+    Ok(Backend::Bwrap {
+        path,
+        version: version_str.trim().to_string(),
+    })
 }
 
 /// Parse the `MAJOR.MINOR` prefix out of a `bwrap --version` line.
@@ -358,5 +414,107 @@ mod tests {
         let p = Policy::default();
         let b = detect(&p).expect("windows without fail_if_unavailable is no-op");
         assert_eq!(b, Backend::Unavailable);
+    }
+
+    // ─── userns probe + graceful fallback (#345) ────────────────────────────
+    // Deterministic on any unix host via a fake `bwrap`: `--version` reports a
+    // supported version; the probe invocation exits with `probe_exit`.
+    #[cfg(unix)]
+    fn fake_bwrap(dir: &tempfile::TempDir, probe_exit: u8) -> PathBuf {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.path().join("bwrap");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(
+            f,
+            "if [ \"$1\" = \"--version\" ]; then echo 'bubblewrap 0.7.0'; exit 0; fi"
+        )
+        .unwrap();
+        writeln!(f, "exit {probe_exit}").unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn userns_probe_args_unshares_user_over_readonly_root() {
+        let args = userns_probe_args();
+        assert!(args.iter().any(|a| a == "--unshare-user"));
+        assert!(args.iter().any(|a| a == "--ro-bind"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_userns_reflects_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            probe_userns(&fake_bwrap(&dir, 0)),
+            "exit 0 ⇒ userns available"
+        );
+        let dir2 = tempfile::tempdir().unwrap();
+        assert!(
+            !probe_userns(&fake_bwrap(&dir2, 1)),
+            "nonzero exit ⇒ userns denied"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_bwrap_returns_bwrap_when_userns_permitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fake_bwrap(&dir, 0);
+        let b = finalize_bwrap(path.clone(), "bubblewrap 0.7.0\n", &Policy::default())
+            .expect("userns permitted ⇒ Bwrap");
+        assert_eq!(
+            b,
+            Backend::Bwrap {
+                path,
+                version: "bubblewrap 0.7.0".into()
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_bwrap_falls_back_when_userns_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Policy {
+            fail_if_unavailable: false,
+            ..Policy::default()
+        };
+        let b = finalize_bwrap(fake_bwrap(&dir, 1), "bubblewrap 0.7.0\n", &p)
+            .expect("userns denied without fail_if_unavailable ⇒ unsandboxed");
+        assert_eq!(b, Backend::Unavailable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_bwrap_errors_when_userns_denied_and_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Policy {
+            fail_if_unavailable: true,
+            ..Policy::default()
+        };
+        let err = finalize_bwrap(fake_bwrap(&dir, 1), "bubblewrap 0.7.0\n", &p)
+            .expect_err("userns denied under fail_if_unavailable ⇒ error");
+        assert!(matches!(err, SandboxError::BackendUnavailable { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_bwrap_skips_probe_in_nested_sandbox_mode() {
+        // enable_weaker_nested_sandbox omits --unshare-user, so a denied probe
+        // must not force a fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let p = Policy {
+            enable_weaker_nested_sandbox: true,
+            ..Policy::default()
+        };
+        let path = fake_bwrap(&dir, 1);
+        let b = finalize_bwrap(path.clone(), "bubblewrap 0.7.0\n", &p)
+            .expect("nested mode ⇒ Bwrap regardless of userns probe");
+        assert!(matches!(b, Backend::Bwrap { .. }));
     }
 }
