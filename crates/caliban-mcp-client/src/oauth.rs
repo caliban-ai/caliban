@@ -448,6 +448,10 @@ struct ProtectedResourceDoc {
 
 #[derive(Debug, Deserialize)]
 struct AuthServerDoc {
+    /// RFC 8414 §2: the authorization server's issuer identifier. When present
+    /// it MUST equal the AS URL we discovered it from (#339).
+    #[serde(default)]
+    issuer: Option<String>,
     authorization_endpoint: String,
     token_endpoint: String,
     /// `Option` because auth servers (GitHub) emit an explicit `null` here,
@@ -457,6 +461,30 @@ struct AuthServerDoc {
     /// RFC 7591 registration endpoint. `null` on servers without DCR (GitHub).
     #[serde(default)]
     registration_endpoint: Option<String>,
+}
+
+/// Reject a discovered OAuth endpoint that isn't `https`, unless it targets
+/// loopback (127.0.0.0/8, `::1`, `localhost`) — the standard dev/test
+/// exception. Without this, a hostile or MITM'd protected-resource document
+/// could advertise an `http://` token endpoint and the authorization code +
+/// PKCE verifier (and any bearer/secret) would be sent in cleartext (#339).
+fn require_secure(url: &Url, server: &str, kind: &str) -> Result<(), McpError> {
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    let is_loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if is_loopback && url.scheme() == "http" {
+        return Ok(());
+    }
+    Err(McpError::OauthDiscovery {
+        server: server.to_string(),
+        message: format!("insecure {kind} '{url}': https required (downgrade rejected)"),
+    })
 }
 
 /// Discover endpoints for `server_url`. Hits the MCP-flavoured
@@ -535,30 +563,55 @@ pub async fn discover_endpoints(
             server: server.to_string(),
             message: format!("parse {asd_url}: {e}"),
         })?;
-    Ok(OauthEndpoints {
-        auth_url: Url::parse(&asd.authorization_endpoint).map_err(|e| {
-            McpError::OauthDiscovery {
-                server: server.to_string(),
-                message: format!("invalid authorization_endpoint: {e}"),
-            }
-        })?,
-        token_url: Url::parse(&asd.token_endpoint).map_err(|e| McpError::OauthDiscovery {
+    let auth_url =
+        Url::parse(&asd.authorization_endpoint).map_err(|e| McpError::OauthDiscovery {
             server: server.to_string(),
-            message: format!("invalid token_endpoint: {e}"),
-        })?,
+            message: format!("invalid authorization_endpoint: {e}"),
+        })?;
+    let token_url = Url::parse(&asd.token_endpoint).map_err(|e| McpError::OauthDiscovery {
+        server: server.to_string(),
+        message: format!("invalid token_endpoint: {e}"),
+    })?;
+    // RFC 7591: carry the registration endpoint so `auto` can dynamically
+    // register a client when no static `client_id` was configured. A malformed
+    // URL here is non-fatal — treat it as "no DCR available".
+    let registration_endpoint = asd
+        .registration_endpoint
+        .as_deref()
+        .and_then(|s| Url::parse(s).ok());
+
+    // #339: require https (except loopback) on every discovered endpoint so a
+    // hostile/MITM'd protected-resource doc can't downgrade the flow to
+    // cleartext, and — RFC 8414 §3.3 — reject an AS whose advertised `issuer`
+    // doesn't match the URL we discovered it from (an AS mix-up steered by a
+    // hostile resource server).
+    require_secure(&auth_url, server, "authorization_endpoint")?;
+    require_secure(&token_url, server, "token_endpoint")?;
+    if let Some(reg) = &registration_endpoint {
+        require_secure(reg, server, "registration_endpoint")?;
+    }
+    if let Some(iss) = asd.issuer.as_deref() {
+        let expected = auth_server_url.as_str().trim_end_matches('/');
+        if iss.trim_end_matches('/') != expected {
+            return Err(McpError::OauthDiscovery {
+                server: server.to_string(),
+                message: format!(
+                    "issuer mismatch: metadata issuer '{iss}' != authorization server '{auth_server_url}'"
+                ),
+            });
+        }
+    }
+
+    Ok(OauthEndpoints {
+        auth_url,
+        token_url,
         scopes: if resource_scopes.is_empty() {
             asd.scopes_supported.unwrap_or_default()
         } else {
             resource_scopes
         },
         audience,
-        // RFC 7591: carry the registration endpoint so `auto` can dynamically
-        // register a client when no static `client_id` was configured. A
-        // malformed URL here is non-fatal — treat it as "no DCR available".
-        registration_endpoint: asd
-            .registration_endpoint
-            .as_deref()
-            .and_then(|s| Url::parse(s).ok()),
+        registration_endpoint,
     })
 }
 

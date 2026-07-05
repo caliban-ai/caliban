@@ -965,3 +965,96 @@ async fn refresh_uses_and_preserves_persisted_client_secret() {
         "client_secret must survive refresh for the next one"
     );
 }
+
+/// #339: a discovered `http://` (non-loopback) token endpoint is rejected — the
+/// authorization code + PKCE verifier must never be POSTed in cleartext.
+#[tokio::test]
+async fn discovery_rejects_insecure_token_endpoint() {
+    let server = spawn_mock_oauth_server().await;
+    let base = server.uri();
+    let as_issuer = format!("{base}/login/oauth");
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": "aud",
+            "authorization_servers": [as_issuer],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/login/oauth"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            // Downgraded to cleartext on a non-loopback host.
+            "token_endpoint": "http://token.evil.example/oauth/token",
+        })))
+        .mount(&server)
+        .await;
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let err = discover_endpoints("demo", &server_url, &http())
+        .await
+        .expect_err("an http token endpoint must be rejected");
+    let s = err.to_string();
+    assert!(s.contains("insecure") && s.contains("https"), "got: {s}");
+}
+
+/// #339: when the AS metadata advertises an `issuer`, it must equal the AS URL
+/// we discovered it from — an attacker-steered AS mix-up is rejected.
+#[tokio::test]
+async fn discovery_rejects_issuer_mismatch() {
+    let server = spawn_mock_oauth_server().await;
+    let base = server.uri();
+    let as_issuer = format!("{base}/login/oauth");
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": "aud",
+            "authorization_servers": [as_issuer],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/login/oauth"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issuer": "https://issuer.evil.example",
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            "token_endpoint": format!("{base}/oauth/token"),
+        })))
+        .mount(&server)
+        .await;
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let err = discover_endpoints("demo", &server_url, &http())
+        .await
+        .expect_err("issuer mismatch must be rejected");
+    assert!(err.to_string().contains("issuer mismatch"), "got: {err}");
+}
+
+/// #339: a matching `issuer` is accepted (the validation doesn't over-reject).
+#[tokio::test]
+async fn discovery_accepts_matching_issuer() {
+    let server = spawn_mock_oauth_server().await;
+    let base = server.uri();
+    let as_issuer = format!("{base}/login/oauth");
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": "aud",
+            "authorization_servers": [as_issuer.clone()],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/login/oauth"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issuer": as_issuer,
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            "token_endpoint": format!("{base}/oauth/token"),
+        })))
+        .mount(&server)
+        .await;
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let endpoints = discover_endpoints("demo", &server_url, &http())
+        .await
+        .expect("matching issuer must be accepted");
+    assert!(endpoints.token_url.as_str().ends_with("/oauth/token"));
+}
