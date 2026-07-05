@@ -338,6 +338,7 @@ async fn token_store_persists_and_reuses() {
         expires_at: Some(Utc::now() + chrono::Duration::seconds(3600)),
         scopes: vec!["read".to_string()],
         client_id: None,
+        ..Default::default()
     };
     store.put("svc", "aud", &tokens).expect("put");
     let cached = store.get("svc", "aud").expect("get").expect("some");
@@ -373,6 +374,7 @@ async fn refresh_swaps_in_new_access_token() {
         expires_at: Some(Utc::now() + chrono::Duration::seconds(10)),
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     assert!(old.needs_refresh(Utc::now()));
     let new = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
@@ -406,6 +408,7 @@ async fn token_endpoint_401_surfaces_exchange_error() {
         expires_at: None,
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     let err = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
         .await
@@ -433,6 +436,7 @@ async fn clear_on_401_removes_cached_token() {
                 expires_at: None,
                 scopes: vec![],
                 client_id: None,
+                ..Default::default()
             },
         )
         .expect("put");
@@ -455,6 +459,7 @@ async fn file_store_serves_as_keyring_fallback() {
         expires_at: None,
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     store.put("svc", "aud", &tokens).expect("put");
     let reread = FileStore::new(path);
@@ -488,6 +493,7 @@ async fn refresh_preserves_existing_refresh_token() {
         expires_at: None,
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     let new = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
         .await
@@ -554,6 +560,7 @@ async fn refresh_request_body_includes_required_fields() {
         expires_at: None,
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     let _ = refresh_tokens(
         &http(),
@@ -611,6 +618,7 @@ async fn token_endpoint_200_with_error_body_surfaces_error() {
         expires_at: None,
         scopes: vec![],
         client_id: None,
+        ..Default::default()
     };
     let err = refresh_tokens(&http(), "svc", &endpoints, "cid", None, &old)
         .await
@@ -652,6 +660,7 @@ async fn authenticator_reuses_cached_token() {
                 expires_at: Some(Utc::now() + chrono::Duration::seconds(3600)),
                 scopes: vec![],
                 client_id: Some("cid".to_string()),
+                ..Default::default()
             },
         )
         .expect("put");
@@ -764,6 +773,7 @@ async fn authenticator_refreshes_expiring_token() {
                 expires_at: Some(Utc::now() + chrono::Duration::seconds(10)),
                 scopes: vec![],
                 client_id: Some("cid".to_string()),
+                ..Default::default()
             },
         )
         .expect("put");
@@ -830,4 +840,128 @@ async fn oauth_flow_honors_fixed_callback_port() {
         "ephemeral redirect_uri should have an OS-assigned port, got {redirect2}"
     );
     flow2.cancel();
+}
+
+/// #333 M8: in `auto` mode a still-valid cached token is returned WITHOUT
+/// running endpoint discovery. Proven by installing NO discovery routes — a
+/// discovery attempt would 404 and error — yet `bearer_for` still succeeds from
+/// cache. (Pre-fix, discovery ran first to compute the audience key and this
+/// failed offline / when `.well-known` was down.)
+#[tokio::test]
+async fn authenticator_auto_reuses_cached_token_without_discovery() {
+    let server = spawn_mock_oauth_server().await;
+    // Deliberately NO discovery routes mounted.
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    store
+        .put(
+            "github",
+            "aud",
+            &OauthTokens {
+                access_token: "cached-access".to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(3600)),
+                client_id: Some("cid".to_string()),
+                audience: "aud".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("put");
+    let auth = OauthAuthenticator::new(
+        http(),
+        Arc::clone(&store),
+        /* interactive */ true,
+        None,
+    );
+    let server_url = Url::parse(&format!("{}/mcp", server.uri())).unwrap();
+    let token = auth
+        .bearer_for(
+            "github",
+            OauthMode::Auto,
+            &server_url,
+            &ManualOauthConfig::default(),
+        )
+        .await
+        .expect("fresh cached token must be reused without discovery");
+    assert_eq!(token.as_deref(), Some("cached-access"));
+}
+
+/// #333 M9: `register_client` captures a returned `client_secret` and its
+/// RFC 7591 `client_secret_expires_at` (Unix seconds; 0 → never).
+#[tokio::test]
+async fn register_client_captures_secret_and_expiry() {
+    let server = spawn_mock_oauth_server().await;
+    let expiry: i64 = 1_900_000_000; // a fixed future Unix timestamp
+    Mock::given(method("POST"))
+        .and(path("/register"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "client_id": "dyn-cid",
+            "client_secret": "dyn-secret",
+            "client_secret_expires_at": expiry,
+        })))
+        .mount(&server)
+        .await;
+    let reg_url = Url::parse(&format!("{}/register", server.uri())).unwrap();
+    let redirect = Url::parse("http://127.0.0.1:1/callback").unwrap();
+    let reg = register_client("svc", &reg_url, &redirect, "caliban", &http())
+        .await
+        .expect("registration");
+    assert_eq!(reg.client_id, "dyn-cid");
+    assert_eq!(reg.client_secret.as_deref(), Some("dyn-secret"));
+    assert_eq!(
+        reg.client_secret_expires_at,
+        chrono::DateTime::from_timestamp(expiry, 0)
+    );
+}
+
+/// #333 M9: a confidential client's refresh uses the *persisted* `client_secret`
+/// (a DCR client has no manual secret) and carries it forward for the next
+/// refresh. The mock token endpoint only accepts the refresh when the secret is
+/// present in the form body.
+#[tokio::test]
+async fn refresh_uses_and_preserves_persisted_client_secret() {
+    let server = spawn_mock_oauth_server().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("client_secret=dcr-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "refreshed-access",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+    store
+        .put(
+            "github",
+            "aud",
+            &OauthTokens {
+                access_token: "old".to_string(),
+                refresh_token: Some("r".to_string()),
+                // Near expiry → forces the silent-refresh path.
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(10)),
+                client_id: Some("cid".to_string()),
+                client_secret: Some("dcr-secret".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("put");
+    // manual_cfg has client_secret: None, so only the persisted secret can satisfy the mock.
+    let auth = OauthAuthenticator::new(
+        http(),
+        Arc::clone(&store),
+        /* interactive */ true,
+        None,
+    );
+    let url = Url::parse("https://api.example/mcp").unwrap();
+    let token = auth
+        .bearer_for("github", OauthMode::Manual, &url, &manual_cfg(&server))
+        .await
+        .expect("refresh should succeed using the persisted client_secret");
+    assert_eq!(token.as_deref(), Some("refreshed-access"));
+    let cached = store.get("github", "aud").expect("get").expect("some");
+    assert_eq!(
+        cached.client_secret.as_deref(),
+        Some("dcr-secret"),
+        "client_secret must survive refresh for the next one"
+    );
 }

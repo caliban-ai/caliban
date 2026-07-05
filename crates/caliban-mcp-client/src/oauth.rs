@@ -89,9 +89,10 @@ pub struct OauthEndpoints {
     pub registration_endpoint: Option<Url>,
 }
 
-/// One persisted token bundle. Stored under
-/// `keyring("caliban-mcp", "<server>:<audience>")` as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One persisted token bundle. Stored under `keyring("caliban-mcp", "<server>")`
+/// as JSON (keyed by server alone — see [`account_key`] — so a warm-cache
+/// lookup can precede endpoint discovery).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OauthTokens {
     /// Access token (Bearer).
     pub access_token: String,
@@ -111,6 +112,22 @@ pub struct OauthTokens {
     /// `None` for tokens written before this field existed (serde default).
     #[serde(default)]
     pub client_id: Option<String>,
+    /// The resolved resource `audience` these tokens were issued for. Persisted
+    /// so a warm-cache reuse can return without re-running discovery (#333 M8),
+    /// and carried as the `audience` claim on refresh.
+    #[serde(default)]
+    pub audience: String,
+    /// The `client_secret`, when the client is confidential — a static manual
+    /// secret or one returned by RFC 7591 dynamic registration. Persisted so a
+    /// DCR-issued confidential client can silently refresh instead of forcing a
+    /// fresh browser flow every expiry (#333 M9). `None` for a public client.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Absolute expiry of `client_secret` (RFC 7591 `client_secret_expires_at`),
+    /// when the registration reported one. `None` = no secret, or one that does
+    /// not expire. Persisted for observability / future re-registration.
+    #[serde(default)]
+    pub client_secret_expires_at: Option<DateTime<Utc>>,
 }
 
 impl OauthTokens {
@@ -181,8 +198,15 @@ pub trait TokenStore: Send + Sync + std::fmt::Debug {
     fn clear(&self, server: &str, audience: &str) -> Result<(), McpError>;
 }
 
-fn account_key(server: &str, audience: &str) -> String {
-    format!("{server}:{audience}")
+/// Cache key for a server's token bundle. Keyed by `server` **alone** (the
+/// `audience` argument is retained for API compatibility but ignored): the
+/// resolved audience is only knowable after endpoint discovery, so keying by it
+/// would force a discovery round-trip before any cache lookup — defeating warm
+/// reuse offline / when the `.well-known` host is down (#333 M8). A server maps
+/// to a single MCP resource audience, so `server` is a sufficient key; the
+/// audience travels inside the stored [`OauthTokens`].
+fn account_key(server: &str, _audience: &str) -> String {
+    server.to_string()
 }
 
 /// In-memory store — used by tests and as a fallback when nothing else
@@ -629,6 +653,10 @@ pub struct RegisteredClient {
     pub client_id: String,
     /// Client secret, when the server issued a confidential client.
     pub client_secret: Option<String>,
+    /// Absolute expiry of `client_secret` (RFC 7591 `client_secret_expires_at`),
+    /// when the server reported a non-zero one. `None` = no secret or a secret
+    /// that does not expire.
+    pub client_secret_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Register a public (PKCE) client with an RFC 7591 `registration_endpoint`.
@@ -683,17 +711,27 @@ pub async fn register_client(
                 server: server.to_string(),
                 message: format!("malformed registration response: {e}"),
             })?;
+    // RFC 7591: `client_secret_expires_at` is Unix seconds; 0 means "never".
+    let client_secret_expires_at = doc
+        .client_secret_expires_at
+        .filter(|&secs| secs > 0)
+        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0));
     Ok(RegisteredClient {
         client_id: doc.client_id,
         client_secret: doc.client_secret,
+        client_secret_expires_at,
     })
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)] // RFC 7591 field names are all `client_*`.
 struct ClientRegistrationResponse {
     client_id: String,
     #[serde(default)]
     client_secret: Option<String>,
+    /// RFC 7591: absolute expiry of the secret as Unix seconds (0 = never).
+    #[serde(default)]
+    client_secret_expires_at: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,9 +1155,12 @@ async fn parse_token_response(
         expires_at,
         scopes,
         // Set by the caller (`await_callback` / `refresh_tokens` / the
-        // authenticator) which knows the client_id; the token endpoint doesn't
-        // echo it back.
+        // authenticator) which knows the client identity + audience; the token
+        // endpoint doesn't echo them back.
         client_id: None,
+        audience: String::new(),
+        client_secret: None,
+        client_secret_expires_at: None,
     })
 }
 
@@ -1173,9 +1214,14 @@ pub async fn refresh_tokens(
         // still work.
         new.refresh_token.clone_from(&tokens.refresh_token);
     }
-    // Preserve the client_id binding so the *next* refresh still targets the
-    // right client (the token endpoint never echoes it back).
+    // Preserve the client identity + audience so the *next* refresh still
+    // targets the right client with the right secret (the token endpoint never
+    // echoes these back). #333: without carrying the client_secret forward, a
+    // confidential DCR client would lose it after the first refresh.
     new.client_id = Some(client_id.to_string());
+    new.client_secret = client_secret.map(str::to_string);
+    new.client_secret_expires_at = tokens.client_secret_expires_at;
+    new.audience.clone_from(&endpoints.audience);
     Ok(new)
 }
 
@@ -1259,69 +1305,78 @@ impl OauthAuthenticator {
         server_url: &Url,
         manual: &ManualOauthConfig,
     ) -> Result<Option<String>, McpError> {
+        if matches!(mode, OauthMode::Off) {
+            return Ok(None);
+        }
+        let now = Utc::now();
+
+        // 1. Warm-cache fast path (#333 M8): return a still-valid token WITHOUT
+        //    endpoint discovery. For `auto`, discovery is two round-trips whose
+        //    only purpose here would be to recompute the cache key; keying by
+        //    server (see `account_key`) lets a valid on-disk token be reused
+        //    offline / when the `.well-known` host is down.
+        let cached = self.store.get(server, "")?;
+        if let Some(existing) = &cached
+            && !existing.needs_refresh(now)
+        {
+            tracing::debug!(
+                target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                server,
+                "reusing cached oauth token (no discovery)",
+            );
+            return Ok(Some(existing.access_token.clone()));
+        }
+
+        // 2. Need endpoints — to refresh a near-expiry token or run a cold
+        //    interactive flow. Resolve them now (discovery for `auto`). Explicit
+        //    `oauth_config.scopes` always wins so an operator can narrow/correct
+        //    what discovery inferred.
         let mut endpoints = match mode {
-            OauthMode::Off => return Ok(None),
+            OauthMode::Off => unreachable!("Off handled above"),
             OauthMode::Auto => discover_endpoints(server, server_url, &self.http).await?,
             OauthMode::Manual => endpoints_from_manual(server, manual, server_url)?,
         };
-        // Explicit `oauth_config.scopes` always wins — it lets an operator
-        // narrow or correct the scopes discovery inferred (or supply them when
-        // the server advertises none). Empty means "use what was resolved".
         if !manual.scopes.is_empty() {
             endpoints.scopes = manual.scopes.clone();
         }
 
-        // 1. Reuse or refresh a cached token, keyed by the resolved audience.
-        let now = Utc::now();
-        if let Some(existing) = self.store.get(server, &endpoints.audience)? {
-            if !existing.needs_refresh(now) {
-                tracing::debug!(
-                    target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
-                    server,
-                    "reusing cached oauth token",
-                );
-                return Ok(Some(existing.access_token));
-            }
-            // Near expiry — try a silent refresh before falling back to the
-            // full interactive flow. Use the client_id the token was issued to.
-            if existing.refresh_token.is_some()
-                && let Some(client_id) = existing
-                    .client_id
-                    .clone()
-                    .or_else(|| manual.client_id.clone())
+        // 3. Silent refresh of a near-expiry cached token, preferring the
+        //    client_secret the token was issued with (#333 M9) over a manual
+        //    one — a DCR-issued confidential client has no manual secret.
+        if let Some(existing) = &cached
+            && existing.refresh_token.is_some()
+            && let Some(client_id) = existing
+                .client_id
+                .clone()
+                .or_else(|| manual.client_id.clone())
+        {
+            let secret = existing
+                .client_secret
+                .as_deref()
+                .or(manual.client_secret.as_deref());
+            match refresh_tokens(&self.http, server, &endpoints, &client_id, secret, existing).await
             {
-                match refresh_tokens(
-                    &self.http,
-                    server,
-                    &endpoints,
-                    &client_id,
-                    manual.client_secret.as_deref(),
-                    &existing,
-                )
-                .await
-                {
-                    Ok(refreshed) => {
-                        self.store.put(server, &endpoints.audience, &refreshed)?;
-                        tracing::info!(
-                            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
-                            server,
-                            "refreshed oauth token",
-                        );
-                        return Ok(Some(refreshed.access_token));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
-                            server,
-                            error = %e,
-                            "oauth token refresh failed; re-authenticating interactively",
-                        );
-                    }
+                Ok(refreshed) => {
+                    self.store.put(server, "", &refreshed)?;
+                    tracing::info!(
+                        target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                        server,
+                        "refreshed oauth token",
+                    );
+                    return Ok(Some(refreshed.access_token));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
+                        server,
+                        error = %e,
+                        "oauth token refresh failed; re-authenticating interactively",
+                    );
                 }
             }
         }
 
-        // 2. Cold cache — need a fresh interactive authorization.
+        // 4. Cold cache — fresh interactive authorization.
         self.interactive_authorize(server, &endpoints, manual).await
     }
 
@@ -1369,8 +1424,8 @@ impl OauthAuthenticator {
         // to register (DCR) and to present in the auth URL. Holding the bound
         // listener across registration avoids any unbind/rebind race.
         let (listener, redirect_uri) = bind_loopback(server, self.callback_port).await?;
-        let (client_id, client_secret) = match source {
-            Source::Static(cid, secret) => (cid, secret),
+        let (client_id, client_secret, secret_expires_at) = match source {
+            Source::Static(cid, secret) => (cid, secret, None),
             Source::Dcr(reg_url) => {
                 let registered =
                     register_client(server, &reg_url, &redirect_uri, "caliban", &self.http).await?;
@@ -1380,18 +1435,27 @@ impl OauthAuthenticator {
                     client_id = registered.client_id.as_str(),
                     "registered oauth client dynamically (RFC 7591)",
                 );
-                (registered.client_id, registered.client_secret)
+                (
+                    registered.client_id,
+                    registered.client_secret,
+                    registered.client_secret_expires_at,
+                )
             }
         };
 
         let mut opts =
             OauthFlowOptions::new(server.to_string(), endpoints.clone(), client_id.clone());
-        opts.client_secret = client_secret;
+        opts.client_secret = client_secret.clone();
         let flow = OauthFlow::start_on_listener(opts, listener, redirect_uri);
         present_auth_url(server, &flow.auth_url);
         let mut tokens = flow.await_callback(&self.http).await?;
         tokens.client_id = Some(client_id);
-        self.store.put(server, &endpoints.audience, &tokens)?;
+        // Persist the client identity + audience so a later refresh needs no
+        // discovery and a confidential DCR client can refresh silently (#333).
+        tokens.client_secret = client_secret;
+        tokens.client_secret_expires_at = secret_expires_at;
+        tokens.audience.clone_from(&endpoints.audience);
+        self.store.put(server, "", &tokens)?;
         tracing::info!(
             target: caliban_common::tracing_targets::TARGET_MCP_OAUTH,
             server,
@@ -1476,6 +1540,7 @@ mod tests {
             expires_at: None,
             scopes: vec![],
             client_id: None,
+            ..Default::default()
         };
         assert!(!t.needs_refresh(Utc::now()));
     }
@@ -1489,6 +1554,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(10)),
             scopes: vec![],
             client_id: None,
+            ..Default::default()
         };
         assert!(t.needs_refresh(now));
     }
@@ -1502,6 +1568,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(3600)),
             scopes: vec![],
             client_id: None,
+            ..Default::default()
         };
         assert!(!t.needs_refresh(now));
     }
@@ -1515,6 +1582,7 @@ mod tests {
             expires_at: None,
             scopes: vec!["read".to_string()],
             client_id: None,
+            ..Default::default()
         };
         store.put("svc", "aud", &tokens).expect("put");
         let got = store.get("svc", "aud").expect("get").expect("some");
@@ -1536,6 +1604,7 @@ mod tests {
             expires_at: None,
             scopes: vec![],
             client_id: None,
+            ..Default::default()
         };
         store.put("svc", "aud", &tokens).expect("put");
         // File exists and is non-empty.
@@ -1564,6 +1633,7 @@ mod tests {
                     expires_at: None,
                     scopes: vec![],
                     client_id: None,
+                    ..Default::default()
                 },
             )
             .expect("put");
