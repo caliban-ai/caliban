@@ -94,6 +94,14 @@ pub fn render_profile(policy: &Policy) -> String {
             "(allow network-outbound (remote tcp \"127.0.0.1:{}\"))",
             net.socks_proxy_port
         );
+    } else if net.allow_all_outbound {
+        // Filesystem-confinement policies (e.g. the `--workspace` Bash fence)
+        // keep the network fully open so ordinary commands still work. DNS on
+        // macOS is resolved via mDNSResponder over Mach, so a blanket
+        // mach-lookup is required alongside the network allow.
+        let _ = writeln!(out, ";; Network: unrestricted egress (allow_all_outbound).");
+        let _ = writeln!(out, "(allow network*)");
+        let _ = writeln!(out, "(allow mach-lookup)");
     } else if !net.allowed_domains.is_empty() {
         let _ = writeln!(out, ";; Network: allowed_domains (TCP/443).");
         let _ = writeln!(out, "(allow network-outbound");
@@ -213,6 +221,31 @@ mod tests {
         p.network.allowed_domains.clear();
         let s = render_profile(&p);
         assert!(!s.contains("(allow network-outbound"));
+    }
+
+    #[test]
+    fn allow_all_outbound_emits_blanket_network_and_mach_lookup() {
+        let mut p = make_policy();
+        p.network.allowed_domains.clear();
+        p.network.allow_all_outbound = true;
+        let s = render_profile(&p);
+        assert!(s.contains("(allow network*)"), "profile:\n{s}");
+        assert!(s.contains("(allow mach-lookup)"), "profile:\n{s}");
+    }
+
+    #[test]
+    fn proxy_wins_over_allow_all_outbound() {
+        // A proxy lock-down must still take precedence over the blanket allow.
+        let mut p = make_policy();
+        p.network.allowed_domains.clear();
+        p.network.allow_all_outbound = true;
+        p.network.http_proxy_port = 8888;
+        let s = render_profile(&p);
+        assert!(s.contains(r#"(allow network-outbound (remote tcp "127.0.0.1:8888"))"#));
+        assert!(
+            !s.contains("(allow network*)"),
+            "blanket allow leaked past proxy:\n{s}"
+        );
     }
 
     #[test]

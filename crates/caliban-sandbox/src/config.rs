@@ -52,6 +52,16 @@ pub struct NetworkAcl {
     /// `127.0.0.1:<socks_proxy_port>`.
     #[serde(default)]
     pub socks_proxy_port: u16,
+    /// Allow **all** outbound network access, bypassing the default egress
+    /// block. This is the escape hatch for policies whose purpose is
+    /// *filesystem* confinement (e.g. the `--workspace` Bash fence) and that
+    /// must not break ordinary network-using commands (`git fetch`, `cargo`,
+    /// `curl`). It keeps the network namespace on Linux (no `--unshare-net`)
+    /// and emits a blanket `(allow network*)` + `(allow mach-lookup)` on
+    /// macOS. Mutually exclusive in spirit with the proxy/allowlist modes; if
+    /// a proxy port is also set, the proxy lock-down still wins.
+    #[serde(default)]
+    pub allow_all_outbound: bool,
     /// Allow Unix-socket access (e.g. the Docker daemon socket).
     #[serde(default)]
     pub allow_unix_sockets: bool,
