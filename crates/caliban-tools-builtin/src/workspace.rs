@@ -84,6 +84,13 @@ impl WorkspaceRoot {
         } else {
             self.root.join(&candidate)
         };
+        // Collapse `.`/`..` lexically *before* the containment check. Canonicalizing
+        // only the existing ancestor leaves a non-existent tail (e.g. `x/../../y`,
+        // where `x` doesn't exist) with its `..` intact — it would slip past the
+        // lexical `starts_with` prefix check below and then be resolved by the OS
+        // at write time, escaping the fence (#327). Normalizing first makes the
+        // prefix check sound.
+        let abs = lexically_normalize(&abs);
         // Canonicalize parent (file may not exist yet for Write tool).
         let canon = canonicalize_existing_ancestor(&abs);
         if self.restrict_to_root && !canon.starts_with(&self.root) {
@@ -105,8 +112,40 @@ impl WorkspaceRoot {
     }
 }
 
+/// Lexically collapse `.` and `..` components without touching the filesystem.
+///
+/// A leading `..` on a rooted path is dropped (you cannot ascend past the
+/// root); on a relative path it is preserved. This is a purely textual
+/// normalization used to neutralize traversal (`..`) in the not-yet-existent
+/// tail of a path before the workspace-containment check. It intentionally does
+/// **not** resolve symlinks — that is left to `canonicalize_existing_ancestor`,
+/// which follows this call and canonicalizes whatever prefix already exists.
+fn lexically_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if let Some(Component::Normal(_)) = out.components().next_back() {
+                    out.pop();
+                } else if !out.has_root() {
+                    // Relative path with a leading `..`: preserve it.
+                    out.push("..");
+                }
+                // Rooted path at its root: `..` is a no-op (cannot ascend past root).
+            }
+            Component::Normal(seg) => out.push(seg),
+        }
+    }
+    out
+}
+
 /// Canonicalize as much of the path as exists, then append the rest. This
-/// lets us check restriction even for paths that don't yet exist.
+/// lets us check restriction even for paths that don't yet exist. Callers are
+/// expected to pass a lexically-normalized path (see `lexically_normalize`) so
+/// the re-appended tail carries no `..` components.
 fn canonicalize_existing_ancestor(p: &Path) -> PathBuf {
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     let mut cur = p;
@@ -214,6 +253,33 @@ mod tests {
         let root = WorkspaceRoot::new(&inner).restricted();
         let err = root.resolve("../escape.txt").unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn restricted_rejects_traversal_through_nonexistent_tail() {
+        // Regression for #327: `..` in a tail whose prefix does not yet exist
+        // must still be collapsed before the containment check, otherwise it
+        // escapes the fence once the OS resolves it at write time.
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let root = WorkspaceRoot::new(&proj).restricted();
+        // `x` does not exist, so canonicalization stops at `proj`; the `../..`
+        // tail must be neutralized lexically.
+        let err = root.resolve("x/../../secrets/creds").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn restricted_allows_internal_parent_ref() {
+        // A `..` that stays inside the root is still permitted after normalization.
+        let tmp = TempDir::new().unwrap();
+        let root = WorkspaceRoot::new(tmp.path()).restricted();
+        let resolved = root.resolve("a/../b.txt").unwrap();
+        assert!(resolved.starts_with(root.root()));
+        assert!(resolved.ends_with("b.txt"));
+        // The `..` must be gone from the resolved path.
+        assert!(!resolved.to_string_lossy().contains(".."));
     }
 
     #[test]
