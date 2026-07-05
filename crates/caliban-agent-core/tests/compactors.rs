@@ -64,7 +64,8 @@ async fn drop_oldest_truncates_above_threshold() {
         .compact(&messages, &fake_caps(2000))
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .messages;
     // Should preserve leading System + at most 2 most-recent messages (1 turn = 2 messages).
     assert!(result.len() <= 3);
     assert_eq!(result[0].role, caliban_provider::Role::System);

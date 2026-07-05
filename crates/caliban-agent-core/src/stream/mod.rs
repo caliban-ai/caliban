@@ -558,11 +558,16 @@ impl Agent {
     /// `tracking` so repeated failures eventually disable autocompaction for
     /// the run. Non-fatal: hook/compactor errors are logged, never propagated.
     /// 1:1 lift of the inline compaction block.
+    ///
+    /// Returns any provider usage the compaction itself incurred (e.g. the
+    /// summarizer call), so the caller can fold autocompact spend into the
+    /// session totals (#329/#292). Zero when no compaction ran or the strategy
+    /// is LLM-free.
     async fn maybe_compact(
         &self,
         history: &mut Vec<Message>,
         tracking: &mut recovery::AutoCompactTracking,
-    ) {
+    ) -> Usage {
         let active_model_snapshot = self.active_model();
         let caps = self.provider.capabilities(active_model_snapshot.as_str());
         let token_count_before = crate::compact::estimate_tokens(history);
@@ -577,7 +582,7 @@ impl Agent {
             !tracking.disabled && utilization >= t
         });
         if !should_attempt {
-            return;
+            return Usage::default();
         }
         let strategy = self.compactor.strategy_name();
         let compact_ctx = CompactCtx {
@@ -599,11 +604,12 @@ impl Agent {
                         recovery::MAX_CONSECUTIVE_COMPACT_FAILURES
                     );
                 }
+                Usage::default()
             }
-            Ok(Some(new)) => {
+            Ok(Some(compaction)) => {
                 tracking.consecutive_failures = 0;
-                let token_count_after = crate::compact::estimate_tokens(&new);
-                *history = new;
+                let token_count_after = crate::compact::estimate_tokens(&compaction.messages);
+                *history = compaction.messages;
                 let outcome = CompactOutcome {
                     token_count_after,
                     compacted: true,
@@ -611,6 +617,7 @@ impl Agent {
                 if let Err(e) = self.hooks.post_compact(&compact_ctx, &outcome).await {
                     tracing::warn!(error = %e, "post_compact hook error (non-fatal)");
                 }
+                compaction.usage.unwrap_or_default()
             }
             Ok(None) => {
                 tracking.consecutive_failures = 0;
@@ -621,6 +628,7 @@ impl Agent {
                 if let Err(e) = self.hooks.post_compact(&compact_ctx, &outcome).await {
                     tracing::warn!(error = %e, "post_compact hook error (non-fatal)");
                 }
+                Usage::default()
             }
         }
     }
@@ -1065,24 +1073,28 @@ impl Agent {
                 if self.config.micro_compact_enabled {
                     use crate::compact::Compactor as _;
                     let caps = self.provider.capabilities(&self.config.model);
-                    if let Ok(Some(new)) = crate::compact::MicroCompactor::new()
+                    if let Ok(Some(compaction)) = crate::compact::MicroCompactor::new()
                         .compact(&history, &caps)
                         .await
                     {
                         let freed = crate::compact::estimate_tokens(&history)
-                            .saturating_sub(crate::compact::estimate_tokens(&new));
+                            .saturating_sub(crate::compact::estimate_tokens(&compaction.messages));
                         tracing::debug!(
                             target: "caliban::compact",
                             freed_tokens = freed,
                             "microcompact",
                         );
-                        history = new;
+                        history = compaction.messages;
                     }
                 }
 
                 // ---- Compaction (threshold-gated autocompact) ----
-                self.maybe_compact(&mut history, recovery.auto_tracking_mut())
+                // Fold any summarization spend into the session totals so
+                // autocompact cost is not invisible (#329/#292).
+                let compact_usage = self
+                    .maybe_compact(&mut history, recovery.auto_tracking_mut())
                     .await;
+                total_usage.merge(compact_usage);
 
                 // ---- Build completion request ----
                 let req = self.build_request(

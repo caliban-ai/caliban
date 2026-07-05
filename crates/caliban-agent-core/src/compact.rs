@@ -4,27 +4,133 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use caliban_provider::{Capabilities, Message, Provider, Role};
+use caliban_provider::{
+    Capabilities, ContentBlock, Message, Provider, Role, TextBlock, ToolResultBlock, Usage,
+};
 
 use crate::error::{Error, Result};
+
+/// Outcome of a compaction pass: the rewritten history plus any provider usage
+/// the compactor itself incurred. Only `SummarizingCompactor` makes a provider
+/// call, so `usage` is `None` for the LLM-free strategies; threading it out
+/// lets the caller fold autocompact spend into session totals (#292/#329).
+#[derive(Debug, Clone, Default)]
+pub struct Compaction {
+    /// The rewritten message history to install.
+    pub messages: Vec<Message>,
+    /// Provider usage consumed producing this compaction (e.g. the
+    /// summarization call), if any.
+    pub usage: Option<Usage>,
+}
+
+impl Compaction {
+    /// A compaction with no associated provider usage (LLM-free strategies).
+    fn free(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            usage: None,
+        }
+    }
+}
 
 /// Compactor — strategy for keeping the message history under the model's
 /// input window.
 #[async_trait]
 pub trait Compactor: Send + Sync {
-    /// Decide whether to compact. Returns the new messages if compaction
-    /// was applied; None if no-op.
+    /// Decide whether to compact. Returns the new messages (plus any usage the
+    /// compactor itself incurred) if compaction was applied; `None` if no-op.
     async fn compact(
         &self,
         messages: &[Message],
         capabilities: &Capabilities,
-    ) -> Result<Option<Vec<Message>>>;
+    ) -> Result<Option<Compaction>>;
 
     /// Strategy identifier surfaced to `PreCompact` / `PostCompact` hooks.
     /// Defaults to the type's short Rust name; impls override as desired.
     fn strategy_name(&self) -> &'static str {
         "unknown"
     }
+}
+
+/// Safety net that drops tool-call blocks which would be orphaned in
+/// `messages` — a `tool_result` whose `tool_use` is absent (→ Anthropic 400)
+/// or a dangling `tool_use` with no result — plus any message emptied as a
+/// result. The window boundary is chosen by [`clean_tail_start`] so orphans
+/// shouldn't normally arise; this guards against a mid-turn cut or a
+/// malformed history. It intentionally does **not** reorder or strip by role
+/// (see the note in [`clean_tail_start`]).
+#[must_use]
+pub fn sanitize_tool_pairs(messages: &[Message]) -> Vec<Message> {
+    use std::collections::HashSet;
+
+    let mut use_ids: HashSet<&str> = HashSet::new();
+    let mut result_ids: HashSet<&str> = HashSet::new();
+    for m in messages {
+        for cb in &m.content {
+            match cb {
+                ContentBlock::ToolUse(tu) => {
+                    use_ids.insert(tu.id.as_str());
+                }
+                ContentBlock::ToolResult(tr) => {
+                    result_ids.insert(tr.tool_use_id.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    for m in messages {
+        let content: Vec<ContentBlock> = m
+            .content
+            .iter()
+            .filter(|cb| match cb {
+                // A result whose use was dropped is an orphan → drop it.
+                ContentBlock::ToolResult(tr) => use_ids.contains(tr.tool_use_id.as_str()),
+                // A use whose result is absent (dangling call) → drop it.
+                ContentBlock::ToolUse(tu) => result_ids.contains(tu.id.as_str()),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        if !content.is_empty() {
+            out.push(Message {
+                role: m.role.clone(),
+                content,
+            });
+        }
+    }
+    out
+}
+
+/// Choose a start index into `body` that keeps roughly the last `desired`
+/// messages but begins on a *genuine user turn* — a `User` message carrying no
+/// `ToolResult`. A blind offset can open the retained window on a `tool_result`
+/// whose `tool_use` fell into the dropped slice (Anthropic rejects the orphan)
+/// or on a bare assistant message (the first message must be a user turn); a
+/// clean user turn is the only boundary from which every following tool pair is
+/// self-contained.
+///
+/// Prefers the clean boundary at or after the ideal offset (tighter budget),
+/// then the nearest one before it (keeps more context), then falls back to `0`
+/// — keep everything — when no clean boundary exists (a single long agentic
+/// turn); the in-window truncation fallback handles any resulting overflow.
+fn clean_tail_start(body: &[Message], desired: usize) -> usize {
+    let ideal = body.len().saturating_sub(desired);
+    let is_clean = |m: &Message| {
+        m.role == Role::User
+            && !m
+                .content
+                .iter()
+                .any(|cb| matches!(cb, ContentBlock::ToolResult(_)))
+    };
+    if let Some(i) = (ideal..body.len()).find(|&i| is_clean(&body[i])) {
+        return i;
+    }
+    if let Some(i) = (0..ideal).rev().find(|&i| is_clean(&body[i])) {
+        return i;
+    }
+    0
 }
 
 /// Janitor compactor: replaces older `ToolResult` blocks with a one-line
@@ -47,7 +153,7 @@ impl Compactor for MicroCompactor {
         &self,
         messages: &[Message],
         _capabilities: &Capabilities,
-    ) -> Result<Option<Vec<Message>>> {
+    ) -> Result<Option<Compaction>> {
         // Map tool_use_id → is_error from the ToolResult blocks, so a failed
         // result can't be chosen as the surviving "latest" (#170).
         let mut errored: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
@@ -127,7 +233,7 @@ impl Compactor for MicroCompactor {
                 }
             })
             .collect();
-        Ok(Some(new))
+        Ok(Some(Compaction::free(new)))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -177,6 +283,73 @@ pub fn estimate_tokens(messages: &[Message]) -> u32 {
     u32::try_from(chars / 4).unwrap_or(u32::MAX)
 }
 
+/// Last-resort in-window reducer (#329): when the retained tail alone still
+/// exceeds `max_tokens` — typically a single oversized tool result inside the
+/// last few turns — truncate the largest text/tool-result payloads in place
+/// until it fits, instead of no-op'ing forever (`Summarizing`) or hard-erroring
+/// (`DropOldest`, which would trip the consecutive-failure disable). Preserves
+/// message and turn structure plus tool pairing; only shrinks block *contents*.
+fn truncate_in_window(messages: &[Message], max_tokens: u32) -> Vec<Message> {
+    // Lower a uniform per-text-block char cap until the whole window fits (or
+    // we hit a floor). Monotone and bounded — no pathological spin.
+    let mut cap = 8192usize;
+    let mut out = cap_blocks(messages, cap);
+    while cap > 256 && estimate_tokens(&out) > max_tokens {
+        cap /= 2;
+        out = cap_blocks(messages, cap);
+    }
+    out
+}
+
+/// Clone `messages`, truncating every text / tool-result-text payload to at
+/// most `cap` characters. Thinking blocks are left intact (their signatures
+/// must not be mangled) and non-text blocks pass through unchanged.
+fn cap_blocks(messages: &[Message], cap: usize) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| Message {
+            role: m.role.clone(),
+            content: m.content.iter().map(|cb| cap_block(cb, cap)).collect(),
+        })
+        .collect()
+}
+
+fn cap_block(cb: &ContentBlock, cap: usize) -> ContentBlock {
+    match cb {
+        ContentBlock::Text(t) => ContentBlock::Text(TextBlock {
+            text: cap_text(&t.text, cap),
+            cache_control: t.cache_control,
+        }),
+        ContentBlock::ToolResult(tr) => ContentBlock::ToolResult(ToolResultBlock {
+            tool_use_id: tr.tool_use_id.clone(),
+            content: tr
+                .content
+                .iter()
+                .map(|inner| cap_block(inner, cap))
+                .collect(),
+            is_error: tr.is_error,
+        }),
+        other => other.clone(),
+    }
+}
+
+/// Truncate `s` to about `cap` chars on a UTF-8 boundary, leaving a marker that
+/// records how much was elided.
+fn cap_text(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[… {} chars truncated by in-window compaction …]",
+        &s[..end],
+        s.len() - end
+    )
+}
+
 /// Noop — never compacts.
 #[derive(Debug, Default)]
 pub struct NoopCompactor;
@@ -187,7 +360,7 @@ impl Compactor for NoopCompactor {
         &self,
         _messages: &[Message],
         _capabilities: &Capabilities,
-    ) -> Result<Option<Vec<Message>>> {
+    ) -> Result<Option<Compaction>> {
         Ok(None)
     }
 
@@ -222,7 +395,7 @@ impl Compactor for DropOldestCompactor {
         &self,
         messages: &[Message],
         capabilities: &Capabilities,
-    ) -> Result<Option<Vec<Message>>> {
+    ) -> Result<Option<Compaction>> {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target =
             (f64::from(capabilities.max_input_tokens) * f64::from(self.target_fraction)) as u32;
@@ -237,22 +410,32 @@ impl Compactor for DropOldestCompactor {
         let leading_systems = messages[..leading_system_count].to_vec();
         let body = &messages[leading_system_count..];
 
-        // Keep the last keep_recent_turns × 2 messages of body (pairs of user+assistant).
+        // Keep the last keep_recent_turns × 2 messages of body (pairs of
+        // user+assistant), but #329: snap the boundary to a clean user turn so
+        // the window can't open on an orphaned tool_result / bare assistant.
         let keep = (self.keep_recent_turns as usize) * 2;
-        let body_kept = if body.len() <= keep {
-            body.to_vec()
-        } else {
-            body[body.len() - keep..].to_vec()
-        };
+        let start = clean_tail_start(body, keep);
+        let mut tail = sanitize_tool_pairs(&body[start..]);
+
+        // #329: if the retained tail alone still exceeds the hard window (one
+        // oversized tool result within the last few turns), shrink payloads in
+        // place rather than hard-erroring — which would trip the consecutive-
+        // failure disable and leave the run permanently overflowing.
+        let systems_tokens = estimate_tokens(&leading_systems);
+        let tail_budget = capabilities.max_input_tokens.saturating_sub(systems_tokens);
+        if estimate_tokens(&tail) > tail_budget {
+            tail = truncate_in_window(&tail, tail_budget);
+        }
 
         let mut new_messages = leading_systems;
-        new_messages.extend(body_kept);
+        new_messages.extend(tail);
         if estimate_tokens(&new_messages) > capabilities.max_input_tokens {
             return Err(Error::Compaction(
-                "DropOldestCompactor: kept tail still exceeds max_input_tokens".into(),
+                "DropOldestCompactor: kept tail still exceeds max_input_tokens after truncation"
+                    .into(),
             ));
         }
-        Ok(Some(new_messages))
+        Ok(Some(Compaction::free(new_messages)))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -285,11 +468,14 @@ impl std::fmt::Debug for SummarizingCompactor {
 
 #[async_trait]
 impl Compactor for SummarizingCompactor {
+    // Split point + old-slice rendering + summary request + tail sanitize/
+    // truncate keep this over the 100-line lint; it reads as one linear flow.
+    #[allow(clippy::too_many_lines)]
     async fn compact(
         &self,
         messages: &[Message],
         capabilities: &Capabilities,
-    ) -> Result<Option<Vec<Message>>> {
+    ) -> Result<Option<Compaction>> {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target =
             (f64::from(capabilities.max_input_tokens) * f64::from(self.target_fraction)) as u32;
@@ -302,15 +488,28 @@ impl Compactor for SummarizingCompactor {
             .count();
         let leading_systems = messages[..leading_system_count].to_vec();
         let body = &messages[leading_system_count..];
+        // #329: split on a clean user turn so `recent` never opens on an
+        // orphaned tool_result / bare assistant, and `old` is a whole-turn
+        // prefix the summarizer can render coherently.
         let keep = (self.keep_recent_turns as usize) * 2;
-        let (old, recent) = if body.len() <= keep {
-            (&body[..0], body)
-        } else {
-            body.split_at(body.len() - keep)
-        };
+        let start = clean_tail_start(body, keep);
+        let (old, recent) = body.split_at(start);
 
         if old.is_empty() {
-            // Nothing to summarize.
+            // Nothing to summarize. #329: if the in-window tail is itself over
+            // the *hard* limit (a huge tool result within the last few turns),
+            // don't no-op forever — truncate oversized payloads in place so the
+            // run stops overflowing. Otherwise leave it (we're over the soft
+            // target but under the hard cap, and there's nothing to summarize).
+            if estimate_tokens(messages) > capabilities.max_input_tokens {
+                let tail = sanitize_tool_pairs(recent);
+                let budget = capabilities
+                    .max_input_tokens
+                    .saturating_sub(estimate_tokens(&leading_systems));
+                let mut new_messages = leading_systems;
+                new_messages.extend(truncate_in_window(&tail, budget));
+                return Ok(Some(Compaction::free(new_messages)));
+            }
             return Ok(None);
         }
 
@@ -319,14 +518,40 @@ impl Compactor for SummarizingCompactor {
             tool calls, user goals, and key decisions. Output only the summary text.";
 
         let mut summary_messages = vec![Message::system_text(summary_prompt)];
-        // Concatenate old messages into one user message.
+        // Concatenate old messages into one user message. #329: render tool
+        // traffic (tool_use / tool_result), not just Text — in agentic runs the
+        // old turns are almost all tool calls, so a Text-only view left the
+        // summarizer near-blind and it summarized nothing of substance.
         let mut combined = String::new();
         for m in old {
             let _ = writeln!(combined, "[{:?}]", m.role);
             for cb in &m.content {
-                if let caliban_provider::ContentBlock::Text(t) = cb {
-                    combined.push_str(&t.text);
-                    combined.push_str("\n\n");
+                match cb {
+                    ContentBlock::Text(t) => {
+                        combined.push_str(&t.text);
+                        combined.push_str("\n\n");
+                    }
+                    ContentBlock::ToolUse(tu) => {
+                        let _ = writeln!(combined, "[tool_use {}({})]", tu.name, tu.input);
+                    }
+                    ContentBlock::ToolResult(tr) => {
+                        let tag = if tr.is_error {
+                            "tool_result error"
+                        } else {
+                            "tool_result"
+                        };
+                        let _ = write!(combined, "[{tag}] ");
+                        for inner in &tr.content {
+                            if let ContentBlock::Text(t) = inner {
+                                combined.push_str(&t.text);
+                            }
+                        }
+                        combined.push('\n');
+                    }
+                    ContentBlock::Thinking(t) => {
+                        let _ = writeln!(combined, "[thinking] {}", t.thinking);
+                    }
+                    ContentBlock::Image(_) => {}
                 }
             }
         }
@@ -356,29 +581,49 @@ impl Compactor for SummarizingCompactor {
             .await
             .map_err(|e| Error::Compaction(format!("summarizer call failed: {e}")))?;
 
+        // #329/#292: thread the summarization spend out so the caller can fold
+        // it into session usage/cost totals — otherwise autocompact is invisible.
+        let usage = Some(resp.usage);
+
         let summary_text = resp
             .message
             .content
             .iter()
             .filter_map(|cb| match cb {
-                caliban_provider::ContentBlock::Text(t) => Some(t.text.as_str()),
+                ContentBlock::Text(t) => Some(t.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        let mut new_messages = leading_systems;
-        new_messages.push(Message::system_text(format!(
+        let mut head = leading_systems;
+        head.push(Message::system_text(format!(
             "Summary of earlier conversation:\n{summary_text}"
         )));
-        new_messages.extend(recent.iter().cloned());
+
+        // #329: sanitize the recent tail — its first message may be a
+        // tool_result whose tool_use is in the summarized `old` slice.
+        let mut tail = sanitize_tool_pairs(recent);
+        let budget = capabilities
+            .max_input_tokens
+            .saturating_sub(estimate_tokens(&head));
+        if estimate_tokens(&tail) > budget {
+            tail = truncate_in_window(&tail, budget);
+        }
+
+        let mut new_messages = head;
+        new_messages.extend(tail);
 
         if estimate_tokens(&new_messages) > capabilities.max_input_tokens {
             return Err(Error::Compaction(
-                "SummarizingCompactor: result still exceeds max_input_tokens".into(),
+                "SummarizingCompactor: result still exceeds max_input_tokens after truncation"
+                    .into(),
             ));
         }
-        Ok(Some(new_messages))
+        Ok(Some(Compaction {
+            messages: new_messages,
+            usage,
+        }))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -463,7 +708,8 @@ mod microcompactor_tests {
             .compact(&messages, &caps())
             .await
             .unwrap()
-            .expect("a superseding pair exists, so compaction applies");
+            .expect("a superseding pair exists, so compaction applies")
+            .messages;
         assert_eq!(
             result_text(&out, "a"),
             "good",
@@ -484,12 +730,315 @@ mod microcompactor_tests {
             .compact(&messages, &caps())
             .await
             .unwrap()
-            .expect("supersession applies");
+            .expect("supersession applies")
+            .messages;
         assert!(
             result_text(&out, "a").starts_with("[superseded:"),
             "older successful Read should collapse to a placeholder"
         );
         assert_eq!(result_text(&out, "b"), "new", "newest result kept verbatim");
+    }
+}
+
+#[cfg(test)]
+mod correctness_329_tests {
+    use super::*;
+    use caliban_provider::{
+        Capabilities, CompletionRequest, CompletionResponse, ContentBlock, Message, MessageStream,
+        ModelInfo, PromptCachingCapability, Provider, Role, StopReason, SystemPromptCapability,
+        TextBlock, ToolResultBlock, ToolUseBlock, ToolUseCapability, Usage,
+    };
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    fn caps(max: u32) -> Capabilities {
+        Capabilities {
+            max_input_tokens: max,
+            max_output_tokens: 1024,
+            vision: false,
+            tool_use: ToolUseCapability::None,
+            thinking: false,
+            prompt_caching: PromptCachingCapability::None,
+            json_mode: false,
+            streaming: false,
+            stop_sequences: false,
+            top_k: false,
+            system_prompt: SystemPromptCapability::SeparateField,
+            refusal_field: false,
+        }
+    }
+
+    fn user(t: &str) -> Message {
+        Message::user_text(t)
+    }
+    fn tool_use(id: &str, path: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse(ToolUseBlock {
+                id: id.into(),
+                name: "Read".into(),
+                input: json!({ "file_path": path }),
+            })],
+        }
+    }
+    fn tool_result(id: &str, text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResultBlock {
+                tool_use_id: id.into(),
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: text.into(),
+                    cache_control: None,
+                })],
+                is_error: false,
+            })],
+        }
+    }
+
+    fn has_use(ms: &[Message], id: &str) -> bool {
+        ms.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|cb| matches!(cb, ContentBlock::ToolUse(tu) if tu.id == id))
+        })
+    }
+    fn has_result(ms: &[Message], id: &str) -> bool {
+        ms.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|cb| matches!(cb, ContentBlock::ToolResult(tr) if tr.tool_use_id == id))
+        })
+    }
+
+    /// No `tool_result` in `ms` may reference a `tool_use` that isn't also in
+    /// `ms` — the exact invariant the provider enforces (Anthropic 400).
+    fn assert_no_orphans(ms: &[Message]) {
+        let uses: std::collections::HashSet<&str> = ms
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|cb| match cb {
+                ContentBlock::ToolUse(tu) => Some(tu.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for m in ms {
+            for cb in &m.content {
+                if let ContentBlock::ToolResult(tr) = cb {
+                    assert!(
+                        uses.contains(tr.tool_use_id.as_str()),
+                        "orphaned tool_result {} survived",
+                        tr.tool_use_id
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- Fix 1: orphan sanitizer ----
+    #[test]
+    fn sanitize_drops_orphan_result_and_dangling_use() {
+        let msgs = vec![
+            tool_result("gone", "orphan"), // result with no use
+            user("hello"),
+            tool_use("keep", "/f"),
+            tool_result("keep", "ok"),
+            tool_use("dangling", "/g"), // use with no result
+        ];
+        let out = sanitize_tool_pairs(&msgs);
+        assert!(!has_result(&out, "gone"), "orphan result should be dropped");
+        assert!(!has_use(&out, "dangling"), "dangling use should be dropped");
+        assert!(
+            has_use(&out, "keep") && has_result(&out, "keep"),
+            "complete pair kept"
+        );
+        assert_no_orphans(&out);
+    }
+
+    // ---- Boundary: clean_tail_start snaps to a genuine user turn ----
+    #[test]
+    fn clean_tail_start_snaps_forward_to_user_turn() {
+        let body = vec![
+            user("first"),         // 0 clean
+            tool_use("a", "/a"),   // 1
+            tool_result("a", "x"), // 2 (ideal offset for desired=4 lands here)
+            user("second"),        // 3 clean
+            tool_use("b", "/b"),   // 4
+            tool_result("b", "y"), // 5
+        ];
+        // desired=4 → ideal=2 is a tool_result → must snap forward to 3.
+        assert_eq!(clean_tail_start(&body, 4), 3);
+    }
+
+    // ---- Fix 1 end-to-end: DropOldest never emits an orphan ----
+    #[tokio::test]
+    async fn dropoldest_output_has_no_orphaned_tool_result() {
+        let mut msgs = vec![Message::system_text("sys")];
+        for i in 0..15 {
+            msgs.push(user(&format!("ask {i}")));
+            msgs.push(tool_use(&format!("t{i}"), &format!("/f{i}")));
+            msgs.push(tool_result(&format!("t{i}"), &"x".repeat(300)));
+        }
+        let c = DropOldestCompactor {
+            target_fraction: 0.5,
+            keep_recent_turns: 2,
+        };
+        let out = c
+            .compact(&msgs, &caps(2000))
+            .await
+            .unwrap()
+            .expect("over target → compacts")
+            .messages;
+        let first_body = out.iter().find(|m| m.role != Role::System).expect("body");
+        assert_eq!(
+            first_body.role,
+            Role::User,
+            "window must open on a user turn"
+        );
+        assert_no_orphans(&out);
+    }
+
+    // ---- Fix 4: oversized in-window tail is truncated, not errored ----
+    #[tokio::test]
+    async fn dropoldest_truncates_oversized_in_window_tail() {
+        // A single huge tool result inside the last kept turn: it can't be
+        // dropped without losing the turn, so it must be shrunk in place.
+        let msgs = vec![
+            Message::system_text("sys"),
+            user("q"),
+            tool_use("big", "/huge"),
+            tool_result("big", &"z".repeat(200_000)),
+        ];
+        let c = DropOldestCompactor {
+            target_fraction: 0.5,
+            keep_recent_turns: 4,
+        };
+        let out = c
+            .compact(&msgs, &caps(4000))
+            .await
+            .unwrap()
+            .expect("must reduce in-window, not no-op or error")
+            .messages;
+        assert!(
+            estimate_tokens(&out) <= 4000,
+            "in-window truncation did not fit budget: {} tokens",
+            estimate_tokens(&out)
+        );
+        assert!(
+            has_result(&out, "big"),
+            "pairing preserved through truncation"
+        );
+        assert_no_orphans(&out);
+    }
+
+    // A provider that records the text it was asked to summarize and returns a
+    // canned summary carrying a known usage, so we can assert Fix 2 + Fix 3.
+    struct CapturingProvider {
+        seen: Mutex<Option<String>>,
+        usage: Usage,
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        async fn complete(
+            &self,
+            req: CompletionRequest,
+        ) -> caliban_provider::Result<CompletionResponse> {
+            let text: String = req
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|cb| match cb {
+                    ContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            *self.seen.lock().unwrap() = Some(text);
+            Ok(CompletionResponse {
+                id: "r1".into(),
+                model: req.model,
+                message: Message::assistant_text("SUMMARY"),
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: self.usage,
+            })
+        }
+        async fn stream(&self, _req: CompletionRequest) -> caliban_provider::Result<MessageStream> {
+            unimplemented!("summarizer only calls complete()")
+        }
+        fn capabilities(&self, _model: &str) -> Capabilities {
+            caps(1000)
+        }
+        fn list_models(&self) -> Vec<ModelInfo> {
+            vec![]
+        }
+        fn name(&self) -> &'static str {
+            "capturing"
+        }
+    }
+
+    // ---- Fix 2 + Fix 3: summarizer sees tool traffic, and usage is threaded ----
+    #[tokio::test]
+    async fn summarizer_renders_tool_traffic_and_threads_usage() {
+        let usage = Usage {
+            output_tokens: 42,
+            ..Usage::default()
+        };
+        let provider = Arc::new(CapturingProvider {
+            seen: Mutex::new(None),
+            usage,
+        });
+        let c = SummarizingCompactor {
+            provider: provider.clone(),
+            summarizer_model: "m".into(),
+            target_fraction: 0.5,
+            keep_recent_turns: 1,
+        };
+        // Old turns are ALL tool traffic (no assistant text) — the case that
+        // starved the Text-only summarizer input.
+        let mut msgs = vec![user("start goal")];
+        for i in 0..10 {
+            msgs.push(tool_use(&format!("t{i}"), &format!("/f{i}")));
+            msgs.push(tool_result(
+                &format!("t{i}"),
+                // Large enough that the history clears the 0.5 * 2000 target and
+                // the old slice is actually summarized.
+                &format!("file {i} contents {}", "x".repeat(2000)),
+            ));
+        }
+        msgs.push(user("recent question"));
+
+        let out = c
+            .compact(&msgs, &caps(2000))
+            .await
+            .unwrap()
+            .expect("over target → summarizes");
+
+        // Fix 3: the summarization spend is threaded out.
+        assert_eq!(out.usage.map(|u| u.output_tokens), Some(42));
+
+        // Fix 2: the summarizer's input carried the tool traffic, not near-blank text.
+        let sent = provider
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("summarizer was called");
+        assert!(
+            sent.contains("[tool_use Read"),
+            "no tool_use in summarizer input:\n{sent}"
+        );
+        assert!(
+            sent.contains("[tool_result]"),
+            "no tool_result in summarizer input"
+        );
+        assert!(
+            sent.contains("file 0 contents"),
+            "no tool result content in summarizer input"
+        );
+
+        // And the resulting history stays valid + within budget.
+        assert_no_orphans(&out.messages);
     }
 }
 

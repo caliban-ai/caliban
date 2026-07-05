@@ -113,8 +113,8 @@ impl RecoveryState {
         );
         self.attempted_reactive_compact = true;
         let caps = agent.provider.capabilities(&agent.config.model);
-        if let Ok(Some(new)) = agent.compactor.compact(history, &caps).await {
-            *history = new;
+        if let Ok(Some(compaction)) = agent.compactor.compact(history, &caps).await {
+            *history = compaction.messages;
             // Redo this turn with the compacted history; don't consume a slot.
             return RecoveryAction::RetryTurn;
         }

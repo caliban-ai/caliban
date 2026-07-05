@@ -1608,7 +1608,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _capabilities: &Capabilities,
-        ) -> caliban_agent_core::Result<Option<Vec<Message>>> {
+        ) -> caliban_agent_core::Result<Option<caliban_agent_core::Compaction>> {
             Err(caliban_agent_core::Error::Compaction(
                 "compactor: ran out of budget".into(),
             ))

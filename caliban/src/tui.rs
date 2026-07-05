@@ -563,7 +563,7 @@ mod tests {
         }
         let before_count = messages.len();
         let out = futures::executor::block_on(comp.compact(&messages, &caps)).unwrap();
-        let new = out.expect("must compact when over target");
+        let new = out.expect("must compact when over target").messages;
         assert!(
             new.len() < before_count,
             "compactor dropped messages: {before_count} → {}",

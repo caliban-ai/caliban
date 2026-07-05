@@ -114,22 +114,24 @@ impl Compactor for RecordingCompactor {
         &self,
         messages: &[Message],
         _caps: &Capabilities,
-    ) -> caliban_agent_core::error::Result<Option<Vec<Message>>> {
+    ) -> caliban_agent_core::error::Result<Option<caliban_agent_core::Compaction>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             Err(caliban_agent_core::error::Error::Compaction(
                 "compact failed".into(),
             ))
         } else {
-            Ok(Some(vec![messages.last().cloned().unwrap_or_else(|| {
-                Message {
-                    role: caliban_provider::Role::User,
-                    content: vec![ContentBlock::Text(TextBlock {
-                        text: "compacted".into(),
-                        cache_control: None,
-                    })],
-                }
-            })]))
+            let messages = vec![messages.last().cloned().unwrap_or_else(|| Message {
+                role: caliban_provider::Role::User,
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: "compacted".into(),
+                    cache_control: None,
+                })],
+            })];
+            Ok(Some(caliban_agent_core::Compaction {
+                messages,
+                usage: None,
+            }))
         }
     }
 

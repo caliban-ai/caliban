@@ -36,8 +36,8 @@ pub use auto_mode::{
     parse_classifier_response as auto_mode_parse_classifier_response,
 };
 pub use compact::{
-    Compactor, DropOldestCompactor, MicroCompactor, NoopCompactor, SummarizingCompactor,
-    estimate_tokens,
+    Compaction, Compactor, DropOldestCompactor, MicroCompactor, NoopCompactor,
+    SummarizingCompactor, estimate_tokens, sanitize_tool_pairs,
 };
 pub use error::{Error, Result};
 pub use hooks::{
