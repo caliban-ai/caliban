@@ -18,7 +18,19 @@ use std::path::Path;
 /// I/O errors from creating the tempfile, writing bytes, or the final
 /// rename.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
+    // When `path` is a symlink, write *through* it to its target so the link's
+    // identity survives (#335): otherwise the tmp+rename would replace the link
+    // itself with a fresh regular file (`latest → v1.2.3` becomes a divergent
+    // regular file). `canonicalize` follows the whole chain; a dangling or
+    // unresolvable link falls back to the path as given (replace-in-place).
+    let dest: std::path::PathBuf = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|m| m.file_type().is_symlink())
+        .and_then(|_| std::fs::canonicalize(path).ok())
+        .unwrap_or_else(|| path.to_path_buf());
+    let dest = dest.as_path();
+
+    let parent = dest.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "write_atomic: path has no parent directory",
@@ -42,14 +54,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // would inherit 0600 (#224). Set the tempfile's mode before persisting:
     // preserve the destination's existing mode on overwrite (an executable
     // stays executable), otherwise apply the ordinary 0644 for a fresh file.
+    // Mask `& 0o7777` (not `0o777`) so setuid/setgid/sticky bits survive a
+    // rewrite — a `2755` setgid script must not come back `0755` (#335).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o777);
+        let mode = std::fs::metadata(dest).map_or(0o644, |m| m.permissions().mode() & 0o7777);
         tmp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
-    tmp.persist(path).map_err(|e| e.error)?;
+    tmp.persist(dest).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -161,6 +175,57 @@ mod tests {
         write_atomic(&p, b"content").unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644, "new file got mode {mode:o}, expected 0644");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserves_special_bits_on_overwrite() {
+        // #335: setuid/setgid/sticky bits must survive a rewrite. Previously the
+        // mode was masked `& 0o777`, so a `2755` setgid script came back `0755`.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("tool");
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        // setgid (0o2000) + sticky (0o1000) + 0o755.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o3755)).unwrap();
+        write_atomic(&p, b"#!/bin/sh\necho hi\n").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode, 0o3755,
+            "special bits stripped: got {mode:o}, expected 3755"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_writes_through_symlink() {
+        // #335: a write to a symlink must update the target and keep the link,
+        // not replace `latest → v1` with a divergent regular file.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("v1");
+        std::fs::write(&target, b"old").unwrap();
+        let link = tmp.path().join("latest");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, b"new").unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "symlink identity destroyed — link became a regular file"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new",
+            "target not updated"
+        );
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            b"new",
+            "read-through mismatch"
+        );
     }
 
     #[cfg(unix)]
