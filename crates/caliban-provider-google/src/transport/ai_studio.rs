@@ -15,6 +15,8 @@ use crate::transport::Transport;
 /// Sends requests directly to the Google AI Studio HTTPS API.
 pub struct AIStudioTransport {
     client: reqwest::Client,
+    /// Streaming client: connect-timeout only, no total deadline (#330).
+    stream_client: reqwest::Client,
     config: AIStudioConfig,
 }
 
@@ -33,7 +35,14 @@ impl AIStudioTransport {
     pub fn new(config: AIStudioConfig) -> Result<Self, GoogleError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(GoogleError::Http)?;
-        Ok(Self { client, config })
+        let stream_client =
+            caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+                .map_err(GoogleError::Http)?;
+        Ok(Self {
+            client,
+            stream_client,
+            config,
+        })
     }
 
     fn generate_content_url(&self, model: &str) -> String {
@@ -73,7 +82,7 @@ impl Transport for AIStudioTransport {
     ) -> Result<BoxStream<'static, Result<bytes::Bytes, GoogleError>>, GoogleError> {
         let url = self.stream_generate_content_url(model);
         let resp = self
-            .client
+            .stream_client
             .post(&url)
             .header("content-type", "application/json")
             .json(&body)

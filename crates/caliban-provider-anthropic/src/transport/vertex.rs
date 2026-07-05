@@ -17,6 +17,8 @@ const GCP_SCOPE: &[&str] = &["https://www.googleapis.com/auth/cloud-platform"];
 /// `Transport` impl using Google Vertex AI for the Anthropic schema family.
 pub struct VertexTransport {
     client: reqwest::Client,
+    /// Streaming client: connect-timeout only, no total deadline (#330).
+    stream_client: reqwest::Client,
     token_provider: Arc<dyn TokenProvider>,
     project: String,
     region: String,
@@ -42,8 +44,12 @@ impl VertexTransport {
     pub fn new(config: VertexConfig) -> Result<Self, AnthropicError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(AnthropicError::Http)?;
+        let stream_client =
+            caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+                .map_err(AnthropicError::Http)?;
         Ok(Self {
             client,
+            stream_client,
             token_provider: config.token_provider,
             project: config.project,
             region: config.region,
@@ -121,7 +127,7 @@ impl Transport for VertexTransport {
 
         let headers = self.auth_headers().await?;
         let resp = self
-            .client
+            .stream_client
             .post(self.endpoint(&model, true))
             .headers(headers)
             .json(&body)
