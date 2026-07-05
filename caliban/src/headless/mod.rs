@@ -308,8 +308,10 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// Whether the no-edit-progress nudge fired at least once this run
     /// (#239). Captured from `TurnEvent::RunEnd`.
     no_edit_nudge_emitted: bool,
-    /// Wall-clock start of the current run (or input frame in `run_frames`),
-    /// used to compute the result frame's `duration_ms` (#222).
+    /// Wall-clock start of the whole run, used to compute the result frame's
+    /// `duration_ms` (#222). In multi-frame `run_frames` this is **not** reset
+    /// per frame: the single terminal `result` reports whole-session totals, so
+    /// `duration_ms` must be whole-session too (#331).
     started: std::time::Instant,
 }
 
@@ -910,9 +912,13 @@ impl<W: Write> HeadlessDriver<W> {
                     // frame reflects the *last* turn's assistant reply
                     // (not a concatenation across every frame).
                     final_text.clear();
-                    // Reset the duration clock so `duration_ms` measures this
-                    // frame's run, not the cumulative session (#222).
-                    self.started = std::time::Instant::now();
+                    // NB: `self.started` is intentionally NOT reset per frame.
+                    // Only one terminal `result` frame is emitted (at finalize
+                    // after the loop) and its `num_turns`/usage/`total_cost_usd`
+                    // are whole-session; a per-frame duration would report the
+                    // last frame's wall-clock against session-wide totals, so
+                    // any tokens/sec or latency a consumer derives would be
+                    // wrong. Keep `duration_ms` whole-session to match (#331).
                     let outcome = self
                         .run_single_pass(
                             Arc::clone(&agent),
@@ -1849,6 +1855,46 @@ mod tests {
         assert_eq!(
             message_count, 2,
             "two assistant messages, one per user frame"
+        );
+    }
+
+    /// #331: the single terminal `result` frame reports whole-session totals
+    /// (`turns`, usage, cost), so `duration_ms` must be whole-session too —
+    /// not reset per user frame. Each frame is given a real ~50 ms cost; the
+    /// two-frame run must report a duration covering *both* frames, which a
+    /// per-frame reset (last-frame-only) could not.
+    #[tokio::test]
+    async fn run_frames_duration_is_whole_session_not_last_frame() {
+        use std::time::Duration;
+        let per_frame = Duration::from_millis(50);
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_delayed_first_chunk(per_frame, "alpha");
+        mock.enqueue_delayed_first_chunk(per_frame, "beta");
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut driver = HeadlessDriver::new(
+            &mut buf,
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+
+        let stdin = "{\"type\":\"user\",\"content\":\"first\"}\n\
+                     {\"type\":\"user\",\"content\":\"second\"}\n";
+        driver
+            .run_frames(agent, Vec::new(), stdin, CancellationToken::new())
+            .await
+            .expect("multi-frame run succeeded");
+
+        let frames = parse_ndjson_lines(&buf);
+        let result = frames.last().expect("result frame");
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["turns"], 2);
+        let duration_ms = result["duration_ms"].as_u64().expect("duration_ms u64");
+        // Both 50 ms frames ran sequentially → ≥ ~90 ms (generous slack).
+        // A per-frame reset would report only the last frame (~50 ms).
+        assert!(
+            duration_ms >= 90,
+            "duration_ms {duration_ms} looks like a single frame, not the whole session"
         );
     }
 

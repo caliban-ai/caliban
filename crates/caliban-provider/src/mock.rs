@@ -110,6 +110,23 @@ impl MockProvider {
             .push(MockEntry::Silent);
     }
 
+    /// Enqueue a stream that stays silent for `delay`, then emits a normal
+    /// `EndTurn` text response — the non-builder analogue of
+    /// [`MockProviderBuilder::with_delayed_first_chunk`]. Used to give each
+    /// agent turn a measurable wall-clock cost in timing tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
+    pub fn enqueue_delayed_first_chunk(&self, delay: Duration, text: &str) {
+        let events = build_text_events(text, StopReason::EndTurn, 1);
+        self.inner
+            .lock()
+            .expect("MockProvider lock poisoned")
+            .stream_queue
+            .push(MockEntry::DelayedFirstChunk { delay, events });
+    }
+
     /// Begin building a `MockProvider` with a chainable response API.
     #[must_use]
     pub fn builder() -> MockProviderBuilder {
