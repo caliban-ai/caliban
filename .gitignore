@@ -8,6 +8,10 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 
+# Python bytecode cache (transient; the project is migrating scripts off Python)
+__pycache__/
+*.pyc
+
 # Superpowers brainstorm artifacts
 .superpowers/
 
