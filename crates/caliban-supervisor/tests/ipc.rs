@@ -329,7 +329,13 @@ async fn respawn_preserves_agent_when_worktree_resolution_fails() {
          (this is the exact bug: Respawn used to remove the old agent before \
          the fallible source/worktree I/O, so a failure here permanently lost it)",
     );
-    assert_eq!(still_there.status, original.status);
+    // Survival is proven by the record still being present under its original
+    // id with its original spec. We deliberately do NOT assert the exact
+    // `status`: the failed respawn leaves the old agent untouched, so its
+    // status is just its natural lifecycle state, which races between Running
+    // and Done depending on how fast the fake worker child exits (flaky across
+    // runners). The failed respawn's guarantee is "not destroyed", not "frozen
+    // in a particular status".
     assert_eq!(still_there.spec.source, original.spec.source);
 
     supervisor.cancel_token().cancel();
