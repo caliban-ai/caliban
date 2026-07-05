@@ -53,5 +53,11 @@ serde_json         = { workspace = true }
 name             = "test_server"
 path             = "src/bin/test_server.rs"
 
+# Mock gonzalo code-graph server used by the hermetic contract test in
+# tests/gonzalo_integration.rs via CARGO_BIN_EXE_gonzalo_test_server (#344).
+[[bin]]
+name             = "gonzalo_test_server"
+path             = "src/bin/gonzalo_test_server.rs"
+
 [lints]
 workspace = true
