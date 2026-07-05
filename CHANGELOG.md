@@ -9,9 +9,116 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-05
+
+This release turns caliban from a single-process CLI into the base of a
+**distributed, self-hostable agent supervisor**. `caliband` gains a networked
+control plane, workspace-scoped multi-repo supervision, and multi-arch container
+images; caliban learns to consume gonzalo's code-graph over MCP; and
+config/data relocate to XDG-first locations. It also lands a broad reliability,
+OAuth, and security-hardening pass. **Behavior changes to review before
+upgrading:** config/data/cache/state now live in XDG locations (previously the
+platform GUI dirs on macOS), and `--workspace` now fences file writes by
+default. The `caliband` network transport is **beta** (hardening tracked in
+#319/#320).
+
 ### Added
 
-- **Build commit in `--version`** (#303): binaries built from a git checkout now report the commit they were built from — `caliban --version` prints e.g. `caliban 0.4.0 (d364def, 2026-07-03)`, appending `-dirty` for an uncommitted tree. This lets you pin a binary to an exact point in git history between releases, where every commit on `main` otherwise reports the same semver. Builds without git metadata (release tarballs, crates.io installs) fall back to the bare semver.
+- **Workspace-scoped `caliband`** (#281): the supervisor now manages a workspace
+  spanning multiple sources, with per-source worktree isolation wired end to
+  end. (#325)
+- **`caliband` network transport** (#280) — *beta*: the daemon can serve its
+  control plane over NDJSON on TCP with rustls TLS + a bearer token
+  (`--listen`/`CALIBAN_DAEMON_LISTEN`), so a remote client (e.g. prospero) can
+  drive it across the network rather than only a local Unix socket. (#321)
+- **Consume the gonzalo code-graph MCP server** (#308): a config entry wires
+  gonzalo's `search`/`node`/`callers`/`callees`/`impact`/`explore` tools into the
+  agent, over stdio or HTTP. (#310)
+- **Dynamic Ollama model discovery** (#316): the Ollama provider builds its model
+  list and capabilities from the runtime API rather than a static table. (#322)
+- **OAuth Dynamic Client Registration (RFC 7591)** (#313): `oauth="auto"` MCP
+  servers self-register a client when the provider supports DCR. (#315)
+- **Multi-arch container image** (#279): `caliban` + `caliband` ship as a single
+  linux/amd64 + linux/arm64 image on GHCR. (#298)
+- **Build commit in `--version`** (#303): binaries built from a git checkout now
+  report the commit they were built from — `caliban --version` prints e.g.
+  `caliban 0.5.0 (<sha>, <date>)`, appending `-dirty` for an uncommitted tree.
+  Builds without git metadata (release tarballs, crates.io installs) fall back to
+  the bare semver. (#305)
+
+### Changed
+
+- **XDG-first config/data/cache/state on all platforms** (#295): caliban now
+  stores its config, data, cache, and state under XDG locations everywhere — on
+  macOS this moves them out of `~/Library/Application Support` (ADR 0050).
+  Existing files in the old locations are not migrated automatically. (#297)
+- **`--workspace` fences file writes by default** (#237): under `--workspace`,
+  file writes are restricted to the workspace unless you pass
+  `--no-restrict-paths`. (#273)
+- **Streaming-timeout policy raised above the transport layer** (#330): connect,
+  first-byte, and total-exemption timeouts are applied uniformly above the
+  provider transport, so a hanging `stream()` call is bounded like a silent
+  stream. (#364)
+- **Boolean CLI flags accept an optional `=BOOL` value** (#223): flags like
+  `--foo` now also accept `--foo=true` / `--foo=false` consistently. (#293)
+
+### Security
+
+- **Clear all cargo-audit advisories + add a CI advisory gate** (#258): resolved
+  all 6 outstanding `cargo-audit` findings and added a CI gate that fails on new
+  advisories. (#260)
+- **OAuth discovery enforces https + issuer match** (#339): MCP OAuth discovery
+  rejects non-https endpoints and mismatched issuers. (#357)
+- **OAuth token store writes are atomic + `0600`** (#341): the OAuth token
+  `FileStore` writes through a temp file with `0600` permissions. (#355)
+- **Collapse `..` before the workspace fence check** (#327): path traversal is
+  normalized before the workspace boundary is enforced. (#346)
+- **Fence Bash writes via the OS sandbox under `--workspace`** (#328):
+  background and foreground Bash writes are confined by the OS sandbox when a
+  workspace fence is active. (#348)
+
+### Fixed
+
+- **Real compactor wired for `/compact` + autocompact** (#292): `/compact` and
+  automatic compaction now run an actual compaction pass. (#294)
+- **Compactor strategy correctness** (#329): fixes orphaned blocks, summarizer
+  input, usage accounting, and the in-window tail. (#349)
+- **Prefill-aware stream watchdog + total-timeout exemption** (#263, #254): a
+  slow first chunk within the prefill budget no longer trips the idle watchdog,
+  and the stream path is exempt from the total timeout. (#269)
+- **Sandbox degrades gracefully when user namespaces are denied** (#345):
+  `caliband` now probes for an actual user namespace and runs unsandboxed (with a
+  warning) instead of failing every tool call on runtimes that install `bwrap`
+  but forbid unprivileged userns. (#371)
+- **`write_atomic` preserves special bits + writes through symlinks** (#335). (#350)
+- **`Write`/`Edit` produce `0644` (or preserve mode)** (#224): edited files no
+  longer inherit the tempfile's `0600`. (#291)
+- **Result frame = final message + additive CC-contract fields** (#222): the
+  headless result frame carries the final message and the additive
+  Claude-Code-contract fields. (#276)
+- **`duration_ms` is whole-session in multi-frame stream-json** (#331). (#351)
+- **Per-tool dispatch records + ignore/globset spam filtered** (#256). (#257)
+- **MCP OAuth: cache before discovery, persist DCR `client_secret`** (#333). (#352)
+- **Wire the MCP OAuth auto/manual flow into the connection path** (#300). (#304)
+- **Complete settings-path MCP config plumbing** (#309, #311): env expansion and
+  the OAuth callback port are honored for settings-file MCP servers. (#312)
+- **Windows OAuth browser opener no longer truncates the auth URL** (#338). (#356)
+- **Settings `${VAR}` expander preserves non-ASCII text** (#340). (#354)
+- **`paths.rs` XDG env-edge hardening** (#336): relative fallbacks and
+  non-absolute env values are handled. (#353)
+- **`--version -dirty` ignores untracked files** (#306). (#307)
+
+Testing: hermetic gonzalo code-graph contract test via an in-tree mock MCP
+server, with the live round-trip honestly `#[ignore]`d (#344, #367); positive
+prefill-grace assertions (#334, #368); closed the `no_bare_platform_dirs` guard
+coverage holes (#337, #369).
+
+Docs: introduced `docs/evaluation/` and reorganized the probe + competitor docs
+(#361, #362); corrected the `container.md` sandbox-fallback caveat (#345, #370).
+
+Internal: migrated helper scripts from Python to bash (#360, #365); tracked
+`rebuild.sh` and gitignored the Python bytecode cache (#359); container images
+now build each arch natively on GitHub arm64 runners, dropping QEMU (#302).
 
 ## [0.4.0] - 2026-06-21
 
@@ -242,7 +349,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/caliban-ai/caliban/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/caliban-ai/caliban/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/caliban-ai/caliban/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/caliban-ai/caliban/compare/v0.1.0...v0.2.0
