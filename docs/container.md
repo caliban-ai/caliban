@@ -44,17 +44,20 @@ On Linux, `caliband` isolates subprocess tools with `bubblewrap` (`bwrap`),
 which is installed in the image. `bwrap` needs user-namespace support from the
 container runtime (it runs with `--unshare-user`).
 
-Sandbox detection currently checks only that `bwrap` is **present and a
-supported version** — it does not yet probe whether the runtime actually permits
-user namespaces. The fail-open-to-unsandboxed path fires when `bwrap` is missing
-or too old, **not** when it is installed but userns is denied. So on a runtime
-that ships `bwrap` yet forbids user namespaces (e.g. stock Docker under the
-default seccomp profile, or `kernel.unprivileged_userns_clone=0`), sandboxed
-tool calls **fail** rather than degrading to unsandboxed.
+Sandbox detection checks that `bwrap` is present and a supported version, **and
+probes whether the runtime actually permits an unprivileged user namespace**. On
+a runtime that ships `bwrap` yet forbids userns (e.g. stock Docker under the
+default seccomp profile, or `kernel.unprivileged_userns_clone=0`), the probe
+fails and caliban logs a warning and runs **unsandboxed** rather than failing
+every tool call. Set the sandbox policy's `fail_if_unavailable` if you would
+rather hard-fail than run without isolation.
 
-To run there today, grant the container user-namespace access (an appropriate
-`securityContext` / `--security-opt seccomp=unconfined`) or run without the
-sandbox. A real userns probe with graceful fallback, and arbitrary-UID
-(`runAsUser`) hardening of the baked `HOME`/`XDG_RUNTIME_DIR`, are tracked in
-#345. Pod-level isolation (gVisor/Kata via agent-sandbox) is the k8s-era
-replacement (design spec §6).
+To keep the sandbox on such a runtime, grant the container user-namespace access
+(an appropriate `securityContext` / `--security-opt seccomp=unconfined`).
+Pod-level isolation (gVisor/Kata via agent-sandbox) is the k8s-era replacement
+(design spec §6).
+
+> **Arbitrary-UID note:** the image bakes `HOME=/home/app` (uid 10001) and a
+> `0755` `XDG_RUNTIME_DIR`, so an `runAsUser` override that isn't 10001 can't
+> write them. Run as uid 10001 or supply a `securityContext` until the image is
+> hardened (tracked in #345).
