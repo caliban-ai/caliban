@@ -1490,21 +1490,33 @@ fn present_auth_url(server: &str, auth_url: &Url) {
 /// Best-effort system-browser open, dependency-free. Returns `true` if the
 /// launcher process spawned (not that the page actually rendered).
 fn open_in_browser(url: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    let launcher = ("open", Vec::<&str>::new());
-    #[cfg(target_os = "windows")]
-    let launcher = ("cmd", vec!["/C", "start", ""]);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let launcher = ("xdg-open", Vec::<&str>::new());
-
-    let (cmd, prefix_args) = launcher;
+    let (cmd, args) = browser_argv(std::env::consts::OS, url);
     std::process::Command::new(cmd)
-        .args(prefix_args)
-        .arg(url)
+        .args(&args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
+}
+
+/// Build the launcher argv for opening `url` in the default browser on `os`
+/// (pass `std::env::consts::OS`). The URL is always its own argv entry — never
+/// interpolated into a shell command string.
+///
+/// On Windows this uses `rundll32 url.dll,FileProtocolHandler <url>`, **not**
+/// `cmd /C start "" <url>`: `cmd.exe` treats the `&` query separators in an
+/// OAuth authorization URL as command separators and truncates it (#338).
+/// `rundll32` receives the URL directly, so there is no shell to re-parse it.
+fn browser_argv(os: &str, url: &str) -> (&'static str, Vec<String>) {
+    match os {
+        "macos" => ("open", vec![url.to_string()]),
+        "windows" => (
+            "rundll32.exe",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        ),
+        // Linux / *BSD / other unix.
+        _ => ("xdg-open", vec![url.to_string()]),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1514,6 +1526,35 @@ fn open_in_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_argv_passes_url_as_single_arg_intact() {
+        // The auth URL has multiple `&` separators — it must survive as one
+        // argv entry on every platform (#338).
+        let url = "https://auth.example/authorize?client_id=abc&scope=read+write&state=xyz&code_challenge=q";
+        for os in ["macos", "windows", "linux", "freebsd"] {
+            let (_cmd, args) = browser_argv(os, url);
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some(url),
+                "url must be the final, intact arg on {os}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_argv_windows_avoids_cmd_shell() {
+        // rundll32 receives the URL directly; `cmd /C start` would let cmd.exe
+        // parse the `&` separators and truncate the URL (#338).
+        let url = "https://auth.example/authorize?a=1&b=2";
+        let (cmd, args) = browser_argv("windows", url);
+        assert_eq!(cmd, "rundll32.exe");
+        assert!(
+            !args.iter().any(|a| a == "start" || a == "/C"),
+            "must not route through cmd.exe: {args:?}"
+        );
+        assert_eq!(args.last().unwrap(), url);
+    }
 
     #[test]
     fn pkce_pair_length_and_charset() {
