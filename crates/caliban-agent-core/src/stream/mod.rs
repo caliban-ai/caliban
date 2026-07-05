@@ -1110,11 +1110,35 @@ impl Agent {
                 let provider = Arc::clone(&self.provider);
                 let req_clone = req.clone();
                 let cancel_for_retry = cancel.clone();
+                // #330: bound the connect→first-header wait uniformly here.
+                // Transports set only a connect timeout on their streaming client
+                // (no total deadline), and `WatchedStream` can't observe the
+                // stream until *after* `provider.stream()`'s `.send()` returns
+                // headers — so a server that accepts the connection but never
+                // responds would hang forever. Wrap the whole `stream()` future
+                // in a first-byte timeout, reusing the prefill budget as the
+                // single time-to-first-token bound (`0` = unbounded/legacy). On
+                // elapse we surface `StreamIdle` — terminal, like the prefill/
+                // idle watchdog, and bounded to one budget rather than
+                // retry×budget.
+                let first_byte_budget = self.config.stream_prefill_timeout_ms;
                 let stream_result = with_retry(&self.retry, &cancel, move || {
                     let p = Arc::clone(&provider);
                     let r = req_clone.clone();
                     let _ = &cancel_for_retry; // ensure the clone is moved
-                    async move { p.stream(r).await }
+                    async move {
+                        if first_byte_budget == 0 {
+                            p.stream(r).await
+                        } else {
+                            let budget = Duration::from_millis(first_byte_budget.into());
+                            match tokio::time::timeout(budget, p.stream(r)).await {
+                                Ok(res) => res,
+                                Err(_elapsed) => {
+                                    Err(caliban_provider::Error::StreamIdle(budget))
+                                }
+                            }
+                        }
+                    }
                 })
                 .await;
 

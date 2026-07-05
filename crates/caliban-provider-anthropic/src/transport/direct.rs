@@ -14,6 +14,10 @@ use crate::transport::Transport;
 #[derive(Debug)]
 pub struct DirectTransport {
     client: reqwest::Client,
+    /// Streaming client: connect-timeout only, **no** total deadline (#330).
+    /// The total-timeout `client` would otherwise cap a long stream mid-flow;
+    /// the first-byte + idle bounds live in agent-core.
+    stream_client: reqwest::Client,
     config: DirectConfig,
 }
 
@@ -26,7 +30,14 @@ impl DirectTransport {
     pub fn new(config: DirectConfig) -> Result<Self, AnthropicError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(AnthropicError::Http)?;
-        Ok(Self { client, config })
+        let stream_client =
+            caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+                .map_err(AnthropicError::Http)?;
+        Ok(Self {
+            client,
+            stream_client,
+            config,
+        })
     }
 
     fn endpoint(&self) -> String {
@@ -78,7 +89,7 @@ impl Transport for DirectTransport {
 
         let headers = self.auth_headers()?;
         let resp = self
-            .client
+            .stream_client
             .post(self.endpoint())
             .headers(headers)
             .json(&body)

@@ -12,6 +12,52 @@ use caliban_provider::{Message, MockProvider};
 use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
+/// #330: a provider whose `stream()` *call itself* hangs (server accepts the
+/// connection but never sends response headers) must be bounded by the
+/// agent-core first-byte timeout — not hang forever. This is distinct from the
+/// silent-stream cases: there `stream()` returns and the *stream* is silent (a
+/// `WatchedStream` prefill/idle catch); here `.send()` never resolves, *before*
+/// any stream watchdog can observe.
+#[tokio::test]
+async fn first_byte_timeout_bounds_hanging_stream_call() {
+    let provider = MockProvider::builder()
+        // Never returns headers within any sane budget.
+        .with_hanging_stream(Duration::from_secs(30))
+        .build();
+    let cfg = AgentConfig {
+        model: "mock".into(),
+        // The prefill budget doubles as the first-byte budget (#330).
+        stream_prefill_timeout_ms: 100,
+        stream_idle_timeout_ms: 100,
+        ..Default::default()
+    };
+    let agent = Arc::new(
+        Agent::builder()
+            .provider(Arc::new(provider))
+            .config(cfg)
+            .build()
+            .expect("agent"),
+    );
+    let start = std::time::Instant::now();
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
+    let mut last_stop = None;
+    while let Some(Ok(ev)) = stream.next().await {
+        if let TurnEvent::RunEnd { stopped_for, .. } = ev {
+            last_stop = Some(stopped_for);
+        }
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "first-byte timeout should abort at ~100ms, not hang: {:?}",
+        start.elapsed()
+    );
+    assert!(
+        matches!(last_stop, Some(StopCondition::StreamIdle(_))),
+        "expected StreamIdle from the first-byte timeout, got {last_stop:?}"
+    );
+}
+
 #[tokio::test]
 async fn stream_idle_aborts_run() {
     let provider = MockProvider::builder()

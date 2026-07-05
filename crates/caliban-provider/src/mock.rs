@@ -41,6 +41,13 @@ enum MockEntry {
         delay: Duration,
         events: Vec<Result<StreamEvent>>,
     },
+    /// The `stream()` *call itself* hangs for `delay` before returning — models
+    /// a server that accepts the connection but never sends response headers,
+    /// so `.send().await` never resolves. Exercises the agent-core first-byte
+    /// timeout (#330), which sits *before* any stream watchdog can observe.
+    HangingCall {
+        delay: Duration,
+    },
 }
 
 #[derive(Default)]
@@ -209,13 +216,19 @@ impl Provider for MockProvider {
     }
 
     async fn stream(&self, _req: CompletionRequest) -> Result<MessageStream> {
-        let mut s = self.inner.lock().expect("MockProvider lock poisoned");
-        if s.stream_queue.is_empty() {
-            return Err(Error::InvalidRequest(
-                "MockProvider: stream queue empty".into(),
-            ));
-        }
-        match s.stream_queue.remove(0) {
+        // Take the next entry and release the lock *before* any await — the
+        // MutexGuard is not Send and `HangingCall` awaits (would make the
+        // future non-Send otherwise).
+        let entry = {
+            let mut s = self.inner.lock().expect("MockProvider lock poisoned");
+            if s.stream_queue.is_empty() {
+                return Err(Error::InvalidRequest(
+                    "MockProvider: stream queue empty".into(),
+                ));
+            }
+            s.stream_queue.remove(0)
+        };
+        match entry {
             MockEntry::Error(e) => Err(e),
             MockEntry::Events(events) => Ok(Box::pin(stream::iter(events))),
             MockEntry::Silent => Ok(Box::pin(SilentStream)),
@@ -230,6 +243,11 @@ impl Provider for MockProvider {
                 })
                 .flatten();
                 Ok(Box::pin(s))
+            }
+            MockEntry::HangingCall { delay } => {
+                // The call itself blocks — response headers never arrive.
+                tokio::time::sleep(delay).await;
+                Ok(Box::pin(stream::empty()))
             }
         }
     }
@@ -347,6 +365,15 @@ impl MockProviderBuilder {
     #[must_use]
     pub fn with_error_once(mut self, err: Error) -> Self {
         self.entries.push(MockEntry::Error(err));
+        self
+    }
+
+    /// Enqueue a stream whose `stream()` **call** hangs for `delay` before
+    /// returning — models a server that accepts the connection but never sends
+    /// response headers. Exercises the agent-core first-byte timeout (#330).
+    #[must_use]
+    pub fn with_hanging_stream(mut self, delay: Duration) -> Self {
+        self.entries.push(MockEntry::HangingCall { delay });
         self
     }
 

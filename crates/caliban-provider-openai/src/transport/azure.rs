@@ -19,6 +19,8 @@ use crate::transport::Transport;
 #[derive(Debug)]
 pub struct AzureTransport {
     client: reqwest::Client,
+    /// Streaming client: connect-timeout only, no total deadline (#330).
+    stream_client: reqwest::Client,
     config: AzureConfig,
 }
 
@@ -31,7 +33,14 @@ impl AzureTransport {
     pub fn new(config: AzureConfig) -> Result<Self, OpenAIError> {
         let client =
             caliban_common::http::build_client(config.timeout).map_err(OpenAIError::Http)?;
-        Ok(Self { client, config })
+        let stream_client =
+            caliban_common::http::build_stream_client(caliban_common::http::DEFAULT_TIMEOUT)
+                .map_err(OpenAIError::Http)?;
+        Ok(Self {
+            client,
+            stream_client,
+            config,
+        })
     }
 
     /// Build the full endpoint URL for a given deployment name.
@@ -112,7 +121,7 @@ impl Transport for AzureTransport {
 
         let headers = self.auth_headers()?;
         let resp = self
-            .client
+            .stream_client
             .post(self.endpoint(&deployment))
             .headers(headers)
             .json(&body)
