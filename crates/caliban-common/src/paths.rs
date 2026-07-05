@@ -7,58 +7,56 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve the per-app XDG config home for `app`.
+/// Read an `XDG_*` path override: the env var, but only when it is set,
+/// non-empty, **and absolute**. Per the XDG Base Directory spec (adopted by
+/// ADR 0050) a relative value MUST be ignored — honoring one scatters files
+/// cwd-relative (e.g. `XDG_STATE_HOME=.cache`). `is_absolute()` already implies
+/// non-empty, so it is the only check needed. Returns `None` otherwise.
+fn absolute_env(var: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var(var).ok()?);
+    p.is_absolute().then_some(p)
+}
+
+/// Resolve the per-app XDG config home for `app`, or `None` when it cannot be
+/// determined.
 ///
-/// 1. `$XDG_CONFIG_HOME/<app>` if `XDG_CONFIG_HOME` is set and non-empty.
+/// 1. `$XDG_CONFIG_HOME/<app>` when `XDG_CONFIG_HOME` is set to an absolute path.
 /// 2. Else `$HOME/.config/<app>`.
-/// 3. Else (no `HOME`) returns the relative path `.config/<app>` — callers
-///    deal with the absent-home edge case explicitly.
+/// 3. Else `None`. A relative path is never returned — that would pollute the
+///    cwd. This matches [`xdg_base`] / [`platform_config_dir`] so the config and
+///    data helper families agree in the no-`HOME` edge case (su/cron/minimal
+///    container), rather than one returning a cwd-relative path while the other
+///    returns `None`.
 ///
 /// macOS callers still honor `XDG_CONFIG_HOME` so the test suite and
 /// operator overrides behave the same as on Linux.
 #[must_use]
-pub fn xdg_config_home(app: &str) -> PathBuf {
-    if let Ok(custom) = std::env::var("XDG_CONFIG_HOME")
-        && !custom.is_empty()
-    {
-        return PathBuf::from(custom).join(app);
+pub fn xdg_config_home(app: &str) -> Option<PathBuf> {
+    if let Some(base) = absolute_env("XDG_CONFIG_HOME") {
+        return Some(base.join(app));
     }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".config").join(app);
-    }
-    PathBuf::from(".config").join(app)
+    dirs::home_dir().map(|home| home.join(".config").join(app))
 }
 
-/// Resolve the per-app XDG data home for `app`.
-///
-/// 1. `$XDG_DATA_HOME/<app>` if `XDG_DATA_HOME` is set and non-empty.
-/// 2. Else `$HOME/.local/share/<app>`.
-/// 3. Else falls back to a relative path `.local/share/<app>`.
+/// Resolve the per-app XDG data home for `app`, or `None` when it cannot be
+/// determined. Same rules as [`xdg_config_home`], with `.local/share`.
 #[must_use]
-pub fn xdg_data_home(app: &str) -> PathBuf {
-    if let Ok(custom) = std::env::var("XDG_DATA_HOME")
-        && !custom.is_empty()
-    {
-        return PathBuf::from(custom).join(app);
+pub fn xdg_data_home(app: &str) -> Option<PathBuf> {
+    if let Some(base) = absolute_env("XDG_DATA_HOME") {
+        return Some(base.join(app));
     }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".local").join("share").join(app);
-    }
-    PathBuf::from(".local").join("share").join(app)
+    dirs::home_dir().map(|home| home.join(".local").join("share").join(app))
 }
 
-/// Per-app XDG runtime dir, or `None` when `XDG_RUNTIME_DIR` is unset.
+/// Per-app XDG runtime dir, or `None` when `XDG_RUNTIME_DIR` is unset or not an
+/// absolute path.
 ///
 /// macOS doesn't set `XDG_RUNTIME_DIR` by default — callers are expected
 /// to handle the `None` case (typically by falling back to `xdg_data_home`
 /// or a tempdir).
 #[must_use]
 pub fn xdg_runtime_home(app: &str) -> Option<PathBuf> {
-    let raw = std::env::var("XDG_RUNTIME_DIR").ok()?;
-    if raw.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(raw).join(app))
+    absolute_env("XDG_RUNTIME_DIR").map(|base| base.join(app))
 }
 
 /// Resolve an XDG base dir: the `$XDG_*_HOME` override if set and non-empty,
@@ -72,10 +70,8 @@ pub fn xdg_runtime_home(app: &str) -> Option<PathBuf> {
 /// (or the matching `XDG_*` override), plus a `caliban` app segment the caller
 /// appends.
 fn xdg_base(var: &str, default: &[&str]) -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var(var)
-        && !custom.is_empty()
-    {
-        return Some(PathBuf::from(custom));
+    if let Some(custom) = absolute_env(var) {
+        return Some(custom);
     }
     dirs::home_dir().map(|home| {
         let mut p = home;
@@ -249,25 +245,52 @@ mod tests {
     fn xdg_config_home_honors_env() {
         let _g = EnvGuard::set("XDG_CONFIG_HOME", Some("/tmp/cfg"));
         let p = xdg_config_home("caliban");
-        assert_eq!(p, PathBuf::from("/tmp/cfg/caliban"));
+        assert_eq!(p, Some(PathBuf::from("/tmp/cfg/caliban")));
     }
 
     #[test]
     fn xdg_config_home_falls_back_when_env_unset() {
         let _g = EnvGuard::set("XDG_CONFIG_HOME", None);
         let p = xdg_config_home("caliban");
-        if let Some(home) = dirs::home_dir() {
-            assert_eq!(p, home.join(".config").join("caliban"));
-        } else {
-            assert_eq!(p, PathBuf::from(".config").join("caliban"));
-        }
+        // Home-based when HOME exists; `None` (never a relative path) otherwise —
+        // matching `platform_config_dir` (#336 L7).
+        assert_eq!(
+            p,
+            dirs::home_dir().map(|h| h.join(".config").join("caliban"))
+        );
+    }
+
+    #[test]
+    fn xdg_config_home_ignores_relative_env() {
+        // #336 M7: a non-absolute XDG value must be ignored, not honored
+        // cwd-relative. Falls back to the HOME-based path (or None).
+        let _g = EnvGuard::set("XDG_CONFIG_HOME", Some("relative/cfg"));
+        let p = xdg_config_home("caliban");
+        assert_eq!(
+            p,
+            dirs::home_dir().map(|h| h.join(".config").join("caliban")),
+            "relative XDG_CONFIG_HOME must be ignored"
+        );
     }
 
     #[test]
     fn xdg_data_home_honors_env() {
         let _g = EnvGuard::set("XDG_DATA_HOME", Some("/tmp/data"));
         let p = xdg_data_home("caliban");
-        assert_eq!(p, PathBuf::from("/tmp/data/caliban"));
+        assert_eq!(p, Some(PathBuf::from("/tmp/data/caliban")));
+    }
+
+    #[test]
+    fn xdg_base_ignores_relative_env() {
+        // #336 M7: `XDG_STATE_HOME=.cache` must NOT scatter state cwd-relative.
+        let _g = EnvGuard::set("XDG_STATE_HOME", Some(".cache"));
+        let p = platform_state_dir();
+        assert_ne!(p, Some(PathBuf::from(".cache")), "relative XDG honored");
+        assert_eq!(
+            p,
+            dirs::home_dir().map(|h| h.join(".local").join("state")),
+            "must fall back to the HOME-based state dir"
+        );
     }
 
     #[test]

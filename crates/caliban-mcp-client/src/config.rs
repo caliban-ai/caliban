@@ -212,8 +212,11 @@ pub fn is_valid_server_name(name: &str) -> bool {
 pub fn discovery_paths(workspace_root: &Path) -> (Vec<PathBuf>, PathBuf) {
     let mut user: Vec<PathBuf> = Vec::new();
     // 1. XDG path: "$XDG_CONFIG_HOME ? : $HOME/.config", + caliban/mcp.toml.
-    let xdg = caliban_common::paths::xdg_config_home("caliban").join("mcp.toml");
-    user.push(xdg);
+    //    `None` when no absolute XDG override and no HOME — skip rather than
+    //    write a cwd-relative mcp.toml (#336).
+    if let Some(xdg) = caliban_common::paths::xdg_config_home("caliban") {
+        user.push(xdg.join("mcp.toml"));
+    }
     // 2. Base config path. XDG-first (ADR 0050) makes this identical to (1) on
     //    every OS; dedupe keeps a single candidate.
     if let Some(native) =
