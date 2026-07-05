@@ -118,14 +118,25 @@ async fn slow_prefill_within_budget_completes() {
     let mut stream =
         agent.stream_until_done(vec![Message::user_text("x")], CancellationToken::new());
 
+    // Positive assertions (#334): a bare `!matches!(last_stop, StreamIdle)`
+    // passes vacuously when the run errors and leaves `last_stop = None`. Fail
+    // on any stream `Err`, and assert the turn actually completed *and* streamed
+    // its content — not merely "didn't trip the idle watchdog".
     let mut last_stop = None;
-    while let Some(Ok(ev)) = stream.next().await {
-        if let TurnEvent::RunEnd { stopped_for, .. } = ev {
-            last_stop = Some(stopped_for);
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        match item.expect("within-budget prefill run must not yield a stream error") {
+            TurnEvent::AssistantTextDelta { text: fragment, .. } => text.push_str(&fragment),
+            TurnEvent::RunEnd { stopped_for, .. } => last_stop = Some(stopped_for),
+            _ => {}
         }
     }
     assert!(
-        !matches!(last_stop, Some(StopCondition::StreamIdle(_))),
-        "slow prefill within budget must not trip the idle watchdog, got {last_stop:?}",
+        matches!(last_stop, Some(StopCondition::EndOfTurn)),
+        "slow prefill within budget should complete with EndOfTurn, got {last_stop:?}",
+    );
+    assert_eq!(
+        text, "done",
+        "the delayed first chunk should stream through to completion",
     );
 }
