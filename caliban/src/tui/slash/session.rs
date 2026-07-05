@@ -233,7 +233,8 @@ impl SlashCommand for RecapCommand {
                     compactor.strategy_name()
                 )));
             }
-            Ok(Some(new)) => {
+            Ok(Some(compaction)) => {
+                let new = compaction.messages;
                 ctx.app.transcript.push(TranscriptLine::Info(format!(
                     "recap (strategy {}) \u{2014} {} message(s) summarized:",
                     compactor.strategy_name(),

@@ -229,7 +229,7 @@ async fn summarize_slice(
         .compact(&input, caps)
         .await
         .map_err(|e| CheckpointError::Io(std::io::Error::other(format!("compact: {e}"))))?;
-    let head = compacted.unwrap_or(input);
+    let head = compacted.map_or(input, |c| c.messages);
     let mut out = head;
     out.extend_from_slice(keep_suffix);
     Ok(out)
@@ -562,7 +562,7 @@ mod tests {
             &self,
             messages: &[Message],
             _caps: &Capabilities,
-        ) -> caliban_agent_core::Result<Option<Vec<Message>>> {
+        ) -> caliban_agent_core::Result<Option<caliban_agent_core::Compaction>> {
             self.called
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Replace input with a single synthetic system "summary" message.
@@ -573,7 +573,10 @@ mod tests {
                     cache_control: None,
                 })],
             };
-            Ok(Some(vec![summary]))
+            Ok(Some(caliban_agent_core::Compaction {
+                messages: vec![summary],
+                usage: None,
+            }))
         }
         fn strategy_name(&self) -> &'static str {
             "Recording"
@@ -872,7 +875,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _caps: &Capabilities,
-            ) -> caliban_agent_core::Result<Option<Vec<Message>>> {
+            ) -> caliban_agent_core::Result<Option<caliban_agent_core::Compaction>> {
                 Ok(None)
             }
             fn strategy_name(&self) -> &'static str {
@@ -887,7 +890,7 @@ mod tests {
         let caps = min_caps(100_000);
         let input = vec![user("p1"), assistant("r1")];
         let compacted = comp.compact(&input, &caps).await.unwrap();
-        let head = compacted.unwrap_or_else(|| input.clone());
+        let head = compacted.map_or_else(|| input.clone(), |c| c.messages);
         assert_eq!(head.len(), 2, "None means keep the original input slice");
     }
 

@@ -68,7 +68,7 @@ impl Compactor for RecordingCompactor {
         &self,
         messages: &[Message],
         _caps: &Capabilities,
-    ) -> caliban_agent_core::error::Result<Option<Vec<Message>>> {
+    ) -> caliban_agent_core::error::Result<Option<caliban_agent_core::Compaction>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // Drop everything but the last user message to simulate a real reduction.
         let last_user = messages
@@ -76,7 +76,10 @@ impl Compactor for RecordingCompactor {
             .rev()
             .find(|m| m.role == caliban_provider::Role::User)
             .cloned();
-        Ok(last_user.map(|m| vec![m]))
+        Ok(last_user.map(|m| caliban_agent_core::Compaction {
+            messages: vec![m],
+            usage: None,
+        }))
     }
     fn strategy_name(&self) -> &'static str {
         "test-recording"

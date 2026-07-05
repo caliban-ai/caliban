@@ -320,7 +320,8 @@ impl SlashCommand for CompactCommand {
                 "compact: no-op (strategy {} kept {before_count} messages, ~{before} tokens)",
                 compactor.strategy_name(),
             ))),
-            Ok(Some(new)) => {
+            Ok(Some(compaction)) => {
+                let new = compaction.messages;
                 let after = caliban_agent_core::estimate_tokens(&new);
                 let after_count = new.len();
                 let dropped = before_count.saturating_sub(after_count);

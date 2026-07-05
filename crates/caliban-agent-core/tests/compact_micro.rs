@@ -69,7 +69,7 @@ async fn supersedes_older_read_of_same_path() {
         .compact(&msgs, &capabilities())
         .await
         .unwrap();
-    let new = out.expect("microcompact should mutate");
+    let new = out.expect("microcompact should mutate").messages;
     // Older result replaced with placeholder
     let text_a = match &new[1].content[0] {
         ContentBlock::ToolResult(tr) => match &tr.content[0] {
