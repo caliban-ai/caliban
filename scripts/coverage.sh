@@ -27,7 +27,7 @@
 #
 # Outputs (under target/llvm-cov/):
 #   target/llvm-cov/lcov.info      LCOV report (consumed by CI artifact / Codecov)
-#   target/llvm-cov/coverage.json  JSON export (rendered by scripts/coverage-report.py)
+#   target/llvm-cov/coverage.json  JSON export (rendered by scripts/coverage-report.sh)
 #   target/llvm-cov/html/          HTML report (only with --html / --open)
 #
 # Exit code is non-zero when coverage is under COVERAGE_MIN (unless --no-fail).
@@ -109,7 +109,7 @@ echo "coverage floor: ${COVERAGE_MIN}% line coverage (COVERAGE_MIN)"
 # — that's exactly when the PR comment / gap report is most useful.
 run cargo llvm-cov --workspace --ignore-filename-regex "$IGNORE_REGEX" --lcov --output-path "$LCOV_PATH"
 
-# JSON export that scripts/coverage-report.py renders into the Markdown PR
+# JSON export that scripts/coverage-report.sh renders into the Markdown PR
 # comment / job summary. Reuses the profile data above (no re-test).
 run cargo llvm-cov report --ignore-filename-regex "$IGNORE_REGEX" --json --output-path "$JSON_PATH"
 

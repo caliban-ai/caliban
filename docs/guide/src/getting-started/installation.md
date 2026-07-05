@@ -96,7 +96,7 @@ The `scripts/` directory contains these helpers:
 |---|---|
 | `scripts/check.sh` | Mirrors the full PR CI suite locally: `cargo fmt --check`, `cargo clippy`, `cargo build`, `cargo test`. Accepts `--cloud` to additionally run the cloud-features build, and `--no-test` to skip the test step. |
 | `scripts/coverage.sh` | Measures workspace line coverage with `cargo-llvm-cov` and fails below the `COVERAGE_MIN` floor — the same gate CI enforces. Accepts `--html`/`--open` to render an HTML report and `--no-fail` to report without gating. Writes `lcov.info` + `coverage.json` under `target/llvm-cov/`. |
-| `scripts/coverage-report.py` | Renders `target/llvm-cov/coverage.json` into the Markdown coverage report CI posts as a sticky PR comment (overall stats, per-crate breakdown, notable gaps). Run after `coverage.sh` to preview it locally. |
+| `scripts/coverage-report.sh` | Renders `target/llvm-cov/coverage.json` into the Markdown coverage report CI posts as a sticky PR comment (overall stats, per-crate breakdown, notable gaps). Run after `coverage.sh` to preview it locally. |
 
 Run `scripts/check.sh --help` or `scripts/coverage.sh --help` for the full usage summary.
 
