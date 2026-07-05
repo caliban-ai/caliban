@@ -27,6 +27,9 @@ __pycache__/
 # Generated ADR copies for the mdBook guide (source of truth: docs/adr/)
 /docs/guide/src/adr/
 
+# Generated changelog copy for the mdBook guide (source of truth: CHANGELOG.md)
+/docs/guide/src/changelog.md
+
 # Shared theme files fetched from the hub at build time (source: caliban-ai.github.io)
 /docs/guide/theme/caliban-ai.css
 /docs/guide/theme/nav.js
