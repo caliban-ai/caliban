@@ -36,6 +36,7 @@ caliban-agent-core         = { workspace = true }
 caliban-sessions           = { workspace = true }
 caliban-checkpoint         = { workspace = true }
 caliban-tools-builtin      = { workspace = true }
+caliban-sandbox            = { workspace = true }
 caliban-memory             = { workspace = true }
 caliban-output-styles      = { workspace = true }
 caliban-skills             = { workspace = true }

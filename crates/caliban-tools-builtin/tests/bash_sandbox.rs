@@ -194,3 +194,132 @@ async fn seatbelt_runs_echo_end_to_end() {
     let text = format!("{out:?}");
     assert!(text.contains("hello-seatbelt"), "text: {text}");
 }
+
+/// Build a policy equivalent to the binary's `workspace_fence_policy`: reads
+/// and network open, writes confined to `workspace` + temp + writable devices.
+/// Kept in sync with `caliban/src/startup/compose.rs`.
+#[cfg(target_os = "macos")]
+fn fence_policy(workspace: &std::path::Path) -> Policy {
+    let mut allow_write = vec![workspace.to_path_buf()];
+    let tmp = std::env::temp_dir();
+    if let Ok(canon) = std::fs::canonicalize(&tmp) {
+        allow_write.push(canon);
+    }
+    allow_write.push(tmp);
+    for p in ["/tmp", "/private/tmp", "/var/tmp"] {
+        allow_write.push(std::path::PathBuf::from(p));
+    }
+    for dev in [
+        "/dev/null",
+        "/dev/tty",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/fd",
+        "/dev/zero",
+        "/dev/random",
+        "/dev/urandom",
+    ] {
+        allow_write.push(std::path::PathBuf::from(dev));
+    }
+    Policy {
+        enabled: true,
+        fail_if_unavailable: false,
+        filesystem: FilesystemAcl {
+            allow_read: vec!["/".into()],
+            allow_write,
+            ..FilesystemAcl::default()
+        },
+        network: caliban_sandbox::NetworkAcl {
+            allow_all_outbound: true,
+            ..caliban_sandbox::NetworkAcl::default()
+        },
+        ..Policy::default()
+    }
+}
+
+/// The write-fence, exercised end-to-end through sandbox-exec: writes inside
+/// the workspace succeed; writes outside it are denied; `> /dev/null`,
+/// reads outside the workspace, and the shell itself all still work.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires /usr/bin/sandbox-exec"]
+async fn seatbelt_write_fence_confines_writes_only() {
+    let ws = TempDir::new().unwrap();
+    let ws_path = std::fs::canonicalize(ws.path()).unwrap();
+    // The "outside" target lives in $HOME — genuinely outside the allowed set
+    // (workspace + temp + devices). Writing there is the F2 escape the fence
+    // must block; without the sandbox it would succeed (home is writable).
+    let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME set"));
+    let leak = home.join(format!(".caliban_fence_leak_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&leak); // pre-clean any stale probe
+
+    let shim = Arc::new(SandboxedShim::new(fence_policy(&ws_path)).expect("shim ok"));
+    assert!(shim.is_active(), "seatbelt should be active on macOS");
+    let tool = BashTool::with_sandbox(WorkspaceRoot::new(&ws_path), Some(shim));
+
+    // 1. Write inside the workspace — allowed.
+    tool.invoke(
+        json!({"command": format!("echo inside > {}/ok.txt", ws_path.display())}),
+        ctx(),
+    )
+    .await
+    .expect("write inside workspace should succeed");
+    assert!(ws_path.join("ok.txt").exists(), "inside file not created");
+
+    // 2. Write outside the workspace (into $HOME) — denied by the fence.
+    let res = tool
+        .invoke(
+            json!({"command": format!("echo escaped > {}", leak.display())}),
+            ctx(),
+        )
+        .await;
+    let breached = leak.exists();
+    let _ = std::fs::remove_file(&leak); // clean up if the fence failed
+    assert!(res.is_err(), "write outside the workspace must be denied");
+    assert!(!breached, "fence breached: $HOME file was created");
+
+    // 3. Redirect to /dev/null — allowed (common, must not break).
+    tool.invoke(json!({"command": "echo x > /dev/null"}), ctx())
+        .await
+        .expect("redirect to /dev/null should work");
+
+    // 4. Read a file outside the workspace — allowed (write fence, not read jail).
+    let outside = TempDir::new().unwrap();
+    let outside_path = std::fs::canonicalize(outside.path()).unwrap();
+    std::fs::write(outside_path.join("readme.txt"), b"visible").unwrap();
+    let out = tool
+        .invoke(
+            json!({"command": format!("cat {}/readme.txt", outside_path.display())}),
+            ctx(),
+        )
+        .await
+        .expect("reads outside the workspace should be allowed");
+    assert!(
+        format!("{out:?}").contains("visible"),
+        "read blocked: {out:?}"
+    );
+}
+
+/// Network egress stays open under the write-fence (`allow_all_outbound`), so
+/// `git fetch` / `cargo` / `curl` are not broken. Requires connectivity.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires /usr/bin/sandbox-exec + network"]
+async fn seatbelt_write_fence_keeps_network_open() {
+    let ws = TempDir::new().unwrap();
+    let ws_path = std::fs::canonicalize(ws.path()).unwrap();
+    let shim = Arc::new(SandboxedShim::new(fence_policy(&ws_path)).expect("shim ok"));
+    let tool = BashTool::with_sandbox(WorkspaceRoot::new(&ws_path), Some(shim));
+
+    let out = tool
+        .invoke(
+            json!({"command": "curl -sS -m 15 -o /dev/null -w '%{http_code}' https://example.com"}),
+            ctx(),
+        )
+        .await
+        .expect("network egress should be permitted under the write-fence");
+    assert!(
+        format!("{out:?}").contains("200"),
+        "no 200 from egress: {out:?}"
+    );
+}

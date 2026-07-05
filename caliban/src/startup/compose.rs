@@ -10,7 +10,7 @@
 //! - [`load_layered_settings`] — ADR 0026 `settings.json` loader.
 //! - [`auto_memory_disabled`] — `CALIBAN_DISABLE_AUTO_MEMORY` check.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -377,6 +377,93 @@ pub(crate) async fn preflight_model_check(args: &Args, model: &str) -> Result<()
     ))
 }
 
+/// Character devices commands routinely write via redirects and ttys. On
+/// Linux `--dev /dev` already exposes these; on macOS Seatbelt's
+/// `(deny default)` requires each one explicitly, or `cmd > /dev/null` fails.
+const WRITABLE_DEVICES: &[&str] = &[
+    "/dev/null",
+    "/dev/tty",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/fd",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+];
+
+/// Build the default **filesystem write-fence** policy for Bash under
+/// `--workspace` / `--restrict-paths`: reads and network stay open; writes are
+/// confined to the workspace root, the OS temp dirs, and the standard writable
+/// character devices. Pure and testable — no backend probing here.
+fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
+    use caliban_sandbox::{FilesystemAcl, NetworkAcl, Policy};
+
+    let mut allow_write = vec![workspace_root.to_path_buf()];
+    // Temp dirs: toolchains and shell redirects write scratch here. Add both
+    // the reported `$TMPDIR` and its canonical form (on macOS `$TMPDIR` lives
+    // under /var/folders, a symlink into /private/var that Seatbelt resolves).
+    let tmp = std::env::temp_dir();
+    if let Ok(canon) = std::fs::canonicalize(&tmp) {
+        allow_write.push(canon);
+    }
+    allow_write.push(tmp);
+    for p in ["/tmp", "/private/tmp", "/var/tmp"] {
+        allow_write.push(PathBuf::from(p));
+    }
+    allow_write.extend(WRITABLE_DEVICES.iter().map(PathBuf::from));
+
+    Policy {
+        enabled: true,
+        // Best-effort: if no backend binary (bwrap / sandbox-exec) is present,
+        // warn and run Bash unsandboxed rather than breaking every command.
+        // File tools stay fenced independently (#273/#327); this is the Bash
+        // half of the same workspace fence (#328).
+        fail_if_unavailable: false,
+        filesystem: FilesystemAcl {
+            // Read broadly — this is a *write* fence, not a read jail. Lets
+            // commands exec system binaries, load libc/dyld, and read config
+            // (~/.gitconfig, ~/.cargo, …).
+            allow_read: vec![PathBuf::from("/")],
+            allow_write,
+            ..FilesystemAcl::default()
+        },
+        network: NetworkAcl {
+            // Keep egress open: fencing writes must not break `git fetch` /
+            // `cargo` / `curl`.
+            allow_all_outbound: true,
+            ..NetworkAcl::default()
+        },
+        ..Policy::default()
+    }
+}
+
+/// Construct the Bash write-fence sandbox for a restricted workspace. Returns
+/// `None` (after warning) when no OS sandbox backend is available, so the
+/// caller falls back to an unsandboxed Bash rather than failing to start.
+fn build_bash_fence(workspace_root: &Path) -> Option<Arc<caliban_sandbox::SandboxedShim>> {
+    let policy = workspace_fence_policy(workspace_root);
+    match caliban_sandbox::SandboxedShim::new(policy) {
+        Ok(shim) if shim.is_active() => Some(Arc::new(shim)),
+        Ok(_) => {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
+                "workspace fence is active for file tools, but no OS sandbox backend \
+                 (bwrap / sandbox-exec) is available: Bash commands run unfenced and may \
+                 write outside the workspace. Install bubblewrap (Linux) to contain shell writes."
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_PERMISSIONS,
+                "failed to construct the Bash OS sandbox ({e}); Bash commands run unfenced. \
+                 File tools remain fenced."
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn build_registry(
     args: &Args,
     workspace: WorkspaceRoot,
@@ -408,7 +495,16 @@ pub(crate) fn build_registry(
     r.register(Arc::new(EditTool::new(root.clone())));
     r.register(Arc::new(MultiEditTool::new(root.clone())));
     r.register(Arc::new(NotebookEditTool::new(root.clone())));
-    r.register(Arc::new(BashTool::new(root.clone())));
+    // Bash needs the OS sandbox to be fenced — a path-prefix check can't
+    // contain an arbitrary shell command. When the workspace is restricted,
+    // wrap Bash in a write-fence sandbox (ADR 0032); otherwise leave it
+    // unsandboxed as before (#328).
+    let bash = if crate::args::should_restrict(args) {
+        BashTool::with_sandbox(root.clone(), build_bash_fence(&workspace_root))
+    } else {
+        BashTool::new(root.clone())
+    };
+    r.register(Arc::new(bash));
     r.register(Arc::new(GlobTool::new(root.clone())));
     r.register(Arc::new(GrepTool::new(root)));
     r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
@@ -1580,10 +1676,44 @@ fn apply_memory_settings(
 mod tests {
     use super::{
         apply_env_ms_override, debug_enabled, default_debug_filter, missing_key_err,
-        resolve_debug_log_path,
+        resolve_debug_log_path, workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
+
+    #[test]
+    fn workspace_fence_policy_confines_writes_but_keeps_reads_and_net() {
+        let root = std::path::Path::new("/proj/ws");
+        let p = workspace_fence_policy(root);
+        assert!(p.enabled, "fence policy must be enabled");
+        assert!(
+            !p.fail_if_unavailable,
+            "must be best-effort (fail-open) so a missing backend doesn't break Bash"
+        );
+        // Reads open (write fence, not read jail).
+        assert_eq!(p.filesystem.allow_read, vec![std::path::PathBuf::from("/")]);
+        // Network open so git/cargo/curl still work.
+        assert!(p.network.allow_all_outbound);
+        // Workspace root is writable; a sibling outside it is not.
+        assert!(
+            p.filesystem
+                .allow_write
+                .contains(&std::path::PathBuf::from("/proj/ws"))
+        );
+        assert!(
+            !p.filesystem
+                .allow_write
+                .iter()
+                .any(|w| w == std::path::Path::new("/proj/secrets")),
+            "outside-root path must not be writable"
+        );
+        // Standard writable devices present (so `cmd > /dev/null` works).
+        assert!(
+            p.filesystem
+                .allow_write
+                .contains(&std::path::PathBuf::from("/dev/null"))
+        );
+    }
 
     #[test]
     fn env_ms_override_applies_valid_and_ignores_garbage() {

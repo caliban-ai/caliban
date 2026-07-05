@@ -81,12 +81,12 @@ pub fn build_args(policy: &Policy) -> Vec<OsString> {
         // Deny direct egress; only the operator's loopback proxy is
         // reachable. The proxy enforces domain rules.
         push_str(&mut args, "--unshare-net");
-    } else if domains_empty && !net.allow_local_binding {
+    } else if domains_empty && !net.allow_local_binding && !net.allow_all_outbound {
         push_str(&mut args, "--unshare-net");
     }
-    // Otherwise: domains-non-empty without proxy — we keep the network
-    // namespace (bwrap can't filter per-hostname). The shim logs a
-    // warning at construction time.
+    // Otherwise: `allow_all_outbound`, a non-empty domain list (bwrap can't
+    // filter per-hostname; the shim warns), or local binding — in all of
+    // these we keep the network namespace so egress works.
 
     if !net.allow_unix_sockets {
         // Default: hide the most common host sockets so accidental
@@ -261,6 +261,33 @@ mod tests {
         let p = Policy {
             network: NetworkAcl {
                 allowed_domains: vec!["github.com".into()],
+                http_proxy_port: 8888,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        let args = build_args(&p);
+        assert!(args.contains(&os("--unshare-net")));
+    }
+
+    #[test]
+    fn allow_all_outbound_keeps_net_namespace() {
+        let p = Policy {
+            network: NetworkAcl {
+                allow_all_outbound: true,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        let args = build_args(&p);
+        assert!(!args.contains(&os("--unshare-net")), "args = {args:?}");
+    }
+
+    #[test]
+    fn proxy_still_unshares_net_despite_allow_all_outbound() {
+        let p = Policy {
+            network: NetworkAcl {
+                allow_all_outbound: true,
                 http_proxy_port: 8888,
                 ..NetworkAcl::default()
             },

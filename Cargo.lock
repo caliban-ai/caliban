@@ -834,6 +834,7 @@ dependencies = [
  "caliban-provider-google",
  "caliban-provider-ollama",
  "caliban-provider-openai",
+ "caliban-sandbox",
  "caliban-sessions",
  "caliban-settings",
  "caliban-skills",
