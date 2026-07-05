@@ -137,11 +137,20 @@ pub fn expand_vars(s: &str, ctx: &ExpandContext) -> Result<String, ExpandError> 
             out.push_str(&value);
             i = inner_start + rel_end + 1;
         } else {
-            // Copy one UTF-8 byte at a time. Safe because the multi-byte
-            // continuation bytes in UTF-8 never collide with ASCII `$` or
-            // `{`, so we can never split a code point mid-stream.
-            out.push(bytes[i] as char);
-            i += 1;
+            // Copy the next whole UTF-8 character. `bytes[i] as char` (the old
+            // code) casts a raw byte to a codepoint, so any 0x80–0xFF byte
+            // becomes U+0080–U+00FF and re-encodes as multi-byte UTF-8,
+            // mangling non-ASCII values (`café` → `cafÃ©`, #340). `i` is always
+            // on a char boundary (ASCII `${…}` spans and whole-char advances),
+            // so slicing here is safe.
+            if let Some(ch) = s[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                // Unreachable: the `while i < bytes.len()` guard plus `i` always
+                // landing on a char boundary means a char is always present.
+                i += 1;
+            }
         }
     }
     Ok(out)
@@ -174,6 +183,17 @@ mod tests {
     fn expands_single_var() {
         let c = ctx_with(&[("FOO", "bar")]);
         assert_eq!(expand_vars("${FOO}", &c).unwrap(), "bar");
+    }
+
+    #[test]
+    fn preserves_non_ascii_literal_text() {
+        // #340: non-substituted text must be copied verbatim, not byte-by-byte
+        // through `bytes[i] as char` (which mangled 0x80–0xFF into 2-byte UTF-8).
+        let c = ctx_with(&[("NAME", "münster")]);
+        assert_eq!(
+            expand_vars("café ${NAME} — 日本語 🚀", &c).unwrap(),
+            "café münster — 日本語 🚀"
+        );
     }
 
     #[test]
