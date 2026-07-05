@@ -83,7 +83,7 @@ same report to the job summary. To preview that comment locally:
 
 ```bash
 scripts/coverage.sh                                   # writes target/llvm-cov/coverage.json
-python3 scripts/coverage-report.py | glow -           # or pipe to any Markdown viewer
+scripts/coverage-report.sh | glow -                   # or pipe to any Markdown viewer
 ```
 
 On a Homebrew Rust toolchain (no `rustup` component support), point
