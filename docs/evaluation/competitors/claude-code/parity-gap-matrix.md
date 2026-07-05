@@ -9,7 +9,7 @@
 > When shipping a feature, tick its row(s) from 🔴 → 🟡 or 🟡 → ✅ in the
 > same PR that ships the code.
 >
-> **Companion document:** [`claude-code-capability-inventory.md`](claude-code-capability-inventory.md)
+> **Companion document:** [`capability-inventory.md`](capability-inventory.md)
 > — a structured snapshot of Claude Code's documented surface, captured
 > from the public docs (`docs.claude.com/en/docs/claude-code/*`). That
 > file is the *source* this matrix is derived from; refresh both
@@ -26,26 +26,26 @@ Every 🔴 row in this matrix has a proposed design doc as of 2026-05-24:
 
 | Theme | Spec | ADR |
 |---|---|---|
-| A. Permissions/safety (v2 schema + TOML polarity + active management) | [`permissions-v2-design`](superpowers/specs/2026-05-31-permissions-v2-design.md) | [0045](../docs/adr/0045-permissions-v2-and-toml-primary-config.md) |
-| A. Permissions/safety (modes + auto-mode) | [`permission-modes-design`](superpowers/specs/2026-05-24-permission-modes-design.md) | [0029](../docs/adr/0029-permission-modes-and-auto-mode.md) |
-| A. Permissions/safety (OS sandbox) | [`os-sandbox-design`](superpowers/specs/2026-05-24-os-sandbox-design.md) | [0032](../docs/adr/0032-os-sandbox.md) |
-| B. Hooks (event surface + handlers) | [`hooks-expansion-design`](superpowers/specs/2026-05-24-hooks-expansion-design.md) | [0024](../docs/adr/0024-hook-event-taxonomy.md) |
-| B. Plugins | [`plugin-system-design`](superpowers/specs/2026-05-24-plugin-system-design.md) | [0030](../docs/adr/0030-plugin-packaging.md) |
-| C. Auto-memory | [`auto-memory-design`](superpowers/specs/2026-05-24-auto-memory-design.md) | [0035](../docs/adr/0035-auto-memory.md) |
-| C. CLAUDE.md ancestry + `@`-imports | [`claudemd-ancestry-design`](superpowers/specs/2026-05-24-claudemd-ancestry-design.md) | [0036](../docs/adr/0036-claudemd-ancestry-and-imports.md) |
-| C. Checkpointing + `/rewind` | [`checkpointing-design`](superpowers/specs/2026-05-24-checkpointing-design.md) | [0028](../docs/adr/0028-checkpointing-rewind.md) |
-| D. Settings hierarchy + `/config` | [`settings-hierarchy-design`](superpowers/specs/2026-05-24-settings-hierarchy-design.md) | [0026](../docs/adr/0026-settings-layering.md) |
-| E. TUI ergonomics (`@file`/`!`/`Ctrl+G`/Ask/transcript) | [`tui-ergonomics-design`](superpowers/specs/2026-05-24-tui-ergonomics-design.md) | [0027](../docs/adr/0027-tui-ergonomics.md) |
-| E. Image / vision input | [`image-input-design`](superpowers/specs/2026-05-24-image-input-design.md) | [0039](../docs/adr/0039-image-and-vision-input.md) |
-| F. Built-in tool gaps (WebSearch / NotebookEdit / MultiEdit / Bg-Bash) | [`builtin-tool-gaps-design`](superpowers/specs/2026-05-24-builtin-tool-gaps-design.md) | — |
-| G. Sub-agent isolation + background fleet | [`subagent-worktree-and-fleet-design`](superpowers/specs/2026-05-24-subagent-worktree-and-fleet-design.md) | [0037](../docs/adr/0037-subagent-isolation-and-background-fleet.md) |
-| H. MCP v2 (transports / OAuth / elicitation / resources) | [`mcp-v2-design`](superpowers/specs/2026-05-24-mcp-v2-design.md) | [0023](../docs/adr/0023-mcp-v2-transports-and-oauth.md) |
-| I. Model router v2 (fallback/hedging/breakers/caps) | [`model-router-v2-design`](superpowers/specs/2026-05-24-model-router-v2-design.md) | [0038](../docs/adr/0038-model-router-v2.md) |
-| I. Bedrock + Vertex providers | [`bedrock-vertex-providers-design`](superpowers/specs/2026-05-24-bedrock-vertex-providers-design.md) | [0034](../docs/adr/0034-bedrock-and-vertex-providers.md) |
-| J. Headless `-p` + JSON output | [`headless-mode-design`](superpowers/specs/2026-05-24-headless-mode-design.md) | [0025](../docs/adr/0025-headless-output-protocol.md) |
-| K. OTel export + cost accounting + `/usage` / `/context` / `/compact` | [`otel-and-cost-design`](superpowers/specs/2026-05-24-otel-and-cost-design.md) | [0033](../docs/adr/0033-opentelemetry-and-cost.md) |
-| L. Output styles | [`output-styles-design`](superpowers/specs/2026-05-24-output-styles-design.md) | [0031](../docs/adr/0031-output-styles.md) |
-| M. Slash command coverage (registry + ~24 commands) | [`slash-command-coverage-design`](superpowers/specs/2026-05-24-slash-command-coverage-design.md) | [0040](../docs/adr/0040-slash-command-registry.md) |
+| A. Permissions/safety (v2 schema + TOML polarity + active management) | [`permissions-v2-design`](../../../superpowers/specs/2026-05-31-permissions-v2-design.md) | [0045](../../../adr/0045-permissions-v2-and-toml-primary-config.md) |
+| A. Permissions/safety (modes + auto-mode) | [`permission-modes-design`](../../../superpowers/specs/2026-05-24-permission-modes-design.md) | [0029](../../../adr/0029-permission-modes-and-auto-mode.md) |
+| A. Permissions/safety (OS sandbox) | [`os-sandbox-design`](../../../superpowers/specs/2026-05-24-os-sandbox-design.md) | [0032](../../../adr/0032-os-sandbox.md) |
+| B. Hooks (event surface + handlers) | [`hooks-expansion-design`](../../../superpowers/specs/2026-05-24-hooks-expansion-design.md) | [0024](../../../adr/0024-hook-event-taxonomy.md) |
+| B. Plugins | [`plugin-system-design`](../../../superpowers/specs/2026-05-24-plugin-system-design.md) | [0030](../../../adr/0030-plugin-packaging.md) |
+| C. Auto-memory | [`auto-memory-design`](../../../superpowers/specs/2026-05-24-auto-memory-design.md) | [0035](../../../adr/0035-auto-memory.md) |
+| C. CLAUDE.md ancestry + `@`-imports | [`claudemd-ancestry-design`](../../../superpowers/specs/2026-05-24-claudemd-ancestry-design.md) | [0036](../../../adr/0036-claudemd-ancestry-and-imports.md) |
+| C. Checkpointing + `/rewind` | [`checkpointing-design`](../../../superpowers/specs/2026-05-24-checkpointing-design.md) | [0028](../../../adr/0028-checkpointing-rewind.md) |
+| D. Settings hierarchy + `/config` | [`settings-hierarchy-design`](../../../superpowers/specs/2026-05-24-settings-hierarchy-design.md) | [0026](../../../adr/0026-settings-layering.md) |
+| E. TUI ergonomics (`@file`/`!`/`Ctrl+G`/Ask/transcript) | [`tui-ergonomics-design`](../../../superpowers/specs/2026-05-24-tui-ergonomics-design.md) | [0027](../../../adr/0027-tui-ergonomics.md) |
+| E. Image / vision input | [`image-input-design`](../../../superpowers/specs/2026-05-24-image-input-design.md) | [0039](../../../adr/0039-image-and-vision-input.md) |
+| F. Built-in tool gaps (WebSearch / NotebookEdit / MultiEdit / Bg-Bash) | [`builtin-tool-gaps-design`](../../../superpowers/specs/2026-05-24-builtin-tool-gaps-design.md) | — |
+| G. Sub-agent isolation + background fleet | [`subagent-worktree-and-fleet-design`](../../../superpowers/specs/2026-05-24-subagent-worktree-and-fleet-design.md) | [0037](../../../adr/0037-subagent-isolation-and-background-fleet.md) |
+| H. MCP v2 (transports / OAuth / elicitation / resources) | [`mcp-v2-design`](../../../superpowers/specs/2026-05-24-mcp-v2-design.md) | [0023](../../../adr/0023-mcp-v2-transports-and-oauth.md) |
+| I. Model router v2 (fallback/hedging/breakers/caps) | [`model-router-v2-design`](../../../superpowers/specs/2026-05-24-model-router-v2-design.md) | [0038](../../../adr/0038-model-router-v2.md) |
+| I. Bedrock + Vertex providers | [`bedrock-vertex-providers-design`](../../../superpowers/specs/2026-05-24-bedrock-vertex-providers-design.md) | [0034](../../../adr/0034-bedrock-and-vertex-providers.md) |
+| J. Headless `-p` + JSON output | [`headless-mode-design`](../../../superpowers/specs/2026-05-24-headless-mode-design.md) | [0025](../../../adr/0025-headless-output-protocol.md) |
+| K. OTel export + cost accounting + `/usage` / `/context` / `/compact` | [`otel-and-cost-design`](../../../superpowers/specs/2026-05-24-otel-and-cost-design.md) | [0033](../../../adr/0033-opentelemetry-and-cost.md) |
+| L. Output styles | [`output-styles-design`](../../../superpowers/specs/2026-05-24-output-styles-design.md) | [0031](../../../adr/0031-output-styles.md) |
+| M. Slash command coverage (registry + ~24 commands) | [`slash-command-coverage-design`](../../../superpowers/specs/2026-05-24-slash-command-coverage-design.md) | [0040](../../../adr/0040-slash-command-registry.md) |
 
 Long-tail surfaces in section N (IDE / GitHub App / web / iOS / Slack /
 Remote Control / Channels / Routines / Deep links / Teleport) do **not**
@@ -57,9 +57,9 @@ have specs yet — they're parked until terminal/CLI parity is reached.
 
 | Capability | Caliban | Notes |
 |---|---|---|
-| Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020; v2 schema: ordered `[[permissions.rules]]` array with `pattern`/`action`/`comment`/`reason`/`expires_at`, globstar `**`, `Bash:~glob` anywhere-match, dotted-key MCP arg accessors — ADR-0045 / [v2 spec](superpowers/specs/2026-05-31-permissions-v2-design.md) |
+| Rule grammar (allow/ask/deny + globs) | ✅ | ADR-0020; v2 schema: ordered `[[permissions.rules]]` array with `pattern`/`action`/`comment`/`reason`/`expires_at`, globstar `**`, `Bash:~glob` anywhere-match, dotted-key MCP arg accessors — ADR-0045 / [v2 spec](../../../superpowers/specs/2026-05-31-permissions-v2-design.md) |
 | Permissions modes: `default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions` | ✅ | ADR-0029; Shift+Tab cycles + status-bar chip; `--permission-mode` flag; `CALIBAN_DEFAULT_PERMISSION_MODE` env; `--allow-dangerously-skip-permissions` gate for bypass; `permissions.enforce = true` refuses bypass at startup (ADR-0045) |
-| Permissions active management (CLI + TUI editor + modal writeback + audit log) | ✅ | ADR-0045 / [v2 spec](superpowers/specs/2026-05-31-permissions-v2-design.md); `caliban perms` CLI (list/test/explain/add/remove/import/export/audit/lint), `/permissions` overlay editor, modal scope picker with TOML writeback, JSONL decision log under `$XDG_STATE_HOME`, `permissions.enforce` lockdown, always-visible bypass-latch chip with `ctrl+shift+b` drop |
+| Permissions active management (CLI + TUI editor + modal writeback + audit log) | ✅ | ADR-0045 / [v2 spec](../../../superpowers/specs/2026-05-31-permissions-v2-design.md); `caliban perms` CLI (list/test/explain/add/remove/import/export/audit/lint), `/permissions` overlay editor, modal scope picker with TOML writeback, JSONL decision log under `$XDG_STATE_HOME`, `permissions.enforce` lockdown, always-visible bypass-latch chip with `ctrl+shift+b` drop |
 | Auto-mode (classifier-driven `environment`/`allow`/`soft_deny`/`hard_deny`) | ✅ | ADR-0029; `AutoModeClassifier` via router `RequestPurpose::FastClassifier` with `$defaults` curated rule lists, sha256-keyed cache, 4 KiB input truncation |
 | TUI Ask modal | ✅ | ADR-0027 + Plan C; 4-button modal (Allow once / Always allow / Reject once / Always reject) — see row E "Permission Ask modal" |
 | OS-level sandbox (Seatbelt / bubblewrap) | ✅ | ADR-0032; v1 ships macOS + Linux/WSL; Windows native deferred |
@@ -283,6 +283,6 @@ styles, etc.
 1. When a feature lands: edit the relevant row(s) in this matrix in the
    same PR, ticking 🔴 → 🟡 or 🟡 → ✅ as appropriate.
 2. When Claude Code ships something new: refresh
-   [`claude-code-capability-inventory.md`](claude-code-capability-inventory.md)
+   [`capability-inventory.md`](capability-inventory.md)
    first (re-fetch the upstream docs), then propagate any new rows here.
 3. Bump the **Last refreshed** date at the top.
