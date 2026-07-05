@@ -42,6 +42,19 @@ router config are supplied per deployment — later injected by `caliban-operato
 
 On Linux, `caliband` isolates subprocess tools with `bubblewrap` (`bwrap`),
 which is installed in the image. `bwrap` needs user-namespace support from the
-container runtime; if the pod forbids it, caliban logs a warning and runs
-**unsandboxed** rather than failing. Pod-level isolation (gVisor/Kata via
-agent-sandbox) is the k8s-era replacement (design spec §6).
+container runtime (it runs with `--unshare-user`).
+
+Sandbox detection currently checks only that `bwrap` is **present and a
+supported version** — it does not yet probe whether the runtime actually permits
+user namespaces. The fail-open-to-unsandboxed path fires when `bwrap` is missing
+or too old, **not** when it is installed but userns is denied. So on a runtime
+that ships `bwrap` yet forbids user namespaces (e.g. stock Docker under the
+default seccomp profile, or `kernel.unprivileged_userns_clone=0`), sandboxed
+tool calls **fail** rather than degrading to unsandboxed.
+
+To run there today, grant the container user-namespace access (an appropriate
+`securityContext` / `--security-opt seccomp=unconfined`) or run without the
+sandbox. A real userns probe with graceful fallback, and arbitrary-UID
+(`runAsUser`) hardening of the baked `HOME`/`XDG_RUNTIME_DIR`, are tracked in
+#345. Pod-level isolation (gVisor/Kata via agent-sandbox) is the k8s-era
+replacement (design spec §6).
