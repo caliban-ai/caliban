@@ -1,4 +1,4 @@
-//! #379: OTel GenAI semconv `execute_tool` span per tool call.
+//! #379: OpenTelemetry `GenAI` semconv `execute_tool` span per tool call.
 //!
 //! Drives one tool-call turn through a `MockProvider` + a registered tool with
 //! an in-memory OTLP span exporter installed, then asserts the exported span
@@ -29,12 +29,14 @@ use tracing_subscriber::layer::SubscriberExt as _;
 
 /// A trivial tool that returns a fixed text block.
 struct EchoTool {
+    name: String,
     schema: serde_json::Value,
 }
 
 impl EchoTool {
     fn new() -> Self {
         Self {
+            name: "echo".to_owned(),
             schema: serde_json::json!({"type": "object"}),
         }
     }
@@ -43,7 +45,7 @@ impl EchoTool {
 #[async_trait]
 impl Tool for EchoTool {
     fn name(&self) -> &str {
-        "echo"
+        &self.name
     }
     fn description(&self) -> &'static str {
         "echo test tool"
