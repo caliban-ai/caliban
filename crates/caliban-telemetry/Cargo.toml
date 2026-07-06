@@ -23,22 +23,53 @@ chrono           = { workspace = true }
 tokio            = { workspace = true }
 whoami           = "1"
 
-# Optional: real OTLP exporter wiring. Off by default so a stock `cargo build
-# --workspace` works without pulling tonic/h2/etc. The `Telemetry` facade still
-# exists when the feature is off — it just routes to a no-op exporter.
+# Real OTLP exporter wiring. The `otlp` umbrella pulls the SDK + tracing bridge
+# and the OTLP base; `otlp-http` / `otlp-grpc` add the wire transports. The
+# caliban binary enables all three (see caliban/Cargo.toml) so the shipped
+# exporter compiles in — runtime emission stays gated by
+# `CALIBAN_ENABLE_TELEMETRY`. A stock `cargo build -p caliban-telemetry
+# --no-default-features` still compiles without pulling tonic/h2/reqwest.
 opentelemetry         = { version = "0.27", optional = true, features = ["metrics", "logs", "trace"] }
-opentelemetry_sdk     = { version = "0.27", optional = true, features = ["rt-tokio", "metrics", "logs"] }
-opentelemetry-otlp    = { version = "0.27", optional = true, features = ["http-proto", "metrics", "logs"] }
+opentelemetry_sdk     = { version = "0.27", optional = true, features = ["rt-tokio", "metrics", "logs", "trace"] }
+opentelemetry-otlp    = { version = "0.27", optional = true, default-features = false }
 tracing-opentelemetry = { version = "0.28", optional = true }
+# Needed by the public `Telemetry::otel_layer` accessor to name the
+# `tracing_subscriber::Layer` / `LookupSpan` bounds. Only pulled with `otlp`.
+tracing-subscriber    = { workspace = true, optional = true }
 
 [features]
 default = []
-otlp    = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+# Umbrella: SDK trace pipeline + tracing bridge + OTLP base (no wire transport
+# on its own). Transports below imply this.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+    "opentelemetry-otlp/trace",
+    "opentelemetry-otlp/metrics",
+    "opentelemetry-otlp/logs",
+]
+# HTTP transport: protobuf + JSON payloads over an async reqwest client.
+otlp-http = [
+    "otlp",
+    "opentelemetry-otlp/http-proto",
+    "opentelemetry-otlp/http-json",
+    "opentelemetry-otlp/reqwest-client",
+]
+# gRPC transport via tonic.
+otlp-grpc = ["otlp", "opentelemetry-otlp/grpc-tonic"]
 
 [dev-dependencies]
 tempfile  = { workspace = true }
 tokio     = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock  = { workspace = true }
+# In-memory span exporter for hermetic pipeline tests (no network). Exercised
+# only by the `#[cfg(feature = "otlp")]` tests under `cargo test --workspace`,
+# where the caliban binary turns the transports on.
+opentelemetry     = { version = "0.27", features = ["trace", "testing"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "testing"] }
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 //! Hosts every helper that constructs runtime state shared across the
 //! three dispatch paths (TUI / headless / single-prompt):
 //!
-//! - [`init_debug_tracing`] — file-backed `tracing` subscriber.
+//! - [`init_tracing`] — global `tracing` subscriber (debug fmt + OTLP layers).
 //! - [`build_provider`] — single-provider construction (router fallback).
 //! - [`web_fetch_client`] — `reqwest::Client` for `WebFetchTool`.
 //! - [`build_registry`] — registry assembly (built-in tools + plugins).
@@ -66,43 +66,96 @@ fn default_debug_filter() -> &'static str {
      ignore=warn,globset=warn"
 }
 
-/// Install a file-backed `tracing` subscriber when debug logging is enabled
-/// (see [`debug_enabled`]). No-op otherwise. Idempotent once initialized:
-/// runs at most once at startup before any `tracing::*!` site fires.
-pub(crate) async fn init_debug_tracing(args: &Args) {
+/// Install the global `tracing` subscriber, composing whichever layers are
+/// active for this run:
+///
+/// - a file-backed fmt layer when debug logging is enabled (see
+///   [`debug_enabled`]); and
+/// - the OTLP span-export layer when telemetry is enabled and the exporter
+///   feature built a provider ([`caliban_telemetry::Telemetry::otel_layer`]).
+///
+/// When neither is active this is a no-op (no global subscriber installed —
+/// preserving prior behavior). Idempotent: runs at most once at startup before
+/// any `tracing::*!` site fires.
+pub(crate) async fn init_tracing(args: &Args, telemetry: &caliban_telemetry::Telemetry) {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let Some(log_path) = resolve_debug_log_path(args) else {
+    // Build the OTLP span-export layer (present only when telemetry is enabled
+    // and a provider was built). Its subscriber type is inferred from the
+    // `.with(...)` call site below.
+    let otel_layer = telemetry.otel_layer();
+
+    let debug_path = resolve_debug_log_path(args);
+    if debug_path.is_none() && otel_layer.is_none() {
+        // Nothing to install — no debug log and no span export.
         return;
-    };
-    if let Some(parent) = log_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let opened = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .await;
-    let Ok(async_file) = opened else { return };
-    // tracing-subscriber's fmt layer wants std::io::Write, so
-    // convert back to a std::fs::File. into_std offloads to the
-    // blocking pool; safe here since this only runs once at start.
-    let file = async_file.into_std().await;
-    // Default filter keeps caliban + caliban_* crates at DEBUG and
-    // silences noisy lower-level traces (mio, hyper, reqwest, …).
-    // Users can override via RUST_LOG env var.
+
+    // Open the debug log file (best-effort). A failure to open leaves the fmt
+    // layer absent but still installs the OTLP layer if present.
+    let fmt_layer = match debug_path {
+        Some(log_path) => {
+            if let Some(parent) = log_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .await
+            {
+                // tracing-subscriber's fmt layer wants std::io::Write, so
+                // convert back to a std::fs::File. into_std offloads to the
+                // blocking pool; safe here since this only runs once at start.
+                Ok(async_file) => {
+                    let file = async_file.into_std().await;
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_ansi(false);
+                    Some((layer, log_path))
+                }
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+
+    // If the fmt layer was requested but failed to open and there is no OTLP
+    // layer either, bail without installing a subscriber (prior behavior).
+    if fmt_layer.is_none() && otel_layer.is_none() {
+        return;
+    }
+
+    // Default filter keeps caliban + caliban_* crates at DEBUG and silences
+    // noisy lower-level traces (mio, hyper, reqwest, …). Users can override via
+    // RUST_LOG. This global filter governs both the fmt and OTLP layers.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_debug_filter()));
-    let layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::sync::Mutex::new(file))
-        .with_ansi(false);
+
+    let (fmt_layer, log_path) = match fmt_layer {
+        Some((layer, path)) => (Some(layer), Some(path)),
+        None => (None, None),
+    };
+
+    // `Option<Layer>` and `Option<Box<dyn Layer>>` both implement `Layer`, so a
+    // missing layer simply contributes nothing.
     tracing_subscriber::registry()
         .with(filter)
-        .with(layer)
+        .with(fmt_layer)
+        .with(otel_layer)
         .init();
-    tracing::info!("caliban debug logging started — {}", log_path.display());
+
+    if let Some(path) = log_path {
+        tracing::info!("caliban debug logging started — {}", path.display());
+    }
+    if telemetry.enabled {
+        tracing::info!(
+            target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+            "otlp span export layer attached",
+        );
+    }
 }
 
 pub(crate) fn build_provider(
