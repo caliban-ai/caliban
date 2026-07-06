@@ -196,6 +196,7 @@ fn denied_tool_result(tool_use_id: &str, text: String) -> ToolResultBlock {
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
@@ -209,7 +210,6 @@ use futures::stream::{FuturesUnordered, Stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
 use tracing::{Instrument as _, field::Empty};
 
 use crate::agent::Agent;
@@ -224,6 +224,42 @@ use crate::tool::ToolError;
 use hook_dispatch::dispatch_tool;
 use parallel::DispatchPlan;
 use turn::{ActiveBlock, MessageAccumulator, TurnTiming};
+
+pin_project_lite::pin_project! {
+    /// Stream combinator that enters `span` for the duration of every
+    /// `poll_next` on the wrapped stream (#385).
+    ///
+    /// The run loop is a `try_stream!` future: its body executes while the
+    /// stream is *polled*, not while it is *constructed*. A plain
+    /// `#[instrument]` on a synchronous stream-returning fn therefore only
+    /// covers construction, leaving the per-request `chat` and `execute_tool`
+    /// spans created during polling with the wrong parent. Entering the run
+    /// span on each poll makes it the current span while the loop runs, so
+    /// those child spans nest under it with zero per-site plumbing.
+    ///
+    /// Entering across an `.await` is normally a hazard, but `poll_next` is
+    /// synchronous: the guard is created and dropped within a single poll,
+    /// never held across a suspension point.
+    struct SpanStream<S> {
+        #[pin]
+        inner: S,
+        span: tracing::Span,
+    }
+}
+
+impl<S: Stream> Stream for SpanStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let _enter = this.span.enter();
+        this.inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
 
 /// Neutral nudge injected by the #249 empty/degenerate-turn guard: a turn that
 /// reasoned but emitted no tool call and no answer. Phrased to push the model to
@@ -1199,17 +1235,25 @@ impl Agent {
     // helpers would silently destroy incremental streaming. The allow is
     // therefore intrinsic to the function's role as the orchestration skeleton.
     #[allow(clippy::too_many_lines)]
-    #[instrument(
-        skip(self, messages, cancel, settings),
-        fields(model = %self.active_model(), session = %settings.session_id, prompt = settings.prompt_index)
-    )]
     pub fn stream_until_done_with_settings(
         self: Arc<Self>,
         messages: Vec<Message>,
         cancel: CancellationToken,
         settings: RunSettings,
     ) -> TurnEventStream {
-        Box::pin(try_stream! {
+        // #385: the run span, created explicitly with the same name and fields
+        // the former `#[instrument]` attribute produced (name = the fn name;
+        // fields `model` / `session` / `prompt`). Fields are captured now,
+        // before `self` and `settings` are moved into the `try_stream!` body.
+        // `SpanStream` below enters this span on every poll so the loop's
+        // per-request `chat` and per-call `execute_tool` spans nest under it.
+        let run_span = tracing::info_span!(
+            "stream_until_done_with_settings",
+            model = %self.active_model(),
+            session = %settings.session_id,
+            prompt = settings.prompt_index,
+        );
+        let inner = try_stream! {
             let mut history = messages;
             let mut total_usage = Usage::default();
             // ---- before_run hook (ADR 0028) ----
@@ -2246,6 +2290,10 @@ impl Agent {
                 turns_without_edit,
                 no_edit_nudge_emitted,
             };
+        };
+        Box::pin(SpanStream {
+            inner,
+            span: run_span,
         })
     }
 }

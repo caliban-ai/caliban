@@ -1049,6 +1049,7 @@ dependencies = [
  "globset",
  "opentelemetry",
  "opentelemetry_sdk",
+ "pin-project-lite",
  "proptest",
  "rand 0.8.6",
  "reqwest 0.12.28",
