@@ -32,7 +32,19 @@ use crate::tool::{ToolContext, ToolError};
 /// `DispatchPlan::Denied` and never reach here. Re-running the gate in this
 /// phase would evaluate the policy twice and double-prompt the user for "Ask"
 /// rules (#58), so dispatch only invokes + runs `after_tool`.
-#[instrument(skip(agent, input, cancel), fields(tool = tool_name, id = tool_use_id))]
+// OTel GenAI semconv `execute_tool` span (ADR 0053, semconv-only). Dotted field
+// names map verbatim to OTel attribute keys via tracing-opentelemetry; `otel.name`
+// sets the exported span name ("execute_tool {tool}"). Span kind defaults to
+// INTERNAL, which is what the semconv specifies for execute_tool.
+#[instrument(
+    skip(agent, input, cancel),
+    fields(
+        otel.name = tracing::field::Empty,
+        gen_ai.operation.name = "execute_tool",
+        gen_ai.tool.name = tool_name,
+        gen_ai.tool.call.id = tool_use_id,
+    )
+)]
 pub(crate) async fn dispatch_tool(
     agent: &Agent,
     session_id: &str,
@@ -42,6 +54,8 @@ pub(crate) async fn dispatch_tool(
     input: serde_json::Value,
     cancel: &CancellationToken,
 ) -> std::result::Result<ToolResultBlock, StopCondition> {
+    tracing::Span::current().record("otel.name", format!("execute_tool {tool_name}").as_str());
+
     if cancel.is_cancelled() {
         return Err(StopCondition::Cancelled);
     }
