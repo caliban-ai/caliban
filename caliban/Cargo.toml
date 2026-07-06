@@ -43,7 +43,10 @@ caliban-skills             = { workspace = true }
 caliban-mcp-client         = { workspace = true }
 caliban-model-router       = { workspace = true }
 caliban-plugins            = { workspace = true }
-caliban-telemetry          = { workspace = true }
+# Enable the real OTLP span exporter (both transports) so the shipped binary
+# compiles the pipeline in. Export stays runtime-gated by
+# `CALIBAN_ENABLE_TELEMETRY`; nothing is emitted unless telemetry is turned on.
+caliban-telemetry          = { workspace = true, features = ["otlp", "otlp-http", "otlp-grpc"] }
 caliban-images             = { workspace = true }
 caliban-worktrees          = { workspace = true }
 caliban-supervisor         = { workspace = true }

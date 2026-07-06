@@ -139,8 +139,24 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    // Install file-backed tracing subscriber when --debug or CALIBAN_DEBUG is set.
-    startup::init_debug_tracing(&args).await;
+    // Initialize telemetry (cost ledger + optional OTLP span export). The real
+    // exporter pipeline is built here when CALIBAN_ENABLE_TELEMETRY is set and
+    // the OTEL_* contract points at a collector; otherwise this is a cheap,
+    // disabled handle. Held for the life of the process and force-flushed on
+    // exit. Requires the Tokio runtime (batch span processor), which
+    // `#[tokio::main]` provides.
+    let telemetry_session_id = args
+        .session
+        .clone()
+        .or_else(|| args.resume.clone())
+        .unwrap_or_else(caliban_telemetry::Telemetry::new_session_id);
+    let telemetry = caliban_telemetry::Telemetry::init_from_env(&telemetry_session_id)
+        .context("initialize telemetry")?;
+
+    // Install the global tracing subscriber: file-backed fmt layer when --debug
+    // / CALIBAN_DEBUG is set, plus the OTLP span-export layer when telemetry is
+    // enabled. No-op when neither applies.
+    startup::init_tracing(&args, &telemetry).await;
 
     let workspace = match &args.workspace {
         Some(p) => {
@@ -514,6 +530,8 @@ async fn main() -> Result<()> {
             resolved_perm_mode,
         )
         .await;
+        // Force-flush batched OTLP spans + session-end metric before exit.
+        let _ = telemetry.shutdown();
         std::process::exit(exit);
     }
     // hook_event_buffer is consumed by headless mode; for the TUI/interactive
@@ -538,7 +556,7 @@ async fn main() -> Result<()> {
                         )
                     })
                     .collect();
-            return tui::run(
+            let result = tui::run(
                 args,
                 agent,
                 store,
@@ -556,6 +574,9 @@ async fn main() -> Result<()> {
                 runtime_rules,
             )
             .await;
+            // Force-flush batched OTLP spans + session-end metric before exit.
+            let _ = telemetry.shutdown();
+            return result;
         }
         anyhow::bail!(
             "no prompt given and stdin is not a TTY; use --prompt or pass a positional argument"
@@ -565,7 +586,7 @@ async fn main() -> Result<()> {
     // --- Single-prompt path: register the outer Ctrl-C handler, drive
     // the agent loop, fire SessionEnd, and optionally persist the
     // session back to disk.
-    startup::run_single_prompt(
+    let result = startup::run_single_prompt(
         &args,
         agent,
         system_prompt,
@@ -576,5 +597,8 @@ async fn main() -> Result<()> {
         plan_mode,
         model,
     )
-    .await
+    .await;
+    // Force-flush batched OTLP spans + session-end metric before exit.
+    let _ = telemetry.shutdown();
+    result
 }

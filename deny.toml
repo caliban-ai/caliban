@@ -23,4 +23,10 @@ ignore = [
   # bump. The unsound IterMut path is internal to ratatui and not reachable from
   # caliban. Re-check when ratatui bumps lru.
   { id = "RUSTSEC-2026-0002", reason = "unsound IterMut pinned at lru 0.12 by ratatui 0.29; not reachable from caliban; awaits ratatui bump" },
+
+  # async-std 1.13 — discontinued/unmaintained (no vulnerability). Pulled only as
+  # a dev-dependency of opentelemetry_sdk (used by the in-memory span-exporter
+  # tests in caliban-telemetry); never present in the shipped binary. Re-check if
+  # opentelemetry_sdk drops it.
+  { id = "RUSTSEC-2025-0052", reason = "async-std discontinued/unmaintained; dev-only via opentelemetry_sdk test deps, not in the shipped binary" },
 ]
