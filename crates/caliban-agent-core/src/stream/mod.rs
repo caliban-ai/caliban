@@ -66,6 +66,121 @@ fn finish_reason_str(stop_reason: StopReason) -> &'static str {
     }
 }
 
+/// Whether `GenAI` message **content** may be captured on the chat generation
+/// span (`gen_ai.input.messages` / `gen_ai.output.messages`), read once from the
+/// `OTEL_LOG_USER_PROMPTS` environment variable.
+///
+/// Read directly from the environment — **not** via `caliban-telemetry`'s
+/// `log_user_prompts` config — because `caliban-agent-core` deliberately does
+/// not depend on the telemetry crate (ADR 0053 / #380). The accepted truthy set
+/// (`1`/`true`/`yes`/`on`, case-insensitive) mirrors that crate's
+/// `env_truthy_default`, and the default is **off**: no content is emitted
+/// unless the operator explicitly opts in.
+static LOG_USER_PROMPTS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    matches!(
+        std::env::var("OTEL_LOG_USER_PROMPTS")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+});
+
+/// `true` iff `GenAI` message-content capture is enabled for this process
+/// (`OTEL_LOG_USER_PROMPTS` truthy). See [`LOG_USER_PROMPTS`].
+fn content_capture_enabled() -> bool {
+    *LOG_USER_PROMPTS
+}
+
+/// Serialize a slice of provider [`Message`]s to the OpenTelemetry `GenAI`
+/// structured message shape (semconv "current form") as a single JSON string,
+/// suitable for the `gen_ai.input.messages` / `gen_ai.output.messages`
+/// attributes (ADR 0053 / #380).
+///
+/// Best-effort and non-panicking: blocks with no textual/tool projection (e.g.
+/// images) are dropped, and any serialization failure returns `None` so the
+/// caller simply omits content for the turn rather than failing the run. Only
+/// invoked when [`content_capture_enabled`] is `true`.
+fn messages_to_semconv_json(messages: &[Message]) -> Option<String> {
+    let arr: Vec<serde_json::Value> = messages.iter().map(message_to_semconv_value).collect();
+    serde_json::to_string(&serde_json::Value::Array(arr)).ok()
+}
+
+/// Map one provider [`Message`] to a semconv `{ "role", "parts" }` object.
+fn message_to_semconv_value(msg: &Message) -> serde_json::Value {
+    let parts: Vec<serde_json::Value> = msg
+        .content
+        .iter()
+        .filter_map(content_block_to_part)
+        .collect();
+    serde_json::json!({ "role": semconv_role(msg), "parts": parts })
+}
+
+/// Map a caliban [`Role`] to the semconv role string, promoting a `User`
+/// message whose blocks are *all* tool results to the `"tool"` role — that is
+/// how caliban carries tool-call responses back to the model.
+fn semconv_role(msg: &Message) -> &'static str {
+    match msg.role {
+        Role::System => "system",
+        Role::Assistant => "assistant",
+        Role::User => {
+            if !msg.content.is_empty()
+                && msg
+                    .content
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult(_)))
+            {
+                "tool"
+            } else {
+                "user"
+            }
+        }
+    }
+}
+
+/// Map a [`ContentBlock`] to a semconv message part, or `None` for blocks with
+/// no textual/tool projection (images — never leak their bytes).
+fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
+    match block {
+        ContentBlock::Text(t) => Some(serde_json::json!({
+            "type": "text",
+            "content": t.text,
+        })),
+        // Extended-thinking is assistant reasoning text; project it best-effort
+        // as a text part.
+        ContentBlock::Thinking(th) => Some(serde_json::json!({
+            "type": "text",
+            "content": th.thinking,
+        })),
+        ContentBlock::ToolUse(tu) => Some(serde_json::json!({
+            "type": "tool_call",
+            "id": tu.id,
+            "name": tu.name,
+            "arguments": tu.input,
+        })),
+        ContentBlock::ToolResult(tr) => Some(serde_json::json!({
+            "type": "tool_call_response",
+            "id": tr.tool_use_id,
+            "result": tool_result_text(tr),
+        })),
+        ContentBlock::Image(_) => None,
+    }
+}
+
+/// Flatten a [`ToolResultBlock`]'s content into a single string: text blocks
+/// joined by newlines, non-text blocks ignored.
+fn tool_result_text(tr: &ToolResultBlock) -> String {
+    tr.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Build the error [`ToolResultBlock`] used for a denied tool call (plan-mode
 /// gate or hook deny): a single text block flagged `is_error`.
 fn denied_tool_result(tool_use_id: &str, text: String) -> ToolResultBlock {
@@ -403,6 +518,87 @@ mod finish_reason_tests {
             finish_reason_str(StopReason::ContentFilter),
             "content_filter"
         );
+    }
+}
+
+#[cfg(test)]
+mod genai_content_tests {
+    //! #380: semconv message-content serialization mapping.
+    use super::*;
+    use caliban_provider::{TextBlock, ThinkingBlock, ToolUseBlock};
+    use serde_json::json;
+
+    fn parse(messages: &[Message]) -> serde_json::Value {
+        serde_json::from_str(&messages_to_semconv_json(messages).expect("serialize")).unwrap()
+    }
+
+    #[test]
+    fn user_text_maps_to_user_role_text_part() {
+        let v = parse(&[Message::user_text("hi there")]);
+        assert_eq!(v[0]["role"], "user");
+        assert_eq!(v[0]["parts"][0]["type"], "text");
+        assert_eq!(v[0]["parts"][0]["content"], "hi there");
+    }
+
+    #[test]
+    fn assistant_tool_use_maps_to_tool_call_part() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text(TextBlock {
+                    text: "let me look".into(),
+                    cache_control: None,
+                }),
+                ContentBlock::ToolUse(ToolUseBlock {
+                    id: "call-1".into(),
+                    name: "Read".into(),
+                    input: json!({"path": "/x"}),
+                }),
+            ],
+        };
+        let v = parse(std::slice::from_ref(&msg));
+        assert_eq!(v[0]["role"], "assistant");
+        assert_eq!(v[0]["parts"][0]["content"], "let me look");
+        assert_eq!(v[0]["parts"][1]["type"], "tool_call");
+        assert_eq!(v[0]["parts"][1]["id"], "call-1");
+        assert_eq!(v[0]["parts"][1]["name"], "Read");
+        assert_eq!(v[0]["parts"][1]["arguments"]["path"], "/x");
+    }
+
+    #[test]
+    fn tool_result_user_message_promotes_to_tool_role() {
+        // caliban carries tool results in a `User` message; it must map to the
+        // semconv `"tool"` role with `tool_call_response` parts.
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResultBlock {
+                tool_use_id: "call-1".into(),
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: "file contents".into(),
+                    cache_control: None,
+                })],
+                is_error: false,
+            })],
+        };
+        let v = parse(std::slice::from_ref(&msg));
+        assert_eq!(v[0]["role"], "tool");
+        assert_eq!(v[0]["parts"][0]["type"], "tool_call_response");
+        assert_eq!(v[0]["parts"][0]["id"], "call-1");
+        assert_eq!(v[0]["parts"][0]["result"], "file contents");
+    }
+
+    #[test]
+    fn thinking_maps_to_text_part() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking(ThinkingBlock {
+                thinking: "reasoning".into(),
+                signature: None,
+            })],
+        };
+        let v = parse(std::slice::from_ref(&msg));
+        assert_eq!(v[0]["parts"][0]["type"], "text");
+        assert_eq!(v[0]["parts"][0]["content"], "reasoning");
     }
 }
 
@@ -1166,6 +1362,11 @@ impl Agent {
                     gen_ai.response.finish_reasons = Empty,
                     gen_ai.usage.input_tokens = Empty,
                     gen_ai.usage.output_tokens = Empty,
+                    // #380: message CONTENT, captured only when
+                    // `OTEL_LOG_USER_PROMPTS` is truthy (see `content_capture_enabled`).
+                    // Declared `Empty` so they are absent by default.
+                    gen_ai.input.messages = Empty,
+                    gen_ai.output.messages = Empty,
                 );
                 chat_span.record("otel.name", format!("chat {}", req.model).as_str());
                 // max_tokens is always resolved on the request; temperature /
@@ -1177,6 +1378,20 @@ impl Agent {
                 }
                 if let Some(p) = req.top_p {
                     chat_span.record("gen_ai.request.top_p", f64::from(p));
+                }
+                // #380: input message CONTENT (semconv-only), recorded now
+                // because the full input is known at request-build time. Gated:
+                // emitted only when `OTEL_LOG_USER_PROMPTS` is truthy, and
+                // best-effort (a serialization failure simply omits content for
+                // the turn rather than failing the run).
+                if content_capture_enabled() {
+                    if let Some(json) = messages_to_semconv_json(&req.messages) {
+                        chat_span.record("gen_ai.input.messages", json.as_str());
+                    } else {
+                        tracing::debug!(
+                            "gen_ai.input.messages: serialization failed; content omitted",
+                        );
+                    }
                 }
 
                 // ---- Stream from provider (with retry) ----
@@ -1462,9 +1677,28 @@ impl Agent {
                     "gen_ai.usage.output_tokens",
                     i64::from(turn_usage.output_tokens),
                 );
-                drop(chat_span);
 
+                // Assemble the assistant message from the drained accumulator.
+                // Built here (before `drop(chat_span)`) so #380 can record the
+                // response content onto the still-open generation span.
                 let mut assistant_message = acc.into_message();
+
+                // #380: output message CONTENT (semconv-only) — the single
+                // assistant message assembled from this response. Recorded
+                // before `drop(chat_span)` closes/exports the span. Gated on
+                // `OTEL_LOG_USER_PROMPTS` and best-effort like the input side.
+                if content_capture_enabled() {
+                    if let Some(json) =
+                        messages_to_semconv_json(std::slice::from_ref(&assistant_message))
+                    {
+                        chat_span.record("gen_ai.output.messages", json.as_str());
+                    } else {
+                        tracing::debug!(
+                            "gen_ai.output.messages: serialization failed; content omitted",
+                        );
+                    }
+                }
+                drop(chat_span);
 
                 // ---- Plan A — Stage A: silent budget-escalation retry ----
                 //
