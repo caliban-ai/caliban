@@ -85,14 +85,20 @@ emission is gated.
 enqueues that purpose at the head of the loop and emits a `compact.event`
 log. No new model routing logic is introduced by this ADR.
 
-### `otel_headers_helper` is a per-startup helper script + refresh
+### Headers helper for short-lived collector tokens
 
-Settings field `[telemetry].otel_headers_helper` points at a path;
-caliban spawns it at startup and on a configurable interval
-(`telemetry.otel_headers_refresh`, default `5m`), parses stdout as
-`k=v\n…`, merges with `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on
-collision). This is how operators put short-lived bearer tokens in
-front of their collector without checking secrets into env files.
+Operators can put short-lived bearer tokens in front of their collector
+without checking secrets into env files: the env var
+`CALIBAN_OTEL_HEADERS_HELPER` points at an executable, which caliban runs
+at startup, parsing its stdout as `k=v\n…` and merging with
+`OTEL_EXPORTER_OTLP_HEADERS` (helper wins on collision).
+
+**Implementation note (reconciled 2026-07-05, #381).** As shipped this is an
+**env-only, one-shot** mechanism. The originally-envisioned
+`[telemetry].otel_headers_helper` / `otel_headers_refresh` *settings* fields
+and the periodic re-run were **not implemented** — no consumer needed them and
+the env hatch covers the use case. If timed refresh of rotating tokens is
+later required, add the settings fields + interval then.
 
 ## Consequences
 
