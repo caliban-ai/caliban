@@ -47,6 +47,25 @@ fn updated_input_is_valid(
     Ok(())
 }
 
+/// Map a provider [`StopReason`] to the OpenTelemetry `GenAI`
+/// `gen_ai.response.finish_reasons` value (ADR 0053 / #378).
+///
+/// Centralised so the generation span and any future emitter agree on one
+/// stable vocabulary. Values follow the OpenTelemetry `GenAI` semantic
+/// conventions' finish-reason strings: natural stops → `stop`, tool calls →
+/// `tool_calls`, the token cap → `length`, and safety/refusal outcomes →
+/// `content_filter`.
+fn finish_reason_str(stop_reason: StopReason) -> &'static str {
+    match stop_reason {
+        // A natural end-of-turn or a stop-sequence hit both read as `stop`.
+        StopReason::EndTurn | StopReason::StopSequence => "stop",
+        StopReason::ToolUse => "tool_calls",
+        StopReason::MaxTokens => "length",
+        // Refusals and content-filter trips are both safety terminations.
+        StopReason::Refusal | StopReason::ContentFilter => "content_filter",
+    }
+}
+
 /// Build the error [`ToolResultBlock`] used for a denied tool call (plan-mode
 /// gate or hook deny): a single text block flagged `is_error`.
 fn denied_tool_result(tool_use_id: &str, text: String) -> ToolResultBlock {
@@ -76,6 +95,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
+use tracing::{Instrument as _, field::Empty};
 
 use crate::agent::Agent;
 use crate::error::Result;
@@ -364,6 +384,25 @@ mod updated_input_tests {
         let schema = json!({"type": "object", "required": ["path"]});
         let err = updated_input_is_valid(&schema, &json!({"other": 1})).unwrap_err();
         assert!(err.contains("required field `path`"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::*;
+
+    #[test]
+    fn maps_every_stop_reason_to_semconv_string() {
+        // #378: the StopReason -> gen_ai.response.finish_reasons mapping.
+        assert_eq!(finish_reason_str(StopReason::EndTurn), "stop");
+        assert_eq!(finish_reason_str(StopReason::StopSequence), "stop");
+        assert_eq!(finish_reason_str(StopReason::ToolUse), "tool_calls");
+        assert_eq!(finish_reason_str(StopReason::MaxTokens), "length");
+        assert_eq!(finish_reason_str(StopReason::Refusal), "content_filter");
+        assert_eq!(
+            finish_reason_str(StopReason::ContentFilter),
+            "content_filter"
+        );
     }
 }
 
@@ -1102,6 +1141,44 @@ impl Agent {
                     recovery.effective_max_tokens(self.config.max_tokens),
                 );
 
+                // ---- OTel GenAI generation span (#378, ADR 0053) ----
+                //
+                // One "chat" span per provider request (semconv-only: no vendor
+                // keys, no cost, no message content — content is #380). Created
+                // as a child of the current span (the run span when active) and
+                // instrumented around the provider request below so it times the
+                // request+response. Request params are recorded now; response
+                // model / finish reason / token usage are recorded after the
+                // drain (fields left `Empty` until then). Dotted field names map
+                // verbatim to OTel attribute keys via tracing-opentelemetry, and
+                // `otel.name` / `otel.kind` set the exported span name and kind.
+                let chat_span = tracing::info_span!(
+                    "chat",
+                    otel.name = Empty,
+                    otel.kind = "client",
+                    gen_ai.operation.name = "chat",
+                    gen_ai.provider.name = %self.provider.name(),
+                    gen_ai.request.model = %req.model,
+                    gen_ai.request.temperature = Empty,
+                    gen_ai.request.max_tokens = Empty,
+                    gen_ai.request.top_p = Empty,
+                    gen_ai.response.model = Empty,
+                    gen_ai.response.finish_reasons = Empty,
+                    gen_ai.usage.input_tokens = Empty,
+                    gen_ai.usage.output_tokens = Empty,
+                );
+                chat_span.record("otel.name", format!("chat {}", req.model).as_str());
+                // max_tokens is always resolved on the request; temperature /
+                // top_p are optional and skipped when unset (semconv: omit rather
+                // than emit a null/zero).
+                chat_span.record("gen_ai.request.max_tokens", i64::from(req.max_tokens));
+                if let Some(t) = req.temperature {
+                    chat_span.record("gen_ai.request.temperature", f64::from(t));
+                }
+                if let Some(p) = req.top_p {
+                    chat_span.record("gen_ai.request.top_p", f64::from(p));
+                }
+
                 // ---- Stream from provider (with retry) ----
                 // Begin per-turn timing here so TTFT reflects user-observed
                 // latency including any backoff sleeps (typically 0 on the
@@ -1140,6 +1217,7 @@ impl Agent {
                         }
                     }
                 })
+                .instrument(chat_span.clone())
                 .await;
 
                 let provider_stream = match stream_result {
@@ -1356,6 +1434,36 @@ impl Agent {
 
                 let turn_stop_reason = acc.stop_reason.unwrap_or(StopReason::EndTurn);
                 let turn_usage = acc.usage;
+
+                // ---- #378: record generation-span response attributes ----
+                //
+                // Done before `acc` is consumed so the response model is
+                // available, and before the Stage-A / tool-dispatch phases so
+                // the span's duration ends at response completion (not after
+                // tool execution). Dropping `chat_span` here closes and exports
+                // the OTel span for this request.
+                if !acc.model.is_empty() {
+                    chat_span.record("gen_ai.response.model", acc.model.as_str());
+                }
+                chat_span.record(
+                    "gen_ai.response.finish_reasons",
+                    finish_reason_str(turn_stop_reason),
+                );
+                // ADR 0053: the cache-token breakdown has no stable semconv key,
+                // so fold it into the standard input-token count. Anthropic (and
+                // the OTLP-facing providers) report `input_tokens` exclusive of
+                // cached prompt tokens, so total prompt tokens =
+                // input + cache_read + cache_creation.
+                let genai_input_tokens = i64::from(turn_usage.input_tokens)
+                    + i64::from(turn_usage.cache_read_input_tokens.unwrap_or(0))
+                    + i64::from(turn_usage.cache_creation_input_tokens.unwrap_or(0));
+                chat_span.record("gen_ai.usage.input_tokens", genai_input_tokens);
+                chat_span.record(
+                    "gen_ai.usage.output_tokens",
+                    i64::from(turn_usage.output_tokens),
+                );
+                drop(chat_span);
+
                 let mut assistant_message = acc.into_message();
 
                 // ---- Plan A — Stage A: silent budget-escalation retry ----
