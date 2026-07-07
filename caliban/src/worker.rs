@@ -282,6 +282,33 @@ fn load_agent_tls() -> std::io::Result<Option<caliban_supervisor::transport::Tls
     caliban_supervisor::transport::tls_server_from_pem(&cert_pem, &key_pem).map(Some)
 }
 
+/// Fail-closed credential policy for the TCP session plane (#288).
+///
+/// A `--listen` (network) agent must never bind unauthenticated, and must never
+/// carry a bearer token over plaintext (an on-path observer could steal it —
+/// the same risk #280 guards on the client dial). Returns `Err(reason)` unless
+/// **both** a non-empty token and TLS are configured. Empty/whitespace-only
+/// tokens are treated as absent. Unix (`--socket`) mode does not use this — it
+/// is local and filesystem-permission-scoped.
+fn require_network_credentials(token: Option<&str>, tls_present: bool) -> Result<(), String> {
+    let token = token.map(str::trim).filter(|t| !t.is_empty());
+    if token.is_none() {
+        return Err(
+            "CALIBAN_AGENT_TOKEN is required for --listen (network) mode; \
+                    refusing to bind an unauthenticated listener"
+                .to_owned(),
+        );
+    }
+    if !tls_present {
+        return Err(
+            "agent TLS (CALIBAN_AGENT_TLS_CERT/KEY) is required for --listen mode; \
+                    refusing to send the bearer token over plaintext"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Build the client the worker uses to report Idle/Running back to the daemon.
 ///
 /// Network mode (#280 Task 7): when `CALIBAN_CONTROL_ENDPOINT` (`host:port`)
@@ -371,6 +398,12 @@ pub(crate) async fn run(
                 }
             };
             let token = std::env::var("CALIBAN_AGENT_TOKEN").ok();
+            // #288: fail closed — never bind a network listener that is
+            // unauthenticated or would carry the bearer token over plaintext.
+            if let Err(reason) = require_network_credentials(token.as_deref(), tls.is_some()) {
+                eprintln!("[caliban __agent-worker] refusing to bind {addr}: {reason}");
+                return 78; // EX_CONFIG
+            }
             caliban_supervisor::transport::BindSpec {
                 endpoint: caliban_supervisor::transport::Endpoint::Tcp {
                     addr: addr.to_string(),
@@ -845,6 +878,46 @@ async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use caliban_agent_core::{Action, default_rules};
+
+    // --- require_network_credentials: fail-closed TCP session-plane auth (#288) ---
+
+    #[test]
+    fn network_creds_rejects_missing_token() {
+        let err = require_network_credentials(None, false).unwrap_err();
+        assert!(
+            err.contains("CALIBAN_AGENT_TOKEN"),
+            "missing token must be rejected with a token-requirement reason, got: {err}"
+        );
+    }
+
+    #[test]
+    fn network_creds_treats_empty_token_as_absent() {
+        assert!(
+            require_network_credentials(Some(""), true).is_err(),
+            "empty token must be treated as absent"
+        );
+        assert!(
+            require_network_credentials(Some("   "), true).is_err(),
+            "whitespace-only token must be treated as absent"
+        );
+    }
+
+    #[test]
+    fn network_creds_requires_tls_when_token_present() {
+        let err = require_network_credentials(Some("secret"), false).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("tls"),
+            "a token without TLS must be rejected with a TLS/plaintext reason, got: {err}"
+        );
+    }
+
+    #[test]
+    fn network_creds_accepts_token_and_tls() {
+        assert!(
+            require_network_credentials(Some("secret"), true).is_ok(),
+            "a non-empty token with TLS present is the only accepted configuration"
+        );
+    }
 
     // --- parse_provider (#93) ---
 
