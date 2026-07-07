@@ -712,6 +712,12 @@ impl<W: Write> HeadlessDriver<W> {
                             d.as_secs()
                         ))));
                     }
+                    StopCondition::ThinkingBudgetExhausted => {
+                        return Ok(Some(TerminalStop::RunError(
+                            "thinking budget exhausted — the model kept reasoning without answering"
+                                .to_string(),
+                        )));
+                    }
                 }
             }
             TurnEvent::TurnStart { model: actual, .. } => {
