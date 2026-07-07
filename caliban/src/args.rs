@@ -184,6 +184,20 @@ pub(crate) struct Args {
     )]
     pub(crate) include_hook_events: bool,
 
+    /// Attach a `t_ms` dispatch-duration (ms) to each stream-json `tool_result`
+    /// frame, so consumers can correlate per-tool latency (#28).
+    #[arg(
+        long = "include-tool-dispatch-events",
+        value_name = "BOOL",
+        require_equals = true,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag,
+        help_heading = "Headless / -p mode (ADR 0025)"
+    )]
+    pub(crate) include_tool_dispatch_events: bool,
+
     /// Echo each user prompt as a `user` frame in stream-json mode.
     #[arg(
         long = "replay-user-messages",

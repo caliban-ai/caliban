@@ -543,6 +543,7 @@ pub(crate) async fn run_headless(
         json_schema,
         include_partial_messages: args.include_partial_messages,
         include_hook_events: args.include_hook_events,
+        include_tool_dispatch_events: args.include_tool_dispatch_events,
         replay_user_messages: args.replay_user_messages,
         verbose: args.verbose,
         bare_mode: args.bare,

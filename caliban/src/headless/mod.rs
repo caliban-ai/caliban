@@ -159,6 +159,9 @@ pub(crate) struct HeadlessRunConfig {
     pub(crate) include_partial_messages: bool,
     /// Emit `hook_event` frames in stream-json mode.
     pub(crate) include_hook_events: bool,
+    /// #28: attach a `t_ms` dispatch-duration to each stream-json `tool_result`
+    /// frame. Opt-in; off by default so output is unchanged.
+    pub(crate) include_tool_dispatch_events: bool,
     /// Echo user prompts back as `user` frames.
     pub(crate) replay_user_messages: bool,
     /// Dump full, untruncated tool I/O to stderr in `--output-format text`
@@ -210,6 +213,7 @@ impl HeadlessRunConfig {
             json_schema: None,
             include_partial_messages: false,
             include_hook_events: false,
+            include_tool_dispatch_events: false,
             replay_user_messages: false,
             verbose: false,
             bare_mode: false,
@@ -313,6 +317,10 @@ pub(crate) struct HeadlessDriver<W: Write> {
     /// per frame: the single terminal `result` reports whole-session totals, so
     /// `duration_ms` must be whole-session too (#331).
     started: std::time::Instant,
+    /// #28: per-tool dispatch-start instants, keyed by `tool_use_id`. Populated
+    /// at `ToolCallStart` and drained at `ToolCallEnd` to compute the `t_ms`
+    /// dispatch duration — only when `include_tool_dispatch_events` is set.
+    tool_dispatch_starts: std::collections::HashMap<String, std::time::Instant>,
 }
 
 /// A non-`EndOfTurn` terminal stop reported by [`HeadlessDriver::run_single_pass`].
@@ -352,6 +360,7 @@ impl<W: Write> HeadlessDriver<W> {
             turns_without_edit: 0,
             no_edit_nudge_emitted: false,
             started: std::time::Instant::now(),
+            tool_dispatch_starts: std::collections::HashMap::new(),
         }
     }
 
@@ -594,6 +603,12 @@ impl<W: Write> HeadlessDriver<W> {
             TurnEvent::ToolCallStart {
                 tool_use_id, name, ..
             } => {
+                // #28: record the dispatch start so `ToolCallEnd` can compute
+                // `t_ms`. Cloned before `tool_started` takes ownership of the id.
+                if self.config.include_tool_dispatch_events {
+                    self.tool_dispatch_starts
+                        .insert(tool_use_id.clone(), std::time::Instant::now());
+                }
                 // Stash the tool name; the matching tool I/O (stream-json
                 // `tool_use` frame, or the `--verbose` text-mode block) is
                 // emitted at `ToolCallEnd` time so it can carry the fully
@@ -629,6 +644,14 @@ impl<W: Write> HeadlessDriver<W> {
                 } else {
                     None
                 };
+                // #28: dispatch duration (ToolCallStart→now), when requested.
+                let dispatch_ms = if self.config.include_tool_dispatch_events {
+                    self.tool_dispatch_starts
+                        .remove(&tool_use_id)
+                        .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX))
+                } else {
+                    None
+                };
                 self.encoder.tool_call(
                     &mut self.writer,
                     &tool_use_id,
@@ -636,6 +659,7 @@ impl<W: Write> HeadlessDriver<W> {
                     is_error,
                     &content,
                     &self.config,
+                    dispatch_ms,
                 )?;
             }
             TurnEvent::TurnEnd {
@@ -2645,6 +2669,76 @@ mod tests {
         ]
     }
 
+    /// #28: with `--include-tool-dispatch-events`, the stream-json `tool_result`
+    /// frame carries a numeric `t_ms` dispatch duration.
+    #[tokio::test]
+    async fn tool_dispatch_timing_present_with_flag() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(tool_call_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut config = HeadlessRunConfig::minimal(OutputFormat::StreamJson);
+        config.include_tool_dispatch_events = true;
+        let mut driver = HeadlessDriver::new(Vec::<u8>::new(), config);
+        driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+        let tr: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|v| v["type"] == "tool_result")
+            .collect();
+        assert_eq!(
+            tr.len(),
+            1,
+            "expected one tool_result frame; got {frames:?}"
+        );
+        assert!(
+            tr[0]["t_ms"].is_u64(),
+            "with the flag, tool_result must carry a numeric t_ms; got {:?}",
+            tr[0]
+        );
+    }
+
+    /// #28: without the flag (default), no `t_ms` key — output is unchanged.
+    #[tokio::test]
+    async fn tool_dispatch_timing_absent_by_default() {
+        let mock = Arc::new(MockProvider::new());
+        mock.enqueue_stream(tool_call_stream());
+        let agent = build_agent_with(Arc::clone(&mock), None, None, 10);
+
+        let mut driver = HeadlessDriver::new(
+            Vec::<u8>::new(),
+            HeadlessRunConfig::minimal(OutputFormat::StreamJson),
+        );
+        driver
+            .run(
+                agent,
+                vec![Message::user_text("hi")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect("driver run");
+
+        let frames = parse_ndjson_lines(&driver.writer);
+        let tr: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|v| v["type"] == "tool_result")
+            .collect();
+        assert_eq!(tr.len(), 1);
+        assert!(
+            tr[0].get("t_ms").is_none(),
+            "without the flag, tool_result must not carry t_ms; got {:?}",
+            tr[0]
+        );
+    }
+
     /// Default mode is surfaced verbatim in the `system/init` frame.
     #[tokio::test]
     async fn system_init_includes_permission_mode_default() {
@@ -2931,7 +3025,7 @@ mod tests {
         let content = vec![text_block("found 3 files")];
 
         let mut buf: Vec<u8> = Vec::new();
-        enc.tool_call(&mut buf, "toolu_001", buffered, false, &content, &cfg)
+        enc.tool_call(&mut buf, "toolu_001", buffered, false, &content, &cfg, None)
             .expect("tool_call encode");
 
         let frames = parse_ndjson_lines(&buf);
