@@ -112,6 +112,17 @@ pub struct AgentConfig {
     /// nudge and takes another turn; the streak counter resets the moment a
     /// productive turn occurs. `0` disables the guard entirely. Default `2`.
     pub empty_turn_nudge_max: u32,
+    // ── #62 (runaway-thinking-spiral guard) ──────────────────────
+    /// Per-turn cap on cumulative **thinking** characters. A reasoning model can
+    /// stream thinking deltas continuously (so the idle watchdog never fires)
+    /// without ever producing a tool call or final text; `max_tokens` recovery
+    /// only *raises* the budget on each `MaxTokens` hit. When a single attempt
+    /// streams more than this many thinking chars, the run terminates with
+    /// [`crate::StopCondition::ThinkingBudgetExhausted`]. Independent of the
+    /// idle watchdog and the output-token budget. `0` disables the guard.
+    /// Default `262_144` (≈ 65k tokens) — a backstop far above any legitimate
+    /// single-turn reasoning, so it never trips in normal use.
+    pub max_turn_thinking_chars: usize,
 }
 
 impl Default for AgentConfig {
@@ -152,6 +163,8 @@ impl Default for AgentConfig {
             no_edit_nudge_threshold: 10,
             // #249
             empty_turn_nudge_max: 2,
+            // #62
+            max_turn_thinking_chars: 262_144,
         }
     }
 }
@@ -173,6 +186,7 @@ mod recovery_config_tests {
         assert!(cfg.max_tokens_recovery);
         assert_eq!(cfg.no_edit_nudge_threshold, 10);
         assert_eq!(cfg.empty_turn_nudge_max, 2);
+        assert_eq!(cfg.max_turn_thinking_chars, 262_144);
     }
 }
 

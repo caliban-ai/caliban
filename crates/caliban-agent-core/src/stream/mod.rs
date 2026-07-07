@@ -471,6 +471,11 @@ pub enum StopCondition {
     ContentFilter(String),
     /// SSE/HTTP stream went silent past the idle timeout.
     StreamIdle(std::time::Duration),
+    /// A single turn streamed *thinking* past `max_turn_thinking_chars` without
+    /// producing a tool call or final text — a runaway reasoning spiral (#62).
+    /// Independent of the idle watchdog (the spiral streams continuously) and of
+    /// the `max_tokens` budget (recovery raises it).
+    ThinkingBudgetExhausted,
 }
 
 impl StopCondition {
@@ -486,6 +491,7 @@ impl StopCondition {
                 | Self::Refusal(_)
                 | Self::ContentFilter(_)
                 | Self::StreamIdle(_)
+                | Self::ThinkingBudgetExhausted
         )
     }
 
@@ -516,6 +522,12 @@ impl StopCondition {
             Self::ContentFilter(msg) => (format!("content filter: {msg}"), StopLevel::Error),
             Self::StreamIdle(d) => (
                 format!("stream idle for {}s", d.as_secs()),
+                StopLevel::Error,
+            ),
+            Self::ThinkingBudgetExhausted => (
+                "thinking budget exhausted \u{2014} the model kept reasoning without answering; \
+                 try /effort low to reduce reasoning budget"
+                    .to_string(),
                 StopLevel::Error,
             ),
         };
@@ -1580,6 +1592,11 @@ impl Agent {
                 // interruption is only safe to re-issue while this is false —
                 // otherwise replaying would double-emit to stream consumers.
                 let mut emitted_content_this_turn = false;
+                // #62: cumulative thinking chars this attempt. Bounds a runaway
+                // reasoning spiral that streams continuously (so the idle
+                // watchdog never fires) without producing a tool call or text.
+                let max_turn_thinking_chars = self.config.max_turn_thinking_chars;
+                let mut thinking_chars: usize = 0;
 
                 while let Some(evt_result) = provider_stream.next().await {
                     if cancel.is_cancelled() {
@@ -1685,11 +1702,20 @@ impl Agent {
                                     StreamingDelta::Thinking(s),
                                 ) => {
                                     accumulated.push_str(&s);
+                                    thinking_chars =
+                                        thinking_chars.saturating_add(s.chars().count());
                                     yield TurnEvent::AssistantThinkingDelta {
                                         turn_index,
                                         content_block_index: index,
                                         text: s,
                                     };
+                                    // #62: trip the runaway-thinking guard.
+                                    if max_turn_thinking_chars > 0
+                                        && thinking_chars > max_turn_thinking_chars
+                                    {
+                                        stopped_for = StopCondition::ThinkingBudgetExhausted;
+                                        break 'outer;
+                                    }
                                 }
                                 (
                                     Some(ActiveBlock::ToolUse { id, json_buf, .. }),

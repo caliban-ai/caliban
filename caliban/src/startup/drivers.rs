@@ -178,7 +178,8 @@ pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition)
         | StopCondition::Refusal(_)
         | StopCondition::ContentFilter(_)
         | StopCondition::MaxTokensExhausted
-        | StopCondition::StreamIdle(_) => 1,
+        | StopCondition::StreamIdle(_)
+        | StopCondition::ThinkingBudgetExhausted => 1,
     }
 }
 
