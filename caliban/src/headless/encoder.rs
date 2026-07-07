@@ -96,6 +96,7 @@ pub(crate) trait FrameEncoder {
     /// A completed tool call. The driver has already taken the buffered tool
     /// input (when buffering applies) and passes it in; the encoder relocates
     /// the per-format emission.
+    #[allow(clippy::too_many_arguments)]
     fn tool_call(
         &mut self,
         w: &mut dyn Write,
@@ -104,6 +105,7 @@ pub(crate) trait FrameEncoder {
         is_error: bool,
         content: &[ContentBlock],
         cfg: &HeadlessRunConfig,
+        dispatch_ms: Option<u64>,
     ) -> Result<(), HeadlessError>;
 
     /// The full assistant `message` frame (stream-json without partial
@@ -211,6 +213,7 @@ impl FrameEncoder for TextEncoder {
         is_error: bool,
         content: &[ContentBlock],
         cfg: &HeadlessRunConfig,
+        _dispatch_ms: Option<u64>,
     ) -> Result<(), HeadlessError> {
         // `--verbose` text mode: dump the full, untruncated tool
         // call to stderr (stdout stays the assistant answer, so
@@ -335,6 +338,7 @@ impl FrameEncoder for JsonEncoder {
         _is_error: bool,
         _content: &[ContentBlock],
         _cfg: &HeadlessRunConfig,
+        _dispatch_ms: Option<u64>,
     ) -> Result<(), HeadlessError> {
         Ok(())
     }
@@ -454,6 +458,7 @@ impl FrameEncoder for StreamJsonEncoder {
         is_error: bool,
         content: &[ContentBlock],
         _cfg: &HeadlessRunConfig,
+        dispatch_ms: Option<u64>,
     ) -> Result<(), HeadlessError> {
         // Pair the `tool_use` frame with the matching
         // `tool_result`: emit the deferred tool_use now that
@@ -467,7 +472,7 @@ impl FrameEncoder for StreamJsonEncoder {
         let content_value = content_blocks_to_json(content);
         write_ndjson(
             w,
-            &events::tool_result(tool_use_id, is_error, content_value),
+            &events::tool_result(tool_use_id, is_error, content_value, dispatch_ms),
         )?;
         Ok(())
     }

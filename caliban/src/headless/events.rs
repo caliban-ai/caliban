@@ -184,6 +184,11 @@ pub(crate) struct ToolResult {
     pub(crate) is_error: bool,
     /// Raw content blocks returned by the tool.
     pub(crate) content: Value,
+    /// #28: dispatch duration in milliseconds (`ToolCallStart`→`ToolCallEnd`),
+    /// present only under `--include-tool-dispatch-events`. Omitted otherwise so
+    /// default output is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) t_ms: Option<u64>,
 }
 
 /// `message` payload (full assistant message; emitted when partial-message
@@ -424,12 +429,14 @@ pub(crate) fn tool_result(
     tool_use_id: impl Into<String>,
     is_error: bool,
     content: Value,
+    t_ms: Option<u64>,
 ) -> ToolResult {
     ToolResult {
         kind: "tool_result".into(),
         tool_use_id: tool_use_id.into(),
         is_error,
         content,
+        t_ms,
     }
 }
 
@@ -723,12 +730,23 @@ mod tests {
     #[test]
     fn tool_result_serializes() {
         let content = serde_json::json!([{"type": "text", "text": "ok"}]);
-        let frame = tool_result("toolu_01", false, content.clone());
+        let frame = tool_result("toolu_01", false, content.clone(), None);
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "tool_result");
         assert_eq!(json["tool_use_id"], "toolu_01");
         assert_eq!(json["is_error"], false);
         assert_eq!(json["content"], content);
+        // #28: no t_ms key unless dispatch timing is requested.
+        assert!(json.get("t_ms").is_none(), "t_ms must be omitted when None");
+    }
+
+    #[test]
+    fn tool_result_includes_t_ms_when_set() {
+        // #28: dispatch timing surfaces as a numeric `t_ms` on the frame.
+        let content = serde_json::json!([{"type": "text", "text": "ok"}]);
+        let frame = tool_result("toolu_01", false, content, Some(7));
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["t_ms"], 7);
     }
 
     #[test]
