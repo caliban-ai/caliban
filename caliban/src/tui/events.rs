@@ -3020,6 +3020,8 @@ mod tests {
                         cache_control: None,
                     },
                 )],
+                result_text: "ok-result".into(),
+                truncated: false,
             },
             &mut app,
         );

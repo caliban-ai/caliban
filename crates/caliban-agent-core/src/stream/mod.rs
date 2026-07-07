@@ -168,10 +168,17 @@ fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
     }
 }
 
-/// Flatten a [`ToolResultBlock`]'s content into a single string: text blocks
-/// joined by newlines, non-text blocks ignored.
-fn tool_result_text(tr: &ToolResultBlock) -> String {
-    tr.content
+/// Global display cap (in chars) for the `result_text` carried on
+/// [`TurnEvent::ToolCallEnd`]. A dashboard-preview bound, deliberately smaller
+/// than and independent of the model-context cap
+/// ([`crate::post_process::ToolResultCap`]): observers want a tight, cheap
+/// preview, not the full body fed back to the model.
+pub const STREAM_RESULT_TEXT_CAP: usize = 8 * 1024;
+
+/// Flatten content blocks' text into a single string: text blocks joined by
+/// newlines, non-text blocks ignored.
+fn flatten_content_text(content: &[ContentBlock]) -> String {
+    content
         .iter()
         .filter_map(|b| match b {
             ContentBlock::Text(t) => Some(t.text.as_str()),
@@ -179,6 +186,24 @@ fn tool_result_text(tr: &ToolResultBlock) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Flatten `content` to display text and cap it to `max_chars`. Char-based, so
+/// truncation never splits a UTF-8 boundary. Returns `(text, truncated)` where
+/// `text` is the head (prefix) of the flattened result.
+fn capped_result_text(content: &[ContentBlock], max_chars: usize) -> (String, bool) {
+    let full = flatten_content_text(content);
+    if full.chars().count() > max_chars {
+        (full.chars().take(max_chars).collect(), true)
+    } else {
+        (full, false)
+    }
+}
+
+/// Flatten a [`ToolResultBlock`]'s content into a single string: text blocks
+/// joined by newlines, non-text blocks ignored.
+fn tool_result_text(tr: &ToolResultBlock) -> String {
+    flatten_content_text(&tr.content)
 }
 
 /// Build the error [`ToolResultBlock`] used for a denied tool call (plan-mode
@@ -337,8 +362,18 @@ pub enum TurnEvent {
         tool_use_id: String,
         /// Whether the result is an error.
         is_error: bool,
-        /// Content blocks returned by the tool (or the error message).
+        /// Content blocks returned by the tool (or the error message). Full and
+        /// structured; the authoritative copy is also carried in
+        /// [`TurnEvent::TurnEnd`]'s `tool_results`.
         content: Vec<ContentBlock>,
+        /// Display-ready flattened text of the result, capped to
+        /// [`STREAM_RESULT_TEXT_CAP`] chars. The head (prefix) of the result;
+        /// non-text blocks (e.g. images) are omitted. For observers (e.g. the
+        /// prospero dashboard) that want a cheap, bounded preview without
+        /// re-flattening `content`.
+        result_text: String,
+        /// `true` iff `result_text` was truncated to fit the cap.
+        truncated: bool,
     },
     /// The turn is complete — assistant message + any tool results are ready.
     TurnEnd {
@@ -1826,11 +1861,15 @@ impl Agent {
                         } => {
                             // Emit the denied ToolCallEnd up front, in
                             // assistant-message order.
+                            let (result_text, truncated) =
+                                capped_result_text(&result.content, STREAM_RESULT_TEXT_CAP);
                             yield TurnEvent::ToolCallEnd {
                                 turn_index,
                                 tool_use_id: result.tool_use_id.clone(),
                                 is_error: true,
                                 content: result.content.clone(),
+                                result_text,
+                                truncated,
                             };
                             plans.push(DispatchPlan::Denied {
                                 original_index,
@@ -1946,11 +1985,15 @@ impl Agent {
                         Ok(tool_result) => {
                             let is_error = tool_result.is_error;
                             let content = tool_result.content.clone();
+                            let (result_text, truncated) =
+                                capped_result_text(&content, STREAM_RESULT_TEXT_CAP);
                             yield TurnEvent::ToolCallEnd {
                                 turn_index,
                                 tool_use_id: id,
                                 is_error,
                                 content,
+                                result_text,
+                                truncated,
                             };
                             ordered_results[idx] = Some(tool_result);
                         }
