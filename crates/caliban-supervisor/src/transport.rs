@@ -173,6 +173,37 @@ pub struct BindSpec {
     pub token: Option<String>,
 }
 
+/// Fail-closed credential policy for a network (TCP) listener (#288, #400).
+///
+/// A `--listen` listener must never bind unauthenticated, and must never carry
+/// a bearer token over plaintext (an on-path observer could steal it). Returns
+/// `Err(reason)` unless **both** a non-empty token and TLS are configured.
+/// Empty/whitespace-only tokens are treated as absent. Unix-socket mode is
+/// local and filesystem-permission-scoped, so it does not use this guard.
+///
+/// This is the single source of truth for the policy, applied to **both** the
+/// daemon control-plane listener (`caliband --listen`) and the per-agent
+/// session-plane listener the worker binds — the #288 fix originally guarded
+/// only the latter, leaving the control socket fail-open (#400).
+pub fn require_network_credentials(token: Option<&str>, tls_present: bool) -> Result<(), String> {
+    let token = token.map(str::trim).filter(|t| !t.is_empty());
+    if token.is_none() {
+        return Err(
+            "a non-empty bearer token is required for network (--listen) mode; \
+             refusing to bind an unauthenticated listener"
+                .to_owned(),
+        );
+    }
+    if !tls_present {
+        return Err(
+            "TLS (--tls-cert/--tls-key) is required for network (--listen) mode; \
+             refusing to send the bearer token over plaintext"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// How to dial a connection.
 pub struct ConnectSpec {
     /// Target address.
@@ -287,6 +318,29 @@ pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_network_credentials_rejects_missing_token() {
+        let err = require_network_credentials(None, true).unwrap_err();
+        assert!(err.contains("token"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn require_network_credentials_rejects_empty_or_whitespace_token() {
+        assert!(require_network_credentials(Some(""), true).is_err());
+        assert!(require_network_credentials(Some("   "), true).is_err());
+    }
+
+    #[test]
+    fn require_network_credentials_rejects_token_without_tls() {
+        let err = require_network_credentials(Some("secret"), false).unwrap_err();
+        assert!(err.contains("TLS"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn require_network_credentials_accepts_token_and_tls() {
+        assert!(require_network_credentials(Some("secret"), true).is_ok());
+    }
 
     async fn echo_once(listener: Listener) {
         let mut conn = listener.accept().await.expect("accept");

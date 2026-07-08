@@ -227,6 +227,12 @@ fn build_supervisor(
         .unwrap_or_else(|| host_of(&listen).to_string());
     let agent_port_base = args.agent_port_base.unwrap_or(7100);
 
+    // Fail-closed: never bind the control plane unauthenticated or in plaintext.
+    // The #288 fix guarded only the per-agent worker listener, leaving the daemon
+    // control socket fail-open (#400) — apply the same policy here.
+    caliban_supervisor::require_network_credentials(args.token.as_deref(), control_tls.is_some())
+        .map_err(|e| format!("--listen: {e}"))?;
+
     let bind = BindSpec {
         endpoint: Endpoint::Tcp { addr: listen },
         tls: control_tls,
