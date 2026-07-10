@@ -26,8 +26,13 @@ use serde_json::{Map, Value};
 
 use crate::Settings;
 
-/// Set of permission array keys that concatenate.
-const PERMISSION_LIST_KEYS: &[&str] = &["allow", "ask", "deny"];
+/// Set of permission array keys that concatenate rather than replace. The v2
+/// ordered `rules` array is included (#410): without it, `rules` fell through to
+/// "higher wins" and a less-trusted project/local scope's `rules` array would
+/// wholesale-replace — silently dropping — a more-trusted user/managed scope's
+/// deny rules. Concatenating preserves every scope's rules (first-match-wins at
+/// evaluation time, lower-priority scope first, matching allow/ask/deny).
+const PERMISSION_LIST_KEYS: &[&str] = &["allow", "ask", "deny", "rules"];
 
 /// Top-level array keys that concatenate + dedupe.
 const DEDUPE_ARRAY_KEYS: &[&str] = &[
@@ -274,6 +279,26 @@ mod tests {
         let mut lower = json!({"permissions": {"allow": ["Read"]}});
         merge_values(&mut lower, json!({"permissions": {"allow": ["Bash"]}}));
         assert_eq!(lower["permissions"]["allow"], json!(["Read", "Bash"]));
+    }
+
+    #[test]
+    fn permission_rules_concatenate_not_replace() {
+        // #410: the v2 ordered `rules` array must concatenate like allow/ask/deny,
+        // so a less-trusted higher scope can't wipe a more-trusted scope's rules.
+        let mut lower = json!({
+            "permissions": {"rules": [{"pattern": "Bash:rm *", "action": "deny"}]}
+        });
+        merge_values(
+            &mut lower,
+            json!({"permissions": {"rules": [{"pattern": "*", "action": "allow"}]}}),
+        );
+        assert_eq!(
+            lower["permissions"]["rules"],
+            json!([
+                {"pattern": "Bash:rm *", "action": "deny"},
+                {"pattern": "*", "action": "allow"}
+            ])
+        );
     }
 
     #[test]
