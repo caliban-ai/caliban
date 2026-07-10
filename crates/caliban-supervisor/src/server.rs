@@ -7,9 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +20,16 @@ use crate::proto::{CtlReply, CtlRequest, DaemonStatus, SupervisorError};
 use crate::registry::Registry;
 use crate::store::AgentStore;
 use crate::transport::{BindSpec, Endpoint, Listener, TlsServer};
+
+/// Max time a peer may take to complete the TLS handshake + token preamble
+/// before its connection is dropped. Bounds the pre-auth work a single slow or
+/// silent client can hold open (#401).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Max length of a single NDJSON control-request line. A line that consumes the
+/// whole budget without a terminating newline is rejected, bounding the memory
+/// a client can force the daemon to buffer (#401).
+const MAX_CTL_LINE: u64 = 1 << 20; // 1 MiB
 
 /// Network (TCP) configuration for a supervisor running in server mode
 /// (#280 Task 7). Absent (`None` on the [`Supervisor`]) means Unix mode —
@@ -253,11 +265,30 @@ impl Supervisor {
                     tracing::info!("supervisor shutdown requested");
                     break;
                 }
-                accepted = listener.accept() => {
+                accepted = listener.accept_raw() => {
                     match accepted {
-                        Ok(conn) => {
+                        Ok(incoming) => {
                             let me = Arc::clone(&self);
+                            // Run the TLS handshake + token check in the spawned
+                            // task, under a timeout — never on the accept loop —
+                            // so a slow/silent peer can't wedge acceptance (#401).
                             tokio::spawn(async move {
+                                let conn = match tokio::time::timeout(
+                                    HANDSHAKE_TIMEOUT,
+                                    incoming.authenticate(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(conn)) => conn,
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(error = %e, "handshake/auth failed");
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!("handshake/auth timed out");
+                                        return;
+                                    }
+                                };
                                 if let Err(e) = me.handle_client(conn).await {
                                     tracing::warn!(error = %e, "client handler error");
                                 }
@@ -284,13 +315,22 @@ impl Supervisor {
         conn: crate::transport::BoxConn,
     ) -> std::io::Result<()> {
         let (read_half, mut write_half) = tokio::io::split(conn);
-        let mut reader = BufReader::new(read_half);
+        let mut reader = BufReader::new(read_half).take(MAX_CTL_LINE);
         let mut line = String::new();
         loop {
+            reader.set_limit(MAX_CTL_LINE);
             line.clear();
             let n = reader.read_line(&mut line).await?;
             if n == 0 {
                 return Ok(());
+            }
+            // Budget exhausted without a terminating newline → the line is
+            // over-long. Reject and close rather than buffer unboundedly (#401).
+            if reader.limit() == 0 && !line.ends_with('\n') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "control line exceeds maximum length",
+                ));
             }
             let trimmed = line.trim_end();
             if trimmed.is_empty() {

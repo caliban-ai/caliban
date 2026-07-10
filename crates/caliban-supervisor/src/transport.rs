@@ -141,8 +141,10 @@ async fn read_preamble_line(conn: &mut BoxConn) -> std::io::Result<String> {
 async fn server_check_token(conn: &mut BoxConn, expected: &str) -> std::io::Result<()> {
     let line = read_preamble_line(conn).await?;
     let preamble: TokenPreamble = serde_json::from_str(&line).map_err(std::io::Error::other)?;
-    // Constant-time-ish compare is overkill for a shared daemon token; plain eq.
-    if preamble.bearer == expected {
+    // Constant-time compare: the bearer token is the sole auth factor on the
+    // network plane, so a byte-wise short-circuit (`==`) leaks it to a timing
+    // attacker over many trials (#401).
+    if constant_time_eq(preamble.bearer.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
         Err(std::io::Error::new(
@@ -150,6 +152,20 @@ async fn server_check_token(conn: &mut BoxConn, expected: &str) -> std::io::Resu
             "bad bearer token",
         ))
     }
+}
+
+/// Length-then-content constant-time byte comparison. The length check can
+/// leak the *length* of the expected token (not its contents), which is an
+/// accepted tradeoff for a locally-generated bearer token.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Write the bearer-token preamble line onto `conn`.
@@ -214,6 +230,40 @@ pub struct ConnectSpec {
     pub token: Option<String>,
 }
 
+/// A raw accepted connection whose TLS handshake and token check have **not**
+/// yet run. Produced by [`Listener::accept_raw`] so the accept loop returns
+/// immediately; the handshake/auth is deferred to [`Incoming::authenticate`]
+/// (run in a spawned task under a timeout) so a slow peer can't wedge the loop.
+pub struct Incoming {
+    stream: RawStream,
+    tls: Option<TlsAcceptor>,
+    token: Option<String>,
+}
+
+enum RawStream {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Incoming {
+    /// Perform the (optional) TLS handshake, then the (optional) token check.
+    /// Consumes `self`, yielding the ready [`BoxConn`]. Intended to be wrapped
+    /// in `tokio::time::timeout` by the caller.
+    pub async fn authenticate(self) -> std::io::Result<BoxConn> {
+        let mut conn: BoxConn = match self.stream {
+            RawStream::Unix(s) => Box::new(s),
+            RawStream::Tcp(s) => match self.tls {
+                None => Box::new(s),
+                Some(acceptor) => Box::new(acceptor.accept(s).await?),
+            },
+        };
+        if let Some(expected) = self.token {
+            server_check_token(&mut conn, &expected).await?;
+        }
+        Ok(conn)
+    }
+}
+
 /// A bound listener over one transport family.
 pub enum Listener {
     /// Unix-domain.
@@ -264,10 +314,23 @@ impl Listener {
     /// TLS handshake when server TLS is configured, then — for TCP — checks
     /// the bearer-token preamble when a token is configured.
     pub async fn accept(&self) -> std::io::Result<BoxConn> {
+        self.accept_raw().await?.authenticate().await
+    }
+
+    /// Accept the next connection **without** performing the TLS handshake or
+    /// token check. Returns immediately after the raw `accept(2)`, so a slow or
+    /// silent peer can never stall the accept loop (#401). The caller runs
+    /// [`Incoming::authenticate`] on the returned value — typically inside a
+    /// spawned task under a timeout — so the handshake happens concurrently.
+    pub async fn accept_raw(&self) -> std::io::Result<Incoming> {
         match self {
             Listener::Unix(l) => {
                 let (stream, _addr) = l.accept().await?;
-                Ok(Box::new(stream))
+                Ok(Incoming {
+                    stream: RawStream::Unix(stream),
+                    tls: None,
+                    token: None,
+                })
             }
             Listener::Tcp {
                 listener,
@@ -275,14 +338,11 @@ impl Listener {
                 token,
             } => {
                 let (stream, _addr) = listener.accept().await?;
-                let mut conn: BoxConn = match tls {
-                    None => Box::new(stream),
-                    Some(t) => Box::new(t.acceptor.accept(stream).await?),
-                };
-                if let Some(expected) = token {
-                    server_check_token(&mut conn, expected).await?;
-                }
-                Ok(conn)
+                Ok(Incoming {
+                    stream: RawStream::Tcp(stream),
+                    tls: tls.as_ref().map(|t| t.acceptor.clone()),
+                    token: token.clone(),
+                })
             }
         }
     }
@@ -318,6 +378,15 @@ pub async fn connect(spec: &ConnectSpec) -> std::io::Result<BoxConn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_semantics_of_plain_eq() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secr")); // length differs
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
 
     #[test]
     fn require_network_credentials_rejects_missing_token() {
