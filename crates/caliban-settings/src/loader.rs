@@ -486,14 +486,23 @@ fn read_scope(
     // document.
     if let Some(dir) = scope_dir {
         let perm_path = dir.join(&perm_filename);
-        if perm_path.exists()
-            && let Ok(perm_body) = std::fs::read_to_string(&perm_path)
-            && let Ok(perm_val) = parse_body(&perm_path, &perm_body)
-            && let Some(perms) = perm_val.get("permissions").cloned()
-            && let Some(obj) = value.as_object_mut()
-        {
-            // Replace only the `permissions` key in the merged value.
-            obj.insert("permissions".to_string(), perms);
+        if perm_path.exists() {
+            // Surface read/parse errors as `LoadError` (fail-closed), exactly
+            // like the primary settings file above — the previous
+            // `&& let Ok(..)` chain silently swallowed both, so a typo in
+            // `permissions.local.toml` would drop the operator's `deny` rules
+            // with no warning while they believed the file was in force (#410).
+            let perm_body = std::fs::read_to_string(&perm_path).map_err(|e| LoadError::Io {
+                path: perm_path.clone(),
+                source: e,
+            })?;
+            let perm_val = parse_body(&perm_path, &perm_body)?;
+            if let Some(perms) = perm_val.get("permissions").cloned()
+                && let Some(obj) = value.as_object_mut()
+            {
+                // Replace only the `permissions` key in the merged value.
+                obj.insert("permissions".to_string(), perms);
+            }
         }
     }
 
@@ -608,6 +617,28 @@ mod tests {
         let outcome = load_settings(&opts).unwrap();
         let m = outcome.settings.model.unwrap();
         assert!(matches!(m, crate::ModelSelector::Name(n) if n == "from-toml"));
+    }
+
+    #[test]
+    fn malformed_permissions_file_errors_not_swallowed() {
+        // #410: a malformed per-scope permissions file must fail loudly
+        // (fail-closed) rather than be silently ignored — a typo must not drop
+        // the operator's deny rules while they believe the file is in force.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(&ws.join(".caliban/settings.toml"), r#"model = "x""#);
+        // Invalid TOML (unterminated array).
+        write(&ws.join(".caliban/permissions.toml"), "deny = [\n");
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let err = load_settings(&opts).unwrap_err();
+        assert!(
+            matches!(err, LoadError::ParseToml { .. }),
+            "expected a surfaced parse error, got {err:?}"
+        );
     }
 
     #[test]
