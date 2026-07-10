@@ -37,5 +37,6 @@ pub use server::{NetworkConfig, Supervisor};
 pub use sources::{Source, discover_sources, resolve_source};
 pub use store::AgentStore;
 pub use transport::{
-    BindSpec, BoxConn, ConnectSpec, Endpoint, Listener, connect, require_network_credentials,
+    BindSpec, BoxConn, ConnectSpec, Endpoint, Incoming, Listener, connect,
+    require_network_credentials,
 };
