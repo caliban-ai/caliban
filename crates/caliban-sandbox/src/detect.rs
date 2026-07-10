@@ -208,17 +208,38 @@ fn userns_probe_args() -> Vec<std::ffi::OsString> {
         .collect()
 }
 
+/// Decide userns availability from the probe process's exit code.
+///
+/// `bwrap` sets up **all** namespaces (including `--unshare-user`) *before* it
+/// execs the final payload, so:
+/// - `Some(0)`   — namespace created and `/bin/true` ran → available.
+/// - `Some(127)` — namespace created, but the payload binary was absent on this
+///   host (e.g. NixOS ships no `/bin/true`); the exec-stage failure still proves
+///   userns works → available (#404). Previously this was misread as "denied",
+///   silently downgrading a capable host to unsandboxed.
+/// - any other code (e.g. `Some(1)` from a failed `--unshare-user`) or `None`
+///   (signal) — the namespace could not be created → unavailable.
+#[cfg(any(target_os = "linux", test))]
+fn interpret_userns_probe(code: Option<i32>) -> bool {
+    matches!(code, Some(0 | 127))
+}
+
 /// Run the userns probe with `bwrap` at `path`; `true` iff it can create a
-/// user namespace on this host.
+/// user namespace on this host. A failure to even launch `bwrap` (the caller
+/// already confirmed the binary exists, so this is a transient/permission
+/// error) is treated as unavailable rather than as a userns denial.
 #[cfg(any(target_os = "linux", test))]
 fn probe_userns(path: &Path) -> bool {
-    std::process::Command::new(path)
+    match std::process::Command::new(path)
         .args(userns_probe_args())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+    {
+        Ok(s) => interpret_userns_probe(s.code()),
+        Err(_) => false,
+    }
 }
 
 /// Given a present, version-OK `bwrap`, confirm the runtime actually permits
@@ -445,6 +466,23 @@ mod tests {
         assert!(args.iter().any(|a| a == "--ro-bind"));
     }
 
+    #[test]
+    fn interpret_userns_probe_treats_missing_payload_as_available() {
+        assert!(interpret_userns_probe(Some(0)), "ns created, payload ran");
+        assert!(
+            interpret_userns_probe(Some(127)),
+            "ns created, payload absent (e.g. NixOS, no /bin/true) ⇒ available (#404)"
+        );
+        assert!(
+            !interpret_userns_probe(Some(1)),
+            "--unshare-user setup failed ⇒ denied"
+        );
+        assert!(
+            !interpret_userns_probe(None),
+            "killed by signal ⇒ not available"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn probe_userns_reflects_exit_status() {
@@ -453,10 +491,18 @@ mod tests {
             probe_userns(&fake_bwrap(&dir, 0)),
             "exit 0 ⇒ userns available"
         );
+        // Exit 127: namespace was created but the payload binary was missing —
+        // bwrap only reaches exec after userns setup, so this still means the
+        // host supports userns (#404).
+        let dir127 = tempfile::tempdir().unwrap();
+        assert!(
+            probe_userns(&fake_bwrap(&dir127, 127)),
+            "exit 127 (payload absent) ⇒ userns still available"
+        );
         let dir2 = tempfile::tempdir().unwrap();
         assert!(
             !probe_userns(&fake_bwrap(&dir2, 1)),
-            "nonzero exit ⇒ userns denied"
+            "exit 1 (userns setup failed) ⇒ denied"
         );
     }
 
