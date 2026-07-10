@@ -56,20 +56,9 @@ impl SandboxedShim {
 
         let backend = detect(&policy)?;
 
-        // Linux without proxy + non-empty allowed_domains can't enforce
-        // hostname rules; warn loudly so operators know the sandbox is
-        // looser than they probably intended.
-        if matches!(backend, Backend::Bwrap { .. })
-            && !policy.network.allowed_domains.is_empty()
-            && policy.network.http_proxy_port == 0
-            && policy.network.socks_proxy_port == 0
-        {
-            tracing::warn!(
-                "sandbox: allowed_domains is set without a proxy port on Linux; \
-                 bwrap cannot enforce per-hostname egress. Consider setting \
-                 network.http_proxy_port and pointing a domain-aware proxy at it."
-            );
-        }
+        // (Previously a warn here about allowed_domains-without-proxy on Linux;
+        // that configuration is now rejected outright by `validate_policy`
+        // above (#403), so the case is unreachable.)
 
         let (profile_temp, profile_path) = match &backend {
             Backend::Seatbelt { .. } => {
@@ -299,6 +288,23 @@ fn validate_policy(policy: &Policy) -> Result<(), SandboxError> {
             reason: "set at most one of network.http_proxy_port or network.socks_proxy_port".into(),
         });
     }
+    // Per-hostname allow/deny lists can only be enforced by the loopback proxy —
+    // neither bwrap nor Seatbelt can filter egress by hostname. Without a proxy
+    // port, honoring `allowed_domains` previously meant keeping the network
+    // namespace open (opening ALL egress — an inversion of intent), while
+    // `denied_domains` was silently ignored entirely. Both are worse than
+    // refusing, so fail closed on the misconfiguration (#403).
+    let proxy_set = policy.network.http_proxy_port != 0 || policy.network.socks_proxy_port != 0;
+    if !proxy_set
+        && (!policy.network.allowed_domains.is_empty() || !policy.network.denied_domains.is_empty())
+    {
+        return Err(SandboxError::InvalidConfig {
+            reason: "network.allowed_domains/denied_domains require network.http_proxy_port or \
+                     network.socks_proxy_port to enforce per-hostname rules; set a proxy port \
+                     (the proxy applies the domain rules) or remove the domain lists"
+                .into(),
+        });
+    }
     Ok(())
 }
 
@@ -501,6 +507,57 @@ mod tests {
         let md = std::fs::metadata(tf.path()).expect("metadata");
         let mode = md.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn domain_lists_without_proxy_are_rejected() {
+        // #403: allowed_domains / denied_domains are unenforceable without a
+        // proxy, so the shim must fail closed rather than silently no-op
+        // (denied_domains) or open all egress (allowed_domains).
+        for net in [
+            NetworkAcl {
+                allowed_domains: vec!["github.com".into()],
+                ..NetworkAcl::default()
+            },
+            NetworkAcl {
+                denied_domains: vec!["evil.com".into()],
+                ..NetworkAcl::default()
+            },
+        ] {
+            let p = Policy {
+                enabled: true,
+                network: net,
+                ..Policy::default()
+            };
+            let err =
+                SandboxedShim::new(p).expect_err("domain list without proxy must be rejected");
+            assert!(
+                matches!(err, SandboxError::InvalidConfig { .. }),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_lists_with_proxy_are_accepted() {
+        // With a proxy port set, the proxy enforces the domain rules → valid.
+        let p = Policy {
+            enabled: true,
+            network: NetworkAcl {
+                allowed_domains: vec!["github.com".into()],
+                denied_domains: vec!["evil.com".into()],
+                http_proxy_port: 8888,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        // Construction validates the policy; backend resolution may still yield
+        // Unavailable on a host without bwrap, but it must not be InvalidConfig.
+        let result = SandboxedShim::new(p);
+        assert!(
+            !matches!(result, Err(SandboxError::InvalidConfig { .. })),
+            "domain lists with a proxy must not be rejected as InvalidConfig"
+        );
     }
 
     #[test]
