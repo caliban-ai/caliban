@@ -61,10 +61,14 @@ impl Tool for WriteTool {
     }
 
     fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
-        input
-            .get("path")
-            .and_then(Value::as_str)
-            .map(crate::parallel::canonical_key)
+        let path = input.get("path").and_then(Value::as_str)?;
+        // #417: key on the *resolved* workspace target (the same resolution the
+        // write uses) so different spellings of one file serialize; fall back to
+        // the raw string key if resolution fails.
+        Some(self.root.resolve(path).map_or_else(
+            |_| crate::parallel::canonical_key(path),
+            |r| crate::parallel::canonical_key_path(&r),
+        ))
     }
 
     /// Invoke the Write tool.
@@ -121,6 +125,27 @@ mod tests {
             hooks: None,
             turn_index: 0,
         }
+    }
+
+    #[test]
+    fn parallel_conflict_key_is_stable_across_spellings() {
+        // #417: the same target via a relative path and an absolute path must
+        // yield the same conflict key so a concurrent Edit+Write serialize.
+        // Keying on the resolved workspace target (not the raw string vs cwd)
+        // is what makes this hold when the workspace root differs from the cwd.
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool::new(WorkspaceRoot::new(tmp.path()));
+        let rel = tool
+            .parallel_conflict_key(&json!({"path": "f.txt"}))
+            .expect("key");
+        let abs_path = tmp.path().join("f.txt");
+        let abs = tool
+            .parallel_conflict_key(&json!({"path": abs_path.to_str().unwrap()}))
+            .expect("key");
+        assert_eq!(
+            rel, abs,
+            "relative and absolute spellings of one target must key the same",
+        );
     }
 
     #[tokio::test]

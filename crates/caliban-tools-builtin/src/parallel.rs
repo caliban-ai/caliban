@@ -12,7 +12,19 @@ use std::path::{Path, PathBuf};
 /// at worst over-conservative (string-equal paths still collide).
 #[must_use]
 pub(crate) fn canonical_key(path: &str) -> String {
-    let p = Path::new(path);
+    canonical_key_path(Path::new(path))
+}
+
+/// Like [`canonical_key`] but for an already-resolved [`Path`].
+///
+/// Callers should pass the path produced by `WorkspaceRoot::resolve` (the same
+/// resolution the write itself uses) rather than the raw tool input, so two
+/// spellings of one target — a relative path, an absolute path, a `~`-path —
+/// collapse to the same key and serialize (#417). Keying on the raw string
+/// canonicalized against the *process cwd* missed this when the workspace root
+/// differs from the cwd.
+#[must_use]
+pub(crate) fn canonical_key_path(p: &Path) -> String {
     if let Ok(c) = p.canonicalize() {
         return c.display().to_string();
     }
@@ -22,7 +34,8 @@ pub(crate) fn canonical_key(path: &str) -> String {
         return parent_c.join(file).display().to_string();
     }
     // Last resort: absolute-ize via cwd-join so two different relative paths
-    // from different working directories don't accidentally collide.
+    // from different working directories don't accidentally collide. (Resolved
+    // workspace paths are already absolute, so this is a no-op for them.)
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if p.is_absolute() {
         p.display().to_string()

@@ -262,10 +262,13 @@ impl Tool for NotebookEditTool {
     }
 
     fn parallel_conflict_key(&self, input: &Value) -> Option<String> {
-        input
-            .get("path")
-            .and_then(Value::as_str)
-            .map(crate::parallel::canonical_key)
+        let path = input.get("path").and_then(Value::as_str)?;
+        // #417: key on the *resolved* workspace target so different spellings of
+        // one file serialize; fall back to the raw string key.
+        Some(self.root.resolve(path).map_or_else(
+            |_| crate::parallel::canonical_key(path),
+            |r| crate::parallel::canonical_key_path(&r),
+        ))
     }
 
     async fn invoke(&self, input: Value, cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
