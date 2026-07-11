@@ -66,6 +66,10 @@ pub(crate) enum ActiveBlock {
     },
     Thinking {
         accumulated: String,
+        /// Signature fragments for this thinking block, accumulated from
+        /// `StreamingDelta::Signature`. Preserved so the block can be re-sent
+        /// without the provider rejecting it (#419).
+        signature: String,
     },
     ToolUse {
         id: String,
@@ -123,9 +127,12 @@ impl MessageAccumulator {
                 text: accumulated,
                 cache_control: None,
             }),
-            ActiveBlock::Thinking { accumulated } => ContentBlock::Thinking(ThinkingBlock {
+            ActiveBlock::Thinking {
+                accumulated,
+                signature,
+            } => ContentBlock::Thinking(ThinkingBlock {
                 thinking: accumulated,
-                signature: None,
+                signature: (!signature.is_empty()).then_some(signature),
             }),
             ActiveBlock::ToolUse { id, name, json_buf } => {
                 let input = if json_buf.is_empty() {

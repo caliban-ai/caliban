@@ -1655,8 +1655,10 @@ impl Agent {
                                         Some(ActiveBlock::Text { accumulated: String::new() });
                                 }
                                 StreamingContentType::Thinking => {
-                                    acc.active[i] =
-                                        Some(ActiveBlock::Thinking { accumulated: String::new() });
+                                    acc.active[i] = Some(ActiveBlock::Thinking {
+                                        accumulated: String::new(),
+                                        signature: String::new(),
+                                    });
                                 }
                                 StreamingContentType::ToolUse { id, name } => {
                                     let id = id.clone();
@@ -1698,7 +1700,7 @@ impl Agent {
                                     };
                                 }
                                 (
-                                    Some(ActiveBlock::Thinking { accumulated }),
+                                    Some(ActiveBlock::Thinking { accumulated, .. }),
                                     StreamingDelta::Thinking(s),
                                 ) => {
                                     accumulated.push_str(&s);
@@ -1716,6 +1718,12 @@ impl Agent {
                                         stopped_for = StopCondition::ThinkingBudgetExhausted;
                                         break 'outer;
                                     }
+                                }
+                                (
+                                    Some(ActiveBlock::Thinking { signature, .. }),
+                                    StreamingDelta::Signature(s),
+                                ) => {
+                                    signature.push_str(&s);
                                 }
                                 (
                                     Some(ActiveBlock::ToolUse { id, json_buf, .. }),

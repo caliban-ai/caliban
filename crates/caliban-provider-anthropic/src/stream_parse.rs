@@ -76,11 +76,13 @@ fn native_event_to_ir(e: NativeEvent) -> ProviderResult<StreamEvent> {
                     StreamingDelta::ToolUseInputJson(partial_json)
                 }
                 NativeBlockDelta::ThinkingDelta { thinking } => StreamingDelta::Thinking(thinking),
-                // SignatureDelta carries a cryptographic signature appended
-                // after a thinking block.  The IR has no dedicated delta type
-                // for signatures; we surface it as a no-op Ping so the stream
-                // stays well-formed without losing any text content.
-                NativeBlockDelta::SignatureDelta { .. } => return Ok(StreamEvent::Ping),
+                // SignatureDelta carries the cryptographic signature appended
+                // after a thinking block. It must be preserved and re-sent on
+                // the next turn or Anthropic rejects the retained thinking block
+                // (400) — carry it through the IR as a Signature delta (#419).
+                NativeBlockDelta::SignatureDelta { signature } => {
+                    StreamingDelta::Signature(signature)
+                }
             };
             StreamEvent::Delta {
                 index,
