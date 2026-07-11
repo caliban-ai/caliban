@@ -275,6 +275,33 @@ impl CheckpointStore {
         }
         Ok(max_idx + 1)
     }
+
+    /// Atomically claim a free prompt index `>= min_index` by *exclusively*
+    /// creating its directory, returning the claimed index.
+    ///
+    /// `next_prompt_index` alone is a scan-then-act TOCTOU: two concurrent
+    /// recorders in the same session (parallel sub-agents, `/fork`, two panes)
+    /// compute the same index and then clobber each other's manifest (#412 P4).
+    /// `create_dir` fails atomically with `AlreadyExists` if another recorder
+    /// won the race, so we simply advance to the next slot and retry.
+    ///
+    /// # Errors
+    /// I/O errors creating the session or prompt directory.
+    pub fn claim_prompt_index(&self, min_index: u32) -> Result<u32> {
+        std::fs::create_dir_all(&self.session_dir).map_err(CheckpointError::Io)?;
+        let mut idx = min_index.max(1);
+        loop {
+            match std::fs::create_dir(self.prompt_dir(idx)) {
+                Ok(()) => return Ok(idx),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    idx = idx.checked_add(1).ok_or_else(|| {
+                        CheckpointError::Io(std::io::Error::other("prompt index space exhausted"))
+                    })?;
+                }
+                Err(e) => return Err(CheckpointError::Io(e)),
+            }
+        }
+    }
 }
 
 /// Validate / sanitise a session id for safe use as a directory name. Falls
@@ -397,6 +424,18 @@ mod tests {
             .save_manifest(&Manifest::new(2, ManifestKind::Plan, "p2"))
             .unwrap();
         assert_eq!(store.next_prompt_index().unwrap(), 3);
+    }
+
+    #[test]
+    fn claim_prompt_index_is_exclusive_and_skips_taken_slots() {
+        // #412 P4: each claim exclusively creates its dir, so a re-claim of the
+        // same min advances past the taken slot — no two recorders share one.
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(tmp.path());
+        assert_eq!(store.claim_prompt_index(1).unwrap(), 1);
+        assert_eq!(store.claim_prompt_index(1).unwrap(), 2, "slot 1 taken → 2");
+        assert_eq!(store.claim_prompt_index(5).unwrap(), 5, "honors higher min");
+        assert_eq!(store.claim_prompt_index(5).unwrap(), 6, "slot 5 taken → 6");
     }
 
     #[test]

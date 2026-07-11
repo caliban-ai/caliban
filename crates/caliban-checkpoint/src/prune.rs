@@ -169,8 +169,13 @@ pub fn enforce_byte_cap(
         if !is_real_dir(&blobs) {
             continue;
         }
-        std::fs::remove_dir_all(&blobs).map_err(CheckpointError::Io)?;
-        total = total.saturating_sub(p.bytes);
+        // #412: rewrite the manifest to `Cleared` *before* deleting the blobs.
+        // The old order (delete → rewrite) left a `Files` manifest pointing at
+        // already-deleted blobs if the manifest was unreadable or the process
+        // crashed in between — a later `/rewind` then failed with `BlobMissing`.
+        // Rewriting first means the on-disk manifest never claims blobs that are
+        // about to disappear; a crash after this point just leaves an empty
+        // `blobs/` under an honest `Cleared` manifest.
         if let Some(mut m) = read_manifest(&p.prompt_dir) {
             m.kind = ManifestKind::Cleared;
             m.entries.clear();
@@ -178,6 +183,8 @@ pub fn enforce_byte_cap(
             caliban_common::fs::write_atomic(&p.prompt_dir.join("manifest.json"), &body)
                 .map_err(CheckpointError::Io)?;
         }
+        std::fs::remove_dir_all(&blobs).map_err(CheckpointError::Io)?;
+        total = total.saturating_sub(p.bytes);
         cleared += 1;
     }
     Ok(cleared)

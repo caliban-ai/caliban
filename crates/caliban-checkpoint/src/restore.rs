@@ -1,7 +1,7 @@
 //! Restore operations — overwrite the working tree from a manifest and/or
 //! truncate the conversation at the checkpoint's `last_message_id`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use caliban_agent_core::{Compactor, Message, NoopCompactor, SummarizingCompactor};
@@ -94,6 +94,15 @@ pub struct RestoreOutcome {
 pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<RestoreOutcome> {
     let manifest = store.load_manifest(prompt_index)?;
     let mut outcome = RestoreOutcome::default();
+
+    // Phase 1 — resolve every action and load + integrity-check *all* blobs,
+    // WITHOUT touching the working tree. Any `BlobMissing`/`BlobIntegrity`
+    // aborts here, before a single file is written or deleted, so a
+    // corrupt/byte-cap-evicted blob can't leave a half-restored tree — the
+    // non-transactional gap in #412. (A rarer filesystem write error in phase 2
+    // can still partially apply; the dominant blob-integrity failures cannot.)
+    let mut writes: Vec<(PathBuf, Vec<u8>, u32)> = Vec::new();
+    let mut deletes: Vec<PathBuf> = Vec::new();
     for entry in &manifest.entries {
         if entry.error.is_some() {
             outcome.files_skipped += 1;
@@ -101,18 +110,7 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
         }
         if !entry.exists_pre {
             // Prompt created the file → restore deletes it.
-            match std::fs::remove_file(&entry.path) {
-                Ok(()) => outcome.files_deleted += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    outcome.files_deleted += 1;
-                }
-                Err(source) => {
-                    return Err(CheckpointError::AtomicRestore {
-                        path: entry.path.clone(),
-                        source,
-                    });
-                }
-            }
+            deletes.push(entry.path.clone());
             continue;
         }
         let bytes = store.read_blob(prompt_index, &entry.blob_sha256)?;
@@ -129,7 +127,24 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
                 actual_size,
             });
         }
-        atomic_overwrite(&entry.path, &bytes, entry.mode)?;
+        writes.push((entry.path.clone(), bytes, entry.mode));
+    }
+
+    // Phase 2 — apply. All blobs are already loaded and verified, so only
+    // filesystem write/delete errors remain possible here.
+    for path in deletes {
+        match std::fs::remove_file(&path) {
+            Ok(()) => outcome.files_deleted += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                outcome.files_deleted += 1;
+            }
+            Err(source) => {
+                return Err(CheckpointError::AtomicRestore { path, source });
+            }
+        }
+    }
+    for (path, bytes, mode) in writes {
+        atomic_overwrite(&path, &bytes, mode)?;
         outcome.files_restored += 1;
     }
     Ok(outcome)
@@ -404,6 +419,62 @@ mod tests {
         let outcome = restore_files_only(&store, 1).unwrap();
         assert_eq!(outcome.files_restored, 1);
         assert_eq!(std::fs::read(&file).unwrap(), original);
+    }
+
+    #[test]
+    fn restore_aborts_before_mutating_when_a_later_blob_is_corrupt() {
+        // #412 P2: a corrupt/evicted blob must abort the whole restore *before*
+        // any file is written, so the working tree is never left half-restored.
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+
+        // Entry A: a valid blob.
+        let a = canonical_ws.join("a.txt");
+        let a_bytes = b"ORIGINAL-A";
+        let a_sha = sha256_hex(a_bytes);
+        store.write_blob(1, &a_sha, a_bytes).unwrap();
+
+        // Entry B: claims one sha but the stored blob content doesn't match it
+        // → integrity check fails when B is reached.
+        let b = canonical_ws.join("b.txt");
+        let b_expected = b"ORIGINAL-B";
+        let b_sha = sha256_hex(b_expected);
+        store
+            .write_blob(1, &b_sha, b"CORRUPT-DIFFERENT-CONTENT")
+            .unwrap();
+
+        let mk = |path: PathBuf, sha: String, size: u64| ManifestEntry {
+            path,
+            blob_sha256: sha,
+            mode: 0o644,
+            size,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu".into(),
+            error: None,
+        };
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(mk(a.clone(), a_sha, a_bytes.len() as u64));
+        m.entries
+            .push(mk(b.clone(), b_sha, b_expected.len() as u64));
+        store.save_manifest(&m).unwrap();
+
+        // Mutate both files post-checkpoint.
+        std::fs::write(&a, "CHANGED-A").unwrap();
+        std::fs::write(&b, "CHANGED-B").unwrap();
+
+        let err = restore_files_only(&store, 1).unwrap_err();
+        assert!(
+            matches!(err, CheckpointError::BlobIntegrity { .. }),
+            "expected BlobIntegrity, got {err:?}"
+        );
+        // The valid entry A must NOT have been restored — no partial mutation.
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            b"CHANGED-A",
+            "a.txt must be untouched: restore aborted before any write"
+        );
     }
 
     #[test]

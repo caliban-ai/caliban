@@ -113,10 +113,18 @@ impl Hooks for CheckpointHook {
         // index (e.g. always 1), every prompt would otherwise overwrite
         // `prompt-001` and collapse rewind history to one slot (#220 issue 2).
         // Take the larger of the caller's index and the next free slot so a
-        // correctly-incrementing caller is still honored. (A read-then-act race
-        // under concurrent sub-agents remains — tracked alongside issue 3.)
+        // correctly-incrementing caller is still honored, then *atomically*
+        // claim that slot (or the next free one) so concurrent sub-agents / a
+        // `/fork` can't collide on the same index and clobber a manifest (#412).
         let next_free = self.recorder.store().next_prompt_index().unwrap_or(1);
-        let prompt_index = ctx.prompt_index.max(next_free).max(1);
+        let desired = ctx.prompt_index.max(next_free).max(1);
+        let prompt_index = match self.recorder.store().claim_prompt_index(desired) {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!(error = %e, "CheckpointHook::before_run: claim_prompt_index failed");
+                return Ok(());
+            }
+        };
         if let Err(e) = self.recorder.open_prompt(prompt_index, kind, trimmed).await {
             tracing::warn!(error = %e, "CheckpointHook::before_run: open_prompt failed");
         }
