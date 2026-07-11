@@ -1398,7 +1398,9 @@ impl Agent {
                 // ---- Microcompact (per-turn, LLM-free) ----
                 if self.config.micro_compact_enabled {
                     use crate::compact::Compactor as _;
-                    let caps = self.provider.capabilities(&self.config.model);
+                    // #421: caps from the active model, not config.model (they
+                    // diverge after a `/model` swap).
+                    let caps = self.provider.capabilities(self.active_model().as_str());
                     if let Ok(Some(compaction)) = crate::compact::MicroCompactor::new()
                         .compact(&history, &caps)
                         .await
