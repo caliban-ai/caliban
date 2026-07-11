@@ -102,9 +102,58 @@ fn content_capture_enabled() -> bool {
 /// images) are dropped, and any serialization failure returns `None` so the
 /// caller simply omits content for the turn rather than failing the run. Only
 /// invoked when [`content_capture_enabled`] is `true`.
+/// Per-part content cap (chars) for the `gen_ai.*.messages` projection (#428).
+/// Bounds each text / tool blob so a single huge prompt or tool result can't
+/// produce a multi-MB span attribute (collectors then drop the whole span).
+const SEMCONV_PART_CAP: usize = 8 * 1024;
+
+/// Total cap (bytes) for the serialized `gen_ai.*.messages` attribute (#428).
+/// The input history grows every turn, so without a bound the attribute is
+/// O(history^2) over a run; keep only the most-recent messages that fit.
+const SEMCONV_TOTAL_CAP: usize = 128 * 1024;
+
+/// Truncate `s` to at most [`SEMCONV_PART_CAP`] chars on a char boundary,
+/// marking truncation. Char-based, so it never splits a UTF-8 scalar.
+fn cap_semconv(s: &str) -> String {
+    match s.char_indices().nth(SEMCONV_PART_CAP) {
+        Some((idx, _)) => {
+            let mut out = s[..idx].to_string();
+            out.push_str("…[truncated]");
+            out
+        }
+        None => s.to_string(),
+    }
+}
+
+/// Cap a JSON `Value` used as a tool-call `arguments` payload: pass small values
+/// through, but replace an oversized one (e.g. a `Write` body) with a truncated
+/// string so it can't blow up the span attribute (#428).
+fn cap_semconv_value(v: &serde_json::Value) -> serde_json::Value {
+    let s = v.to_string();
+    if s.len() <= SEMCONV_PART_CAP {
+        v.clone()
+    } else {
+        serde_json::Value::String(cap_semconv(&s))
+    }
+}
+
 fn messages_to_semconv_json(messages: &[Message]) -> Option<String> {
-    let arr: Vec<serde_json::Value> = messages.iter().map(message_to_semconv_value).collect();
-    serde_json::to_string(&serde_json::Value::Array(arr)).ok()
+    // Project each message (per-part content already capped in
+    // `content_block_to_part`), then keep only the most-recent messages whose
+    // serialized size fits under the total cap (#428).
+    let vals: Vec<serde_json::Value> = messages.iter().map(message_to_semconv_value).collect();
+    let mut total: usize = 2; // "[]"
+    let mut start = vals.len();
+    for (i, v) in vals.iter().enumerate().rev() {
+        let vlen = serde_json::to_string(v).map_or(0, |s| s.len() + 1);
+        if total + vlen > SEMCONV_TOTAL_CAP && i + 1 < vals.len() {
+            break;
+        }
+        total += vlen;
+        start = i;
+    }
+    let kept: Vec<serde_json::Value> = vals[start..].to_vec();
+    serde_json::to_string(&serde_json::Value::Array(kept)).ok()
 }
 
 /// Map one provider [`Message`] to a semconv `{ "role", "parts" }` object.
@@ -145,24 +194,24 @@ fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
     match block {
         ContentBlock::Text(t) => Some(serde_json::json!({
             "type": "text",
-            "content": t.text,
+            "content": cap_semconv(&t.text),
         })),
         // Extended-thinking is assistant reasoning text; project it best-effort
         // as a text part.
         ContentBlock::Thinking(th) => Some(serde_json::json!({
             "type": "text",
-            "content": th.thinking,
+            "content": cap_semconv(&th.thinking),
         })),
         ContentBlock::ToolUse(tu) => Some(serde_json::json!({
             "type": "tool_call",
             "id": tu.id,
             "name": tu.name,
-            "arguments": tu.input,
+            "arguments": cap_semconv_value(&tu.input),
         })),
         ContentBlock::ToolResult(tr) => Some(serde_json::json!({
             "type": "tool_call_response",
             "id": tr.tool_use_id,
-            "result": tool_result_text(tr),
+            "result": cap_semconv(&tool_result_text(tr)),
         })),
         ContentBlock::Image(_) => None,
     }
@@ -621,6 +670,41 @@ mod genai_content_tests {
         assert_eq!(v[0]["role"], "user");
         assert_eq!(v[0]["parts"][0]["type"], "text");
         assert_eq!(v[0]["parts"][0]["content"], "hi there");
+    }
+
+    #[test]
+    fn oversized_text_part_is_capped() {
+        // #428: one huge message must not produce a multi-MB attribute.
+        let v = parse(&[Message::user_text("a".repeat(100_000))]);
+        let content = v[0]["parts"][0]["content"].as_str().unwrap();
+        assert!(
+            content.len() < 20_000,
+            "part not capped: {} bytes",
+            content.len()
+        );
+        assert!(
+            content.ends_with("[truncated]"),
+            "missing truncation marker"
+        );
+    }
+
+    #[test]
+    fn total_attribute_is_bounded_and_keeps_recent() {
+        // #428: many large messages → the whole attribute stays under the total
+        // cap, keeping the most-recent messages.
+        let msgs: Vec<Message> = (0..200)
+            .map(|i| Message::user_text(format!("msg{i}-{}", "x".repeat(4000))))
+            .collect();
+        let json = messages_to_semconv_json(&msgs).expect("serialize");
+        assert!(
+            json.len() <= SEMCONV_TOTAL_CAP,
+            "total not bounded: {} bytes",
+            json.len()
+        );
+        assert!(
+            json.contains("msg199-"),
+            "the most-recent message must be kept"
+        );
     }
 
     #[test]
