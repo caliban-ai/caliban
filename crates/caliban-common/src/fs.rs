@@ -7,6 +7,28 @@
 use std::io::Write;
 use std::path::Path;
 
+/// The mode a *fresh* file should get, honoring the process umask (#417).
+///
+/// `std` exposes no umask accessor, so probe once and cache: a file created via
+/// `File::create` gets `0o666 & !umask`, and since `0o644 ⊆ 0o666` we have
+/// `0o644 & !umask == 0o644 & probe_mode`. Falls back to the historical `0o644`
+/// if the probe fails.
+#[cfg(unix)]
+fn umask_respecting_default() -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
+    static MODE: OnceLock<u32> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!(".caliban-umask-probe-{}", std::process::id()));
+        let probed = std::fs::File::create(&path)
+            .and_then(|f| f.metadata())
+            .map(|m| 0o644 & m.permissions().mode());
+        let _ = std::fs::remove_file(&path);
+        probed.unwrap_or(0o644)
+    })
+}
+
 /// Atomically write `bytes` to `path`.
 ///
 /// Writes to a uniquely-named tempfile in `path`'s parent directory, then
@@ -59,7 +81,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dest).map_or(0o644, |m| m.permissions().mode() & 0o7777);
+        let mode = match std::fs::metadata(dest) {
+            Ok(m) => m.permissions().mode() & 0o7777,
+            // Fresh file: honor the process umask instead of a hardcoded 0644,
+            // so a hardened umask (e.g. 0077 expecting 0600) isn't overridden
+            // to world-readable (#417).
+            Err(_) => umask_respecting_default(),
+        };
         tmp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
