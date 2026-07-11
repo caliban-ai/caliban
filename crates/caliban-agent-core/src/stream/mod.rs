@@ -2205,9 +2205,20 @@ impl Agent {
                     turns_since_last_edit += 1;
                     turns_without_edit = turns_without_edit.max(turns_since_last_edit);
                     let threshold = self.config.no_edit_nudge_threshold;
+                    // #420: never let the nudge preempt a *terminal* stop reason.
+                    // The nudge `break 'inner`s before `on_stop_reason` runs, so
+                    // firing it on a Refusal / ContentFilter (always terminal) or
+                    // MaxTokens (recovery-owned) turn would swallow that condition
+                    // — the run would silently take another turn instead of
+                    // surfacing the correct StopCondition + synthetic message.
+                    let stop_is_terminal = matches!(
+                        turn_stop_reason,
+                        StopReason::Refusal | StopReason::ContentFilter | StopReason::MaxTokens
+                    );
                     if threshold > 0
                         && turns_since_last_edit >= threshold
                         && no_edit_nudge_armed
+                        && !stop_is_terminal
                     {
                         tracing::info!(turns_since_last_edit, "no-edit nudge injected");
                         history.push(Message::user_text(format!(

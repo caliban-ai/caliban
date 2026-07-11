@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use caliban_agent_core::{
-    Agent, AgentConfig, ContentBlock, Message, Role, TextBlock, Tool, ToolContext, ToolError,
-    ToolRegistry,
+    Agent, AgentConfig, ContentBlock, Message, Role, StopCondition, TextBlock, Tool, ToolContext,
+    ToolError, ToolRegistry,
 };
 use caliban_provider::{
     MockProvider, Provider, StopReason, StreamEvent, StreamingContentType, StreamingDelta, Usage,
@@ -448,5 +448,49 @@ async fn side_effecting_nonedit_tool_does_not_reset_counter() {
         outcome.turns_without_edit >= 3,
         "high-water turns_without_edit should reach the threshold; got {}",
         outcome.turns_without_edit
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #420 — the nudge must not preempt a terminal stop reason.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn nudge_does_not_mask_a_terminal_refusal() {
+    // A no-edit streak reaches the threshold on a turn that ends in a terminal
+    // Refusal. The nudge fires *before* on_stop_reason, so without the #420
+    // guard it would `break 'inner` and swallow the Refusal. It must instead be
+    // suppressed so the run surrenders with StopCondition::Refusal.
+    let mock = Arc::new(MockProvider::new());
+    // peek (streak→1), peek (streak→2), then a Refusal turn (would be streak→3).
+    mock.enqueue_stream(tool_use_stream("m0", "c0", "peek"));
+    mock.enqueue_stream(tool_use_stream("m1", "c1", "peek"));
+    mock.enqueue_stream(text_stream(
+        "m_refuse",
+        "I can't help with that.",
+        StopReason::Refusal,
+    ));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadOnlyTool));
+    let agent = build_agent(Arc::clone(&mock), registry, 3);
+
+    let outcome = agent
+        .run_until_done(
+            vec![Message::user_text("investigate")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run should complete");
+
+    assert_eq!(
+        count_nudge_messages(&outcome.final_messages),
+        0,
+        "the no-edit nudge must NOT fire on a terminal Refusal turn"
+    );
+    assert!(
+        matches!(outcome.stopped_for, StopCondition::Refusal(_)),
+        "run must surrender with Refusal, got {:?}",
+        outcome.stopped_for
     );
 }
