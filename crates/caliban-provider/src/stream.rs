@@ -89,6 +89,10 @@ pub enum StreamingDelta {
     ToolUseInputJson(String),
     /// A thinking-text increment.
     Thinking(String),
+    /// A signature increment for the current thinking block (Anthropic extended
+    /// thinking). Must be preserved and re-sent, or the provider rejects the
+    /// preserved thinking block on the next turn (#419).
+    Signature(String),
 }
 
 /// Boxed dynamic stream of stream events.
@@ -106,6 +110,7 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
     let mut block_types: Vec<StreamingContentType> = Vec::new();
     let mut block_text: Vec<String> = Vec::new();
     let mut block_json: Vec<String> = Vec::new();
+    let mut block_sig: Vec<String> = Vec::new();
     let mut stop_reason: Option<StopReason> = None;
     let mut usage = Usage::default();
 
@@ -128,6 +133,7 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
                     block_types.resize(i + 1, StreamingContentType::Text);
                     block_text.resize(i + 1, String::new());
                     block_json.resize(i + 1, String::new());
+                    block_sig.resize(i + 1, String::new());
                 }
                 block_types[i] = content_type;
             }
@@ -143,6 +149,7 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
                         block_text[i].push_str(&s);
                     }
                     StreamingDelta::ToolUseInputJson(s) => block_json[i].push_str(&s),
+                    StreamingDelta::Signature(s) => block_sig[i].push_str(&s),
                 }
             }
             StreamEvent::ContentBlockStop { index } => {
@@ -159,7 +166,8 @@ pub async fn collect_message(mut stream: MessageStream) -> Result<(Message, Stop
                     }),
                     StreamingContentType::Thinking => ContentBlock::Thinking(ThinkingBlock {
                         thinking: std::mem::take(&mut block_text[i]),
-                        signature: None,
+                        signature: (!block_sig[i].is_empty())
+                            .then(|| std::mem::take(&mut block_sig[i])),
                     }),
                     StreamingContentType::ToolUse { id, name } => {
                         let json_str = std::mem::take(&mut block_json[i]);
@@ -346,6 +354,40 @@ mod watched_tests {
     use super::*;
     use futures::stream;
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn collect_message_preserves_thinking_signature() {
+        // #419: a Signature delta on a thinking block must survive into the
+        // assembled ThinkingBlock so it can be re-sent; otherwise the provider
+        // rejects the retained (signatureless) thinking block on the next turn.
+        let events = vec![
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamingContentType::Thinking,
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Thinking("pondering".into()),
+            }),
+            Ok(StreamEvent::Delta {
+                index: 0,
+                delta: StreamingDelta::Signature("sig-abc".into()),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageStop),
+        ];
+        let s: MessageStream = Box::pin(stream::iter(events));
+        let (msg, _stop, _usage) = collect_message(s).await.unwrap();
+        let ContentBlock::Thinking(t) = &msg.content[0] else {
+            panic!("expected a thinking block, got {:?}", msg.content);
+        };
+        assert_eq!(t.thinking, "pondering");
+        assert_eq!(
+            t.signature.as_deref(),
+            Some("sig-abc"),
+            "signature preserved"
+        );
+    }
 
     #[tokio::test]
     async fn passes_through_normal_data() {
