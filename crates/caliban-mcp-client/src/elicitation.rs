@@ -2,7 +2,7 @@
 //!
 //! When an MCP server requests user input mid-tool-call via the
 //! `elicitation/create` request, caliban routes that request through this
-//! bridge: an unbounded mpsc queue feeds the TUI, which renders a modal and
+//! bridge: a bounded mpsc queue feeds the TUI, which renders a modal and
 //! delivers the user's choice back via a [`tokio::sync::oneshot`]. Non-
 //! interactive callers (`--print`, CI) attach a default handler that auto-
 //! `Decline`s. A 5-minute hard cap prevents server misbehaviour from
@@ -21,6 +21,11 @@ use tokio::sync::{mpsc, oneshot};
 /// Default hard cap on time-to-respond. Servers that fail to make progress
 /// after issuing an elicitation are auto-`Decline`d after this elapses.
 pub const DEFAULT_ELICITATION_TIMEOUT: Duration = Duration::from_mins(5);
+
+/// Bound on in-flight elicitation prompts (#432). A bounded channel applies
+/// backpressure: a server that issues prompts faster than the TUI drains them
+/// awaits at the cap instead of growing an unbounded queue (slow memory growth).
+const ELICITATION_QUEUE_CAP: usize = 64;
 
 /// Build the permission rule pattern for elicitation from a given server.
 /// `Elicit(<server>)` desugars to the rule grammar's `Elicit:<server>`
@@ -88,7 +93,7 @@ pub(crate) type ElicitationItem = (ElicitationRequest, oneshot::Sender<Elicitati
 /// route prompts. Cheap to clone.
 #[derive(Clone)]
 pub struct ElicitationBridge {
-    tx: mpsc::UnboundedSender<ElicitationItem>,
+    tx: mpsc::Sender<ElicitationItem>,
     timeout: Duration,
 }
 
@@ -105,7 +110,7 @@ impl ElicitationBridge {
     /// should drain.
     #[must_use]
     pub fn new() -> (Self, ElicitationReceiver) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(ELICITATION_QUEUE_CAP);
         (
             Self {
                 tx,
@@ -119,7 +124,7 @@ impl ElicitationBridge {
     /// drive the timeout path quickly).
     #[must_use]
     pub fn with_timeout(timeout: Duration) -> (Self, ElicitationReceiver) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(ELICITATION_QUEUE_CAP);
         (Self { tx, timeout }, ElicitationReceiver { rx })
     }
 
@@ -127,7 +132,7 @@ impl ElicitationBridge {
     /// — used by non-interactive callers (`--print`, CI, headless).
     #[must_use]
     pub fn auto_decline() -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<ElicitationItem>();
+        let (tx, mut rx) = mpsc::channel::<ElicitationItem>(ELICITATION_QUEUE_CAP);
         // Drain in a detached task; reply Decline to every inflight prompt.
         tokio::spawn(async move {
             while let Some((req, sender)) = rx.recv().await {
@@ -180,7 +185,7 @@ impl ElicitationBridge {
         req: ElicitationRequest,
     ) -> Result<ElicitationResponse, ElicitationError> {
         let (tx, rx) = oneshot::channel();
-        if self.tx.send((req, tx)).is_err() {
+        if self.tx.send((req, tx)).await.is_err() {
             return Err(ElicitationError::ConsumerGone);
         }
         match tokio::time::timeout(self.timeout, rx).await {
@@ -202,7 +207,7 @@ impl ElicitationBridge {
 /// back on the oneshot.
 #[derive(Debug)]
 pub struct ElicitationReceiver {
-    rx: mpsc::UnboundedReceiver<ElicitationItem>,
+    rx: mpsc::Receiver<ElicitationItem>,
 }
 
 impl ElicitationReceiver {

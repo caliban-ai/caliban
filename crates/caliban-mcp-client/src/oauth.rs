@@ -1168,7 +1168,16 @@ async fn parse_token_response(
 ) -> Result<OauthTokens, McpError> {
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let raw = response.text().await.unwrap_or_default();
+        // Truncate the server-controlled body before surfacing it to logs / the
+        // `/mcp` overlay — a hostile or non-compliant AS could reflect
+        // credential material or an unbounded payload here (#432).
+        let body: String = raw.chars().take(512).collect();
+        let body = if raw.len() > body.len() {
+            format!("{body}…[truncated]")
+        } else {
+            body
+        };
         return Err(McpError::OauthExchange {
             server: server.to_string(),
             message: format!("token endpoint returned {status}: {body}"),

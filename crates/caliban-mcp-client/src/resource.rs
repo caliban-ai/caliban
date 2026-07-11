@@ -126,11 +126,19 @@ pub fn expand_template(tmpl: &str, args: &[&str]) -> Result<String, McpError> {
                 }
             }
         }
-        // SAFETY-ish: bytes[i] is the leading byte of a UTF-8 sequence we
-        // copy as-is, but since `{` triggers above, we only fall through
-        // for normal ASCII or multi-byte continuation bytes.
-        out.push(bytes[i] as char);
-        i += 1;
+        // Copy the char at byte offset `i` intact. `i` is always a char
+        // boundary (placeholder jumps land right after an ASCII `}`, and the
+        // non-placeholder branch advances by full char widths), so this never
+        // splits a UTF-8 scalar. The old `bytes[i] as char` reinterpreted
+        // continuation bytes as U+0080–U+00FF, corrupting any non-ASCII
+        // template into mojibake (#432).
+        // `i` is always on a char boundary here, so `chars().next()` yields the
+        // char; the `else` is unreachable but avoids a panic path.
+        let Some(ch) = tmpl[i..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        i += ch.len_utf8();
     }
     Ok(out)
 }
@@ -286,6 +294,14 @@ mod tests {
     fn expand_template_repeated_placeholder_reuses_arg() {
         let s = expand_template("/{x}/{x}", &["v"]).expect("expand");
         assert_eq!(s, "/v/v");
+    }
+
+    #[test]
+    fn expand_template_preserves_non_ascii() {
+        // #432: non-ASCII literals in the template must survive intact, not be
+        // corrupted into mojibake by a byte-wise `as char` copy.
+        let s = expand_template("proj/café/{id}/naïve", &["42"]).expect("expand");
+        assert_eq!(s, "proj/café/42/naïve");
     }
 
     #[tokio::test]
