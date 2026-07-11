@@ -81,16 +81,28 @@ struct BashInput {
     background: bool,
 }
 
-/// Read up to `cap` bytes from an async reader, returning lossy UTF-8.
+/// Read from an async reader, keeping the first `cap` bytes (lossy UTF-8) but
+/// **draining the rest to EOF**.
+///
+/// The reader must be drained past the cap: if we stopped reading at `cap`, a
+/// child that writes more than `cap` + the OS pipe buffer would block forever on
+/// `write()`, so `child.wait()` never completes and the command is falsely
+/// killed at the timeout — losing the real (often successful) result (#416).
+/// Continuing to read (and discard) past `cap` lets the child run to completion;
+/// we still only retain the first `cap` bytes for the captured output.
 async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R, cap: usize) -> String {
-    let mut buf = Vec::with_capacity(cap);
+    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
     let mut chunk = [0u8; 4096];
-    while buf.len() < cap {
+    loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let take = n.min(cap - buf.len());
-                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() < cap {
+                    let take = n.min(cap - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+                // Past the cap: keep reading but discard, so the child never
+                // blocks on a full pipe.
             }
         }
     }
@@ -316,6 +328,33 @@ mod tests {
         };
         assert!(t.text.contains("hi"), "output: {}", t.text);
         assert!(t.text.contains("Exit code: 0"), "output: {}", t.text);
+    }
+
+    #[tokio::test]
+    async fn large_stdout_completes_and_reports_success() {
+        // #416: a foreground command whose stdout exceeds STDOUT_CAP must still
+        // run to completion and report its real exit status — not block on a
+        // full pipe until the timeout, nor be SIGKILLed with a truncated result.
+        let tmp = TempDir::new().unwrap();
+        let tool = BashTool::new(WorkspaceRoot::new(tmp.path()));
+        let out = tool
+            .invoke(
+                json!({
+                    "command": "yes 2>/dev/null | head -c 200000; true",
+                    "timeout_seconds": 10
+                }),
+                ctx(),
+            )
+            .await
+            .expect("large-output command should succeed, not time out");
+        let ContentBlock::Text(t) = &out[0] else {
+            panic!("expected Text block")
+        };
+        assert!(
+            t.text.contains("Exit code: 0"),
+            "expected clean exit 0, got: {}",
+            &t.text[..t.text.len().min(300)]
+        );
     }
 
     #[tokio::test]
