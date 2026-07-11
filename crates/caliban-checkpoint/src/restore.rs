@@ -113,6 +113,21 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
             deletes.push(entry.path.clone());
             continue;
         }
+        // #413: `write_atomic` writes *through* symlinks (#335). The recorder
+        // stores canonical, symlink-free, in-workspace paths, so a symlink
+        // appearing on `entry.path` (or an ancestor) at restore time means the
+        // tracked file was swapped for a link since the checkpoint — following
+        // it would let `/rewind` write the blob outside the workspace (arbitrary
+        // file write). Refuse before any mutation.
+        if has_symlink_component(&entry.path) {
+            return Err(CheckpointError::AtomicRestore {
+                path: entry.path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "refusing to restore through a symlink (tracked path replaced since checkpoint)",
+                ),
+            });
+        }
         let bytes = store.read_blob(prompt_index, &entry.blob_sha256)?;
         // Content-addressed integrity check before overwriting the live file:
         // a corrupt/truncated blob must not be silently restored (#220 issue 5).
@@ -148,6 +163,19 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
         outcome.files_restored += 1;
     }
     Ok(outcome)
+}
+
+/// True if any existing component of `path` is a symlink. Used to refuse
+/// restoring through a symlink that was planted after the checkpoint (#413).
+fn has_symlink_component(path: &Path) -> bool {
+    let mut cur = PathBuf::new();
+    for comp in path.components() {
+        cur.push(comp);
+        if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Atomic write delegating to [`caliban_common::fs::write_atomic_with_mode`].
@@ -474,6 +502,49 @@ mod tests {
             std::fs::read(&a).unwrap(),
             b"CHANGED-A",
             "a.txt must be untouched: restore aborted before any write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_to_write_through_a_planted_symlink() {
+        // #413: if a tracked file is swapped for a symlink to an outside target
+        // after the checkpoint, /rewind must refuse rather than write through it.
+        let tmp = TempDir::new().unwrap();
+        let store = store_in(&tmp);
+        let canonical_ws = std::fs::canonicalize(tmp.path().join("ws")).unwrap();
+        let tracked = canonical_ws.join("notes.txt");
+        let bytes = b"CHECKPOINTED";
+        let sha = sha256_hex(bytes);
+        store.write_blob(1, &sha, bytes).unwrap();
+        let mut m = Manifest::new(1, ManifestKind::Files, "p");
+        m.entries.push(ManifestEntry {
+            path: tracked.clone(),
+            blob_sha256: sha,
+            mode: 0o644,
+            size: bytes.len() as u64,
+            exists_pre: true,
+            tool_name: "Write".into(),
+            tool_use_id: "tu".into(),
+            error: None,
+        });
+        store.save_manifest(&m).unwrap();
+
+        // An attacker target OUTSIDE the workspace, then swap the tracked file
+        // for a symlink pointing at it.
+        let outside = tmp.path().join("outside-secret.txt");
+        std::fs::write(&outside, "DO-NOT-TOUCH").unwrap();
+        std::os::unix::fs::symlink(&outside, &tracked).unwrap();
+
+        let err = restore_files_only(&store, 1).unwrap_err();
+        assert!(
+            matches!(err, CheckpointError::AtomicRestore { .. }),
+            "expected a refusal, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"DO-NOT-TOUCH",
+            "must not write through the symlink to the outside target"
         );
     }
 
