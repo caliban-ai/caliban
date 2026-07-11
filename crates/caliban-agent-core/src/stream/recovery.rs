@@ -9,6 +9,22 @@ pub(crate) const META_CONTINUATION_PROMPT: &str = "Output token limit hit. Resum
      Pick up mid-thought. Break remaining work into smaller pieces.";
 
 /// Synthetic message text for `stop_reason: Refusal`.
+/// Represent a surrender note as the last assistant message **without** creating
+/// a second consecutive assistant message (#422). `finalize_tool_results` has
+/// already pushed the turn's real assistant message, so if that's last we leave
+/// it (its content is the response) — only filling a placeholder when it somehow
+/// ended up empty. Otherwise (no assistant message present) push the note.
+fn ensure_assistant_note(history: &mut Vec<Message>, text: &str) {
+    match history.last_mut() {
+        Some(m) if m.role == Role::Assistant => {
+            if m.content.is_empty() {
+                *m = Message::assistant_text(text);
+            }
+        }
+        _ => history.push(Message::assistant_text(text)),
+    }
+}
+
 pub(crate) const REFUSAL_SYNTHETIC: &str = "Model declined to respond.";
 
 /// Synthetic message text for `stop_reason: ContentFilter`.
@@ -31,7 +47,7 @@ pub(crate) struct AutoCompactTracking {
 
 use std::sync::Arc;
 
-use caliban_provider::{Message, StopReason};
+use caliban_provider::{Message, Role, StopReason};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentConfig};
@@ -247,7 +263,7 @@ impl RecoveryState {
                     target: "caliban::recovery",
                     "recovery.refusal"
                 );
-                history.push(Message::assistant_text(REFUSAL_SYNTHETIC));
+                ensure_assistant_note(history, REFUSAL_SYNTHETIC);
                 RecoveryAction::Surrender(StopCondition::Refusal(REFUSAL_SYNTHETIC.into()))
             }
             StopReason::ContentFilter => {
@@ -255,7 +271,7 @@ impl RecoveryState {
                     target: "caliban::recovery",
                     "recovery.content_filter"
                 );
-                history.push(Message::assistant_text(CONTENT_FILTER_SYNTHETIC));
+                ensure_assistant_note(history, CONTENT_FILTER_SYNTHETIC);
                 RecoveryAction::Surrender(StopCondition::ContentFilter(
                     CONTENT_FILTER_SYNTHETIC.into(),
                 ))
@@ -300,11 +316,42 @@ impl RecoveryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caliban_provider::ContentBlock;
 
     #[test]
     fn constants_are_non_empty() {
         assert!(!META_CONTINUATION_PROMPT.is_empty());
         assert!(!REFUSAL_SYNTHETIC.is_empty());
         assert!(!CONTENT_FILTER_SYNTHETIC.is_empty());
+    }
+
+    #[test]
+    fn ensure_assistant_note_never_duplicates_the_assistant_role() {
+        // #422: a real (non-empty) assistant message is already last → no push.
+        let mut h = vec![
+            Message::user_text("q"),
+            Message::assistant_text("I won't do that."),
+        ];
+        ensure_assistant_note(&mut h, REFUSAL_SYNTHETIC);
+        assert_eq!(h.len(), 2, "must not append a second assistant message");
+        assert!(matches!(&h[1].content[0], ContentBlock::Text(t) if t.text == "I won't do that."));
+
+        // An empty trailing assistant message → filled in place, not duplicated.
+        let mut h2 = vec![
+            Message::user_text("q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![],
+            },
+        ];
+        ensure_assistant_note(&mut h2, REFUSAL_SYNTHETIC);
+        assert_eq!(h2.len(), 2, "empty assistant filled, not duplicated");
+        assert!(!h2[1].content.is_empty());
+
+        // No trailing assistant message → the note is pushed.
+        let mut h3 = vec![Message::user_text("q")];
+        ensure_assistant_note(&mut h3, REFUSAL_SYNTHETIC);
+        assert_eq!(h3.len(), 2);
+        assert_eq!(h3[1].role, Role::Assistant);
     }
 }
