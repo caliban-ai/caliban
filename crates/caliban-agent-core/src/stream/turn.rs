@@ -149,10 +149,57 @@ impl MessageAccumulator {
     }
 
     pub(crate) fn into_message(self) -> Message {
+        // #422: drop placeholder/empty text blocks. `ensure_index` back-fills
+        // `blocks` with empty `Text` blocks and a text block that received no
+        // deltas finalizes to `Text{ text: "" }`; sparse block indices leave
+        // such empties mid-message. Including them appends `Text{text:""}` blocks
+        // that some providers reject when the message is later re-sent.
+        let content: Vec<ContentBlock> = self
+            .blocks
+            .into_iter()
+            .filter(|b| !matches!(b, ContentBlock::Text(t) if t.text.is_empty()))
+            .collect();
         Message {
             role: Role::Assistant,
-            content: self.blocks,
+            content,
         }
+    }
+}
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+    use caliban_provider::ToolUseBlock;
+
+    #[test]
+    fn into_message_drops_empty_text_blocks() {
+        // #422: a back-filled/zero-delta empty text block must not appear in the
+        // assembled assistant message (some providers reject empty text blocks).
+        let mut acc = MessageAccumulator::new();
+        acc.blocks = vec![
+            ContentBlock::Text(TextBlock {
+                text: String::new(),
+                cache_control: None,
+            }),
+            ContentBlock::ToolUse(ToolUseBlock {
+                id: "t1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+            }),
+            ContentBlock::Text(TextBlock {
+                text: "real".into(),
+                cache_control: None,
+            }),
+        ];
+        let msg = acc.into_message();
+        assert_eq!(
+            msg.content.len(),
+            2,
+            "empty text dropped: {:?}",
+            msg.content
+        );
+        assert!(matches!(&msg.content[0], ContentBlock::ToolUse(_)));
+        assert!(matches!(&msg.content[1], ContentBlock::Text(t) if t.text == "real"));
     }
 }
 
