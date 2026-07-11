@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use caliban_provider::{
-    Capabilities, ContentBlock, Message, Provider, Role, TextBlock, ToolResultBlock, Usage,
+    Capabilities, ContentBlock, Message, Provider, Role, TextBlock, ToolResultBlock, ToolUseBlock,
+    Usage,
 };
 
 use crate::error::{Error, Result};
@@ -301,9 +302,11 @@ fn truncate_in_window(messages: &[Message], max_tokens: u32) -> Vec<Message> {
     out
 }
 
-/// Clone `messages`, truncating every text / tool-result-text payload to at
-/// most `cap` characters. Thinking blocks are left intact (their signatures
-/// must not be mangled) and non-text blocks pass through unchanged.
+/// Clone `messages`, truncating every oversized payload to fit `cap` characters:
+/// text, tool-result text, and `tool_use` input (#421). An oversized thinking
+/// block is replaced by a short text elision (it can't be truncated in place
+/// without invalidating its signature). Blocks already within `cap` pass through
+/// unchanged.
 fn cap_blocks(messages: &[Message], cap: usize) -> Vec<Message> {
     messages
         .iter()
@@ -328,6 +331,40 @@ fn cap_block(cb: &ContentBlock, cap: usize) -> ContentBlock {
                 .map(|inner| cap_block(inner, cap))
                 .collect(),
             is_error: tr.is_error,
+        }),
+        // #421: an oversized tool_use *input* (e.g. a Write/Edit carrying a
+        // 200k-char body) is the common reason the retained window can't shrink
+        // under budget — `estimate_tokens` counts it but the old `cap_block`
+        // couldn't touch it, so `truncate_in_window` bottomed out still over
+        // budget and hard-failed. Replace the already-executed call's input with
+        // a compact placeholder: the tool_use/tool_result pairing (id) is
+        // preserved and the value stays valid JSON.
+        ContentBlock::ToolUse(tu) => {
+            let s = tu.input.to_string();
+            if s.len() > cap {
+                ContentBlock::ToolUse(ToolUseBlock {
+                    id: tu.id.clone(),
+                    name: tu.name.clone(),
+                    input: serde_json::json!({
+                        "_elided_during_compaction": true,
+                        "_original_input_chars": s.len(),
+                    }),
+                })
+            } else {
+                cb.clone()
+            }
+        }
+        // #421: a thinking block can't be truncated in place (its signature would
+        // no longer match), but leaving huge reasoning intact also blocks the
+        // last-resort reducer. Replace an oversized one with a short text
+        // elision — a plain text block carries no signature claim, so it's safe
+        // to re-send.
+        ContentBlock::Thinking(t) if t.thinking.len() > cap => ContentBlock::Text(TextBlock {
+            text: format!(
+                "[earlier reasoning elided during compaction: {} chars]",
+                t.thinking.len()
+            ),
+            cache_control: None,
         }),
         other => other.clone(),
     }
@@ -895,6 +932,39 @@ mod correctness_329_tests {
             "window must open on a user turn"
         );
         assert_no_orphans(&out);
+    }
+
+    // ---- #421: oversized tool_use *input* is truncated, not errored ----
+    #[tokio::test]
+    async fn dropoldest_truncates_oversized_tool_use_input() {
+        // The bulk lives in the tool_use input (e.g. a Write with a 200k body),
+        // not the result. The old cap_block couldn't shrink it, so the reducer
+        // bottomed out over budget and hard-failed. It must now fit.
+        let msgs = vec![
+            Message::system_text("sys"),
+            user("q"),
+            tool_use("big", &"z".repeat(200_000)),
+            tool_result("big", "ok"),
+        ];
+        let c = DropOldestCompactor {
+            target_fraction: 0.5,
+            keep_recent_turns: 4,
+        };
+        let out = c
+            .compact(&msgs, &caps(4000))
+            .await
+            .unwrap()
+            .expect("must reduce in-window, not error")
+            .messages;
+        assert!(
+            estimate_tokens(&out) <= 4000,
+            "oversized tool_use input was not shrunk: {} tokens",
+            estimate_tokens(&out)
+        );
+        assert!(
+            has_result(&out, "big"),
+            "tool_use/tool_result pairing preserved through truncation"
+        );
     }
 
     // ---- Fix 4: oversized in-window tail is truncated, not errored ----

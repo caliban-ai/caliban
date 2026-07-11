@@ -112,7 +112,12 @@ impl RecoveryState {
             "recovery.reactive_compact.fired"
         );
         self.attempted_reactive_compact = true;
-        let caps = agent.provider.capabilities(&agent.config.model);
+        // #421: resolve caps from the *active* model, not `config.model`. After
+        // a `/model` swap the two diverge, and compacting to the old (larger)
+        // model's budget can leave history still over the active model's limit —
+        // the retry hits ContextTooLong again and the one-shot guard then routes
+        // to a hard ProviderError.
+        let caps = agent.provider.capabilities(agent.active_model().as_str());
         if let Ok(Some(compaction)) = agent.compactor.compact(history, &caps).await {
             *history = compaction.messages;
             // Redo this turn with the compacted history; don't consume a slot.
