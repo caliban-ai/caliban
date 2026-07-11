@@ -35,12 +35,16 @@ pub struct FilesystemAcl {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkAcl {
-    /// Hostnames the sandboxed process may reach. An empty list means no
-    /// egress (`--unshare-net` on Linux, no `network-outbound` allow on
-    /// macOS).
+    /// Hostnames the sandboxed process may reach. Per-hostname filtering is
+    /// enforced only by the loopback proxy, so a non-empty list **requires**
+    /// `http_proxy_port` or `socks_proxy_port` (else the policy is rejected —
+    /// neither bwrap nor Seatbelt can filter egress by hostname; #403). An
+    /// empty list means no egress (`--unshare-net` on Linux, no
+    /// `network-outbound` allow on macOS).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
-    /// Hostnames explicitly blacklisted within `allowed_domains`.
+    /// Hostnames explicitly blacklisted. Like `allowed_domains`, this is
+    /// enforced only via the proxy and requires a proxy port to be set (#403).
     #[serde(default)]
     pub denied_domains: Vec<String>,
     /// When non-zero, the sandbox blocks direct egress and only permits

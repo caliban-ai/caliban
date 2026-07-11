@@ -75,18 +75,21 @@ pub fn build_args(policy: &Policy) -> Vec<OsString> {
     // -- Network -------------------------------------------------------
     let net = &policy.network;
     let allow_proxy = net.http_proxy_port != 0 || net.socks_proxy_port != 0;
-    let domains_empty = net.allowed_domains.is_empty();
 
+    // Isolate the network unless egress is *explicitly* required. A bare
+    // `allowed_domains`/`denied_domains` list does NOT keep the namespace open:
+    // bwrap can't filter per-hostname, so those lists are enforceable only via
+    // the proxy (`validate_policy` rejects them otherwise). Keeping the network
+    // open for a domain list would grant ALL egress — the inversion #403 fixes.
     if allow_proxy {
-        // Deny direct egress; only the operator's loopback proxy is
-        // reachable. The proxy enforces domain rules.
+        // Deny direct egress; only the operator's loopback proxy is reachable.
+        // The proxy enforces domain rules.
         push_str(&mut args, "--unshare-net");
-    } else if domains_empty && !net.allow_local_binding && !net.allow_all_outbound {
+    } else if !net.allow_all_outbound && !net.allow_local_binding {
         push_str(&mut args, "--unshare-net");
     }
-    // Otherwise: `allow_all_outbound`, a non-empty domain list (bwrap can't
-    // filter per-hostname; the shim warns), or local binding — in all of
-    // these we keep the network namespace so egress works.
+    // Otherwise (`allow_all_outbound` or `allow_local_binding`): keep the
+    // network namespace so egress works.
 
     if !net.allow_unix_sockets {
         // Default: hide the most common host sockets so accidental
@@ -242,9 +245,12 @@ mod tests {
     }
 
     #[test]
-    fn allowed_domains_keep_net_namespace() {
-        // With domains set and no proxy, bwrap can't enforce per-hostname —
-        // we keep the namespace and rely on the caller's warning.
+    fn bare_allowed_domains_isolate_net_not_open_it() {
+        // #403: a domain list without a proxy must NOT keep the namespace open
+        // (bwrap can't filter per-host; opening it would grant ALL egress, an
+        // inversion). It isolates the network instead. (In production
+        // `validate_policy` rejects this config outright; build_args stays safe
+        // regardless.)
         let p = Policy {
             network: NetworkAcl {
                 allowed_domains: vec!["github.com".into()],
@@ -253,7 +259,7 @@ mod tests {
             ..Policy::default()
         };
         let args = build_args(&p);
-        assert!(!args.contains(&os("--unshare-net")), "args = {args:?}");
+        assert!(args.contains(&os("--unshare-net")), "args = {args:?}");
     }
 
     #[test]
