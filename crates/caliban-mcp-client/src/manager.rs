@@ -328,6 +328,10 @@ impl McpClientManager {
             server: name.to_string(),
             transport: server.transport.as_str(),
         })?;
+        // #430: never obtain/attach an OAuth bearer for a cleartext endpoint —
+        // the token would be sent as `Authorization: Bearer …` over http to
+        // anyone on-path. Loopback (local dev) is the sole exception.
+        crate::oauth::require_secure(url, name, "oauth MCP endpoint")?;
         if let Some(token) = authenticator
             .bearer_for(name, server.oauth, url, &server.manual_oauth)
             .await?

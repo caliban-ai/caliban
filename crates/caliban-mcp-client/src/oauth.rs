@@ -453,7 +453,7 @@ struct AuthServerDoc {
 /// exception. Without this, a hostile or MITM'd protected-resource document
 /// could advertise an `http://` token endpoint and the authorization code +
 /// PKCE verifier (and any bearer/secret) would be sent in cleartext (#339).
-fn require_secure(url: &Url, server: &str, kind: &str) -> Result<(), McpError> {
+pub(crate) fn require_secure(url: &Url, server: &str, kind: &str) -> Result<(), McpError> {
     if url.scheme() == "https" {
         return Ok(());
     }
@@ -481,12 +481,19 @@ fn require_secure(url: &Url, server: &str, kind: &str) -> Result<(), McpError> {
 ///
 /// # Errors
 /// [`McpError::OauthDiscovery`] on any HTTP / JSON / URL-shape failure.
+// Two sequential discovery fetches (protected-resource doc → AS metadata) plus
+// parsing and https guards on every hop; splitting it would just scatter the
+// linear flow.
+#[allow(clippy::too_many_lines)]
 pub async fn discover_endpoints(
     server: &str,
     server_url: &Url,
     client: &reqwest::Client,
 ) -> Result<OauthEndpoints, McpError> {
     let prs_url = join_wellknown(server_url, "oauth-protected-resource");
+    // #430: guard the discovery hops too (not just the final endpoints), else
+    // the metadata below is fetched in cleartext and can be rewritten on-path.
+    require_secure(&prs_url, server, "protected-resource metadata")?;
     let prs: ProtectedResourceDoc = client
         .get(prs_url.clone())
         .send()
@@ -528,6 +535,10 @@ pub async fn discover_endpoints(
         server: server.to_string(),
         message: format!("invalid authorization_servers entry '{as_url_raw}': {e}"),
     })?;
+    // #430: `auth_server_url` is server-controlled (from the resource doc);
+    // enforce https before fetching its AS metadata so an http://attacker entry
+    // can't steer the flow (issuer check passes; it returns https endpoints).
+    require_secure(&auth_server_url, server, "authorization server")?;
     let asd_url = join_wellknown(&auth_server_url, "oauth-authorization-server");
     let asd: AuthServerDoc = client
         .get(asd_url.clone())
@@ -1564,6 +1575,19 @@ fn browser_argv(os: &str, url: &str) -> (&'static str, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_secure_rejects_cleartext_allows_https_and_loopback() {
+        // https and loopback http pass; any other http is a rejected downgrade.
+        // The discovery hops (#430) and the bearer-attach path both rely on this.
+        assert!(require_secure(&Url::parse("https://example.com/x").unwrap(), "s", "k").is_ok());
+        assert!(require_secure(&Url::parse("http://127.0.0.1:9000/cb").unwrap(), "s", "k").is_ok());
+        assert!(require_secure(&Url::parse("http://localhost/cb").unwrap(), "s", "k").is_ok());
+        assert!(
+            require_secure(&Url::parse("http://attacker.example/as").unwrap(), "s", "k").is_err(),
+            "cleartext non-loopback http must be rejected"
+        );
+    }
 
     #[test]
     fn browser_argv_passes_url_as_single_arg_intact() {
