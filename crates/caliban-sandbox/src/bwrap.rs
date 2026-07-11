@@ -57,19 +57,28 @@ pub fn build_args(policy: &Policy) -> Vec<OsString> {
     }
 
     // -- Denies (masks) ------------------------------------------------
-    // Both deny_read and deny_write are masked with --tmpfs (an empty
-    // ramfs shadows the real path). bwrap doesn't distinguish between
-    // read-only and read-write denies — masking is the strongest tool
-    // it has.
-    for p in policy
-        .filesystem
-        .deny_read
-        .iter()
-        .chain(policy.filesystem.deny_write.iter())
-    {
+    // #407: mask precisely. `--tmpfs` only mounts over a *directory*, so masking
+    // a file (the common secret case: ~/.aws/credentials, .env, id_rsa) made
+    // bwrap abort at startup; and a tmpfs is a fresh *writable* ramfs, so it
+    // didn't actually prevent writes — it silently discarded them.
+    //   - deny_read hides content: `--ro-bind /dev/null` for a file (empty,
+    //     read-only) or `--tmpfs` for a directory (empty view).
+    //   - deny_write keeps content readable but blocks writes: a read-only bind
+    //     of the path over itself (writes fail EROFS), for files and dirs alike.
+    // `-try` variants tolerate a missing path (nothing to hide) without aborting.
+    let dev_null = OsString::from("/dev/null");
+    for p in &policy.filesystem.deny_read {
         let s = path_to_os(p);
-        push_str(&mut args, "--tmpfs");
-        args.push(s);
+        if p.is_dir() {
+            push_str(&mut args, "--tmpfs");
+            args.push(s);
+        } else {
+            push_pair_os(&mut args, "--ro-bind-try", &dev_null, &s);
+        }
+    }
+    for p in &policy.filesystem.deny_write {
+        let s = path_to_os(p);
+        push_pair_os(&mut args, "--ro-bind-try", &s, &s);
     }
 
     // -- Network -------------------------------------------------------
@@ -201,23 +210,57 @@ mod tests {
     }
 
     #[test]
-    fn deny_read_masks_with_tmpfs() {
+    fn deny_read_file_shadows_with_dev_null() {
+        // #407: a *file* deny_read must use --ro-bind /dev/null (a --tmpfs would
+        // abort bwrap, since tmpfs only mounts over a directory).
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("credentials");
+        std::fs::write(&secret, "token").unwrap();
+        let secret_str = secret.to_str().unwrap().to_owned();
         let p = Policy {
             filesystem: FilesystemAcl {
-                deny_read: vec![PathBuf::from("/home/u/.ssh")],
+                deny_read: vec![secret],
                 ..FilesystemAcl::default()
             },
             ..Policy::default()
         };
         let args = build_args(&p);
         assert!(
-            contains_pair(&args, "--tmpfs", "/home/u/.ssh"),
-            "args = {args:?}",
+            contains_pair(&args, "--ro-bind-try", "/dev/null"),
+            "file deny_read should shadow with /dev/null; args = {args:?}",
+        );
+        assert!(
+            args.iter().any(|a| *a == os(&secret_str)),
+            "the denied path must appear as the bind destination; args = {args:?}",
         );
     }
 
     #[test]
-    fn deny_write_masks_with_tmpfs() {
+    fn deny_read_dir_masks_with_tmpfs() {
+        // A *directory* deny_read still uses --tmpfs (an empty dir view).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets");
+        std::fs::create_dir(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_owned();
+        let p = Policy {
+            filesystem: FilesystemAcl {
+                deny_read: vec![dir],
+                ..FilesystemAcl::default()
+            },
+            ..Policy::default()
+        };
+        let args = build_args(&p);
+        assert!(
+            contains_pair(&args, "--tmpfs", &dir_str),
+            "dir deny_read should use --tmpfs; args = {args:?}",
+        );
+    }
+
+    #[test]
+    fn deny_write_is_readonly_self_bind() {
+        // #407: deny_write must keep content readable but block writes → a
+        // read-only bind of the path over itself, NOT a writable tmpfs that
+        // silently discards writes.
         let p = Policy {
             filesystem: FilesystemAcl {
                 deny_write: vec![PathBuf::from("/work/.env")],
@@ -227,8 +270,12 @@ mod tests {
         };
         let args = build_args(&p);
         assert!(
-            contains_pair(&args, "--tmpfs", "/work/.env"),
-            "args = {args:?}",
+            contains_pair(&args, "--ro-bind-try", "/work/.env"),
+            "deny_write should be a read-only self-bind; args = {args:?}",
+        );
+        assert!(
+            !contains_pair(&args, "--tmpfs", "/work/.env"),
+            "deny_write must not use a writable tmpfs; args = {args:?}",
         );
     }
 
