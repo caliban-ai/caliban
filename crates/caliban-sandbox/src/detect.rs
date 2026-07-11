@@ -230,16 +230,29 @@ fn interpret_userns_probe(code: Option<i32>) -> bool {
 /// error) is treated as unavailable rather than as a userns denial.
 #[cfg(any(target_os = "linux", test))]
 fn probe_userns(path: &Path) -> bool {
-    match std::process::Command::new(path)
-        .args(userns_probe_args())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(s) => interpret_userns_probe(s.code()),
-        Err(_) => false,
+    // ETXTBSY (errno 26 on Linux/macOS): exec of a binary that is still open for
+    // writing fails spuriously. This bites a just-written binary — notably the
+    // freshly-created fake `bwrap` in tests, which flaked CI intermittently
+    // (#441), but it can affect any recently-installed binary. Retry a few times
+    // before concluding userns is unavailable; a spurious exec failure must not
+    // silently drop the sandbox.
+    const ETXTBSY: i32 = 26;
+    for attempt in 0..5 {
+        match std::process::Command::new(path)
+            .args(userns_probe_args())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) => return interpret_userns_probe(s.code()),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < 4 => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return false,
+        }
     }
+    false
 }
 
 /// Given a present, version-OK `bwrap`, confirm the runtime actually permits
