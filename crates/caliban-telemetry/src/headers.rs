@@ -1,35 +1,30 @@
 //! `otel_headers_helper` integration.
 //!
-//! Operators point a setting at a script; we run it on a refresh interval
-//! and parse its stdout as `k=v\nk=v\n…`. The parsed headers merge with
-//! `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on key collision). This lets
-//! short-lived bearer tokens (GCP IAM, AWS SigV4, etc.) flow into OTLP
-//! exports without checking secrets into env files.
+//! Operators point a setting at a script; we run it **once at startup**
+//! (`Telemetry::init_from_env`) and parse its stdout as `k=v\nk=v\n…`. The
+//! parsed headers merge with `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on key
+//! collision). This lets short-lived bearer tokens (GCP IAM, AWS SigV4, etc.)
+//! flow into OTLP exports without checking secrets into env files. There is no
+//! background refresh thread; periodic re-invocation is future work (#426 T3).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use crate::error::TelemetryError;
 
-/// Configuration for the helper script + its refresh interval.
+/// Configuration for the headers-helper script.
 #[derive(Debug, Clone)]
 pub struct HeadersHelperConfig {
     /// Path to the script. Must be executable.
     pub path: PathBuf,
-    /// Refresh interval (default 60s).
-    pub refresh_interval: Duration,
 }
 
 impl HeadersHelperConfig {
-    /// Construct with the documented 60s default refresh.
+    /// Construct from the script path.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            refresh_interval: Duration::from_mins(1),
-        }
+        Self { path }
     }
 }
 

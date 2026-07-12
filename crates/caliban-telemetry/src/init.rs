@@ -95,16 +95,52 @@ mod otlp_pipeline {
     fn build_grpc(
         config: &TelemetryConfig,
     ) -> Result<opentelemetry_otlp::SpanExporter, TelemetryError> {
-        use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+        use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithTonicConfig};
         let mut builder = SpanExporter::builder().with_tonic();
         if let Some(endpoint) = config.endpoint.as_deref() {
             builder = builder.with_endpoint(endpoint);
         }
-        // gRPC header injection maps to tonic metadata (a separate API surface);
-        // deferred, as HTTP header auth is the common OTLP path (honored below).
+        // Apply auth headers as gRPC metadata. The tonic transport uses a
+        // different API from HTTP's `with_headers`, so without this
+        // `OTEL_EXPORTER_OTLP_HEADERS` (the ADR-0033 auth mechanism) were
+        // silently dropped on the gRPC path — the collector 401s and only a
+        // flush-time warn surfaced (#426 T1).
+        if let Some(metadata) = tonic_metadata_from_headers(&config.headers) {
+            builder = builder.with_metadata(metadata);
+        }
         builder
             .build()
             .map_err(|e| TelemetryError::OtlpExporter(e.to_string()))
+    }
+
+    /// Convert the merged OTLP header set into a tonic [`MetadataMap`]. Keys are
+    /// lowercased (gRPC metadata keys are case-insensitive and stored lower);
+    /// entries whose name or value isn't valid ASCII metadata are skipped with a
+    /// warning rather than aborting export.
+    #[cfg(feature = "otlp-grpc")]
+    pub(super) fn tonic_metadata_from_headers(
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Option<tonic::metadata::MetadataMap> {
+        use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
+        if headers.is_empty() {
+            return None;
+        }
+        let mut md = MetadataMap::with_capacity(headers.len());
+        for (k, v) in headers {
+            if let (Ok(key), Ok(val)) = (
+                MetadataKey::from_bytes(k.to_ascii_lowercase().as_bytes()),
+                MetadataValue::try_from(v.as_str()),
+            ) {
+                md.insert(key, val);
+            } else {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+                    header = %k,
+                    "skipping OTLP gRPC header with invalid metadata name or value",
+                );
+            }
+        }
+        Some(md)
     }
 
     #[cfg(not(feature = "otlp-grpc"))]
@@ -182,8 +218,10 @@ pub struct TelemetryConfig {
     pub endpoint: Option<String>,
     /// `OTEL_EXPORTER_OTLP_PROTOCOL` (`grpc` / `http/protobuf` / `http/json`).
     pub protocol: String,
-    /// Merged headers (env + helper, helper wins). Static at init time;
-    /// the helper-refresh thread later updates the dynamic set.
+    /// Merged headers (env + helper, helper wins), resolved once at startup:
+    /// `Telemetry::init_from_env` invokes the headers-helper (if any) via
+    /// `refresh_dynamic_headers` and merges its output here before the exporter
+    /// is built. There is no background refresh thread (#426 T3).
     pub headers: BTreeMap<String, String>,
     /// `OTEL_METRIC_EXPORT_INTERVAL`, parsed humantime → Duration.
     pub metric_export_interval: Duration,
@@ -358,7 +396,14 @@ impl Telemetry {
     /// Surfaces rate-card parse failures from the embedded YAML — these are
     /// fatal misconfigurations.
     pub fn init_from_env(session_id: &str) -> Result<Self, TelemetryError> {
-        let config = TelemetryConfig::from_env();
+        let mut config = TelemetryConfig::from_env();
+        // Apply the headers-helper (if configured) once, at startup, so its
+        // dynamic auth headers actually reach the exporter (#426 T3). Previously
+        // `refresh_dynamic_headers` had no callers, so the helper's output was
+        // never merged. Only bother when telemetry is enabled.
+        if config.enabled {
+            config.refresh_dynamic_headers();
+        }
         let standard = StandardAttrs::from_env(session_id, env!("CARGO_PKG_VERSION"));
 
         let card = match std::env::var("CALIBAN_RATES_YAML").ok() {
@@ -640,6 +685,35 @@ mod otlp_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn refresh_dynamic_headers_merges_helper_output() {
+        // #426 T3: the headers-helper output must actually reach `config.headers`
+        // (helper wins on collision). `init_from_env` invokes this at startup.
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("helper.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'authorization=Bearer dynamic'").unwrap();
+        f.flush().unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(f);
+
+        let mut config = test_config("grpc");
+        config
+            .headers
+            .insert("authorization".into(), "Bearer static".into());
+        config.headers_helper = Some(crate::headers::HeadersHelperConfig::new(script));
+        config.refresh_dynamic_headers();
+
+        assert_eq!(
+            config.headers.get("authorization").map(String::as_str),
+            Some("Bearer dynamic"),
+            "helper header should override the static env header",
+        );
+    }
+
     // (c) config → transport mapping.
     #[test]
     fn classify_protocol_maps_known_and_unknown() {
@@ -719,14 +793,41 @@ mod otlp_tests {
     // worker. No collector is contacted (connect is lazy).
     #[cfg(feature = "otlp-grpc")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn grpc_exporter_accepts_endpoint() {
+    async fn grpc_exporter_accepts_endpoint_and_headers() {
+        // #426 T1: the gRPC exporter must carry auth headers (as tonic metadata)
+        // — previously they were silently dropped. Building with headers set
+        // must succeed (metadata is applied at build time).
         let mut config = test_config("grpc");
         config.endpoint = Some("http://localhost:4317".into());
+        config
+            .headers
+            .insert("authorization".into(), "Bearer xyz".into());
         let exporter = otlp_pipeline::build_span_exporter(&config);
         assert!(
             exporter.is_ok(),
-            "grpc exporter should build: {:?}",
+            "grpc exporter should build with headers: {:?}",
             exporter.err()
+        );
+    }
+
+    #[cfg(feature = "otlp-grpc")]
+    #[test]
+    fn tonic_metadata_from_headers_lowercases_and_skips_invalid() {
+        use std::collections::BTreeMap;
+        // Empty → None (no metadata applied).
+        assert!(otlp_pipeline::tonic_metadata_from_headers(&BTreeMap::new()).is_none());
+
+        let mut headers = BTreeMap::new();
+        // Mixed-case key must be accepted (gRPC keys are stored lowercase).
+        headers.insert("Authorization".to_string(), "Bearer tok".to_string());
+        // A key with a space is not a valid metadata name → skipped, not fatal.
+        headers.insert("bad key".to_string(), "v".to_string());
+        let md = otlp_pipeline::tonic_metadata_from_headers(&headers).expect("some metadata");
+        assert_eq!(md.len(), 1, "invalid-name header should have been skipped");
+        assert_eq!(
+            md.get("authorization").map(|v| v.to_str().unwrap()),
+            Some("Bearer tok"),
+            "auth header missing or key not lowercased",
         );
     }
 
