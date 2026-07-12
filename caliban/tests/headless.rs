@@ -78,6 +78,48 @@ fn caliban_invalid_output_format_exits_nonzero() {
 }
 
 #[test]
+fn preflight_missing_key_emits_ndjson_frame_in_stream_json_mode() {
+    // #429: a pre-flight fatal (missing API key → provider construction) in
+    // `--output-format stream-json` must be emitted as a parseable NDJSON
+    // `result` frame on stdout, not leak as a plain-text `Error:` line.
+    let exe = env!("CARGO_BIN_EXE_caliban");
+    let out = Command::new(exe)
+        .args([
+            "-p",
+            "hi",
+            "--output-format",
+            "stream-json",
+            "--no-mcp",
+            "--bare",
+        ])
+        .env("CALIBAN_DEBUG", "")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .output()
+        .expect("failed to invoke caliban");
+
+    assert!(!out.status.success(), "expected failure exit, got {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().last().unwrap_or_else(|| {
+        panic!(
+            "no stdout emitted; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    let frame: serde_json::Value = serde_json::from_str(last).unwrap_or_else(|e| {
+        panic!("stdout was not valid NDJSON ({e}); got: {stdout:?}");
+    });
+    assert_eq!(frame["type"], "result", "frame: {frame}");
+    assert_eq!(frame["is_error"], true, "frame: {frame}");
+    assert_eq!(frame["subtype"], "error", "frame: {frame}");
+    assert!(
+        frame["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "error message missing: {frame}"
+    );
+}
+
+#[test]
 fn caliban_continue_with_empty_store_exits_66() {
     // --continue with no sessions to resume → exit 66.
     let exe = env!("CARGO_BIN_EXE_caliban");

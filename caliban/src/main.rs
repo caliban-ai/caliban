@@ -237,39 +237,82 @@ async fn main() -> Result<()> {
         tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "telemetry enabled via settings.json");
     }
 
+    // Pre-flight (pre-driver) fatal errors — provider construction, a missing
+    // API key, model pre-check, etc. — must reach structured consumers as an
+    // NDJSON/JSON `result` frame, not leak as a plain `Error:` line from the
+    // top-level handler before the headless driver ever starts (#429). Compute
+    // whether a structured output format is active, and route every pre-driver
+    // fallible step through `preflight!`.
+    let preflight_fmt = args.output_format.unwrap_or(headless::OutputFormat::Text);
+    let preflight_structured = {
+        use std::io::IsTerminal as _;
+        args::is_headless_active(
+            &args,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        ) && matches!(
+            preflight_fmt,
+            headless::OutputFormat::StreamJson | headless::OutputFormat::Json
+        )
+    };
+    macro_rules! preflight {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(err) => {
+                    let e: anyhow::Error = err.into();
+                    if preflight_structured {
+                        headless::emit_preflight_error(preflight_fmt, &format!("{e:#}"));
+                        std::process::exit(1);
+                    }
+                    return Err(e);
+                }
+            }
+        };
+    }
+
     // Router v2: try caliban.toml first (--config flag or discovery), fall
     // back to the single-provider construction when no router config is
     // present (preserving v1 behavior). ADR 0038.
     let cwd_for_router = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let provider: Arc<dyn Provider + Send + Sync> =
-        match router::try_load(args.config_path.as_deref(), &cwd_for_router, &helper_pool)? {
-            Some(wiring) => {
-                tracing::info!(
-                    target: caliban_common::tracing_targets::TARGET_ROUTER,
-                    path = %wiring.config_path.display(),
-                    routes = wiring.router.routes().len(),
-                    "model router wired from caliban.toml",
-                );
-                wiring.router
-            }
-            None => startup::build_provider(&args, &helper_pool)?,
-        };
+        preflight!((|| -> anyhow::Result<Arc<dyn Provider + Send + Sync>> {
+            Ok(
+                match router::try_load(args.config_path.as_deref(), &cwd_for_router, &helper_pool)?
+                {
+                    Some(wiring) => {
+                        tracing::info!(
+                            target: caliban_common::tracing_targets::TARGET_ROUTER,
+                            path = %wiring.config_path.display(),
+                            routes = wiring.router.routes().len(),
+                            "model router wired from caliban.toml",
+                        );
+                        wiring.router
+                    }
+                    None => startup::build_provider(&args, &helper_pool)?,
+                },
+            )
+        })());
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
 
     // Enforce gate: when permissions.enforce = true, refuse bypass flags.
-    startup::check_enforce_gate(&args, &settings_snapshot).map_err(|e| anyhow::anyhow!(e))?;
+    preflight!(
+        startup::check_enforce_gate(&args, &settings_snapshot).map_err(|e| anyhow::anyhow!(e))
+    );
 
     // Resolve the initial permission mode (ADR 0029). CLI flag wins over
     // env; bypass mode requires --allow-dangerously-skip-permissions.
     let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
-    let initial_perm_mode = caliban_agent_core::resolve_startup_mode(
-        args.permission_mode.as_deref(),
-        env_perm.as_deref(),
-        settings_snapshot.permissions.default_mode.as_deref(),
-        args.allow_dangerously_skip_permissions,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    let initial_perm_mode = preflight!(
+        caliban_agent_core::resolve_startup_mode(
+            args.permission_mode.as_deref(),
+            env_perm.as_deref(),
+            settings_snapshot.permissions.default_mode.as_deref(),
+            args.allow_dangerously_skip_permissions,
+        )
+        .map_err(|e| anyhow::anyhow!(e))
+    );
     let permission_mode = caliban_agent_core::SharedPermissionMode::new(initial_perm_mode);
     // Keep the legacy plan-mode flag in sync with `Plan`.
     if initial_perm_mode == caliban_agent_core::PermissionMode::Plan {
@@ -358,7 +401,7 @@ async fn main() -> Result<()> {
     // the first loaded model for unknown IDs, so a typo runs the wrong
     // model with no visible signal. The check is a no-op for canonical
     // OpenAI / Anthropic / Google / Ollama.
-    startup::preflight_model_check(&args, &model).await?;
+    preflight!(startup::preflight_model_check(&args, &model).await);
 
     // Project hooks config out of the layered Settings snapshot (ADR 0026).
     // The in-process PermissionsHook still runs even when --no-hooks /
@@ -431,7 +474,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let agent = startup::build_agent(
+    let agent = preflight!(startup::build_agent(
         &args,
         provider,
         registry,
@@ -443,7 +486,7 @@ async fn main() -> Result<()> {
         &hooks_cfg,
         Arc::clone(&mcp_active),
         Arc::clone(&mcp_eager_servers),
-    )?;
+    ));
 
     // Fire SessionStart hook (best-effort); collect any hook-supplied context
     // to splice into the system prompt before turn 1 (#106).
@@ -452,20 +495,23 @@ async fn main() -> Result<()> {
 
     // Resolve session store + persisted session (when --session is given).
     // Seeds the shared todos handle and plan-mode flag from the snapshot.
-    let (store, mut session) = startup::resolve_session(&args, &model, &todos, &plan_mode)?;
+    let (store, mut session) =
+        preflight!(startup::resolve_session(&args, &model, &todos, &plan_mode));
 
     // Resolve system prompt from CLI flags (or build default), then layer
     // the active output-style block + memory-tier prefix when the default
     // is in effect.
     let cwd_for_prompt = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let system_prompt = startup::resolve_system_prompt(
-        &args,
-        &agent,
-        &cwd_for_prompt,
-        &settings_snapshot,
-        &session_context,
-    )
-    .await?;
+    let system_prompt = preflight!(
+        startup::resolve_system_prompt(
+            &args,
+            &agent,
+            &cwd_for_prompt,
+            &settings_snapshot,
+            &session_context,
+        )
+        .await
+    );
 
     // Snapshot todos for splicing into the system prompt for this run.
     let todo_snapshot = todos.lock().expect("todos lock poisoned").clone();
