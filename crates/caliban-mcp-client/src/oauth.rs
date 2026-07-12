@@ -333,6 +333,33 @@ impl FileStore {
         }
     }
 
+    /// Run `f` while holding an exclusive cross-process advisory lock on a
+    /// sibling `.lock` file (#431). The token file's `put`/`clear` do a
+    /// load-all → mutate → save-all, so two processes (or a token refresh + a
+    /// concurrent write for another server) could clobber each other's update.
+    /// The lock serializes the whole read-modify-write. `save_all` already
+    /// writes atomically (temp + rename), so `get` needs no lock — it can only
+    /// ever read a complete old-or-new file.
+    fn with_lock<T>(&self, f: impl FnOnce() -> Result<T, McpError>) -> Result<T, McpError> {
+        use fs2::FileExt as _;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| McpError::TokenStore(format!("mkdir {}: {e}", parent.display())))?;
+        }
+        let lock_path = self.path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| McpError::TokenStore(format!("open lock {}: {e}", lock_path.display())))?;
+        lock.lock_exclusive()
+            .map_err(|e| McpError::TokenStore(format!("lock {}: {e}", lock_path.display())))?;
+        let result = f();
+        let _ = fs2::FileExt::unlock(&lock); // also released on drop
+        result
+    }
+
     fn load_all(&self) -> Result<std::collections::BTreeMap<String, OauthTokens>, McpError> {
         match std::fs::read_to_string(&self.path) {
             Ok(s) if s.trim().is_empty() => Ok(std::collections::BTreeMap::new()),
@@ -378,14 +405,18 @@ impl TokenStore for FileStore {
             .cloned())
     }
     fn put(&self, server: &str, audience: &str, tokens: &OauthTokens) -> Result<(), McpError> {
-        let mut all = self.load_all()?;
-        all.insert(account_key(server, audience), tokens.clone());
-        self.save_all(&all)
+        self.with_lock(|| {
+            let mut all = self.load_all()?;
+            all.insert(account_key(server, audience), tokens.clone());
+            self.save_all(&all)
+        })
     }
     fn clear(&self, server: &str, audience: &str) -> Result<(), McpError> {
-        let mut all = self.load_all()?;
-        all.remove(&account_key(server, audience));
-        self.save_all(&all)
+        self.with_lock(|| {
+            let mut all = self.load_all()?;
+            all.remove(&account_key(server, audience));
+            self.save_all(&all)
+        })
     }
 }
 
@@ -812,16 +843,23 @@ async fn callback_handler(
     State(state): State<CallbackState>,
     Query(params): Query<CallbackParams>,
 ) -> Html<&'static str> {
+    // #431: a request that doesn't carry the matching state secret is NOT our
+    // redirect — a stray local request, a griefing GET, or a page's `<img>` hit
+    // on the fixed callback port. Ignore it *without* consuming the result
+    // channel, so it can't win the race and drop the legitimate callback that
+    // arrives afterward. (State secrecy already prevents auth-code injection;
+    // this closes the local DoS.)
+    if params.state.as_deref() != Some(state.expected_state.as_str()) {
+        return Html(
+            "<html><body><h1>caliban</h1>\
+             <p>Ignoring an unexpected request.</p></body></html>",
+        );
+    }
     let result = if let Some(err) = params.error {
         let desc = params.error_description.unwrap_or_default();
         Err(McpError::OauthFlow {
             server: state.server.clone(),
             message: format!("auth server returned error '{err}': {desc}"),
-        })
-    } else if params.state.as_deref() != Some(state.expected_state.as_str()) {
-        Err(McpError::OauthFlow {
-            server: state.server.clone(),
-            message: "callback state mismatch".to_string(),
         })
     } else if let Some(code) = params.code {
         Ok(code)
@@ -1726,6 +1764,41 @@ mod tests {
         assert_eq!(got.access_token, "atok");
         store.clear("svc", "aud").expect("clear");
         assert!(store.get("svc", "aud").expect("get").is_none());
+    }
+
+    #[test]
+    fn file_store_concurrent_puts_do_not_clobber() {
+        // #431: put is a load-modify-write over the whole token map; without the
+        // cross-process lock, concurrent writers clobber each other (a lost
+        // update). With the lock, every write survives.
+        use std::sync::Arc;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(FileStore::new(tmp.path().join("tokens.json")));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let s = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    s.put(
+                        &format!("svc{i}"),
+                        "aud",
+                        &OauthTokens {
+                            access_token: format!("tok{i}"),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("put");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        for i in 0..8 {
+            assert!(
+                store.get(&format!("svc{i}"), "aud").expect("get").is_some(),
+                "svc{i} was clobbered by a concurrent put"
+            );
+        }
     }
 
     #[cfg(unix)]

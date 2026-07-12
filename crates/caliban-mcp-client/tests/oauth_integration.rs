@@ -503,7 +503,7 @@ async fn refresh_preserves_existing_refresh_token() {
 
 /// 11. State-mismatch on callback → `OauthFlow` error.
 #[tokio::test]
-async fn state_mismatch_in_callback_surfaces_error() {
+async fn state_mismatch_callback_is_ignored_not_consumed() {
     let server = spawn_mock_oauth_server().await;
     let endpoints = OauthEndpoints {
         auth_url: Url::parse(&format!("{}/oauth/authorize", server.uri())).unwrap(),
@@ -513,7 +513,7 @@ async fn state_mismatch_in_callback_surfaces_error() {
         registration_endpoint: None,
     };
     let mut opts = OauthFlowOptions::new("demo".to_string(), endpoints, "cid".to_string());
-    opts.callback_timeout = Duration::from_secs(2);
+    opts.callback_timeout = Duration::from_millis(500);
     let flow = OauthFlow::start(opts).await.expect("start");
     let redirect_uri = flow
         .auth_url
@@ -528,9 +528,19 @@ async fn state_mismatch_in_callback_surfaces_error() {
         let url = format!("{redirect_uri}?code=abc&state=wrong-state");
         let _ = cb_client.get(url).send().await;
     });
-    let err = flow.await_callback(&http()).await.expect_err("fail");
+    // #431: the wrong-state callback must be IGNORED (not consume the result
+    // channel), so the flow never resolves to it and instead waits out its
+    // timeout. Critically, the bogus request must NOT surface as the result — a
+    // griefer hitting the fixed callback port can't drop the real callback.
+    let err = flow
+        .await_callback(&http())
+        .await
+        .expect_err("must not resolve to a wrong-state callback");
     let s = err.to_string();
-    assert!(s.contains("state mismatch"), "got: {s}");
+    assert!(
+        !s.contains("state mismatch"),
+        "a wrong-state callback must be ignored, not surfaced: {s}"
+    );
 }
 
 /// 12. Discovery POSTs include the body shape the token endpoint expects.

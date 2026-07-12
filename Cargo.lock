@@ -1130,6 +1130,7 @@ dependencies = [
  "caliban-provider",
  "chrono",
  "dirs",
+ "fs2",
  "futures",
  "http 1.4.0",
  "keyring",
