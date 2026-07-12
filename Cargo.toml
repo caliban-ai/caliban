@@ -139,6 +139,9 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 git2         = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 interprocess = { version = "2", features = ["tokio"] }
 nix          = { version = "0.30", features = ["signal", "process"] }
+# Confined (symlink-refusing) *at-family fs ops for the TOCTOU-safe workspace
+# write path (#415). Already in the tree transitively via tempfile.
+rustix       = { version = "1", features = ["fs"] }
 bincode      = { version = "1" }
 # ADR 0026 deps (settings hierarchy).
 notify     = { version = "6", default-features = false, features = ["macos_kqueue"] }

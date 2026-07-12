@@ -143,8 +143,10 @@ impl Tool for EditTool {
             replaced.replace_range(range.clone(), &replacement);
         }
 
-        // Atomic, crash-safe write — shared via `caliban_common::fs::write_atomic`.
-        caliban_common::fs::write_atomic(&path, replaced.as_bytes())
+        // Confined atomic write (#415): symlink-refusing parent walk in
+        // restricted mode keeps the write inside the workspace fence.
+        self.root
+            .atomic_write(&path, replaced.as_bytes())
             .map_err(ToolError::execution)?;
 
         // Fire FileChanged on success (best-effort).
