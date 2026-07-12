@@ -238,7 +238,16 @@ pub(crate) fn map_openai_sse_to_events(
                             };
                             state.thinking_block_open = false;
                         }
-                        let id = tc.id.clone().unwrap_or_default();
+                        // #424: some OpenAI-compatible servers (LM Studio, vLLM,
+                        // proxies) omit tool-call ids. An empty default makes two
+                        // parallel calls share `id=""`, colliding when tool
+                        // results are matched back. Synthesize a stable, unique
+                        // id from the tool-call index instead.
+                        let id = tc
+                            .id
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| format!("call_{}", tc.index));
                         let name = tc
                             .function
                             .as_ref()

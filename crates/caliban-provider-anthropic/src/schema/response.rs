@@ -48,9 +48,13 @@ pub enum NativeStopReason {
 /// Token usage counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NativeUsage {
-    /// Tokens in the input.
+    /// Tokens in the input. `#[serde(default)]` so a `message_delta.usage` that
+    /// omits `input_tokens` (some API/proxy versions send only `output_tokens`)
+    /// doesn't fail deserialization and discard the whole accumulated turn (#424).
+    #[serde(default)]
     pub input_tokens: u32,
     /// Tokens in the output.
+    #[serde(default)]
     pub output_tokens: u32,
     /// Tokens written to the prompt cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
