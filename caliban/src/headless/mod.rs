@@ -118,6 +118,46 @@ pub(crate) fn exit_code_for(err: &HeadlessError) -> i32 {
     }
 }
 
+/// Build the terminal `result` frame for a fatal **pre-flight** (pre-driver)
+/// error — provider construction, a missing API key, model pre-check, etc.
+/// (#429). It carries `subtype: "error"`, `is_error: true`, and the message in
+/// `error`; there is no session yet, so `session_id` is empty.
+#[must_use]
+pub(crate) fn preflight_error_frame(message: &str) -> events::ResultFrame {
+    events::result_frame(
+        ResultSubtype::Error,
+        String::new(),
+        String::new(),
+        0.0,
+        0,
+        0,
+        0,
+        None,
+        Some(message.to_string()),
+        None,
+        0,
+        0,
+        false,
+        0,
+    )
+}
+
+/// Emit a fatal pre-flight error through the selected output format so that
+/// structured consumers of `--output-format stream-json` / `json` receive a
+/// parseable `result` frame instead of a plain-text `Error:` line leaking from
+/// the process's top-level handler before the [`HeadlessDriver`] ever starts
+/// (#429). `text` keeps the existing plain-stderr diagnostic.
+pub(crate) fn emit_preflight_error(format: OutputFormat, message: &str) {
+    match format {
+        OutputFormat::StreamJson | OutputFormat::Json => {
+            let frame = preflight_error_frame(message);
+            let mut out = std::io::stdout().lock();
+            let _ = encoder::write_ndjson(&mut out, &frame);
+        }
+        OutputFormat::Text => eprintln!("[caliban] {message}"),
+    }
+}
+
 /// One-line stderr diagnostic for a non-success terminal stop in `--output-format
 /// text`, which otherwise prints nothing (no result frame). Mirrors the TUI's
 /// `[caliban: …]` [`StopCondition`] notices. Returns `None` for `Success` (normal
@@ -1154,6 +1194,25 @@ fn assistant_text(msg: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_error_frame_is_parseable_error_result() {
+        // #429: a pre-flight fatal (e.g. missing API key) must serialize as a
+        // valid NDJSON `result` frame, not leak as plain text.
+        let frame = preflight_error_frame("ANTHROPIC_API_KEY is not set");
+        let mut buf: Vec<u8> = Vec::new();
+        encoder::write_ndjson(&mut buf, &frame).unwrap();
+        let line = String::from_utf8(buf).unwrap();
+        assert!(
+            line.ends_with('\n'),
+            "NDJSON frame must be newline-terminated"
+        );
+        let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(v["type"], "result");
+        assert_eq!(v["subtype"], "error");
+        assert_eq!(v["is_error"], true);
+        assert_eq!(v["error"], "ANTHROPIC_API_KEY is not set");
+    }
 
     #[test]
     fn text_mode_stop_note_for_non_success_terminal_stops() {
