@@ -9,6 +9,136 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-12
+
+This release makes caliban **observable** and closes a broad **security-hardening
+sweep**. OpenTelemetry support graduates from feature-gated stubs to a working
+OTLP pipeline: `gen_ai.*` spans per model request and tool call, following the
+OTel GenAI semantic conventions (ADR 0053), plus an OTLP metrics pipeline. It
+also lands QA sweep epic #399 — 28 fixes, a dozen of which close **security
+fail-opens shipped in 0.5.0**, where a permission or sandbox control was
+configured but silently inert. **Review before upgrading:** several
+permissions/sandbox paths now fail *closed* — a malformed permissions config, an
+unusable sandbox, or an unparseable domain ACL is now an error rather than a
+silent no-op, so a config that "worked" in 0.5.0 may now refuse to start.
+
+**The sandbox is not a secrets boundary in this release.** Sandboxed commands
+still inherit the full parent environment, so provider credentials
+(`ANTHROPIC_API_KEY`, `GH_TOKEN`, …) are readable by any command caliban runs,
+and the default fence leaves network egress open — a sandboxed command can
+exfiltrate them. Do not rely on the sandbox to contain a command you would not
+trust with your API keys. Tracked in #405.
+
+### Added
+
+- **OTel GenAI tracing over OTLP** (#375, ADR 0053): the OTLP span exporter is
+  real rather than a feature-gated stub (#383), and caliban emits a `gen_ai`
+  chat-generation span per model request (#378, #384) and an `execute_tool` span
+  with `gen_ai.tool.*` attributes per tool call (#386).
+- **Optional prompt/completion capture on spans** (#380): `gen_ai` input and
+  output messages are recorded on spans when `OTEL_LOG_USER_PROMPTS` is set —
+  off by default, since they contain user content. (#387)
+- **OTLP metrics pipeline** (#427): a real `MeterProvider` with a periodic
+  reader honoring `OTEL_METRIC_EXPORT_INTERVAL`, with `MetricEmitter::record`
+  wired into live instruments, so emits reach the collector. `session.count`
+  flows today; cost/token/active-time emits are tracked in #467 and OTLP mTLS in
+  #465. (#468)
+- **Bounded tool `result_text` on the agent stream** (#391): tool results are
+  surfaced on the stream with a size bound. (#394)
+- **Opt-in tool-dispatch timing** (#28): stream-json `tool_result` frames can
+  carry a `t_ms` dispatch duration. (#398)
+- **Per-turn thinking cap** (#62): a per-turn thinking-character cap bounds
+  runaway extended-thinking spirals. (#396)
+- **Fail-closed token + TLS on the `caliband` TCP session plane** (#288): the
+  networked session plane requires a bearer token and TLS rather than accepting
+  unauthenticated plaintext. (#395)
+
+### Changed
+
+- **Permissions and sandbox controls fail closed** (#410, #403, #404): an
+  unparseable permissions config surfaces its parse error instead of silently
+  dropping rules, v2 rule sets concatenate rather than overwrite, and an
+  unusable sandbox or malformed domain ACL is an error rather than a silent
+  no-op. (#438, #440, #437)
+- **Run span covers polling** (#385): `gen_ai` spans nest under the run span
+  rather than escaping it. (#389)
+
+### Security
+
+Twelve of these close controls that were configured but **inert** in 0.5.0 — the
+policy was accepted and then not enforced. **Known gap:** the sandboxed child
+environment is still unscrubbed (#405) — see the note above. These fixes harden
+the *write* and *egress* fences; they do not make the sandbox a secrets boundary.
+
+- **Sandbox domain ACLs no longer no-op or invert egress** (#403): a malformed
+  or unsupported domain ACL silently allowed all egress, and in one path
+  inverted allow/deny. Now fail-closed. (#440)
+- **`allow_unsandboxed_commands` cannot be bypassed by chaining** (#402): a
+  chained command (`allowed && evil`) escaped the sandbox via the allowlisted
+  prefix. (#434)
+- **bwrap deny-masks apply to files and actually block writes** (#407): masks
+  covered directories only and did not prevent writes. (#450)
+- **Workspace-fence TOCTOU closed on the write path** (#415): writes now go
+  through a confined path, so the fence cannot be raced between check and open.
+  (#459)
+- **`/rewind` refuses to write through a planted symlink** (#413): checkpoint
+  restore no longer follows a symlink out of the workspace. (#448)
+- **`caliband` control plane and transport fail closed** (#400, #401): the
+  control-plane listener no longer serves unauthenticated clients, and the
+  transport is hardened against pre-auth DoS and token-comparison timing leaks.
+  (#433, #436)
+- **MCP OAuth hardening** (#431, #430): fixes a callback DoS and a cross-process
+  token-store race, and enforces https on every OAuth discovery hop and bearer
+  attach. (#456, #443)
+- **Legacy `hooks.toml` fenced from HTTP-hook allowlists** (#409): a legacy hooks
+  file can no longer inject entries into the user-managed HTTP-hook allowlist.
+  (#435)
+- **No false macOS per-host egress rule; fence root canonicalized** (#408): the
+  Seatbelt profile no longer emits a per-host egress rule it cannot enforce, and
+  the fence root is canonicalized before comparison. (#462)
+- **Bound `gen_ai.*.messages` span attribute size** (#428): prompt capture cannot
+  emit unbounded attributes. (#451)
+- **Bump `crossbeam-epoch` to 0.9.20** (RUSTSEC-2026-0204). (#457)
+
+### Fixed
+
+- **Large Bash output can no longer deadlock** (#416): stdout/stderr are drained
+  past the output cap, so a command producing more than the cap no longer hangs.
+  (#439)
+- **Checkpoint durability** (#412): transactional restore, correct eviction
+  ordering, and an atomic index write. (#444)
+- **Deferred session-write failures surface; debounce is bounded** (#414): a
+  failed deferred write is reported rather than swallowed. (#461)
+- **Extended-thinking signatures survive streaming** (#419): thinking-block
+  signatures are preserved through the stream, so thinking blocks remain valid on
+  replay. (#442)
+- **Streaming robustness** (#424): usage deserialization, a `line_buf` cap,
+  tool-id handling, and truncation. (#455)
+- **Anthropic prompt-cache tokens land in usage** (#423): cache-read/write token
+  counts from `message_start` are carried into the usage totals. (#446)
+- **Compaction shrinks oversized `tool_use`/thinking blocks** (#421): caps are
+  taken from the active model rather than a fixed constant. (#449)
+- **No duplicate assistant message on surrender; empty content blocks dropped**
+  (#422). (#452)
+- **No-edit nudge cannot preempt a terminal stop reason** (#420). (#447)
+- **Stable parallel-tool conflict key; new files respect umask** (#417). (#453)
+- **`/config` attributes each key to its true source scope** (#411): keys are no
+  longer misattributed to the wrong config file. (#463)
+- **Pre-flight fatals route through the output encoder** (#429): a fatal before
+  the stream opens is emitted in the requested output format rather than as bare
+  text. (#464)
+- **OTLP gRPC auth headers are applied** (#426): headers configured for the gRPC
+  exporter are attached via tonic metadata, and the headers helper is applied at
+  startup. mTLS client certs remain unwired (#465). (#466)
+- **MCP robustness** (#432): utf8-safe template handling, bounded elicitation,
+  and truncated error bodies. (#454)
+- **Warm Ollama turns skip the static `/api/show` probe** (#425): the capability
+  probe no longer re-runs on every turn. (#458)
+
+Docs: adopt OTel GenAI semantic conventions, semconv-only (ADR 0053, #376, #382);
+reconcile ADR 0033 headers-helper drift to env-only reality (#381, #388); publish
+`CHANGELOG.md` to the Pages site (#373).
+
 ## [0.5.0] - 2026-07-05
 
 This release turns caliban from a single-process CLI into the base of a
@@ -349,7 +479,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/caliban-ai/caliban/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/caliban-ai/caliban/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/caliban-ai/caliban/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/caliban-ai/caliban/compare/v0.2.0...v0.3.0
