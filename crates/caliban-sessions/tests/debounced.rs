@@ -48,7 +48,7 @@ fn single_save_within_window_results_in_one_write() {
     // Issue a single save and immediately flush. Exactly one file
     // should exist (the session JSON), no temp / leftover files.
     store.save(&fake_session("single", "hi")).unwrap();
-    store.flush();
+    store.flush().unwrap();
 
     assert!(store.path_for("single").exists());
     assert_eq!(
@@ -76,7 +76,7 @@ fn multiple_saves_within_window_collapse_to_latest_content() {
         .expect("enqueue v3");
 
     // Force the writer to drain whatever it has buffered.
-    store.flush();
+    store.flush().unwrap();
 
     // Only the latest payload should be observable.
     let loaded = store
@@ -146,7 +146,7 @@ fn flush_blocks_until_pending_write_completes() {
     // assertion: the worker thread *could* preempt us, but we've
     // observed the path right after the send — no flush issued yet.)
     // Either way, after `flush()` it MUST exist.
-    store.flush();
+    store.flush().unwrap();
     assert!(
         path.exists(),
         "flush() returned but file did not land on disk",
@@ -188,7 +188,7 @@ fn atomic_write_leaves_no_temp_files_in_destination_dir() {
     // Issue a series of saves so the writer has work, then flush.
     store.save(&fake_session("atom", "one")).unwrap();
     store.save(&fake_session("atom", "two")).unwrap();
-    store.flush();
+    store.flush().unwrap();
 
     // `caliban_common::fs::write_atomic` uses
     // `tempfile::NamedTempFile::new_in` + `persist` for the rename —

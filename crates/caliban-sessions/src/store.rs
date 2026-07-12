@@ -87,7 +87,7 @@ impl SessionStore {
     pub fn load(&self, name: &str) -> Result<Option<PersistedSession>> {
         validate_name(name)?;
         // Drain any pending write so the on-disk view is current.
-        self.inner.writer.flush();
+        let _ = self.inner.writer.flush();
         let path = self.path_for(name);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -104,12 +104,12 @@ impl SessionStore {
     /// writer task that flushes after a 250 ms debounce window (or
     /// sooner via [`SessionStore::flush`] / drop).
     ///
-    /// Returns `Ok(())` once the request is enqueued. I/O failures
-    /// during the eventual write are logged at `warn` rather than
-    /// surfaced to the caller — the calling turn has already
-    /// completed. To force a synchronous flush (and observe its
-    /// outcome only via a subsequent `load`), call
-    /// [`SessionStore::flush`].
+    /// Returns `Ok(())` once the request is enqueued. A failure of the
+    /// eventual deferred write is warn-logged *and* recorded, so it is
+    /// observable via [`SessionStore::flush`] (which returns the outcome of
+    /// the write it forces) or [`SessionStore::last_write_error`] (a health
+    /// signal that also catches timer-flushed failures) — no longer a silent
+    /// `Ok` (#414).
     ///
     /// # Errors
     /// Serialization, name-validation, or directory-creation errors.
@@ -123,13 +123,30 @@ impl SessionStore {
     }
 
     /// Block until any pending debounced write has been flushed to
-    /// disk.
+    /// disk, returning the drain outcome.
     ///
     /// Useful for tests and for clean-shutdown paths that want to be
     /// sure the latest session state hit the disk before continuing.
-    /// Returns immediately if there is nothing pending.
-    pub fn flush(&self) {
-        self.inner.writer.flush();
+    /// Returns `Ok(())` immediately if there is nothing pending.
+    ///
+    /// # Errors
+    /// [`Error::Persist`] if the forced write failed — so a persist failure is
+    /// observable instead of only warn-logged (#414).
+    pub fn flush(&self) -> Result<()> {
+        self.inner.writer.flush().map_err(Error::Persist)
+    }
+
+    /// The most recent deferred-write failure (a health signal), if the last
+    /// write to that session has not since succeeded; `None` when all writes
+    /// are healthy.
+    ///
+    /// Complements [`SessionStore::flush`]: it catches failures that were
+    /// flushed by the debounce timer rather than an explicit `flush`, so
+    /// [`SessionStore::save`]'s fire-and-forget failures remain observable
+    /// (#414).
+    #[must_use]
+    pub fn last_write_error(&self) -> Option<String> {
+        self.inner.writer.last_error()
     }
 
     /// List sessions (their metadata) sorted by `updated_at` descending.
@@ -140,7 +157,7 @@ impl SessionStore {
     /// # Errors
     /// I/O errors. Individual broken files are SKIPPED with no error.
     pub fn list(&self) -> Result<Vec<SessionMetadata>> {
-        self.inner.writer.flush();
+        let _ = self.inner.writer.flush();
         let mut out = Vec::new();
         let entries = match std::fs::read_dir(&self.inner.root) {
             Ok(e) => e,
@@ -191,7 +208,7 @@ impl SessionStore {
     /// I/O or name-validation errors.
     pub fn delete(&self, name: &str) -> Result<()> {
         validate_name(name)?;
-        self.inner.writer.flush();
+        let _ = self.inner.writer.flush();
         let path = self.path_for(name);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),

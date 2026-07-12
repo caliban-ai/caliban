@@ -37,6 +37,13 @@ use tokio::sync::mpsc;
 /// Window across which back-to-back writes collapse into one disk write.
 pub(crate) const DEBOUNCE_WINDOW: Duration = Duration::from_millis(250);
 
+/// Hard ceiling on how long the *oldest* un-flushed write may sit before it is
+/// forced to disk, regardless of a sustained request stream that keeps resetting
+/// the debounce window. Without it, the `biased` `select!` in [`writer_loop`]
+/// would poll incoming requests first and could starve the timer indefinitely,
+/// unboundedly extending the crash-loss window (#414, P10).
+pub(crate) const MAX_DELAY: Duration = Duration::from_secs(1);
+
 /// Cap on how long [`DebouncedWriter::drop`] will wait for the writer
 /// thread to drain its pending request. Drop must not hang the process,
 /// so we bound the wait — if the disk is wedged, we abandon the write
@@ -64,7 +71,9 @@ enum WriterMsg {
     /// and `oneshot::Receiver::blocking_recv` panics in that situation.
     /// The std channel has no runtime opinion — it just parks the OS
     /// thread, which is what we want.
-    Flush(std::sync::mpsc::Sender<()>),
+    /// The `Ok`/`Err` carries the outcome of the flush's drain so the caller
+    /// can observe a failed persist instead of it being only warn-logged (#414).
+    Flush(std::sync::mpsc::Sender<Result<(), String>>),
 }
 
 /// Handle to the debounced writer. Cheap to clone (`Arc` internally).
@@ -77,8 +86,16 @@ pub(crate) struct DebouncedWriter {
     inner: Arc<WriterInner>,
 }
 
+/// Most recent write failure, shared between the worker thread (which records
+/// it) and the handle (which exposes it). `Some((path, message))` means the
+/// last write to `path` failed and no later write to it has succeeded; `None`
+/// means the last observed write succeeded. Lets a failed deferred persist be
+/// observed even when it flushed via the timer, not an explicit `flush` (#414).
+type LastError = Arc<Mutex<Option<(PathBuf, String)>>>;
+
 struct WriterInner {
     tx: mpsc::UnboundedSender<WriterMsg>,
+    last_error: LastError,
     // Worker thread join handle. Mutex<Option> so `Drop` can `take` it
     // even though `Drop` only has `&mut self` on the Arc's inner via
     // get_mut (impossible when other clones exist — but only the *last*
@@ -90,19 +107,30 @@ struct WriterInner {
 impl DebouncedWriter {
     /// Spawn the writer task on a dedicated OS thread.
     pub(crate) fn new() -> Self {
-        Self::with_window(DEBOUNCE_WINDOW)
+        Self::with_window_and_max_delay(DEBOUNCE_WINDOW, MAX_DELAY)
     }
 
-    /// Like [`DebouncedWriter::new`] but lets tests dial the window.
+    /// Like [`DebouncedWriter::new`] but lets tests dial the debounce window
+    /// (max-delay bound scaled to the default ceiling).
+    #[cfg(test)]
     pub(crate) fn with_window(window: Duration) -> Self {
+        Self::with_window_and_max_delay(window, MAX_DELAY)
+    }
+
+    /// Like [`DebouncedWriter::new`] but lets tests dial both the debounce
+    /// window and the max-delay ceiling.
+    pub(crate) fn with_window_and_max_delay(window: Duration, max_delay: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<WriterMsg>();
+        let last_error: LastError = Arc::new(Mutex::new(None));
+        let last_error_worker = Arc::clone(&last_error);
         let thread = std::thread::Builder::new()
             .name("caliban-session-writer".into())
-            .spawn(move || run_writer_thread(rx, window))
+            .spawn(move || run_writer_thread(rx, window, max_delay, &last_error_worker))
             .expect("spawn session writer thread");
         Self {
             inner: Arc::new(WriterInner {
                 tx,
+                last_error,
                 thread: Mutex::new(Some(thread)),
             }),
         }
@@ -120,23 +148,35 @@ impl DebouncedWriter {
             .send(WriterMsg::Persist(PersistRequest { path, bytes }));
     }
 
-    /// Block until any pending request has been flushed to disk.
+    /// Block until any pending request has been flushed to disk, returning the
+    /// drain outcome so a failed persist is observable (#414).
     ///
     /// Safe to call from inside or outside a tokio runtime — it blocks
     /// the calling thread on a `std::sync::mpsc` receiver, which has no
     /// runtime opinion. If the writer thread has already exited (e.g.
-    /// during shutdown), returns immediately.
-    pub(crate) fn flush(&self) {
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    /// during shutdown), returns `Ok(())` (nothing left to flush).
+    pub(crate) fn flush(&self) -> Result<(), String> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         if self.inner.tx.send(WriterMsg::Flush(done_tx)).is_err() {
             // Worker is gone; nothing to flush.
-            return;
+            return Ok(());
         }
         // `recv` returns Err when the sender is dropped without sending —
-        // that happens on worker shutdown. Treat it the same as a
-        // successful flush: the worker either completed the flush or
+        // that happens on worker shutdown. Treat it as a successful flush:
         // there was nothing left to flush.
-        let _ = done_rx.recv();
+        done_rx.recv().unwrap_or(Ok(()))
+    }
+
+    /// The most recent deferred-write failure, if the last write to that path
+    /// has not since succeeded. A health signal so a failure that flushed via
+    /// the debounce timer (not an explicit [`flush`](Self::flush)) is still
+    /// observable (#414).
+    pub(crate) fn last_error(&self) -> Option<String> {
+        self.inner
+            .last_error
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, msg)| msg.clone()))
     }
 }
 
@@ -197,7 +237,12 @@ impl Drop for WriterInner {
 
 /// Body of the worker thread: own a current-thread tokio runtime and
 /// drive the debounce state machine on it.
-fn run_writer_thread(rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duration) {
+fn run_writer_thread(
+    rx: mpsc::UnboundedReceiver<WriterMsg>,
+    window: Duration,
+    max_delay: Duration,
+    last_error: &LastError,
+) {
     // `current_thread` flavor is sufficient — this thread runs nothing
     // but the debouncer.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -214,7 +259,7 @@ fn run_writer_thread(rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duration) {
             return;
         }
     };
-    rt.block_on(writer_loop(rx, window));
+    rt.block_on(writer_loop(rx, window, max_delay, last_error));
 }
 
 /// The debounce state machine.
@@ -227,21 +272,38 @@ fn run_writer_thread(rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duration) {
 /// The debounce timer is shared across all paths and is reset on every
 /// new request, matching the spec's "true debounce" semantic ("waits
 /// 250 ms; timer reset on each new request").
-async fn writer_loop(mut rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duration) {
+///
+/// A second, non-resetting bound caps the total wait: `oldest_dirty` records
+/// when `pending` first became non-empty after a drain, and the effective flush
+/// deadline is `min(debounce_deadline, oldest_dirty + max_delay)`. Because a
+/// saturating request stream could keep the `biased` `select!` from ever
+/// reaching the timer branch, the max-delay bound is *also* checked inline after
+/// each request — guaranteeing a flush at least every `max_delay` regardless of
+/// incoming traffic (#414, P10).
+async fn writer_loop(
+    mut rx: mpsc::UnboundedReceiver<WriterMsg>,
+    window: Duration,
+    max_delay: Duration,
+    last_error: &LastError,
+) {
     let mut pending: HashMap<PathBuf, Vec<u8>> = HashMap::new();
     let mut deadline = tokio::time::Instant::now();
+    let mut oldest_dirty: Option<tokio::time::Instant> = None;
 
     loop {
         if pending.is_empty() {
+            oldest_dirty = None;
             // No work — block on the channel.
             match rx.recv().await {
                 Some(WriterMsg::Persist(req)) => {
+                    let now = tokio::time::Instant::now();
                     pending.insert(req.path, req.bytes);
-                    deadline = tokio::time::Instant::now() + window;
+                    deadline = now + window;
+                    oldest_dirty = Some(now);
                 }
                 Some(WriterMsg::Flush(done)) => {
-                    // Nothing to flush; signal completion immediately.
-                    let _ = done.send(());
+                    // Nothing to flush; signal success immediately.
+                    let _ = done.send(Ok(()));
                 }
                 None => {
                     // Channel closed — no work left, exit cleanly.
@@ -249,6 +311,9 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duratio
                 }
             }
         } else {
+            // Hard ceiling: never wait past `oldest_dirty + max_delay`.
+            let hard = oldest_dirty.map_or(deadline, |od| od + max_delay);
+            let effective = deadline.min(hard);
             tokio::select! {
                 biased;
 
@@ -256,43 +321,79 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<WriterMsg>, window: Duratio
                     Some(WriterMsg::Persist(req)) => {
                         // Same path -> overwrite buffered bytes (latest
                         // wins). Different path -> coexists in the map.
-                        // Either way, reset the timer.
+                        // Reset the debounce timer but NOT oldest_dirty.
+                        let now = tokio::time::Instant::now();
                         pending.insert(req.path, req.bytes);
-                        deadline = tokio::time::Instant::now() + window;
+                        deadline = now + window;
+                        // A sustained stream can starve the timer branch under
+                        // `biased`; enforce the max-delay bound inline.
+                        if oldest_dirty.is_some_and(|od| now >= od + max_delay) {
+                            let _ = drain_pending(&mut pending, last_error);
+                            oldest_dirty = None;
+                        }
                     }
                     Some(WriterMsg::Flush(done)) => {
-                        drain_pending(&mut pending);
-                        let _ = done.send(());
+                        let r = drain_pending(&mut pending, last_error);
+                        oldest_dirty = None;
+                        let _ = done.send(r);
                     }
                     None => {
                         // Channel closed during pending — final drain
                         // before exit.
-                        drain_pending(&mut pending);
+                        let _ = drain_pending(&mut pending, last_error);
                         return;
                     }
                 },
-                () = tokio::time::sleep_until(deadline) => {
-                    drain_pending(&mut pending);
+                () = tokio::time::sleep_until(effective) => {
+                    let _ = drain_pending(&mut pending, last_error);
+                    oldest_dirty = None;
                 }
             }
         }
     }
 }
 
-fn drain_pending(pending: &mut HashMap<PathBuf, Vec<u8>>) {
+/// Drain all pending writes, returning the first failure (if any) so a `Flush`
+/// can report it to its caller.
+fn drain_pending(
+    pending: &mut HashMap<PathBuf, Vec<u8>>,
+    last_error: &LastError,
+) -> Result<(), String> {
+    let mut first_err: Option<String> = None;
     for (path, bytes) in pending.drain() {
-        do_write(&path, &bytes);
+        if let Err(msg) = do_write(&path, &bytes, last_error) {
+            first_err.get_or_insert(msg);
+        }
     }
+    first_err.map_or(Ok(()), Err)
 }
 
-fn do_write(path: &std::path::Path, bytes: &[u8]) {
-    if let Err(e) = caliban_common::fs::write_atomic(path, bytes) {
-        tracing::warn!(
-            target: caliban_common::tracing_targets::TARGET_SESSIONS,
-            error = %e,
-            path = %path.display(),
-            "debounced session write failed",
-        );
+/// Write one buffered snapshot, updating the shared `last_error` health slot:
+/// set it on failure, clear it when this path's write succeeds. Returns the
+/// formatted error on failure.
+fn do_write(path: &std::path::Path, bytes: &[u8], last_error: &LastError) -> Result<(), String> {
+    match caliban_common::fs::write_atomic(path, bytes) {
+        Ok(()) => {
+            if let Ok(mut slot) = last_error.lock()
+                && slot.as_ref().is_some_and(|(p, _)| p == path)
+            {
+                *slot = None;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                error = %e,
+                path = %path.display(),
+                "debounced session write failed",
+            );
+            if let Ok(mut slot) = last_error.lock() {
+                *slot = Some((path.to_path_buf(), msg.clone()));
+            }
+            Err(msg)
+        }
     }
 }
 
@@ -324,7 +425,7 @@ mod tests {
         let w = DebouncedWriter::with_window(TEST_WINDOW);
         w.request(p.clone(), b"hello".to_vec());
         // Flush ensures the request is on disk regardless of timer race.
-        w.flush();
+        w.flush().unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"hello");
     }
 
@@ -340,7 +441,7 @@ mod tests {
         // Before the window elapses + before flush, the file must not
         // yet exist (the worker hasn't written anything).
         assert!(!p.exists());
-        w.flush();
+        w.flush().unwrap();
         // Exactly one disk write, with the latest bytes.
         assert_eq!(std::fs::read(&p).unwrap(), b"v3");
     }
@@ -364,7 +465,7 @@ mod tests {
         let w = DebouncedWriter::with_window(Duration::from_mins(1));
         w.request(p.clone(), b"sync".to_vec());
         // Right after `flush()` returns, the file must be on disk.
-        w.flush();
+        w.flush().unwrap();
         assert!(p.exists(), "flush returned before file landed");
         assert_eq!(std::fs::read(&p).unwrap(), b"sync");
     }
@@ -400,7 +501,7 @@ mod tests {
         rt.block_on(async {
             let w = DebouncedWriter::with_window(Duration::from_mins(1));
             w.request(p.clone(), b"from-runtime".to_vec());
-            w.flush();
+            w.flush().unwrap();
         });
         assert_eq!(std::fs::read(&p).unwrap(), b"from-runtime");
     }
@@ -411,7 +512,7 @@ mod tests {
         let p = dir.path().join("session.json");
         let w = DebouncedWriter::with_window(TEST_WINDOW);
         w.request(p.clone(), b"x".to_vec());
-        w.flush();
+        w.flush().unwrap();
         // Directory should contain only the final file — no `.tmp*`
         // siblings left behind by tempfile::NamedTempFile.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
@@ -421,5 +522,81 @@ mod tests {
             .collect();
         assert_eq!(entries, vec![p.file_name().unwrap().to_owned()]);
         assert_eq!(count_files(dir.path()), 1);
+    }
+
+    #[test]
+    fn flush_surfaces_write_failure() {
+        // #414 P8: a failing persist must be observable, not a silent Ok.
+        // Make the destination's parent a *file* so `create_dir_all` (and thus
+        // the atomic write) fails deterministically.
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("sub");
+        std::fs::write(&blocker, b"i am a file, not a dir").unwrap();
+        let target = blocker.join("session.json"); // parent `sub` is a file
+        let w = DebouncedWriter::with_window(TEST_WINDOW);
+        w.request(target.clone(), b"data".to_vec());
+
+        let flush_result = w.flush();
+        assert!(
+            flush_result.is_err(),
+            "flush returned Ok despite a failed write: {flush_result:?}"
+        );
+        // And it stays observable as a health signal after the fact.
+        assert!(
+            w.last_error().is_some(),
+            "failure not recorded in health slot"
+        );
+    }
+
+    #[test]
+    fn last_error_clears_after_a_successful_write() {
+        let dir = TempDir::new().unwrap();
+        // First: force a failure to a path whose parent is a file.
+        let blocker = dir.path().join("blocked");
+        std::fs::write(&blocker, b"file").unwrap();
+        let bad = blocker.join("x.json");
+        let w = DebouncedWriter::with_window(TEST_WINDOW);
+        w.request(bad.clone(), b"a".to_vec());
+        let _ = w.flush();
+        assert!(w.last_error().is_some());
+        // Then a successful write to a *different* healthy path leaves the bad
+        // path's failure recorded (per-path health), but a later success to the
+        // same bad path (after we remove the blocker) clears it.
+        std::fs::remove_file(&blocker).unwrap();
+        w.request(bad.clone(), b"b".to_vec());
+        w.flush().unwrap();
+        assert!(
+            w.last_error().is_none(),
+            "health slot not cleared on success"
+        );
+    }
+
+    #[test]
+    fn sustained_writes_flush_within_max_delay() {
+        // #414 P10: with a long debounce window, a continuous request stream
+        // must still be forced to disk by the max-delay bound rather than
+        // starving the flush indefinitely.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("hot.json");
+        // Window far longer than the test; only the max-delay bound can flush.
+        let w = DebouncedWriter::with_window_and_max_delay(
+            Duration::from_secs(30),
+            Duration::from_millis(80),
+        );
+        // Stream requests with sub-window gaps for well over max_delay, never
+        // calling flush(). If the bound works, the file appears mid-stream.
+        let mut landed = false;
+        for i in 0..40 {
+            w.request(p.clone(), format!("v{i}").into_bytes());
+            std::thread::sleep(Duration::from_millis(10));
+            if p.exists() {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "sustained writes never flushed within the max-delay bound",
+        );
     }
 }
