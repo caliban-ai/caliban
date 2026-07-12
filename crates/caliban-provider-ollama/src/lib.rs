@@ -143,6 +143,11 @@ impl<T: Transport> OllamaProvider<T> {
     /// and already know the model, this is a no-op, so a briefly-unreachable or
     /// older server degrades gracefully rather than failing the turn.
     pub(crate) async fn resolve_and_cache(&self, canonical: &str, wire: &str) {
+        let existing = self.find_caps(canonical);
+
+        // Always poll the live running window (`/api/ps`) — it's the dynamic
+        // part that can change per turn (the model being (un)loaded), and the
+        // per-turn upgrade to a larger live window depends on it.
         let live = self
             .transport
             .running_models()
@@ -154,14 +159,24 @@ impl<T: Transport> OllamaProvider<T> {
                     .and_then(|m| m.context_length)
             })
             .filter(|c| *c > 0);
-        let show = self.transport.show_model(wire).await.ok().flatten();
+
+        // `/api/show` is *static* model metadata, so fetch it only when we don't
+        // already have resolved capabilities for this model — a warm turn skips
+        // that second round-trip, cutting time-to-first-token (#425). A cached
+        // *bootstrap fallback* (server briefly unreachable at first resolution)
+        // still re-fetches, so we never freeze on the placeholder capabilities.
+        let need_show = existing.is_none_or(|c| c == discovery::bootstrap_capabilities());
+        let show = if need_show {
+            self.transport.show_model(wire).await.ok().flatten()
+        } else {
+            None
+        };
 
         // Nothing learned and already known → no-op.
-        if live.is_none() && show.is_none() && self.find_caps(canonical).is_some() {
+        if live.is_none() && show.is_none() && existing.is_some() {
             return;
         }
 
-        let existing = self.find_caps(canonical);
         let mut caps = match show.as_ref() {
             Some(s) => discovery::capabilities_from_show(s),
             None => existing.unwrap_or_else(discovery::bootstrap_capabilities),
@@ -352,6 +367,65 @@ mod tests {
         // downgrading back to the smaller /api/show number.
         provider.resolve_and_cache(MODEL, MODEL).await;
         assert_eq!(provider.capabilities(MODEL).max_input_tokens, 262_144);
+    }
+
+    /// Counts how many times each probe endpoint is hit, to assert the warm-turn
+    /// fast path (#425): `/api/show` (static) is fetched once, `/api/ps` (live)
+    /// every turn.
+    struct CountingProbe {
+        show_calls: AtomicUsize,
+        ps_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Transport for CountingProbe {
+        async fn send(&self, _: NativeRequest) -> std::result::Result<NativeResponse, OllamaError> {
+            no_send()
+        }
+        async fn stream(
+            &self,
+            _: NativeRequest,
+        ) -> std::result::Result<
+            BoxStream<'static, std::result::Result<Bytes, OllamaError>>,
+            OllamaError,
+        > {
+            no_send()
+        }
+        async fn running_models(&self) -> std::result::Result<Vec<RunningModel>, OllamaError> {
+            self.ps_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        async fn show_model(&self, _: &str) -> std::result::Result<Option<ModelShow>, OllamaError> {
+            self.show_calls.fetch_add(1, Ordering::SeqCst);
+            let body = r#"{"model_info":{"general.architecture":"qwen3_5","qwen3_5.context_length":131072},"capabilities":["completion","tools"]}"#;
+            Ok(Some(serde_json::from_str(body).unwrap()))
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_turn_skips_static_show_probe() {
+        let provider = OllamaProvider::from_transport_with_cache(
+            CountingProbe {
+                show_calls: AtomicUsize::new(0),
+                ps_calls: AtomicUsize::new(0),
+            },
+            None,
+        );
+        for _ in 0..3 {
+            provider.resolve_and_cache(MODEL, MODEL).await;
+        }
+        // /api/show is static → fetched once (cold turn) and skipped after.
+        assert_eq!(
+            provider.transport.show_calls.load(Ordering::SeqCst),
+            1,
+            "static /api/show must be fetched only once"
+        );
+        // /api/ps is live → polled every turn.
+        assert_eq!(
+            provider.transport.ps_calls.load(Ordering::SeqCst),
+            3,
+            "live /api/ps must still be polled each turn"
+        );
     }
 
     /// A full-discovery transport: two tags, per-model `/api/show` capabilities,
