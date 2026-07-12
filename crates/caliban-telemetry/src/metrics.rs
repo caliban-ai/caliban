@@ -108,6 +108,56 @@ impl InMemoryRecorder {
     }
 }
 
+/// Real OTel metric instruments, created lazily from a [`Meter`] and cached by
+/// name. Every `caliban.*` metric except `caliban.active_time.total` (a gauge)
+/// is a monotonic f64 counter. Present only when telemetry is enabled and the
+/// `otlp` feature is compiled in; this is what actually pushes the metric set
+/// to the configured OTLP collector via the `PeriodicReader` (#427).
+#[cfg(feature = "otlp")]
+struct OtelMetrics {
+    meter: opentelemetry::metrics::Meter,
+    counters: Mutex<std::collections::HashMap<&'static str, opentelemetry::metrics::Counter<f64>>>,
+    gauges: Mutex<std::collections::HashMap<&'static str, opentelemetry::metrics::Gauge<f64>>>,
+}
+
+#[cfg(feature = "otlp")]
+impl std::fmt::Debug for OtelMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtelMetrics").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl OtelMetrics {
+    fn new(meter: opentelemetry::metrics::Meter) -> Self {
+        Self {
+            meter,
+            counters: Mutex::new(std::collections::HashMap::new()),
+            gauges: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn emit(&self, name: &'static str, value: f64, attrs: &[(String, String)]) {
+        let kvs: Vec<opentelemetry::KeyValue> = attrs
+            .iter()
+            .map(|(k, v)| opentelemetry::KeyValue::new(k.clone(), v.clone()))
+            .collect();
+        if name == "caliban.active_time.total" {
+            let mut gauges = self.gauges.lock().expect("otel gauge mutex poisoned");
+            gauges
+                .entry(name)
+                .or_insert_with(|| self.meter.f64_gauge(name).build())
+                .record(value, &kvs);
+        } else {
+            let mut counters = self.counters.lock().expect("otel counter mutex poisoned");
+            counters
+                .entry(name)
+                .or_insert_with(|| self.meter.f64_counter(name).build())
+                .add(value, &kvs);
+        }
+    }
+}
+
 /// Typed metric facade. Constructed by `Telemetry::init_from_env`.
 #[derive(Debug, Clone)]
 pub struct MetricEmitter {
@@ -116,11 +166,19 @@ pub struct MetricEmitter {
     /// `false` when telemetry is hard-disabled. We still record into the
     /// in-memory recorder so `/usage` etc. show real numbers without an OTLP
     /// collector, but we skip emits to the real OTel SDK.
-    #[allow(
-        dead_code,
-        reason = "read by the otlp feature wiring; preserved without the feature for ABI stability"
+    #[cfg_attr(
+        not(feature = "otlp"),
+        allow(
+            dead_code,
+            reason = "read by the otlp feature wiring; preserved without the feature for ABI stability"
+        )
     )]
     pub(crate) enabled: bool,
+    /// Real OTel instruments, attached by `init_from_env` once the
+    /// `SdkMeterProvider` is built. `None` when disabled, when the `otlp`
+    /// feature is off, or when the provider couldn't be built (#427).
+    #[cfg(feature = "otlp")]
+    otel: Option<Arc<OtelMetrics>>,
 }
 
 impl MetricEmitter {
@@ -133,6 +191,8 @@ impl MetricEmitter {
             standard,
             recorder: Arc::new(InMemoryRecorder::new()),
             enabled: false,
+            #[cfg(feature = "otlp")]
+            otel: None,
         }
     }
 
@@ -149,7 +209,20 @@ impl MetricEmitter {
             standard,
             recorder,
             enabled,
+            #[cfg(feature = "otlp")]
+            otel: None,
         }
+    }
+
+    /// Attach real OTel instruments, created from `meter`, so subsequent emits
+    /// reach the OTLP metrics pipeline in addition to the in-memory recorder
+    /// (#427). Called by `Telemetry::init_from_env` once the `SdkMeterProvider`
+    /// is built.
+    #[cfg(feature = "otlp")]
+    #[must_use]
+    pub(crate) fn with_otel_meter(mut self, meter: opentelemetry::metrics::Meter) -> Self {
+        self.otel = Some(Arc::new(OtelMetrics::new(meter)));
+        self
     }
 
     /// Returns a handle to the in-memory recorder (used by tests).
@@ -179,14 +252,17 @@ impl MetricEmitter {
         }
         // Sort for deterministic test inspection.
         attrs.sort_by(|a, b| a.0.cmp(&b.0));
-        self.recorder.push(name, value, attrs);
-        // OTel SDK emission would go here when `otlp` is enabled.
+        // Emit into the real OTel instruments before moving `attrs` into the
+        // in-memory recorder, so the metric set actually leaves the process
+        // (#427). The recorder remains the source of truth for `/usage` and
+        // test assertions.
         #[cfg(feature = "otlp")]
+        if self.enabled
+            && let Some(otel) = &self.otel
         {
-            // The actual emit goes through the OTel metric API; we keep the
-            // implementation thin here to avoid coupling tests to the SDK.
-            // The recorder above is the source of truth for assertions.
+            otel.emit(name, value, &attrs);
         }
+        self.recorder.push(name, value, attrs);
     }
 
     /// Emit `caliban.session.count` with `start` or `end` attribute.
@@ -347,6 +423,43 @@ mod tests {
         assert_eq!(evts[0].attr("decision"), Some("accept"));
         assert_eq!(evts[0].attr("source"), Some("user"));
         assert_eq!(evts[0].attr("language"), Some("rust"));
+    }
+
+    #[cfg(feature = "otlp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn emits_reach_the_meter_provider_exporter() {
+        // #427: an emit must reach a real OTel exporter through the attached
+        // MeterProvider — both the counter path and the active_time gauge path.
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+        use opentelemetry_sdk::runtime;
+        use opentelemetry_sdk::testing::metrics::InMemoryMetricExporter;
+
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone(), runtime::Tokio).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+
+        let e = em().with_otel_meter(provider.meter("caliban"));
+        e.emit_tokens(1234, "input", "claude-opus-4-8");
+        e.emit_active_time(2.5, "cli");
+
+        provider.force_flush().expect("force_flush");
+        let names: Vec<String> = exporter
+            .get_finished_metrics()
+            .expect("metrics")
+            .iter()
+            .flat_map(|rm| rm.scope_metrics.iter())
+            .flat_map(|sm| sm.metrics.iter())
+            .map(|m| m.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "caliban.token.usage"),
+            "token counter not exported: {names:?}",
+        );
+        assert!(
+            names.iter().any(|n| n == "caliban.active_time.total"),
+            "active_time gauge not exported: {names:?}",
+        );
     }
 
     #[test]

@@ -206,6 +206,113 @@ mod otlp_pipeline {
             .build();
         Ok(provider)
     }
+
+    /// Select and build the OTLP **metric** exporter for the configured
+    /// protocol, mirroring [`build_span_exporter`] (endpoint + auth headers).
+    #[cfg(feature = "otlp")]
+    fn build_metric_exporter(
+        config: &TelemetryConfig,
+    ) -> Result<opentelemetry_otlp::MetricExporter, TelemetryError> {
+        match classify_protocol(&config.protocol) {
+            OtlpProtocol::Grpc => build_metric_grpc(config),
+            OtlpProtocol::HttpBinary | OtlpProtocol::HttpJson => build_metric_http(config),
+            OtlpProtocol::Unsupported => Err(TelemetryError::OtlpExporter(format!(
+                "unsupported OTEL_EXPORTER_OTLP_PROTOCOL {:?} \
+                 (expected grpc | http/protobuf | http/json)",
+                config.protocol
+            ))),
+        }
+    }
+
+    #[cfg(feature = "otlp-grpc")]
+    fn build_metric_grpc(
+        config: &TelemetryConfig,
+    ) -> Result<opentelemetry_otlp::MetricExporter, TelemetryError> {
+        use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithTonicConfig};
+        let mut builder = MetricExporter::builder().with_tonic();
+        if let Some(endpoint) = config.endpoint.as_deref() {
+            builder = builder.with_endpoint(endpoint);
+        }
+        if let Some(metadata) = tonic_metadata_from_headers(&config.headers) {
+            builder = builder.with_metadata(metadata);
+        }
+        builder
+            .build()
+            .map_err(|e| TelemetryError::OtlpExporter(e.to_string()))
+    }
+
+    #[cfg(not(feature = "otlp-grpc"))]
+    fn build_metric_grpc(
+        _config: &TelemetryConfig,
+    ) -> Result<opentelemetry_otlp::MetricExporter, TelemetryError> {
+        Err(TelemetryError::OtlpExporter(
+            "OTEL_EXPORTER_OTLP_PROTOCOL=grpc requested but the `otlp-grpc` \
+             transport feature is not compiled in"
+                .into(),
+        ))
+    }
+
+    #[cfg(feature = "otlp-http")]
+    fn build_metric_http(
+        config: &TelemetryConfig,
+    ) -> Result<opentelemetry_otlp::MetricExporter, TelemetryError> {
+        use opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig, WithHttpConfig};
+        let protocol = match classify_protocol(&config.protocol) {
+            OtlpProtocol::HttpJson => Protocol::HttpJson,
+            _ => Protocol::HttpBinary,
+        };
+        let mut builder = MetricExporter::builder()
+            .with_http()
+            .with_protocol(protocol);
+        if let Some(endpoint) = config.endpoint.as_deref() {
+            builder = builder.with_endpoint(endpoint);
+        }
+        if !config.headers.is_empty() {
+            let headers: std::collections::HashMap<String, String> = config
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            builder = builder.with_headers(headers);
+        }
+        builder
+            .build()
+            .map_err(|e| TelemetryError::OtlpExporter(e.to_string()))
+    }
+
+    #[cfg(not(feature = "otlp-http"))]
+    fn build_metric_http(
+        _config: &TelemetryConfig,
+    ) -> Result<opentelemetry_otlp::MetricExporter, TelemetryError> {
+        Err(TelemetryError::OtlpExporter(
+            "OTEL_EXPORTER_OTLP_PROTOCOL=http/* requested but the `otlp-http` \
+             transport feature is not compiled in"
+                .into(),
+        ))
+    }
+
+    /// Build the OTLP metrics `SdkMeterProvider`: a `PeriodicReader` that
+    /// exports on `OTEL_METRIC_EXPORT_INTERVAL` (the previously-unused
+    /// `metric_export_interval`) wrapping the OTLP metric exporter (#427).
+    /// Must be called inside a Tokio runtime (the reader spawns a background
+    /// export task via `runtime::Tokio`).
+    #[cfg(feature = "otlp")]
+    pub(super) fn build_meter_provider(
+        config: &TelemetryConfig,
+        app_version: &str,
+    ) -> Result<opentelemetry_sdk::metrics::SdkMeterProvider, TelemetryError> {
+        use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+        use opentelemetry_sdk::runtime;
+        let exporter = build_metric_exporter(config)?;
+        let reader = PeriodicReader::builder(exporter, runtime::Tokio)
+            .with_interval(config.metric_export_interval)
+            .build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(caliban_resource(app_version))
+            .build();
+        Ok(provider)
+    }
 }
 
 /// Parsed telemetry knobs after applying env + opt-outs.
@@ -387,6 +494,11 @@ pub struct Telemetry {
     /// it wraps an `Arc` internally.
     #[cfg(feature = "otlp")]
     tracer_provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    /// Real OTLP metrics provider, built alongside `tracer_provider` when
+    /// telemetry is enabled. Held so `shutdown` can force-flush the periodic
+    /// reader before exit. `None` when disabled / setup failed (#427).
+    #[cfg(feature = "otlp")]
+    meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
 impl Telemetry {
@@ -413,9 +525,48 @@ impl Telemetry {
         let cost = Arc::new(CostAccumulator::new(card));
         let context = Arc::new(ContextWindow::new());
         let recorder = Arc::new(InMemoryRecorder::new());
-        let metrics = MetricEmitter::with_recorder(standard.clone(), recorder, config.enabled);
 
-        // Emit session.count{start} if enabled.
+        // Build the OTLP metrics pipeline (MeterProvider + PeriodicReader) when
+        // telemetry is enabled, `OTEL_METRICS_EXPORTER` selects otlp, and a
+        // Tokio runtime is present (the reader spawns a background export task).
+        // Setup failures degrade to metrics-recorded-but-not-exported (#427).
+        #[cfg(feature = "otlp")]
+        let meter_provider = if config.enabled
+            && config.metrics_exporter == "otlp"
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            match otlp_pipeline::build_meter_provider(&config, env!("CARGO_PKG_VERSION")) {
+                Ok(provider) => {
+                    opentelemetry::global::set_meter_provider(provider.clone());
+                    Some(provider)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+                        error = %e,
+                        "otlp metric exporter setup failed; metric export disabled (cost/usage still recorded)",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Attach the OTel instruments to the emitter (when a provider was built)
+        // so every emit reaches the collector, then emit session.count{start}.
+        let metrics = {
+            let base = MetricEmitter::with_recorder(standard.clone(), recorder, config.enabled);
+            #[cfg(feature = "otlp")]
+            let base = match &meter_provider {
+                Some(provider) => {
+                    use opentelemetry::metrics::MeterProvider as _;
+                    base.with_otel_meter(provider.meter("caliban"))
+                }
+                None => base,
+            };
+            base
+        };
         if config.enabled {
             metrics.emit_session("start");
         }
@@ -464,6 +615,8 @@ impl Telemetry {
             config,
             #[cfg(feature = "otlp")]
             tracer_provider,
+            #[cfg(feature = "otlp")]
+            meter_provider,
         })
     }
 
@@ -525,6 +678,8 @@ impl Telemetry {
             },
             #[cfg(feature = "otlp")]
             tracer_provider: None,
+            #[cfg(feature = "otlp")]
+            meter_provider: None,
         })
     }
 
@@ -544,6 +699,26 @@ impl Telemetry {
     pub fn shutdown(self) -> Result<(), TelemetryError> {
         if self.enabled {
             self.metrics.emit_session("end");
+        }
+        // Force-flush + stop the metrics pipeline so the final interval's
+        // metrics (incl. session.count{end} just emitted) reach the collector
+        // before exit (#427).
+        #[cfg(feature = "otlp")]
+        if let Some(provider) = self.meter_provider.as_ref() {
+            if let Err(e) = provider.force_flush() {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+                    error = %e,
+                    "otlp metric force-flush error during shutdown",
+                );
+            }
+            if let Err(e) = provider.shutdown() {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+                    error = %e,
+                    "otlp meter provider shutdown error",
+                );
+            }
         }
         // Force-flush batched spans and stop the exporter so nothing is lost
         // before the process exits.
@@ -643,6 +818,8 @@ mod tests {
             },
             #[cfg(feature = "otlp")]
             tracer_provider: None,
+            #[cfg(feature = "otlp")]
+            meter_provider: None,
         };
         telemetry.shutdown().unwrap();
         let evts = recorder.by_name("caliban.session.count");
