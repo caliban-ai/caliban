@@ -451,7 +451,17 @@ const WRITABLE_DEVICES: &[&str] = &[
 fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
     use caliban_sandbox::{FilesystemAcl, NetworkAcl, Policy};
 
-    let mut allow_write = vec![workspace_root.to_path_buf()];
+    // Seatbelt `(subpath …)` matches the *kernel-resolved* path, so a symlinked
+    // workspace component (e.g. a repo under `/tmp/... → /private/tmp/...` on
+    // macOS) would make an `allow_write` rule keyed on the raw root never match,
+    // denying writes inside the workspace (S10/#408). Emit the canonical form
+    // (what Seatbelt sees) plus the raw path as given, so the rule matches
+    // regardless of which spelling an access uses.
+    let mut allow_write = Vec::new();
+    if let Ok(canon) = std::fs::canonicalize(workspace_root) {
+        allow_write.push(canon);
+    }
+    allow_write.push(workspace_root.to_path_buf());
     // Temp dirs: toolchains and shell redirects write scratch here. Add both
     // the reported `$TMPDIR` and its canonical form (on macOS `$TMPDIR` lives
     // under /var/folders, a symlink into /private/var that Seatbelt resolves).
@@ -1765,6 +1775,27 @@ mod tests {
             p.filesystem
                 .allow_write
                 .contains(&std::path::PathBuf::from("/dev/null"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_fence_policy_canonicalizes_symlinked_root() {
+        // S10/#408: Seatbelt `(subpath …)` matches the kernel-resolved path, so a
+        // symlinked workspace root must contribute a rule on its canonical form
+        // — otherwise writes inside the workspace are silently denied.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real_ws");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link_ws");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let p = workspace_fence_policy(&link);
+        let canon = std::fs::canonicalize(&link).unwrap();
+        assert!(
+            p.filesystem.allow_write.contains(&canon),
+            "canonical workspace root {canon:?} missing from allow_write: {:?}",
+            p.filesystem.allow_write
         );
     }
 

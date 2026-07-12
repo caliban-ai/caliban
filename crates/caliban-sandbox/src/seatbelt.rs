@@ -102,15 +102,16 @@ pub fn render_profile(policy: &Policy) -> String {
         let _ = writeln!(out, ";; Network: unrestricted egress (allow_all_outbound).");
         let _ = writeln!(out, "(allow network*)");
         let _ = writeln!(out, "(allow mach-lookup)");
-    } else if !net.allowed_domains.is_empty() {
-        let _ = writeln!(out, ";; Network: allowed_domains (TCP/443).");
-        let _ = writeln!(out, "(allow network-outbound");
-        for d in &net.allowed_domains {
-            let _ = writeln!(out, "  (remote tcp {})", quote_path(&format!("{d}:443")));
-        }
-        let _ = writeln!(out, ")");
     }
-    // else: deny default already blocks egress.
+    // No per-host `allowed_domains` branch: Seatbelt's `(remote tcp …)` filter
+    // matches resolved socket addresses, not hostnames, so `(remote tcp
+    // "host:443")` cannot express per-host egress — and the child couldn't even
+    // resolve the name (no mach-lookup for mDNSResponder in this branch). Rather
+    // than emit a rule that looks like it works but doesn't (S9/#408), we emit
+    // nothing here: `validate_policy` (#403) already rejects `allowed_domains`
+    // without a proxy port, so per-host rules are enforced by the loopback proxy
+    // (the `http_proxy_port`/`socks_proxy_port` branches above), never here.
+    // With no proxy and no `allow_all_outbound`, `(deny default)` blocks egress.
 
     if net.allow_local_binding {
         let _ = writeln!(out, ";; Allow local bind.");
@@ -208,11 +209,33 @@ mod tests {
     }
 
     #[test]
-    fn network_outbound_rendered_when_allowed_domains_set() {
-        let p = make_policy();
+    fn allowed_domains_alone_emit_no_egress_rule() {
+        // S9/#408: Seatbelt can't filter egress by hostname, so `allowed_domains`
+        // must NOT produce a `(remote tcp "host:443")` rule that looks functional
+        // but isn't. `validate_policy` (#403) rejects domains without a proxy, so
+        // this configuration never launches; per-host rules are enforced by the
+        // proxy branch instead. Here we assert the false affordance is gone.
+        let p = make_policy(); // allowed_domains=[github.com], no proxy
         let s = render_profile(&p);
-        assert!(s.contains("(allow network-outbound"));
-        assert!(s.contains(r#"(remote tcp "github.com:443")"#));
+        assert!(
+            !s.contains(r#"(remote tcp "github.com:443")"#),
+            "false per-host egress rule still emitted:\n{s}"
+        );
+        assert!(
+            !s.contains("(allow network-outbound"),
+            "unexpected network-outbound from allowed_domains:\n{s}"
+        );
+    }
+
+    #[test]
+    fn allowed_domains_with_proxy_enforced_via_proxy_not_host_rules() {
+        // With a proxy set, egress is locked to loopback and the proxy applies
+        // the domain rules — no per-host `(remote tcp host:443)` is emitted.
+        let mut p = make_policy();
+        p.network.http_proxy_port = 8080;
+        let s = render_profile(&p);
+        assert!(s.contains(r#"(allow network-outbound (remote tcp "127.0.0.1:8080"))"#));
+        assert!(!s.contains(r#"(remote tcp "github.com:443")"#));
     }
 
     #[test]
