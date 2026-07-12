@@ -32,6 +32,10 @@ whoami           = "1"
 opentelemetry         = { version = "0.27", optional = true, features = ["metrics", "logs", "trace"] }
 opentelemetry_sdk     = { version = "0.27", optional = true, features = ["rt-tokio", "metrics", "logs", "trace"] }
 opentelemetry-otlp    = { version = "0.27", optional = true, default-features = false }
+# gRPC metadata types for applying auth headers on the tonic transport (#426);
+# opentelemetry-otlp does not re-export tonic. Pinned to the version the
+# `grpc-tonic` feature already pulls transitively.
+tonic                 = { version = "0.12", optional = true, default-features = false, features = ["transport"] }
 tracing-opentelemetry = { version = "0.28", optional = true }
 # Needed by the public `Telemetry::otel_layer` accessor to name the
 # `tracing_subscriber::Layer` / `LookupSpan` bounds. Only pulled with `otlp`.
@@ -59,7 +63,7 @@ otlp-http = [
     "opentelemetry-otlp/reqwest-client",
 ]
 # gRPC transport via tonic.
-otlp-grpc = ["otlp", "opentelemetry-otlp/grpc-tonic"]
+otlp-grpc = ["otlp", "opentelemetry-otlp/grpc-tonic", "dep:tonic"]
 
 [dev-dependencies]
 tempfile  = { workspace = true }
