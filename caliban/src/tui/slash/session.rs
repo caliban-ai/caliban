@@ -370,7 +370,7 @@ mod resume_tests {
             let sess = caliban_sessions::PersistedSession::new(*name, "mock", "mock");
             store.save(&sess).unwrap();
         }
-        store.flush();
+        store.flush().unwrap();
         app.store = Some(store);
         // Leak the tempdir so files live as long as the test.
         std::mem::forget(tmp);

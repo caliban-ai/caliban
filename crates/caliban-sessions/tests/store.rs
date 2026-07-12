@@ -96,7 +96,7 @@ fn pretty_json_is_human_readable() {
     store.save(&fake_session()).unwrap();
     // `save` is debounced; flush so the on-disk file exists for the
     // direct read below.
-    store.flush();
+    store.flush().unwrap();
     let path = store.path_for("test");
     let bytes = std::fs::read(&path).unwrap();
     let text = String::from_utf8(bytes).unwrap();

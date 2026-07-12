@@ -15,6 +15,12 @@ pub enum Error {
     /// The user's home directory could not be determined.
     #[error("home directory not found")]
     NoHome,
+    /// A deferred (debounced) session write failed after `save` returned.
+    /// Surfaced via [`crate::SessionStore::flush`] /
+    /// [`crate::SessionStore::last_write_error`] so the failure is observable
+    /// rather than only warn-logged (#414).
+    #[error("session persist failed: {0}")]
+    Persist(String),
 }
 
 /// Convenience alias for `Result<T, Error>`.
