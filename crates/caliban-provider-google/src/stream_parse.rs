@@ -230,17 +230,21 @@ pub(crate) fn map_gemini_sse_to_events(
             }
         }
 
-        // Stream ended without a final chunk — close any open blocks.
+        // Stream ended without a final (finishReason) chunk — close any open
+        // blocks. The normal-end path `return`s above, so reaching here means
+        // the generation was cut short.
         if state.text_block_open {
             yield StreamEvent::ContentBlockStop {
                 index: state.text_block_index,
             };
         }
-        yield StreamEvent::MessageDelta {
-            stop_reason: Some(StopReason::EndTurn),
-            usage_delta: None,
-        };
-        yield StreamEvent::MessageStop;
+        // #424: surface the truncation as an interrupted stream so the agent
+        // loop can retry, rather than presenting the partial output as a clean
+        // EndTurn (Google always terminates a complete response with a
+        // finishReason chunk).
+        Err(ProviderError::adapter(GoogleError::StreamParse(
+            "stream ended before a finishReason chunk (truncated generation)".into(),
+        )))?;
     };
 
     Box::pin(s)

@@ -57,6 +57,11 @@ impl StreamState {
 /// non-final chunks accumulates as `Delta` events. Tool calls (typically only
 /// in the final `done: true` chunk) each get a `ContentBlockStart` + `Delta` +
 /// `ContentBlockStop` emitted in sequence.
+/// Max size of the incomplete-line buffer (#424). A newline-less stream would
+/// otherwise grow `line_buf` without bound; 8 MiB is far above any real NDJSON
+/// line yet caps a memory-exhaustion attempt.
+const MAX_LINE_BUF: usize = 8 * 1024 * 1024;
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn map_ndjson_to_events(
     bytes: BoxStream<'static, Result<Bytes, OllamaError>>,
@@ -228,25 +233,40 @@ pub(crate) fn map_ndjson_to_events(
                     return;
                 }
             }
+            // #424: bound the incomplete-line buffer — a server (or broken
+            // upstream) streaming bytes without a newline would otherwise grow
+            // `line_buf` without limit (memory-exhaustion).
+            if line_buf.len() > MAX_LINE_BUF {
+                Err(ProviderError::adapter(OllamaError::StreamParse(format!(
+                    "unterminated NDJSON line exceeds {MAX_LINE_BUF} bytes"
+                ))))?;
+            }
         }
 
-        // If the stream ended without a done:true line, close any open blocks.
+        // The stream ended without a `done:true` marker (that path `return`s
+        // above). Close any open blocks first.
         if let Some(idx) = state.thinking_block.take() {
             yield StreamEvent::ContentBlockStop { index: idx };
         }
         if let Some(idx) = state.text_block.take() {
             yield StreamEvent::ContentBlockStop { index: idx };
         }
-        let stop_reason = if state.saw_tool_calls {
-            StopReason::ToolUse
+        if state.saw_tool_calls {
+            // Tool calls streamed → the turn legitimately continues.
+            yield StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage_delta: None,
+            };
+            yield StreamEvent::MessageStop;
         } else {
-            StopReason::EndTurn
-        };
-        yield StreamEvent::MessageDelta {
-            stop_reason: Some(stop_reason),
-            usage_delta: None,
-        };
-        yield StreamEvent::MessageStop;
+            // #424: no done marker and no tool calls means the generation was cut
+            // short (load-shed / proxy close). Surface it as an interrupted
+            // stream so the agent loop can retry, rather than presenting the
+            // truncated output as a clean EndTurn.
+            Err(ProviderError::adapter(OllamaError::StreamParse(
+                "stream ended before a done marker (truncated generation)".into(),
+            )))?;
+        }
     };
 
     Box::pin(s)
