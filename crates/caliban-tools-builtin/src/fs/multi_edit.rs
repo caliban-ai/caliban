@@ -161,9 +161,11 @@ impl Tool for MultiEditTool {
 
         let path_clone = path.clone();
         let body = final_text.clone();
-        // Atomic, crash-safe write — shared via `caliban_common::fs::write_atomic`.
+        let root = self.root.clone();
+        // Confined atomic write (#415): symlink-refusing parent walk in
+        // restricted mode keeps the write inside the workspace fence.
         tokio::task::spawn_blocking(move || {
-            caliban_common::fs::write_atomic(&path_clone, body.as_bytes())
+            root.atomic_write(&path_clone, body.as_bytes())
                 .map_err(ToolError::execution)
         })
         .await

@@ -88,9 +88,11 @@ impl Tool for WriteTool {
 
         let existed_before = tokio::fs::metadata(&path).await.is_ok();
 
-        // Atomic, crash-safe write (creates parent dirs) — shared with
-        // Edit/MultiEdit/NotebookEdit via `caliban_common::fs::write_atomic`.
-        caliban_common::fs::write_atomic(&path, parsed.content.as_bytes())
+        // Confined atomic write (creates parent dirs): in restricted mode the
+        // parent chain is opened O_NOFOLLOW from the root so a symlink swapped
+        // in after `resolve` can't redirect the write out of the workspace (#415).
+        self.root
+            .atomic_write(&path, parsed.content.as_bytes())
             .map_err(ToolError::execution)?;
 
         // Fire FileChanged on success (best-effort).
@@ -167,6 +169,19 @@ mod tests {
         // File actually exists with correct content
         let written = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
         assert_eq!(written, "hello world");
+    }
+
+    #[tokio::test]
+    async fn restricted_write_creates_nested_file_via_confined_path() {
+        // #415: in restricted mode writes route through the symlink-refusing
+        // confined path; nested directory creation and the write must still work.
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool::new(WorkspaceRoot::new(tmp.path()).restricted());
+        tool.invoke(json!({"path": "a/b/c.txt", "content": "confined"}), ctx())
+            .await
+            .unwrap();
+        let got = std::fs::read_to_string(tmp.path().join("a").join("b").join("c.txt")).unwrap();
+        assert_eq!(got, "confined");
     }
 
     #[tokio::test]

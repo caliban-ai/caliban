@@ -103,6 +103,25 @@ impl WorkspaceRoot {
         Ok(canon)
     }
 
+    /// Atomically write `bytes` to an already-[`resolve`](Self::resolve)d path.
+    ///
+    /// In restricted mode the write is confined beneath the root with a
+    /// symlink-refusing open walk ([`caliban_common::fs::write_atomic_within`]),
+    /// so a symlink planted between `resolve` and the write — e.g. by a
+    /// concurrent `background: true` Bash job — cannot redirect it outside the
+    /// workspace (#415). In unrestricted mode it is an ordinary atomic write.
+    ///
+    /// # Errors
+    /// I/O errors from the underlying write; `PermissionDenied` if a confined
+    /// write would escape the root.
+    pub fn atomic_write(&self, resolved: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if self.restrict_to_root {
+            caliban_common::fs::write_atomic_within(&self.root, resolved, bytes)
+        } else {
+            caliban_common::fs::write_atomic(resolved, bytes)
+        }
+    }
+
     /// Make an absolute path relative to the workspace root if it lies within;
     /// otherwise return the input unchanged.
     #[must_use]

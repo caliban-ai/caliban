@@ -224,12 +224,13 @@ fn apply_action(notebook: &mut Value, input: &NotebookEditInput) -> Result<Strin
     }
 }
 
-/// Atomic JSON write via [`caliban_common::fs::write_atomic`]. Returns the
-/// final byte count.
-fn atomic_write_json(path: &Path, value: &Value) -> Result<usize, ToolError> {
+/// Confined atomic JSON write via [`WorkspaceRoot::atomic_write`] (#415).
+/// Returns the final byte count.
+fn atomic_write_json(root: &WorkspaceRoot, path: &Path, value: &Value) -> Result<usize, ToolError> {
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| ToolError::execution(std::io::Error::other(format!("serialize: {e}"))))?;
-    caliban_common::fs::write_atomic(path, &body).map_err(ToolError::execution)?;
+    root.atomic_write(path, &body)
+        .map_err(ToolError::execution)?;
     Ok(body.len())
 }
 
@@ -287,10 +288,12 @@ impl Tool for NotebookEditTool {
 
         let path_clone = path.clone();
         let value_clone = notebook;
-        let bytes =
-            tokio::task::spawn_blocking(move || atomic_write_json(&path_clone, &value_clone))
-                .await
-                .map_err(|e| ToolError::execution(std::io::Error::other(format!("{e}"))))??;
+        let root = self.root.clone();
+        let bytes = tokio::task::spawn_blocking(move || {
+            atomic_write_json(&root, &path_clone, &value_clone)
+        })
+        .await
+        .map_err(|e| ToolError::execution(std::io::Error::other(format!("{e}"))))??;
 
         // Fire FileChanged on success (best-effort).
         cx.fire_file_changed(
