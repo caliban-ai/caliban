@@ -89,17 +89,18 @@ pub fn render_rows(outcome: &LoadOutcome) -> Vec<ConfigRow> {
 }
 
 /// Return the scope label (`"managed"`, `"user"`, `"project"`, …) that
-/// contributed `key`. This is a best-effort lookup based on the loader's
-/// `LoadOutcome::sources` chain (highest-priority scope that declared
-/// the key wins).
+/// actually set `key` — the highest-precedence scope that declared its
+/// top-level segment, per [`LoadOutcome::provenance`] (#411).
 ///
-/// Pure-projection: we re-read each source file. For Phase 1 this is
-/// acceptable because `/config` is opened rarely; the production path
-/// caches the per-scope `Value` trees in the watcher.
-fn scope_for(outcome: &LoadOutcome, _key: &str) -> Option<String> {
-    // Phase 1 stub: report the highest-priority scope that had any
-    // settings at all. Deep per-key provenance lands with ADR 0040.
-    outcome.sources.last().map(|s| s.scope.label().to_string())
+/// Attribution is at top-level-key granularity: `permissions.allow` is
+/// attributed to whichever scope declared `permissions`. Deep per-nested-key
+/// provenance lands with ADR 0040.
+fn scope_for(outcome: &LoadOutcome, key: &str) -> Option<String> {
+    let top = key.split('.').next().unwrap_or(key);
+    outcome
+        .provenance
+        .get(top)
+        .map(|scope| scope.label().to_string())
 }
 
 /// Render to plain text for `caliban config print`.
@@ -196,9 +197,57 @@ mod tests {
     }
 
     #[test]
-    fn scope_for_returns_last_source() {
+    fn scope_for_reports_declaring_scope() {
         let outcome = build_outcome();
-        let label = scope_for(&outcome, "model").unwrap();
-        assert_eq!(label, "user");
+        // `model` is set only in the user scope.
+        assert_eq!(scope_for(&outcome, "model").as_deref(), Some("user"));
+        // Nested keys resolve to their top-level segment's scope.
+        assert_eq!(
+            scope_for(&outcome, "permissions.allow").as_deref(),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn scope_for_attributes_each_key_to_its_true_scope() {
+        // #411 acceptance: a value set in a *lower* scope while a *higher* scope
+        // contributes other keys must be attributed to the scope that set it,
+        // not merely the top contributing scope.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        // User scope (lower) sets `model`.
+        let user_dir = tmp.path().join("user-config");
+        std::fs::create_dir_all(user_dir.join("caliban")).unwrap();
+        std::fs::write(
+            user_dir.join("caliban/settings.json"),
+            r#"{"model": "user-m"}"#,
+        )
+        .unwrap();
+        // Project scope (higher) sets a *different* key, `agent`.
+        std::fs::create_dir_all(ws.join(".caliban")).unwrap();
+        std::fs::write(ws.join(".caliban/settings.json"), r#"{"agent": "proj-a"}"#).unwrap();
+
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: crate::ScopePaths {
+                managed_root: None,
+                user_config_dir: Some(user_dir),
+            },
+            ..LoadOptions::default()
+        };
+        let outcome = crate::load_settings(&opts).unwrap();
+
+        // The bug: `scope_for` used to return `sources.last()` (project) for
+        // every key. It must now attribute each key to its real source.
+        assert_eq!(
+            scope_for(&outcome, "model").as_deref(),
+            Some("user"),
+            "model was set in the user scope, not project"
+        );
+        assert_eq!(
+            scope_for(&outcome, "agent").as_deref(),
+            Some("project"),
+            "agent was set in the project scope"
+        );
     }
 }

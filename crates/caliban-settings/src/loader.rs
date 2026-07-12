@@ -7,7 +7,7 @@
 //! rule: `.toml` is the native format and wins when both files are present;
 //! `.json` is a legacy/import path that emits a one-time WARN.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -143,6 +143,11 @@ pub struct LoadOutcome {
     pub settings: Settings,
     /// Per-scope provenance for the `/config` overlay.
     pub sources: Vec<ScopeSource>,
+    /// True per-key provenance: each top-level settings key mapped to the
+    /// highest-precedence scope that actually declared it (#411). `/config`
+    /// and `caliban config print` use this to attribute a value to the scope
+    /// that set it, not merely the top contributing scope.
+    pub provenance: BTreeMap<String, Scope>,
     /// Schema-validation warnings collected per scope (empty when
     /// valid).
     pub validation_warnings: Vec<String>,
@@ -223,6 +228,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         return Ok(LoadOutcome {
             settings: Settings::default(),
             sources: Vec::new(),
+            provenance: BTreeMap::new(),
             validation_warnings: Vec::new(),
         });
     }
@@ -349,6 +355,50 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         });
     }
 
+    // Step 5b: per-key provenance (#411). Attribute each top-level key to the
+    // highest-precedence scope that declared it, by folding the raw per-scope
+    // values in the *same* lowest→highest precedence order the merge used — a
+    // later scope's key overwrites the record. Computed independently of the
+    // merge so it stays correct in the `managed_blocks` case (where the CLI
+    // overlay sits below the managed scope rather than on top).
+    let mut provenance: BTreeMap<String, Scope> = BTreeMap::new();
+    let mut prov_order: Vec<(Scope, &Value)> = Vec::new();
+    let scope_value = |sc: Scope| {
+        per_scope
+            .iter()
+            .find(|(s, _, _)| *s == sc)
+            .map(|(_, v, _)| v)
+    };
+    if managed_blocks {
+        for sc in [Scope::User, Scope::Project, Scope::Local] {
+            if let Some(v) = scope_value(sc) {
+                prov_order.push((sc, v));
+            }
+        }
+        if let Some(cli) = opts.cli_overlay.as_ref() {
+            prov_order.push((Scope::Cli, cli));
+        }
+        if let Some(v) = scope_value(Scope::Managed) {
+            prov_order.push((Scope::Managed, v));
+        }
+    } else {
+        for sc in [Scope::Managed, Scope::User, Scope::Project, Scope::Local] {
+            if let Some(v) = scope_value(sc) {
+                prov_order.push((sc, v));
+            }
+        }
+        if let Some(cli) = opts.cli_overlay.as_ref() {
+            prov_order.push((Scope::Cli, cli));
+        }
+    }
+    for (sc, v) in prov_order {
+        if let Value::Object(map) = v {
+            for k in map.keys() {
+                provenance.insert(k.clone(), sc);
+            }
+        }
+    }
+
     // Step 6: deserialize.
     let mut settings: Settings = serde_json::from_value(accumulated).map_err(LoadError::Final)?;
 
@@ -371,6 +421,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
     Ok(LoadOutcome {
         settings,
         sources,
+        provenance,
         validation_warnings: warnings,
     })
 }
