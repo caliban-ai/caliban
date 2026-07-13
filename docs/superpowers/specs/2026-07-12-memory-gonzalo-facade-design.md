@@ -45,7 +45,7 @@ caliban-memory
 | **RecordKey** | `("caliban", "memory:<workspace-slug>", "<slug>")`. Namespace fixed. **Collection encodes the workspace** (derived from the memory-dir identity) so a shared/remote store keeps workspaces separate and `list(ns, "memory:<slug>")` enumerates exactly that workspace's topics. `id` = topic slug. |
 | **RecordKind** | `Topic` (AppendOnly). See caveat. |
 | **Body** | `Body::Inline(json)` where `json` is the serialized `TopicFile` — frontmatter (name, description, kind) **+ the markdown body**. Opaque and lossless; **not** the lossy `gonzalo::Topic{slug,bullets}`. Round-trips equivalent to today's `.md`. |
-| **Meta** | `author` = a fixed caliban `Identity`; `origin_system = "caliban"`; `created`/`updated` = now (epoch millis); `labels` carry the topic kind. |
+| **Meta** | `author` = **the git identity if detectable** (`git config user.email`, falling back to `user.name`), else the constant `"caliban"` `Identity` — resolved once at backend construction, not per write; `origin_system = "caliban"`; `created`/`updated` = now (epoch millis); `labels` carry the topic kind. |
 | **Write (OCC)** | get current → `put(new_record, expected=Some(current.revision))`, or `expected=None` to create. Revision minted via gonzalo's `Revision` (counter + blake3 body hash). |
 | **Delete** | `Store::delete(key, None)` — unconditional, idempotent (matches today's idempotent delete). |
 | **Index** | `index()` rebuilds `MEMORY.md` from `list()` + summaries (`- [title](slug.md) — kind: desc`). The conventions block + 200-line / 25 KB caps stay in `loader.rs::load` where they are today. |
@@ -87,3 +87,4 @@ Every caller is already in an async context, so the conversion is mechanical `.a
 - Sessions (#471), checkpoints (#472), the migrator itself (#474).
 - Multi-writer remote-sync merge semantics for opaque memory bodies (tracked with #471's concern).
 - git/s3/remote substrates (the pilot exercises `gonzalo::FsStore`; remote works by construction once #473 wires selection).
+- **`/memory edit`** stays an fs-path affordance: it opens the raw `.md` in `$EDITOR` via `cfg.auto_memory_dir` directly (not through the backend), and `TopicLoader::dir()` is dropped from the abstraction. Reworking `/memory edit` for non-fs substrates (fetch → temp file → edit → write-back) is deferred to #473. All other `/memory` subcommands (list/show/delete) route through the async backend.
