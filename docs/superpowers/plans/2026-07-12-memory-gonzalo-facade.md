@@ -38,7 +38,9 @@
 
 ---
 
-## Task 1: `MemoryError` variants + `TopicBackend` trait + `TopicLoader` facade
+## Task 1: `MemoryError` variants + `TopicBackend` trait (purely additive)
+
+**This task is additive — it removes nothing, so `cargo build --workspace` stays green.** The async `TopicLoader` facade and deletion of the old sync `TopicLoader` happen in Task 2 (they can't land until `FsTopicBackend` exists). From Task 2 onward the downstream crates (`caliban-tools-builtin`, `caliban`) will not compile until Task 7 rewires callers; per-task verification for Tasks 2–6 is scoped to `cargo test -p caliban-memory`. Task 7 restores the workspace build; Task 8 gates it.
 
 **Files:**
 - Modify: `crates/caliban-memory/src/error.rs`
@@ -46,7 +48,7 @@
 - Modify: `crates/caliban-memory/src/lib.rs`, `crates/caliban-memory/Cargo.toml`
 
 **Interfaces:**
-- Produces: `MemoryError::Backend(String)`, `MemoryError::Conflict { key: String }`; trait `TopicBackend: Send + Sync` with async `list()->Result<Vec<TopicSummary>>`, `read(&str)->Result<TopicFile>`, `write(&TopicDraft)->Result<String>` (display locator), `delete(&str)->Result<()>`, `index()->Result<String>`; `TopicLoader::with_backend(Box<dyn TopicBackend>)` + async delegators.
+- Produces: `MemoryError::Backend(String)`, `MemoryError::Conflict { key: String }`; trait `TopicBackend: Send + Sync` with async `list()->Result<Vec<TopicSummary>>`, `read(&str)->Result<TopicFile>`, `write(&TopicDraft)->Result<String>` (display locator), `delete(&str)->Result<()>`, `index()->Result<String>`. (The `TopicLoader` facade is produced in Task 2.)
 
 - [ ] **Step 1: Add the `async-trait` dependency**
 
@@ -97,13 +99,11 @@ In `crates/caliban-memory/src/error.rs`, add to the `MemoryError` enum:
 Run: `cargo test -p caliban-memory conflict_and_backend_variants_display`
 Expected: PASS.
 
-- [ ] **Step 6: Write the failing test for the trait + facade delegation**
+- [ ] **Step 6: Define the `TopicBackend` trait + object-safety test**
 
-Create `crates/caliban-memory/src/backend/mod.rs`:
+Create `crates/caliban-memory/src/backend/mod.rs` (trait only — no facade yet; the old `auto::TopicLoader` is untouched this task):
 ```rust
 //! The storage seam for auto-memory topics.
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 
 use crate::auto::{TopicDraft, TopicFile, TopicSummary};
@@ -121,40 +121,37 @@ pub trait TopicBackend: Send + Sync {
     async fn index(&self) -> Result<String>;
 }
 
-/// Public facade over a chosen [`TopicBackend`]. `new` selects the fs backend
-/// (behaviour-equivalent to the historical std::fs loader).
-pub struct TopicLoader {
-    backend: Box<dyn TopicBackend>,
-}
-
-impl TopicLoader {
-    #[must_use]
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { backend: Box::new(super::backend::fs::FsTopicBackend::new(dir)) }
-    }
-
-    #[must_use]
-    pub fn with_backend(backend: Box<dyn TopicBackend>) -> Self {
-        Self { backend }
-    }
-
-    pub async fn list(&self) -> Result<Vec<TopicSummary>> { self.backend.list().await }
-    pub async fn read(&self, name: &str) -> Result<TopicFile> { self.backend.read(name).await }
-    pub async fn write(&self, draft: &TopicDraft) -> Result<String> { self.backend.write(draft).await }
-    pub async fn delete(&self, name: &str) -> Result<()> { self.backend.delete(name).await }
-    pub async fn index(&self) -> Result<String> { self.backend.index().await }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auto::{TopicDraft, TopicKind};
+    use std::sync::Mutex;
+
+    /// Minimal in-memory backend proving the trait is object-safe (`Box<dyn>`),
+    /// async, and Result-plumbed. Task 2 adds the real FsTopicBackend + facade.
+    #[derive(Default)]
+    struct MockBackend {
+        writes: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TopicBackend for MockBackend {
+        async fn list(&self) -> Result<Vec<TopicSummary>> { Ok(Vec::new()) }
+        async fn read(&self, _name: &str) -> Result<TopicFile> {
+            Err(crate::error::MemoryError::Backend("mock".into()))
+        }
+        async fn write(&self, draft: &TopicDraft) -> Result<String> {
+            self.writes.lock().unwrap().push(draft.name.clone());
+            Ok(format!("mock:{}", draft.name))
+        }
+        async fn delete(&self, _name: &str) -> Result<()> { Ok(()) }
+        async fn index(&self) -> Result<String> { Ok(String::new()) }
+    }
 
     #[tokio::test]
-    async fn facade_delegates_write_then_list_to_fs_backend() {
-        let tmp = tempfile::tempdir().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        loader
+    async fn trait_is_object_safe_and_delegates_as_dyn() {
+        let backend: Box<dyn TopicBackend> = Box::new(MockBackend::default());
+        let locator = backend
             .write(&TopicDraft {
                 name: "alpha".into(),
                 description: "first".into(),
@@ -163,31 +160,31 @@ mod tests {
             })
             .await
             .unwrap();
-        let names: Vec<_> = loader.list().await.unwrap().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["alpha".to_string()]);
+        assert_eq!(locator, "mock:alpha");
+        assert!(backend.list().await.unwrap().is_empty());
     }
-
-    pub(crate) mod fs {} // placeholder module path resolved once fs.rs lands
 }
 ```
 Add to `crates/caliban-memory/src/lib.rs`:
 ```rust
 pub mod backend;
-pub use backend::{TopicBackend, TopicLoader};
+pub use backend::TopicBackend;
 ```
-Remove the old `pub use ... TopicLoader` line in `auto.rs`/`lib.rs` (TopicLoader now lives in `backend`).
+Leave the existing `auto::TopicLoader` (and its `pub use`) exactly as-is — Task 2 replaces it. This task adds only new symbols, so nothing downstream breaks.
 
-- [ ] **Step 7: Run to verify it fails to compile**
+- [ ] **Step 7: Run the trait test + confirm the whole workspace still builds**
 
-Run: `cargo test -p caliban-memory facade_delegates_write_then_list_to_fs_backend`
-Expected: FAIL — `FsTopicBackend` unresolved (implemented in Task 2). This task's deliverable is the trait + error + facade skeleton; the delegation test goes green at the end of Task 2. Remove the `pub(crate) mod fs {}` placeholder — it exists only to name the intent; the real module is declared in Task 2.
+Run: `cargo test -p caliban-memory trait_is_object_safe_and_delegates_as_dyn`
+Expected: PASS (the trait compiles, is object-safe as `Box<dyn TopicBackend>`, and the mock delegates). This is a definitional task — the test proves object-safety and async/Result plumbing rather than failing first.
+Run: `cargo build --workspace`
+Expected: PASS — Task 1 is purely additive; nothing downstream is touched.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add crates/caliban-memory/src/error.rs crates/caliban-memory/src/backend/mod.rs \
         crates/caliban-memory/src/lib.rs crates/caliban-memory/Cargo.toml
-git commit -m "feat(memory): TopicBackend trait + facade skeleton + error variants (#470)"
+git commit -m "feat(memory): TopicBackend trait + MemoryError variants (#470)"
 ```
 
 ---
@@ -196,11 +193,13 @@ git commit -m "feat(memory): TopicBackend trait + facade skeleton + error varian
 
 **Files:**
 - Create: `crates/caliban-memory/src/backend/fs.rs`
-- Modify: `crates/caliban-memory/src/backend/mod.rs` (declare `pub(crate) mod fs;`), `crates/caliban-memory/src/auto.rs` (retire index-line helpers; expose `render_topic_file`, `read_summary_from_str`)
+- Modify: `crates/caliban-memory/src/backend/mod.rs` (declare `pub(crate) mod fs;`; add the async `TopicLoader` facade), `crates/caliban-memory/src/auto.rs` (delete the old sync `TopicLoader`; retire index-line helpers), `crates/caliban-memory/src/lib.rs` (export `TopicLoader` + `FsTopicBackend` from `backend`; drop the `auto::TopicLoader` re-export)
 
 **Interfaces:**
 - Consumes: `TopicBackend` (Task 1), `TopicDraft`/`TopicFile`/`TopicSummary`/`TopicKind`/`validate_slug`/`render_topic_file`/`parse_frontmatter` (auto.rs).
-- Produces: `FsTopicBackend::new(dir: impl Into<PathBuf>) -> Self`; `pub(crate) fn derive_index(summaries: &[TopicSummary]) -> String` (shared index derivation used by both backends).
+- Produces: `FsTopicBackend::new(dir: impl Into<PathBuf>) -> Self`; `pub(crate) fn derive_index(summaries: &[TopicSummary]) -> String` (shared index derivation used by both backends); the async facade `TopicLoader { fn new(impl Into<PathBuf>)->Self (fs default), fn with_backend(Box<dyn TopicBackend>)->Self, + async list/read/write/delete/index delegators }`.
+
+**Note:** from this task onward `caliban-tools-builtin` and the `caliban` binary will not compile (they still call the old sync `TopicLoader` API); Task 7 rewires them. Verify this task with `cargo test -p caliban-memory`, **not** `cargo build --workspace`.
 
 - [ ] **Step 1: Write the failing test — list/read/write/delete + index derivation over tokio::fs**
 
@@ -387,6 +386,46 @@ In `crates/caliban-memory/src/backend/mod.rs`, add near the top:
 pub(crate) mod fs;
 pub use fs::FsTopicBackend;
 ```
+Then add the async facade to `backend/mod.rs` (this is the new `TopicLoader`):
+```rust
+use std::path::PathBuf;
+
+/// Public facade over a chosen [`TopicBackend`]. `new` selects the fs backend
+/// (behaviour-equivalent to the historical std::fs loader).
+pub struct TopicLoader {
+    backend: Box<dyn TopicBackend>,
+}
+
+impl TopicLoader {
+    #[must_use]
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { backend: Box::new(FsTopicBackend::new(dir)) }
+    }
+
+    #[must_use]
+    pub fn with_backend(backend: Box<dyn TopicBackend>) -> Self {
+        Self { backend }
+    }
+
+    pub async fn list(&self) -> Result<Vec<TopicSummary>> { self.backend.list().await }
+    pub async fn read(&self, name: &str) -> Result<TopicFile> { self.backend.read(name).await }
+    pub async fn write(&self, draft: &TopicDraft) -> Result<String> { self.backend.write(draft).await }
+    pub async fn delete(&self, name: &str) -> Result<()> { self.backend.delete(name).await }
+    pub async fn index(&self) -> Result<String> { self.backend.index().await }
+}
+```
+Add a facade delegation test to `backend/mod.rs` tests:
+```rust
+    #[tokio::test]
+    async fn facade_new_uses_fs_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        loader.write(&TopicDraft { name: "alpha".into(), description: "d".into(), kind: TopicKind::Project, body: "b".into() }).await.unwrap();
+        let names: Vec<_> = loader.list().await.unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["alpha".to_string()]);
+    }
+```
+Delete the old sync `TopicLoader` from `crates/caliban-memory/src/auto.rs` (the struct + its inherent `new`/`list`/`read`/`write`/`delete`/`dir` methods and their tests) — the facade above replaces it. In `crates/caliban-memory/src/lib.rs`, change the backend re-export to `pub use backend::{FsTopicBackend, TopicBackend, TopicLoader};` and remove any `pub use auto::TopicLoader;`.
 In `crates/caliban-memory/src/auto.rs`, add two pure-string constructors used above (extract from the existing `read_summary`/`read` bodies so the parsing logic is shared, not duplicated). **Note the real structs are flat and carry a `path: PathBuf`:** `TopicSummary { name, description, kind, path }` and `TopicFile { name, description, kind, body, path }` — there is no nested `summary` field.
 ```rust
 impl TopicSummary {
@@ -420,7 +459,7 @@ Then delete `update_index_line`, `remove_index_line`, `rewrite_with_index_line`,
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p caliban-memory -- backend::fs`
-Expected: PASS. Then `cargo test -p caliban-memory facade_delegates_write_then_list_to_fs_backend` — PASS (Task 1's delegation test now resolves).
+Expected: PASS. Then `cargo test -p caliban-memory facade_new_uses_fs_backend` — PASS (the facade's `new` wires the fs backend). Verify with `cargo test -p caliban-memory` (crate-scoped); do **not** run `cargo build --workspace` (downstream callers break until Task 7).
 
 - [ ] **Step 5: Port the surviving auto.rs behavior tests to the backend**
 
