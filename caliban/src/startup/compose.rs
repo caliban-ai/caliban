@@ -491,9 +491,25 @@ fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
             ..FilesystemAcl::default()
         },
         network: NetworkAcl {
-            // Keep egress open: fencing writes must not break `git fetch` /
-            // `cargo` / `curl`.
-            allow_all_outbound: true,
+            // Egress is CLOSED (#406, ADR 0054).
+            //
+            // Reads are deliberately open above (`allow_read: ["/"]`) — no
+            // mainstream agent read-jails, and a sandboxed command legitimately
+            // needs ~/.gitconfig, ~/.cargo, and the like. That is defensible
+            // *only* while the child cannot phone home: it may read
+            // ~/.aws/credentials, but it has nowhere to send it. Conceding reads
+            // and egress together concedes credential exfiltration outright, and
+            // the child runs as the same uid, so file modes buy nothing.
+            //
+            // Loopback stays up so localhost test/dev servers keep working —
+            // free via `--unshare-net` on Linux, an explicit rule on macOS.
+            //
+            // Opt out with `--sandbox-network=allow` when a run genuinely needs
+            // the network (`git fetch`, `cargo` against crates.io, `gh`).
+            // Per-hostname allowlists need a proxy — neither backend can filter
+            // egress by name (#403); tracked in #477.
+            allow_all_outbound: false,
+            allow_local_binding: true,
             ..NetworkAcl::default()
         },
         ..Policy::default()
@@ -1753,10 +1769,26 @@ mod tests {
             !p.fail_if_unavailable,
             "must be best-effort (fail-open) so a missing backend doesn't break Bash"
         );
-        // Reads open (write fence, not read jail).
+        // Reads open (write fence, not read jail). This stays — and it is only
+        // defensible *because* egress is closed below: a command may read
+        // ~/.aws/credentials but has nowhere to send it (#406).
         assert_eq!(p.filesystem.allow_read, vec![std::path::PathBuf::from("/")]);
-        // Network open so git/cargo/curl still work.
-        assert!(p.network.allow_all_outbound);
+        // Egress CLOSED (#406). Opening reads *and* egress together concedes
+        // credential exfiltration outright.
+        assert!(
+            !p.network.allow_all_outbound,
+            "the workspace fence must NOT grant blanket egress (#406)"
+        );
+        // ...but loopback stays up, so localhost test/dev servers still work.
+        assert!(
+            p.network.allow_local_binding,
+            "loopback must remain usable inside the sandbox"
+        );
+        // Domain lists require a proxy to enforce (#403); the fence ships none.
+        assert!(
+            p.network.allowed_domains.is_empty() && p.network.denied_domains.is_empty(),
+            "bare domain lists are unenforceable without a proxy (#403/#477)"
+        );
         // Workspace root is writable; a sibling outside it is not.
         assert!(
             p.filesystem
