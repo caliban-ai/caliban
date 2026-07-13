@@ -9,6 +9,7 @@ authors.workspace      = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 caliban-common = { workspace = true }
 tokio       = { workspace = true, features = ["fs", "io-util"] }
 tracing     = { workspace = true }
