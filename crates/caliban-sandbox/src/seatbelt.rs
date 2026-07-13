@@ -102,6 +102,24 @@ pub fn render_profile(policy: &Policy) -> String {
         let _ = writeln!(out, ";; Network: unrestricted egress (allow_all_outbound).");
         let _ = writeln!(out, "(allow network*)");
         let _ = writeln!(out, "(allow mach-lookup)");
+    } else if net.allow_local_binding {
+        // Loopback only (#406). The child may bind and connect to 127.0.0.1 —
+        // test servers, dev servers, suites that spin up a listener — but has no
+        // route off the box.
+        //
+        // This exists because the two backends are NOT symmetric. On Linux,
+        // `--unshare-net` gives loopback for free: the isolated netns has `lo`
+        // up. Seatbelt is `(deny default)`, so emitting no network rule denies
+        // loopback along with egress. Without this branch, closing egress would
+        // break every localhost test suite on macOS and nowhere else.
+        //
+        // No `mach-lookup`: DNS resolution goes through mDNSResponder over Mach,
+        // and a loopback-only child has no business resolving public names.
+        let _ = writeln!(out, ";; Network: loopback only (allow_local_binding).");
+        let _ = writeln!(
+            out,
+            r#"(allow network* (local ip "*:*") (remote ip "localhost:*"))"#
+        );
     }
     // No per-host `allowed_domains` branch: Seatbelt's `(remote tcp …)` filter
     // matches resolved socket addresses, not hostnames, so `(remote tcp
@@ -148,6 +166,41 @@ mod tests {
 
     use super::*;
     use crate::config::{FilesystemAcl, NetworkAcl, Policy};
+
+    #[test]
+    fn local_binding_allows_loopback_only() {
+        // Seatbelt is `(deny default)`, so with no network rule even loopback is
+        // denied — unlike bwrap's --unshare-net, which keeps `lo` up inside the
+        // isolated netns. Without an explicit loopback branch, closing egress
+        // (#406) would also kill every localhost test/dev server, on macOS only.
+        let p = Policy {
+            enabled: true,
+            network: NetworkAcl {
+                allow_local_binding: true,
+                allow_all_outbound: false,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        let s = render_profile(&p);
+        assert!(
+            s.contains(r#"(remote ip "localhost:*")"#),
+            "loopback must be permitted when allow_local_binding is set:\n{s}"
+        );
+        assert!(
+            !s.contains("(allow network*)"),
+            "must NOT emit a blanket network allow — that is full egress:\n{s}"
+        );
+    }
+
+    #[test]
+    fn no_network_flags_denies_all_network() {
+        let s = render_profile(&Policy::default());
+        assert!(
+            !s.contains("(allow network"),
+            "a default policy must emit no network allow at all:\n{s}"
+        );
+    }
 
     fn make_policy() -> Policy {
         Policy {
