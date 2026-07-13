@@ -90,15 +90,21 @@ pub fn build_args(policy: &Policy) -> Vec<OsString> {
     // bwrap can't filter per-hostname, so those lists are enforceable only via
     // the proxy (`validate_policy` rejects them otherwise). Keeping the network
     // open for a domain list would grant ALL egress — the inversion #403 fixes.
+    //
+    // `allow_local_binding` does NOT keep the namespace open either (#476):
+    // `--unshare-net` *is* the loopback-only posture on Linux — bwrap brings `lo`
+    // up inside the fresh netns, so the child can still bind and connect to
+    // 127.0.0.1; it simply has no route off the box. Letting `allow_local_binding`
+    // suppress `--unshare-net` kept the host network namespace and granted ALL
+    // egress — a local-sounding permission silently opening the whole internet.
     if allow_proxy {
         // Deny direct egress; only the operator's loopback proxy is reachable.
         // The proxy enforces domain rules.
         push_str(&mut args, "--unshare-net");
-    } else if !net.allow_all_outbound && !net.allow_local_binding {
+    } else if !net.allow_all_outbound {
         push_str(&mut args, "--unshare-net");
     }
-    // Otherwise (`allow_all_outbound` or `allow_local_binding`): keep the
-    // network namespace so egress works.
+    // Otherwise (`allow_all_outbound`): keep the network namespace so egress works.
 
     if !net.allow_unix_sockets {
         // Default: hide the most common host sockets so accidental
@@ -162,6 +168,44 @@ mod tests {
     fn contains_triple(args: &[OsString], flag: &str, a: &str, b: &str) -> bool {
         args.windows(3)
             .any(|w| w[0] == os(flag) && w[1] == os(a) && w[2] == os(b))
+    }
+
+    #[test]
+    fn local_binding_does_not_grant_egress() {
+        // #476: `allow_local_binding` is *satisfied by* --unshare-net — bwrap
+        // brings `lo` up inside the fresh netns, so the child can still bind and
+        // connect to 127.0.0.1. Letting it suppress --unshare-net kept the host
+        // network namespace and granted ALL egress: a local-sounding permission
+        // silently opening the whole internet (the #403 failure mode).
+        let p = Policy {
+            network: NetworkAcl {
+                allow_local_binding: true,
+                allow_all_outbound: false,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        let args = build_args(&p);
+        assert!(
+            args.contains(&os("--unshare-net")),
+            "allow_local_binding must still isolate the network namespace; got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn allow_all_outbound_keeps_host_netns() {
+        let p = Policy {
+            network: NetworkAcl {
+                allow_all_outbound: true,
+                ..NetworkAcl::default()
+            },
+            ..Policy::default()
+        };
+        let args = build_args(&p);
+        assert!(
+            !args.contains(&os("--unshare-net")),
+            "allow_all_outbound must keep the host network namespace"
+        );
     }
 
     #[test]
@@ -350,18 +394,11 @@ mod tests {
         assert!(args.contains(&os("--unshare-net")));
     }
 
-    #[test]
-    fn local_binding_keeps_net_namespace() {
-        let p = Policy {
-            network: NetworkAcl {
-                allow_local_binding: true,
-                ..NetworkAcl::default()
-            },
-            ..Policy::default()
-        };
-        let args = build_args(&p);
-        assert!(!args.contains(&os("--unshare-net")));
-    }
+    // NOTE: `local_binding_keeps_net_namespace` used to live here, asserting the
+    // exact inverse — that `allow_local_binding` suppresses `--unshare-net`. That
+    // test pinned the #476 fail-open in place: it encoded "keep the host netns"
+    // as intended behavior, when keeping the host netns *is* full egress. It is
+    // superseded by `local_binding_does_not_grant_egress` above.
 
     #[test]
     fn unicode_path_in_allow_write_preserved() {
