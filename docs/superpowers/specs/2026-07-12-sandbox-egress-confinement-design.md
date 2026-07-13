@@ -2,6 +2,10 @@
 
 - **Date:** 2026-07-12
 - **Tickets:** #406 (primary), #399 (epic). Demotes #405 to a follow-up.
+- **Depends on:** #476 (bwrap `allow_local_binding` fail-open — must be fixed or
+  this design's `allow_local_binding: true` silently restores full egress)
+- **Followed by:** #477 (loopback egress proxy → per-domain allowlists; the
+  answer to "let a sandboxed run open a PR")
 - **Status:** designed, not implemented
 - **Target release:** 0.7.0 (breaking)
 
@@ -115,13 +119,19 @@ and set `allow_local_binding: true` in `workspace_fence_policy()`. Loopback
 inside the sandbox is a low-exfil-risk convenience that keeps ordinary test
 suites working on both platforms.
 
-Note the existing bwrap condition (`!allow_all_outbound && !allow_local_binding`
-→ `--unshare-net`) is correct as written for this: with `allow_local_binding:
-true` bwrap would *not* unshare the net namespace, which is wrong — it would
-leave real egress open. The bwrap branch must be changed so that
-`allow_local_binding` alone still yields `--unshare-net` (isolated netns *is*
-the loopback-only posture on Linux); only `allow_all_outbound` or a proxy port
-should keep the host namespace.
+**This depends on #476.** The existing bwrap condition
+(`!allow_all_outbound && !allow_local_binding` → `--unshare-net`) means that
+setting `allow_local_binding: true` makes bwrap *skip* `--unshare-net` and leave
+the host network namespace intact — **granting full egress**. A latent
+#403-class fail-open: a narrow, local-sounding permission silently opens the
+whole internet. Dormant today only because the policy is not user-settable — but
+this design sets `allow_local_binding: true`, which would make it live and
+silently undo the egress close this ticket exists to deliver.
+
+`--unshare-net` **is** the loopback-only posture on Linux (isolated netns with
+`lo` up), so `allow_local_binding` must not suppress it. Only `allow_all_outbound`
+or a proxy port should keep the host namespace. Fix #476 first, or as part of
+this change.
 
 ### 3. Wire the config surface (hard prerequisite)
 
@@ -167,9 +177,26 @@ Emit a one-line startup notice on the first sandboxed run for the same reason.
   `deny_read` masks on `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, and
   `mcp-tokens.json` using the mask machinery #407 fixed. Keep #405 open,
   re-scoped to this.
-- **Per-domain allowlists** via the loopback proxy (the Claude Code model).
-  `http_proxy_port`/`socks_proxy_port` already exist in the policy and are
-  honored by both backends; nothing ships a proxy. Future work.
+- **Per-domain allowlists** via a loopback egress proxy — **#477**, which
+  *depends on this ticket*. Neither backend can filter egress by hostname (bwrap
+  only toggles the netns; Seatbelt's `(remote tcp …)` matches resolved socket
+  addresses, not hostnames), which is exactly why #403 made bare domain lists
+  fail closed. A hostname-aware allowlist therefore **requires a proxy outside
+  the sandbox** — the Claude Code architecture.
+
+  The hook is already built: `http_proxy_port`/`socks_proxy_port` exist in the
+  policy and **both backends already honor them**, locking the child to
+  `127.0.0.1:<port>`. Only the proxy process is missing.
+
+  **This is the answer to "how do I let a sandboxed run open a PR?"** Until #477
+  lands, the only opt-out is the blunt `--sandbox-network=allow` (§3), which
+  restores *all* egress. That is an acceptable first cut, but it is the reason
+  #477 should follow closely rather than sit in the backlog.
+
+  Limitation to document when it lands: an allowlist bounds *where* data can go,
+  not *what*. Allowing `github.com` so `gh pr create` works equally permits
+  `gh gist create` — the credentials are *for* the allowed host. Claude Code
+  documents the same weakness (no TLS termination by default).
 - Read confinement. Explicitly rejected — not industry practice, high breakage,
   low marginal value once egress is shut.
 
