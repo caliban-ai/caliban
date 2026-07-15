@@ -9,6 +9,28 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-15
+
+This release makes the `--workspace` sandbox a **real confinement boundary**.
+Where 0.6.0 had to disclose that the sandbox was *not* a secrets boundary — it
+conceded filesystem reads, network egress, and the full process environment all
+at once — 0.7.0 closes egress by default and scrubs secrets from the child's
+environment. A sandboxed Bash command can now read the disk but cannot send
+anything off the machine. **Review before upgrading:** this is a **breaking**
+change — `--workspace` now also means "no network", so `git fetch`, `cargo`
+against crates.io, `npm install`, and `gh` fail inside sandboxed commands until
+you opt out with `--sandbox-network=allow`. Reads stay open by design (see ADR
+0054), which is safe *only* because egress is now shut.
+
+**Not in this release — a known, deliberate gap.** The egress opt-out is
+all-or-nothing: `--sandbox-network=allow` re-opens the entire network, and there
+is **no per-hostname allowlist** yet (e.g. "allow `github.com` so a run can open
+a PR, and nothing else"). That is not a small feature — neither sandbox backend
+can filter egress by hostname, so it requires a loopback proxy running outside
+the sandbox. It is designed and tracked as a follow-up in **#477**. A
+complementary read-side control (denying reads of the canonical credential
+stores) is tracked in **#481**.
+
 ### Changed
 
 - **Sandboxed Bash commands can no longer reach the network** (#406) —
@@ -532,7 +554,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/caliban-ai/caliban/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/caliban-ai/caliban/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/caliban-ai/caliban/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/caliban-ai/caliban/compare/v0.3.0...v0.4.0
