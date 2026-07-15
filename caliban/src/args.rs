@@ -24,6 +24,31 @@ pub(crate) enum ProviderKind {
     Google,
 }
 
+/// CLI spelling of the sandbox egress posture (`--sandbox-network`). Kept
+/// separate from `caliban_settings::SandboxNetwork` so the settings crate does
+/// not take a clap dependency; `sandbox_network()` maps one to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SandboxNetworkArg {
+    /// Block egress (the default under `--workspace`). Loopback still works.
+    Deny,
+    /// Allow full egress — for runs that need `git fetch` / `cargo` / `gh`.
+    Allow,
+}
+
+/// Resolve the sandbox egress posture: CLI beats `settings.json`, which beats
+/// the fence default (deny, #406).
+pub(crate) fn sandbox_network(
+    args: &Args,
+    settings: &caliban_settings::Settings,
+) -> caliban_settings::SandboxNetwork {
+    use caliban_settings::SandboxNetwork;
+    match args.sandbox_network {
+        Some(SandboxNetworkArg::Allow) => SandboxNetwork::Allow,
+        Some(SandboxNetworkArg::Deny) => SandboxNetwork::Deny,
+        None => settings.sandbox.network.unwrap_or(SandboxNetwork::Deny),
+    }
+}
+
 pub(crate) fn default_model_for(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "claude-sonnet-4-6",
@@ -329,6 +354,15 @@ pub(crate) struct Args {
         value_parser = parse_bool_flag
     )]
     pub(crate) no_restrict_paths: bool,
+
+    /// Egress posture for sandboxed Bash commands. Defaults to `deny` whenever
+    /// the workspace fence is active (#406): a sandboxed command may read the
+    /// disk but cannot reach the network. Pass `allow` when a run genuinely
+    /// needs `git fetch` / `cargo` / `gh` — note that this also re-opens the
+    /// credential-exfiltration path the fence exists to close. Loopback works
+    /// either way, so localhost test servers are unaffected.
+    #[arg(long = "sandbox-network", value_name = "deny|allow", value_enum)]
+    pub(crate) sandbox_network: Option<SandboxNetworkArg>,
 
     /// Suppress tool-execution announcements
     #[arg(
@@ -1192,6 +1226,40 @@ mod tests {
             assert_eq!(parse_bool_flag(f), Ok(false), "{f}");
         }
         assert!(parse_bool_flag("maybe").is_err());
+    }
+
+    #[test]
+    fn sandbox_network_cli_beats_settings() {
+        let mut settings = caliban_settings::Settings::default();
+        settings.sandbox.network = Some(caliban_settings::SandboxNetwork::Deny);
+
+        let args = parse(&["--workspace", "/tmp", "--sandbox-network=allow"]);
+        assert_eq!(
+            super::sandbox_network(&args, &settings),
+            caliban_settings::SandboxNetwork::Allow,
+            "the CLI flag must win over settings.json"
+        );
+    }
+
+    #[test]
+    fn sandbox_network_falls_back_to_settings_then_deny() {
+        // settings only
+        let mut settings = caliban_settings::Settings::default();
+        settings.sandbox.network = Some(caliban_settings::SandboxNetwork::Allow);
+        let args = parse(&["--workspace", "/tmp"]);
+        assert_eq!(
+            super::sandbox_network(&args, &settings),
+            caliban_settings::SandboxNetwork::Allow
+        );
+
+        // nothing set anywhere => deny (the #406 default)
+        let settings = caliban_settings::Settings::default();
+        let args = parse(&["--workspace", "/tmp"]);
+        assert_eq!(
+            super::sandbox_network(&args, &settings),
+            caliban_settings::SandboxNetwork::Deny,
+            "unset everywhere must mean deny"
+        );
     }
 
     #[test]

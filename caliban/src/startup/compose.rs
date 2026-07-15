@@ -448,7 +448,10 @@ const WRITABLE_DEVICES: &[&str] = &[
 /// `--workspace` / `--restrict-paths`: reads and network stay open; writes are
 /// confined to the workspace root, the OS temp dirs, and the standard writable
 /// character devices. Pure and testable — no backend probing here.
-fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
+fn workspace_fence_policy(
+    workspace_root: &Path,
+    network: caliban_settings::SandboxNetwork,
+) -> caliban_sandbox::Policy {
     use caliban_sandbox::{FilesystemAcl, NetworkAcl, Policy};
 
     // Seatbelt `(subpath …)` matches the *kernel-resolved* path, so a symlinked
@@ -491,9 +494,25 @@ fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
             ..FilesystemAcl::default()
         },
         network: NetworkAcl {
-            // Keep egress open: fencing writes must not break `git fetch` /
-            // `cargo` / `curl`.
-            allow_all_outbound: true,
+            // Egress is CLOSED (#406, ADR 0054).
+            //
+            // Reads are deliberately open above (`allow_read: ["/"]`) — no
+            // mainstream agent read-jails, and a sandboxed command legitimately
+            // needs ~/.gitconfig, ~/.cargo, and the like. That is defensible
+            // *only* while the child cannot phone home: it may read
+            // ~/.aws/credentials, but it has nowhere to send it. Conceding reads
+            // and egress together concedes credential exfiltration outright, and
+            // the child runs as the same uid, so file modes buy nothing.
+            //
+            // Loopback stays up so localhost test/dev servers keep working —
+            // free via `--unshare-net` on Linux, an explicit rule on macOS.
+            //
+            // Opt out with `--sandbox-network=allow` when a run genuinely needs
+            // the network (`git fetch`, `cargo` against crates.io, `gh`).
+            // Per-hostname allowlists need a proxy — neither backend can filter
+            // egress by name (#403); tracked in #477.
+            allow_all_outbound: matches!(network, caliban_settings::SandboxNetwork::Allow),
+            allow_local_binding: true,
             ..NetworkAcl::default()
         },
         ..Policy::default()
@@ -503,8 +522,11 @@ fn workspace_fence_policy(workspace_root: &Path) -> caliban_sandbox::Policy {
 /// Construct the Bash write-fence sandbox for a restricted workspace. Returns
 /// `None` (after warning) when no OS sandbox backend is available, so the
 /// caller falls back to an unsandboxed Bash rather than failing to start.
-fn build_bash_fence(workspace_root: &Path) -> Option<Arc<caliban_sandbox::SandboxedShim>> {
-    let policy = workspace_fence_policy(workspace_root);
+fn build_bash_fence(
+    workspace_root: &Path,
+    network: caliban_settings::SandboxNetwork,
+) -> Option<Arc<caliban_sandbox::SandboxedShim>> {
+    let policy = workspace_fence_policy(workspace_root, network);
     match caliban_sandbox::SandboxedShim::new(policy) {
         Ok(shim) if shim.is_active() => Some(Arc::new(shim)),
         Ok(_) => {
@@ -533,6 +555,7 @@ pub(crate) fn build_registry(
     todos: caliban_agent_core::SharedTodos,
     plan_mode: caliban_agent_core::SharedPlanMode,
     plugin_skill_roots: &[PathBuf],
+    settings_snapshot: &caliban_settings::Settings,
 ) -> ToolRegistry {
     if args.no_tools {
         return ToolRegistry::new();
@@ -563,7 +586,8 @@ pub(crate) fn build_registry(
     // wrap Bash in a write-fence sandbox (ADR 0032); otherwise leave it
     // unsandboxed as before (#328).
     let bash = if crate::args::should_restrict(args) {
-        BashTool::with_sandbox(root.clone(), build_bash_fence(&workspace_root))
+        let network = crate::args::sandbox_network(args, settings_snapshot);
+        BashTool::with_sandbox(root.clone(), build_bash_fence(&workspace_root, network))
     } else {
         BashTool::new(root.clone())
     };
@@ -1747,16 +1771,39 @@ mod tests {
     #[test]
     fn workspace_fence_policy_confines_writes_but_keeps_reads_and_net() {
         let root = std::path::Path::new("/proj/ws");
-        let p = workspace_fence_policy(root);
+        let p = workspace_fence_policy(root, caliban_settings::SandboxNetwork::Deny);
         assert!(p.enabled, "fence policy must be enabled");
         assert!(
             !p.fail_if_unavailable,
             "must be best-effort (fail-open) so a missing backend doesn't break Bash"
         );
-        // Reads open (write fence, not read jail).
+        // Reads open (write fence, not read jail). This stays — and it is only
+        // defensible *because* egress is closed below: a command may read
+        // ~/.aws/credentials but has nowhere to send it (#406).
         assert_eq!(p.filesystem.allow_read, vec![std::path::PathBuf::from("/")]);
-        // Network open so git/cargo/curl still work.
-        assert!(p.network.allow_all_outbound);
+        // Egress CLOSED (#406). Opening reads *and* egress together concedes
+        // credential exfiltration outright.
+        assert!(
+            !p.network.allow_all_outbound,
+            "the workspace fence must NOT grant blanket egress (#406)"
+        );
+        // ...but loopback stays up, so localhost test/dev servers still work.
+        assert!(
+            p.network.allow_local_binding,
+            "loopback must remain usable inside the sandbox"
+        );
+        // The escape hatch must actually re-open egress — a flag that silently
+        // does nothing would be worse than no flag at all.
+        let opened = workspace_fence_policy(root, caliban_settings::SandboxNetwork::Allow);
+        assert!(
+            opened.network.allow_all_outbound,
+            "--sandbox-network=allow must restore egress"
+        );
+        // Domain lists require a proxy to enforce (#403); the fence ships none.
+        assert!(
+            p.network.allowed_domains.is_empty() && p.network.denied_domains.is_empty(),
+            "bare domain lists are unenforceable without a proxy (#403/#477)"
+        );
         // Workspace root is writable; a sibling outside it is not.
         assert!(
             p.filesystem
@@ -1790,7 +1837,7 @@ mod tests {
         let link = tmp.path().join("link_ws");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let p = workspace_fence_policy(&link);
+        let p = workspace_fence_policy(&link, caliban_settings::SandboxNetwork::Deny);
         let canon = std::fs::canonicalize(&link).unwrap();
         assert!(
             p.filesystem.allow_write.contains(&canon),

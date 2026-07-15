@@ -46,6 +46,32 @@ pub struct RuleSpec {
     pub tool: Option<String>,
 }
 
+/// Whether sandboxed Bash commands may reach the network (#406).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxNetwork {
+    /// No egress. Loopback still works, so localhost test servers are fine.
+    /// The default whenever the workspace fence is active: a sandboxed command
+    /// may read the disk but cannot phone home.
+    #[default]
+    Deny,
+    /// Full egress — the escape hatch for runs that genuinely need `git fetch`,
+    /// `cargo` against crates.io, or `gh`. Note this also re-opens the
+    /// credential-exfiltration path the fence exists to close, so use it
+    /// deliberately.
+    Allow,
+}
+
+/// `sandbox` block of `settings.json` — OS-sandbox posture for Bash commands
+/// under `--workspace` (#406, ADR 0054).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SandboxSettings {
+    /// Egress posture. `None` means "unset" — the fence default (deny) applies.
+    /// Overridden by `--sandbox-network` on the CLI.
+    pub network: Option<SandboxNetwork>,
+}
+
 /// Permission rule arrays. Mirrors the `permissions` block of a Claude-
 /// Code-compatible `settings.json`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -232,6 +258,10 @@ pub struct Settings {
     // ----- permissions ------------------------------------------------------
     /// Allow / ask / deny rule arrays.
     pub permissions: Permissions,
+
+    // ----- sandbox ----------------------------------------------------------
+    /// OS-sandbox posture for Bash commands under `--workspace` (#406).
+    pub sandbox: SandboxSettings,
 
     // ----- hooks ------------------------------------------------------------
     /// Raw hook event → handler list (passed verbatim to
@@ -686,6 +716,39 @@ fn expand_manual_oauth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_network_parses_from_settings_json() {
+        let s: Settings = serde_json::from_value(serde_json::json!({
+            "sandbox": { "network": "allow" }
+        }))
+        .expect("parse");
+        assert_eq!(s.sandbox.network, Some(SandboxNetwork::Allow));
+
+        let s: Settings = serde_json::from_value(serde_json::json!({
+            "sandbox": { "network": "deny" }
+        }))
+        .expect("parse");
+        assert_eq!(s.sandbox.network, Some(SandboxNetwork::Deny));
+    }
+
+    #[test]
+    fn sandbox_network_unset_is_none() {
+        // `None` means "the scope didn't declare this" — the fence default
+        // (deny) applies. Distinct from an explicit `"deny"`.
+        let s: Settings = serde_json::from_value(serde_json::json!({})).expect("parse");
+        assert_eq!(s.sandbox.network, None);
+    }
+
+    #[test]
+    fn sandbox_network_rejects_unknown_value() {
+        // Fail closed on a typo rather than silently falling back to a
+        // permissive default (the #410 lesson).
+        let r: Result<Settings, _> = serde_json::from_value(serde_json::json!({
+            "sandbox": { "network": "open" }
+        }));
+        assert!(r.is_err(), "an unknown egress posture must not parse");
+    }
 
     #[test]
     fn mcp_field_expands_var() {

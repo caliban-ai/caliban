@@ -9,6 +9,50 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Sandboxed Bash commands can no longer reach the network** (#406) —
+  **BREAKING**. Under `--workspace` (or `--restrict-paths`), the OS sandbox now
+  denies egress by default: a command may read the disk but cannot phone home.
+  Loopback is unaffected, so localhost test and dev servers keep working.
+  `git fetch`, `cargo` against crates.io, `npm install`, `gh`, and `curl` will
+  fail inside sandboxed commands unless you opt out with
+  `--sandbox-network=allow` (or `sandbox.network = "allow"` in `settings.json`).
+  A sandboxed command that fails while egress is blocked now says so and names
+  the opt-out.
+
+  Filesystem **reads remain open** by design — `~/.ssh` and `~/.aws/credentials`
+  are still readable, as in every comparable agent. That is defensible *only*
+  because egress is now closed: a command can read a credential file but has
+  nowhere to send it. Re-opening the network with `--sandbox-network=allow`
+  restores the exfiltration path, so use it deliberately. Per-hostname
+  allowlists require a proxy (#477); environment scrubbing is tracked in #405.
+  See ADR 0054.
+
+### Added
+
+- **`sandbox` section in `settings.json`** (#406): `sandbox.network =
+  "deny"|"allow"` configures the egress posture. This is the **first**
+  user-reachable sandbox configuration — the `[sandbox]` table previously
+  documented in the sandbox crate was never wired to anything.
+
+### Fixed
+
+- **`allow_local_binding` no longer grants full egress** (#476): bwrap skipped
+  `--unshare-net` whenever the flag was set, so a narrow, local-sounding
+  permission ("let this command bind a test-server port") silently opened the
+  entire internet. `--unshare-net` *is* the loopback-only posture on Linux, so
+  the flag must not suppress it. (#479)
+- **The macOS Seatbelt generator emitted invalid profiles** (#406): three rules
+  used syntax `sandbox-exec` rejects — `(local ip "*:0")` for local binding, and
+  `(remote tcp "127.0.0.1:<port>")` for both proxy modes (Seatbelt requires the
+  host to be literally `*` or `localhost`, and the port to be a number or `*`).
+  An invalid rule makes Seatbelt refuse the **whole profile**, so *every*
+  sandboxed command fails to launch. These never fired because no production
+  policy set `allow_local_binding` or a proxy port — the new fence sets the
+  former. The generated profile is now compiled by the real `sandbox-exec` in
+  tests, which the previous string-matching tests could not catch.
+
 ## [0.6.0] - 2026-07-12
 
 This release makes caliban **observable** and closes a broad **security-hardening

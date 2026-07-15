@@ -98,6 +98,24 @@ impl SandboxedShim {
         self.policy.enabled && !matches!(self.backend, Backend::Unavailable)
     }
 
+    /// Returns `true` when this shim blocks network egress — the policy is
+    /// active and grants neither blanket outbound nor a proxy route.
+    ///
+    /// Drives the Bash tool's "your command failed because the sandbox blocked
+    /// the network" hint (#406). A sandboxed command that fails with egress
+    /// denied has overwhelmingly likely failed *because* of it (`git fetch`,
+    /// `cargo`, `npm install`, `curl`), and a silent failure with no
+    /// explanation is the single most-reported complaint about this posture in
+    /// other harnesses.
+    #[must_use]
+    pub fn egress_denied(&self) -> bool {
+        let net = &self.policy.network;
+        self.is_active()
+            && !net.allow_all_outbound
+            && net.http_proxy_port == 0
+            && net.socks_proxy_port == 0
+    }
+
     /// Returns `true` when the sandbox should auto-allow Bash without
     /// asking — i.e. policy is active AND the operator opted in.
     #[must_use]

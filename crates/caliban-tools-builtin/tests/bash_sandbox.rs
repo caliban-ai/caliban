@@ -323,3 +323,55 @@ async fn seatbelt_write_fence_keeps_network_open() {
         "no 200 from egress: {out:?}"
     );
 }
+
+/// #406: the shim must report when it is blocking egress, so the Bash tool can
+/// tell the user *why* their `git fetch` died instead of failing silently.
+#[test]
+fn egress_denied_reports_the_posture() {
+    use caliban_sandbox::{NetworkAcl, Policy, SandboxedShim};
+
+    // The shipped fence: no blanket outbound, loopback up, no proxy.
+    let fence = SandboxedShim::new(Policy {
+        enabled: true,
+        network: NetworkAcl {
+            allow_all_outbound: false,
+            allow_local_binding: true,
+            ..NetworkAcl::default()
+        },
+        ..Policy::default()
+    })
+    .expect("shim");
+
+    // The escape hatch: --sandbox-network=allow.
+    let opened = SandboxedShim::new(Policy {
+        enabled: true,
+        network: NetworkAcl {
+            allow_all_outbound: true,
+            ..NetworkAcl::default()
+        },
+        ..Policy::default()
+    })
+    .expect("shim");
+
+    // Only meaningful where a backend actually exists; is_active() is false
+    // otherwise and egress_denied() is correctly false with it.
+    if fence.is_active() {
+        assert!(
+            fence.egress_denied(),
+            "the fence policy must report egress as denied"
+        );
+    }
+    if opened.is_active() {
+        assert!(
+            !opened.egress_denied(),
+            "allow_all_outbound must not report egress as denied"
+        );
+    }
+
+    // A disabled policy is not blocking anything.
+    let off = SandboxedShim::new(Policy::default()).expect("shim");
+    assert!(
+        !off.egress_denied(),
+        "an inactive shim blocks nothing and must not claim to"
+    );
+}
