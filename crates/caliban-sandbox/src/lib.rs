@@ -32,7 +32,7 @@ pub mod error;
 pub mod seatbelt;
 pub mod shim;
 
-pub use config::{FilesystemAcl, NetworkAcl, Policy};
+pub use config::{EnvAcl, FilesystemAcl, NetworkAcl, Policy};
 pub use detect::{Backend, detect};
 pub use error::SandboxError;
 pub use shim::SandboxedShim;
