@@ -186,7 +186,52 @@ impl SandboxedShim {
             }
         }
 
+        // Scrub secret-named vars from the child (#405). Applied here, after the
+        // per-backend wrap, so it covers both bwrap and Seatbelt at one point:
+        // `sandbox-exec` cannot filter env via its profile (env is inherited
+        // through exec), and bwrap would need `--clearenv`/`--setenv` plumbing.
+        // Removing them from the rebuilt `Command` handles both.
+        apply_env_scrub(cmd, &self.policy.env);
+
         Ok(())
+    }
+}
+
+/// Drop secret-named variables from the child's inherited environment.
+///
+/// The sandboxed child otherwise inherits caliban's full process environment.
+/// For each inherited variable whose name is secret-bearing (per
+/// [`EnvAcl::should_scrub`]) we emit an `env_remove` so it is unset in the
+/// child. Variables the caller **explicitly** set on the command are left
+/// untouched — that is deliberate configuration, not an inherited leak.
+fn apply_env_scrub(cmd: &mut TokioCommand, env: &crate::config::EnvAcl) {
+    apply_env_scrub_from(cmd, env, std::env::vars_os());
+}
+
+/// Core of [`apply_env_scrub`], with the inherited-environment source injected
+/// so tests can exercise it without mutating the process environment (which is
+/// racy under the parallel test runner).
+fn apply_env_scrub_from(
+    cmd: &mut TokioCommand,
+    env: &crate::config::EnvAcl,
+    inherited: impl Iterator<Item = (OsString, OsString)>,
+) {
+    if !env.scrub_secrets {
+        return;
+    }
+    // Names the caller set explicitly (e.g. BashTool's own additions). We never
+    // second-guess those; the scrub targets the *inherited* process env.
+    let explicit: std::collections::HashSet<OsString> =
+        cmd.as_std().get_envs().map(|(k, _)| k.to_owned()).collect();
+
+    for (key, _) in inherited {
+        if explicit.contains(&key) {
+            continue;
+        }
+        // Non-UTF-8 names can't match our ASCII patterns; leave them.
+        if key.to_str().is_some_and(|name| env.should_scrub(name)) {
+            cmd.env_remove(&key);
+        }
     }
 }
 
@@ -329,7 +374,85 @@ fn validate_policy(policy: &Policy) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{FilesystemAcl, NetworkAcl};
+    use crate::config::{EnvAcl, FilesystemAcl, NetworkAcl};
+
+    #[test]
+    fn env_scrub_removes_inherited_secrets_but_keeps_passthrough() {
+        let mut cmd = TokioCommand::new("/bin/sh");
+        let env = EnvAcl {
+            scrub_secrets: true,
+            passthrough: vec!["GH_TOKEN".to_string()],
+        };
+        let inherited = vec![
+            (
+                OsString::from("ANTHROPIC_API_KEY"),
+                OsString::from("sk-secret"),
+            ),
+            (OsString::from("GH_TOKEN"), OsString::from("ghs_x")),
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (OsString::from("HOME"), OsString::from("/home/u")),
+        ];
+        apply_env_scrub_from(&mut cmd, &env, inherited.into_iter());
+
+        // `env_remove` shows up as a key mapped to `None` in the std command.
+        let removed: std::collections::HashSet<OsString> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_owned())
+            .collect();
+
+        assert!(
+            removed.contains(&OsString::from("ANTHROPIC_API_KEY")),
+            "a secret-named inherited var must be removed"
+        );
+        assert!(
+            !removed.contains(&OsString::from("GH_TOKEN")),
+            "a passthrough var must survive"
+        );
+        assert!(!removed.contains(&OsString::from("PATH")));
+        assert!(!removed.contains(&OsString::from("HOME")));
+    }
+
+    #[test]
+    fn env_scrub_off_touches_nothing() {
+        let mut cmd = TokioCommand::new("/bin/sh");
+        let env = EnvAcl::default(); // scrub_secrets = false
+        apply_env_scrub_from(
+            &mut cmd,
+            &env,
+            vec![(
+                OsString::from("ANTHROPIC_API_KEY"),
+                OsString::from("sk-secret"),
+            )]
+            .into_iter(),
+        );
+        let removed = cmd.as_std().get_envs().any(|(_, v)| v.is_none());
+        assert!(!removed, "scrub off must remove nothing");
+    }
+
+    #[test]
+    fn env_scrub_leaves_caller_set_vars_alone() {
+        // A secret-named var the caller EXPLICITLY set is intentional config,
+        // not an inherited leak — don't touch it.
+        let mut cmd = TokioCommand::new("/bin/sh");
+        cmd.env("MY_API_KEY", "intended");
+        let env = EnvAcl {
+            scrub_secrets: true,
+            passthrough: Vec::new(),
+        };
+        apply_env_scrub_from(
+            &mut cmd,
+            &env,
+            vec![(OsString::from("MY_API_KEY"), OsString::from("intended"))].into_iter(),
+        );
+        // Still present with a value (not removed).
+        let kept = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "MY_API_KEY" && v == Some(std::ffi::OsStr::new("intended")));
+        assert!(kept, "an explicitly-set var must be preserved");
+    }
 
     #[tokio::test]
     async fn disabled_shim_is_noop() {

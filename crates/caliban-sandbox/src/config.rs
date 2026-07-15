@@ -31,6 +31,66 @@ pub struct FilesystemAcl {
     pub deny_write: Vec<PathBuf>,
 }
 
+/// Environment-variable controls for the sandboxed child (#405).
+///
+/// The child otherwise inherits caliban's full process environment, which
+/// includes provider credentials (`ANTHROPIC_API_KEY`, `CALIBAN_*` tokens, …).
+/// With egress closed (#406) those secrets can no longer be exfiltrated over
+/// the network, but scrubbing them is honest defense-in-depth: it keeps them
+/// out of a command's environment (and out of anything that dumps `env` into
+/// logs or a file the model later reads), and matches what Codex ships by
+/// default.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EnvAcl {
+    /// When `true`, drop inherited environment variables whose **name** matches
+    /// a secret pattern (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`,
+    /// `*CREDENTIAL*`, case-insensitive) plus a small set of known auth-bearing
+    /// names that don't contain those substrings (e.g.
+    /// `OTEL_EXPORTER_OTLP_HEADERS`). Matches Codex's default filter.
+    ///
+    /// This is a **name-based** filter: it cannot know about a secret stored in
+    /// a variable with an innocuous name. A file-based denylist of the canonical
+    /// credential stores (`deny_read` on `~/.ssh`, `~/.aws`, …) is the
+    /// complementary control.
+    #[serde(default)]
+    pub scrub_secrets: bool,
+    /// Variable names to **keep** even when `scrub_secrets` would drop them.
+    /// The escape hatch for a command that legitimately needs a matched var
+    /// (e.g. `GH_TOKEN` for `gh`). Exact-match, case-sensitive.
+    #[serde(default)]
+    pub passthrough: Vec<String>,
+}
+
+impl EnvAcl {
+    /// Substrings that mark a variable name as secret-bearing (case-insensitive).
+    /// Mirrors Codex's `KEY`/`SECRET`/`TOKEN` default, plus two common extras.
+    const SECRET_SUBSTRINGS: &'static [&'static str] =
+        &["KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL"];
+
+    /// Known auth-bearing variable names that do **not** contain any
+    /// `SECRET_SUBSTRINGS` and so would otherwise slip through the name filter.
+    const SECRET_EXACT: &'static [&'static str] = &["OTEL_EXPORTER_OTLP_HEADERS"];
+
+    /// Whether the variable named `name` should be scrubbed from the child.
+    /// `false` when scrubbing is off, when `name` is on the passthrough list, or
+    /// when the name matches no secret pattern.
+    #[must_use]
+    pub fn should_scrub(&self, name: &str) -> bool {
+        if !self.scrub_secrets {
+            return false;
+        }
+        if self.passthrough.iter().any(|p| p == name) {
+            return false;
+        }
+        let upper = name.to_ascii_uppercase();
+        Self::SECRET_SUBSTRINGS.iter().any(|s| upper.contains(s))
+            || Self::SECRET_EXACT
+                .iter()
+                .any(|e| upper == e.to_ascii_uppercase())
+    }
+}
+
 /// Network egress controls for the sandbox.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +172,8 @@ pub struct Policy {
     pub filesystem: FilesystemAcl,
     /// Network ACL.
     pub network: NetworkAcl,
+    /// Environment-variable scrubbing for the sandboxed child (#405).
+    pub env: EnvAcl,
 }
 
 /// Wrapper for parsing `[sandbox]` out of a full settings TOML document.
@@ -207,6 +269,79 @@ fn command_has_shell_operators(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_scrub_off_by_default_keeps_everything() {
+        let acl = EnvAcl::default();
+        assert!(!acl.should_scrub("ANTHROPIC_API_KEY"));
+        assert!(!acl.should_scrub("PATH"));
+    }
+
+    #[test]
+    fn env_scrub_matches_secret_name_patterns() {
+        let acl = EnvAcl {
+            scrub_secrets: true,
+            passthrough: Vec::new(),
+        };
+        // The provider + caliban secrets that leaked before #405.
+        for secret in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_MCP_TOKEN",
+            "CALIBAN_DAEMON_TOKEN",
+            "CALIBAN_AGENT_TLS_KEY",
+            "MY_DB_PASSWORD",
+            "SOME_CREDENTIAL",
+            // Auth-bearing but without a KEY/SECRET/TOKEN substring — caught by
+            // the explicit list.
+            "OTEL_EXPORTER_OTLP_HEADERS",
+        ] {
+            assert!(acl.should_scrub(secret), "{secret} should be scrubbed");
+        }
+        // Case-insensitive.
+        assert!(acl.should_scrub("my_api_key"));
+    }
+
+    #[test]
+    fn env_scrub_keeps_ordinary_vars() {
+        let acl = EnvAcl {
+            scrub_secrets: true,
+            passthrough: Vec::new(),
+        };
+        for keep in ["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"] {
+            assert!(!acl.should_scrub(keep), "{keep} must not be scrubbed");
+        }
+    }
+
+    #[test]
+    fn env_scrub_passthrough_overrides_match() {
+        let acl = EnvAcl {
+            scrub_secrets: true,
+            passthrough: vec!["GH_TOKEN".to_string()],
+        };
+        assert!(!acl.should_scrub("GH_TOKEN"), "passthrough must win");
+        assert!(
+            acl.should_scrub("ANTHROPIC_API_KEY"),
+            "others still scrubbed"
+        );
+    }
+
+    #[test]
+    fn env_acl_parses_from_toml() {
+        let doc = r#"
+            [sandbox.env]
+            scrub_secrets = true
+            passthrough = ["GH_TOKEN"]
+        "#;
+        let p = Policy::from_toml_str(doc).expect("parse");
+        assert!(p.env.scrub_secrets);
+        assert_eq!(p.env.passthrough, vec!["GH_TOKEN".to_string()]);
+    }
 
     #[test]
     fn default_policy_is_disabled() {

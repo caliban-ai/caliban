@@ -26,8 +26,7 @@ the patch version for fixes.
   because egress is now closed: a command can read a credential file but has
   nowhere to send it. Re-opening the network with `--sandbox-network=allow`
   restores the exfiltration path, so use it deliberately. Per-hostname
-  allowlists require a proxy (#477); environment scrubbing is tracked in #405.
-  See ADR 0054.
+  allowlists require a proxy (#477). See ADR 0054.
 
 ### Added
 
@@ -35,6 +34,16 @@ the patch version for fixes.
   "deny"|"allow"` configures the egress posture. This is the **first**
   user-reachable sandbox configuration — the `[sandbox]` table previously
   documented in the sandbox crate was never wired to anything.
+- **Sandboxed commands run with a scrubbed environment** (#405): under
+  `--workspace`, the OS sandbox now drops secret-named variables
+  (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`, `*CREDENTIAL*`, plus
+  `OTEL_EXPORTER_OTLP_HEADERS`) from a Bash command's environment, so
+  `ANTHROPIC_API_KEY`, `CALIBAN_*` tokens, and the like are no longer visible to
+  commands the model runs. Matches Codex's default. Defense-in-depth on top of
+  the closed egress (#406) — and it keeps secrets out of anything that dumps
+  `env` into a log or a file. Keep a specific variable with
+  `[sandbox.env] passthrough = ["GH_TOKEN"]`. This is a name-based filter; a
+  secret in an innocuously-named variable is not caught.
 
 ### Fixed
 

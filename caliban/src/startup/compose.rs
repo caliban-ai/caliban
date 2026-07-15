@@ -515,6 +515,18 @@ fn workspace_fence_policy(
             allow_local_binding: true,
             ..NetworkAcl::default()
         },
+        env: caliban_sandbox::EnvAcl {
+            // Scrub provider/API secrets from the child's environment (#405).
+            // Defense-in-depth on top of the closed egress above: it keeps
+            // `ANTHROPIC_API_KEY`, `CALIBAN_*` tokens, etc. out of a command's
+            // environment (and out of anything that dumps `env` into a log or a
+            // file the model later reads). Matches what Codex ships by default.
+            // A name-based filter can't catch a secret in an innocuously-named
+            // var; the complementary file-side control (deny_read on the
+            // credential stores) is tracked separately.
+            scrub_secrets: true,
+            ..caliban_sandbox::EnvAcl::default()
+        },
         ..Policy::default()
     }
 }
@@ -1803,6 +1815,15 @@ mod tests {
         assert!(
             p.network.allowed_domains.is_empty() && p.network.denied_domains.is_empty(),
             "bare domain lists are unenforceable without a proxy (#403/#477)"
+        );
+        // Secrets are scrubbed from the child environment by default (#405).
+        assert!(
+            p.env.scrub_secrets,
+            "the fence must scrub secret-named env vars from sandboxed commands"
+        );
+        assert!(
+            p.env.should_scrub("ANTHROPIC_API_KEY") && !p.env.should_scrub("PATH"),
+            "scrub must drop provider secrets but keep ordinary vars"
         );
         // Workspace root is writable; a sibling outside it is not.
         assert!(
