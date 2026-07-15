@@ -258,7 +258,7 @@ impl Tool for BashTool {
                     stderr_str
                 };
 
-                let text = format!(
+                let mut text = format!(
                     "→ Bash command: {}\n→ Exit code: {}\n→ Stdout:\n{}\n→ Stderr:\n{}",
                     parsed.command, exit_code_display, stdout_section, stderr_section,
                 );
@@ -267,6 +267,19 @@ impl Tool for BashTool {
                 // is_error=true. The full captured output is in the error message so
                 // the model still sees stdout/stderr/exit-code context.
                 if exit_code_num != Some(0) {
+                    // #406: when the sandbox blocks egress, a failing command has
+                    // very likely failed *because* of it (`git fetch`, `cargo`,
+                    // `npm install`, `curl`). Name the cause and the opt-out — an
+                    // unexplained failure here is the single most-reported
+                    // complaint about this posture in other harnesses.
+                    if self.sandbox.as_ref().is_some_and(|s| s.egress_denied()) {
+                        text.push_str(
+                            "\n→ Note: network egress is blocked by the workspace sandbox. \
+                             If this command needed the network, re-run caliban with \
+                             `--sandbox-network=allow` (or set `sandbox.network = \"allow\"` \
+                             in settings.json). Loopback is unaffected.",
+                        );
+                    }
                     return Err(ToolError::execution(std::io::Error::other(text)));
                 }
 

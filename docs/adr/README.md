@@ -74,6 +74,7 @@ conventions.
 | [0051](0051-caliband-network-transport.md) | caliband network transport: NDJSON over TCP+TLS with a bearer token (Unix socket retained for local; gRPC deferred to #314) | accepted |
 | [0052](0052-workspace-scoped-caliband.md) | Workspace-scoped caliband: multi-source workspace identity + wired per-source worktree isolation (amends 0037) | accepted |
 | [0053](0053-otel-genai-semconv-only.md) | OpenTelemetry GenAI semantic conventions for LLM tracing: emit `gen_ai.*` only, no vendor-specific or cost attributes (builds on 0033) | accepted |
+| [0054](0054-sandbox-confinement-posture.md) | Sandbox confinement posture: keep filesystem reads open, close network egress by default under `--workspace` (refines 0032) | accepted |
 
 ## Adding a new ADR
 

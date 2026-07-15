@@ -344,6 +344,7 @@ async fn main() -> Result<()> {
         Arc::clone(&todos),
         Arc::clone(&plan_mode),
         &plugin_skill_roots,
+        &settings_outcome.settings,
     );
 
     // MCP servers — Phase B: stdio + HTTP + SSE transports (ADR 0023).

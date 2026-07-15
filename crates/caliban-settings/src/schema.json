@@ -46,6 +46,17 @@
         "deny":  { "type": "array", "items": { "type": "string" } }
       }
     },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "network": {
+          "type": "string",
+          "enum": ["deny", "allow"],
+          "description": "Egress posture for sandboxed Bash commands under --workspace. 'deny' (the default) blocks the network; loopback still works, so localhost test servers are fine. 'allow' restores full egress — and with it the credential-exfiltration path the fence exists to close."
+        }
+      }
+    },
     "hooks": { "type": "object", "additionalProperties": true },
     "disable_all_hooks": { "type": "boolean" },
     "allow_managed_hooks_only": { "type": "boolean" },

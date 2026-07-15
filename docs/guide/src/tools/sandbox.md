@@ -4,6 +4,73 @@ Caliban can wrap every subprocess spawned by the `Bash` tool in an OS-level sand
 
 The sandbox is implemented by the `caliban-sandbox` crate (ADR 0032). It is **disabled by default** and must be explicitly enabled in settings.
 
+## The `--workspace` fence (what you actually get)
+
+The one sandbox policy caliban ships and applies for you is the **workspace fence**. It turns on whenever you pass `--workspace <path>` or `--restrict-paths`, and it wraps `Bash` commands. A plain interactive `caliban` run has **no sandbox at all**.
+
+What the fence guarantees (ADR 0054):
+
+| | Posture |
+|---|---|
+| **Writes** | Confined to the workspace + temp dirs |
+| **Network** | **Blocked.** Loopback still works, so localhost test/dev servers are fine |
+| **Reads** | **Open** — the whole host, including `~/.ssh` and `~/.aws/credentials` |
+
+```admonish warning title="Reads are open — and that is why the network is closed"
+A sandboxed command **can read your credential files**. It cannot send them
+anywhere, because egress is blocked. These two facts are load-bearing together:
+open reads are safe *only* while the network is shut.
+
+If you re-open the network with `--sandbox-network=allow`, you also re-open the
+credential-exfiltration path. Use it deliberately, on runs you trust.
+
+The sandbox is a **write fence plus an egress block** — not a read jail, and not
+a secrets boundary against a command that has network access by some other
+route.
+```
+
+```admonish danger title="macOS: loopback reaches your host's local services"
+"Loopback still works" means different things per platform.
+
+On **Linux**, the sandboxed command gets its *own* network namespace — its
+loopback is private, and it cannot reach anything listening on your host's
+`127.0.0.1`.
+
+On **macOS**, Seatbelt does not virtualize the network, so a sandboxed command
+**can reach services on your host's loopback** — a local database, an admin UI,
+a dev server. In particular, **if you run a local forward proxy, a sandboxed
+command can reach the internet through it**, routing around the egress block.
+
+If you run local services you would not want a hijacked command to touch, do not
+rely on the macOS fence alone.
+```
+
+### Letting a sandboxed run reach the network
+
+`git fetch`, `cargo` against crates.io, `npm install`, `gh`, and `curl` all need egress, so they fail inside the fence by default. A command that fails while egress is blocked will tell you so. To opt out:
+
+```bash
+caliban --workspace ./repo --sandbox-network=allow
+```
+
+or, persistently, in `settings.json`:
+
+```json
+{ "sandbox": { "network": "allow" } }
+```
+
+The CLI flag wins over settings; settings win over the default (`deny`).
+
+Per-hostname allowlists (e.g. "allow `github.com` only, so the agent can open a PR") are **not yet supported** — neither sandbox backend can filter egress by hostname, so it requires a proxy. Tracked in [#477](https://github.com/caliban-ai/caliban/issues/477). Until then the opt-out is all-or-nothing.
+
+```admonish note title="The `[sandbox]` TOML table below is not wired"
+The policy reference that follows describes the `caliban-sandbox` crate's full
+`Policy` surface. Only `sandbox.network` in `settings.json` is currently read by
+caliban; the other knobs are reachable from the library but not from a config
+file. Treat the rest of this page as a description of the sandbox *engine*, not
+of settings you can set today.
+```
+
 ## Platform support
 
 | Platform | Backend | Status |

@@ -555,12 +555,20 @@ pub(crate) async fn run(
         .unwrap_or_else(|_| caliban_tools_builtin::WorkspaceRoot::new(record.session_dir.clone()));
     let todos = caliban_agent_core::new_shared_todos();
     let plan_mode = caliban_agent_core::new_shared_plan_mode();
+    // Load the same layered settings main.rs does, so a worker honors
+    // `sandbox.network` (#406) rather than silently falling back to the
+    // built-in default. On load failure, fall back to `Settings::default()` —
+    // which resolves to `SandboxNetwork::Deny`, i.e. fail closed.
+    let worker_settings = crate::startup::load_layered_settings(&args, workspace.root())
+        .map(|o| o.settings)
+        .unwrap_or_default();
     let registry = crate::startup::build_registry(
         &args,
         workspace,
         Arc::clone(&todos),
         Arc::clone(&plan_mode),
         &[],
+        &worker_settings,
     );
     let registry = filter_registry(registry, record.spec.tool_allowlist.as_deref());
 
