@@ -7,6 +7,9 @@ use crate::error::Result;
 pub(crate) mod fs;
 pub use fs::FsTopicBackend;
 
+#[cfg(test)]
+pub(crate) mod conformance;
+
 /// Substrate-neutral CRUD + index projection for auto-memory topics.
 #[async_trait]
 pub trait TopicBackend: Send + Sync {

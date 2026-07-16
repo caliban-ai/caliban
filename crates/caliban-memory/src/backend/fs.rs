@@ -484,4 +484,11 @@ mod tests {
         // Deleting a topic that was never written succeeds.
         be.delete("never-existed").await.unwrap();
     }
+
+    #[tokio::test]
+    async fn fs_backend_passes_conformance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let be = FsTopicBackend::new(tmp.path().to_path_buf());
+        crate::backend::conformance::run_topic_backend_conformance(&be).await;
+    }
 }
