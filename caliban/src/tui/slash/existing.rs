@@ -249,7 +249,7 @@ impl SlashCommand for MemoryCommand {
                 let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
                 // fs-only affordance; non-fs substrates rework deferred to #473.
                 let path = cfg.auto_memory_dir.join(format!("{slug}.md"));
-                let exists = loader.read(&slug).await.is_ok();
+                let exists = cfg.auto_memory_dir.join(format!("{slug}.md")).exists();
                 match delete_action(&parsed, exists) {
                     // Unreachable: the let-else above returns on a missing slug.
                     // Handled defensively rather than panicking.
