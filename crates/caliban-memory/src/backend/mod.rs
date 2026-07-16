@@ -7,6 +7,11 @@ use crate::error::Result;
 pub(crate) mod fs;
 pub use fs::FsTopicBackend;
 
+#[cfg(feature = "gonzalo")]
+pub mod gonzalo;
+#[cfg(feature = "gonzalo")]
+pub use gonzalo::GonzaloTopicBackend;
+
 #[cfg(test)]
 pub(crate) mod conformance;
 

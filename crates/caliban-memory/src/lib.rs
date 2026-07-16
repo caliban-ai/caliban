@@ -25,6 +25,8 @@ pub mod walk;
 
 pub use ancestry_addendum::AncestryAddendum;
 pub use auto::{TopicDraft, TopicFile, TopicKind, TopicSummary, strip_html_comments};
+#[cfg(feature = "gonzalo")]
+pub use backend::GonzaloTopicBackend;
 pub use backend::{FsTopicBackend, TopicBackend, TopicLoader};
 pub use config::{MemoryConfig, build_excludes};
 pub use error::{MemoryError, Result};
