@@ -46,9 +46,9 @@ pub(crate) async fn run_topic_backend_conformance<B: TopicBackend>(be: &B) {
     assert_eq!(be.list().await.unwrap().len(), 2);
     assert!(be.index().await.unwrap().contains("updated"));
 
-    // invalid slug rejected
+    // invalid slug (path traversal) rejected — matches the documented contract
     assert!(matches!(
-        be.write(&d("Bad Slug", "x")).await,
+        be.write(&d("../escape", "x")).await,
         Err(crate::error::MemoryError::InvalidSlug { .. })
     ));
 

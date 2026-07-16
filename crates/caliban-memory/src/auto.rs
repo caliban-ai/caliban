@@ -143,8 +143,8 @@ struct RawMetadata {
     kind: Option<String>,
 }
 
-/// Validate a topic slug. Rules: non-empty, lowercase alphanumeric plus hyphens/underscores only,
-/// no path separators (`/`, `\\`), no `..`, no leading dot.
+/// Validate a topic slug. Rules: non-empty, no path separators (`/`, `\\`),
+/// no `..`, no leading dot.
 ///
 /// # Errors
 ///
@@ -178,16 +178,6 @@ pub fn validate_slug(slug: &str) -> Result<()> {
         return Err(MemoryError::InvalidSlug {
             slug: slug.to_string(),
             reason: "slug must not contain NUL".into(),
-        });
-    }
-    if !slug
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
-        return Err(MemoryError::InvalidSlug {
-            slug: slug.to_string(),
-            reason: "slug must contain only lowercase alphanumeric, hyphens, and underscores"
-                .into(),
         });
     }
     Ok(())
