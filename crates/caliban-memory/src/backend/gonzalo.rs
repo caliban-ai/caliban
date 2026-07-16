@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gonzalo_core::{
-    Body, Identity, KeyPrefix, Meta, PutResult, Record, RecordKey, RecordKind, Revision, Store,
+    Body, DeleteResult, Identity, KeyPrefix, Meta, PutResult, Record, RecordKey, RecordKind,
+    Revision, Store,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::auto::{TopicDraft, TopicFile, TopicKind, TopicSummary, validate_slug};
 use crate::backend::TopicBackend;
+use crate::backend::fs::derive_index;
 use crate::error::{MemoryError, Result};
 
 const NAMESPACE: &str = "caliban";
@@ -47,7 +49,6 @@ impl GonzaloTopicBackend {
         RecordKey::new(NAMESPACE, self.collection.clone(), slug)
     }
 
-    #[allow(dead_code)] // consumed by Task 6's list/index
     fn prefix(&self) -> KeyPrefix {
         KeyPrefix {
             namespace: Some(NAMESPACE.into()),
@@ -132,6 +133,8 @@ impl TopicBackend for GonzaloTopicBackend {
             record.parent = Some(prev.revision.clone());
             // Revision::next(&self, body) -> counter+1, rehash (verified gonzalo 0.3 API).
             record.revision = prev.revision.next(record.body.bytes());
+            // Preserve the original creation time across updates; only `updated` advances.
+            record.meta.created = prev.meta.created;
         }
         match self
             .store
@@ -159,13 +162,47 @@ impl TopicBackend for GonzaloTopicBackend {
     }
 
     async fn list(&self) -> Result<Vec<TopicSummary>> {
-        unimplemented!("Task 6")
+        let keys = self
+            .store
+            .list(&self.prefix())
+            .await
+            .map_err(|e| MemoryError::Backend(e.to_string()))?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(rec) = self
+                .store
+                .get(&key)
+                .await
+                .map_err(|e| MemoryError::Backend(e.to_string()))?
+            {
+                match stored_to_summary(&rec) {
+                    Ok(s) => out.push(s),
+                    Err(e) => {
+                        tracing::warn!(key = %key, error = %e, "skipping unparseable topic record");
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
-    async fn delete(&self, _name: &str) -> Result<()> {
-        unimplemented!("Task 6")
+
+    async fn delete(&self, name: &str) -> Result<()> {
+        validate_slug(name)?;
+        match self
+            .store
+            .delete(&self.key(name), None)
+            .await
+            .map_err(|e| MemoryError::Backend(e.to_string()))?
+        {
+            DeleteResult::Deleted => Ok(()),
+            DeleteResult::Conflict(_) => Err(MemoryError::Conflict {
+                key: self.key(name).to_string(),
+            }),
+        }
     }
+
     async fn index(&self) -> Result<String> {
-        unimplemented!("Task 6")
+        Ok(derive_index(&self.list().await?))
     }
 }
 
@@ -191,7 +228,6 @@ fn synthetic_path(slug: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{slug}.md"))
 }
 
-#[allow(dead_code)] // consumed by Task 6's list
 fn stored_to_summary(rec: &Record) -> Result<TopicSummary> {
     let (s, kind) = parse_stored(rec)?;
     Ok(TopicSummary {
@@ -245,5 +281,80 @@ mod tests {
         // Either a git identity or the "caliban" fallback — never empty.
         let id = resolve_author();
         assert!(!format!("{id:?}").is_empty());
+    }
+
+    #[tokio::test]
+    async fn gonzalo_backend_passes_conformance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = be(tmp.path());
+        crate::backend::conformance::run_topic_backend_conformance(&g).await;
+    }
+
+    #[tokio::test]
+    async fn stale_write_maps_to_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = be(tmp.path());
+        g.write(&TopicDraft {
+            name: "z".into(),
+            description: "a".into(),
+            kind: TopicKind::User,
+            body: "1".into(),
+        })
+        .await
+        .unwrap();
+        // Manually drive a conflict: put with expected=None on an existing key.
+        let key = g.key("z");
+        let rec = topic_to_record(
+            key.clone(),
+            &TopicDraft {
+                name: "z".into(),
+                description: "b".into(),
+                kind: TopicKind::User,
+                body: "2".into(),
+            },
+            g.meta_now(),
+        )
+        .unwrap();
+        let r = g.store.put(rec, None).await.unwrap();
+        assert!(
+            matches!(r, PutResult::Conflict(_)),
+            "expected=None on existing key must conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_preserves_original_created_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = be(tmp.path());
+        let draft = TopicDraft {
+            name: "gamma".into(),
+            description: "d1".into(),
+            kind: TopicKind::User,
+            body: "1".into(),
+        };
+        g.write(&draft).await.unwrap();
+        let first = g.store.get(&g.key("gamma")).await.unwrap().unwrap();
+        let original_created = first.meta.created;
+        let original_updated = first.meta.updated;
+
+        // Force a distinguishable timestamp for the update.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let draft2 = TopicDraft {
+            name: "gamma".into(),
+            description: "d2".into(),
+            kind: TopicKind::User,
+            body: "2".into(),
+        };
+        g.write(&draft2).await.unwrap();
+        let second = g.store.get(&g.key("gamma")).await.unwrap().unwrap();
+
+        assert_eq!(
+            second.meta.created, original_created,
+            "created must survive an update unchanged"
+        );
+        assert!(
+            second.meta.updated > original_updated,
+            "updated must advance on an update"
+        );
     }
 }
