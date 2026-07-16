@@ -30,6 +30,8 @@ fn config_with(
 
 #[tokio::test]
 async fn end_to_end_with_tempdir() {
+    use caliban_memory::{FsTopicBackend, TopicBackend, TopicDraft, TopicKind};
+
     let tmp = tempfile::TempDir::new().unwrap();
     let global_md = tmp.path().join("config/caliban/CLAUDE.md");
     let workspace = tmp.path().join("workspace");
@@ -39,7 +41,18 @@ async fn end_to_end_with_tempdir() {
 
     write(&global_md, "global content here");
     write(&project_md, "project content here");
-    write(&memory_md, "# Memory index\n\n- [foo](foo.md) — bar\n");
+    // The auto tier's index is always derived from the topic-backend
+    // listing now (never a verbatim read of MEMORY.md), so exercise that
+    // through a real topic write rather than hand-writing MEMORY.md.
+    FsTopicBackend::new(auto_dir.clone())
+        .write(&TopicDraft {
+            name: "foo".into(),
+            description: "bar".into(),
+            kind: TopicKind::Project,
+            body: "b".into(),
+        })
+        .await
+        .unwrap();
 
     let cfg = config_with(
         Some(global_md.clone()),

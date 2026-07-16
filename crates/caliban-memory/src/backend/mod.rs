@@ -38,6 +38,16 @@ pub struct TopicLoader {
     backend: Box<dyn TopicBackend>,
 }
 
+impl std::fmt::Debug for TopicLoader {
+    // `TopicBackend` doesn't require `Debug` (it must stay object-safe and
+    // substrate-neutral), so this facade can't derive it. Callers that embed
+    // a `TopicLoader` in a `#[derive(Debug)]` struct still get a (redacted)
+    // impl this way.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopicLoader").finish_non_exhaustive()
+    }
+}
+
 impl TopicLoader {
     /// Construct a loader backed by [`FsTopicBackend`] over `dir`. The directory
     /// does not have to exist yet — `list` returns an empty vec, and `write`

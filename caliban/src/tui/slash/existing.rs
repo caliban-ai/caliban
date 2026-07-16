@@ -141,7 +141,7 @@ impl SlashCommand for MemoryCommand {
             },
             "list" => {
                 let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-                match loader.list() {
+                match loader.list().await {
                     Ok(topics) if topics.is_empty() => {
                         ctx.app
                             .transcript
@@ -177,7 +177,7 @@ impl SlashCommand for MemoryCommand {
                     return Ok(SlashOutcome::Continue);
                 }
                 let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-                match loader.read(rest) {
+                match loader.read(rest).await {
                     Ok(topic) => {
                         ctx.app.transcript.push(TranscriptLine::Info(format!(
                             "{} [{}] \u{2014} {}",
@@ -205,14 +205,14 @@ impl SlashCommand for MemoryCommand {
                         .push(TranscriptLine::Info("usage: /memory edit <slug>".into()));
                     return Ok(SlashOutcome::Continue);
                 }
-                let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
                 if let Err(e) = caliban_memory::auto::validate_slug(rest) {
                     ctx.app
                         .transcript
                         .push(TranscriptLine::Error(format!("bad slug: {e}")));
                     return Ok(SlashOutcome::Continue);
                 }
-                let path = loader.dir().join(format!("{rest}.md"));
+                // fs-only affordance; non-fs substrates rework deferred to #473.
+                let path = cfg.auto_memory_dir.join(format!("{rest}.md"));
                 if !path.exists() {
                     ctx.app.transcript.push(TranscriptLine::Error(format!(
                         "no such topic: {}",
@@ -247,8 +247,10 @@ impl SlashCommand for MemoryCommand {
                     return Ok(SlashOutcome::Continue);
                 }
                 let loader = caliban_memory::TopicLoader::new(cfg.auto_memory_dir.clone());
-                let path = loader.dir().join(format!("{slug}.md"));
-                match delete_action(&parsed, path.exists()) {
+                // fs-only affordance; non-fs substrates rework deferred to #473.
+                let path = cfg.auto_memory_dir.join(format!("{slug}.md"));
+                let exists = loader.read(&slug).await.is_ok();
+                match delete_action(&parsed, exists) {
                     // Unreachable: the let-else above returns on a missing slug.
                     // Handled defensively rather than panicking.
                     DeleteAction::Usage => {
@@ -269,7 +271,7 @@ impl SlashCommand for MemoryCommand {
                             "re-run with: /memory delete {slug} --force"
                         )));
                     }
-                    DeleteAction::Delete => match loader.delete(&slug) {
+                    DeleteAction::Delete => match loader.delete(&slug).await {
                         Ok(()) => {
                             ctx.app
                                 .transcript
