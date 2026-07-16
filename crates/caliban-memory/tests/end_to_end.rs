@@ -120,6 +120,7 @@ async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
             kind: TopicKind::User,
             body: "Senior platform engineer at Amplio.\n".into(),
         })
+        .await
         .unwrap();
 
     // Reload should pick up the new MEMORY.md index entry.
@@ -131,7 +132,7 @@ async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
         auto.body
     );
     // Topic file round-trips.
-    let topic = loader.read("user-role").unwrap();
+    let topic = loader.read("user-role").await.unwrap();
     assert!(topic.body.contains("Senior platform engineer"));
 }
 

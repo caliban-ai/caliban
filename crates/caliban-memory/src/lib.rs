@@ -24,8 +24,8 @@ pub mod sanitize;
 pub mod walk;
 
 pub use ancestry_addendum::AncestryAddendum;
-pub use auto::{TopicDraft, TopicFile, TopicKind, TopicLoader, TopicSummary, strip_html_comments};
-pub use backend::TopicBackend;
+pub use auto::{TopicDraft, TopicFile, TopicKind, TopicSummary, strip_html_comments};
+pub use backend::{FsTopicBackend, TopicBackend, TopicLoader};
 pub use config::{MemoryConfig, build_excludes};
 pub use error::{MemoryError, Result};
 pub use init_import::{INIT_FILENAMES, LegacyRulesFile, scan_init_files};

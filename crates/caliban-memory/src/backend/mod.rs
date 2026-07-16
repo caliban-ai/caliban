@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use crate::auto::{TopicDraft, TopicFile, TopicSummary};
 use crate::error::Result;
 
+pub(crate) mod fs;
+pub use fs::FsTopicBackend;
+
 /// Substrate-neutral CRUD + index projection for auto-memory topics.
 #[async_trait]
 pub trait TopicBackend: Send + Sync {
@@ -19,6 +22,78 @@ pub trait TopicBackend: Send + Sync {
     async fn index(&self) -> Result<String>;
 }
 
+use std::path::PathBuf;
+
+/// Public facade over a chosen [`TopicBackend`]. `new` selects the fs backend
+/// (behaviour-equivalent to the historical `std::fs` loader).
+pub struct TopicLoader {
+    backend: Box<dyn TopicBackend>,
+}
+
+impl TopicLoader {
+    /// Construct a loader backed by [`FsTopicBackend`] over `dir`. The directory
+    /// does not have to exist yet — `list` returns an empty vec, and `write`
+    /// will create it on demand.
+    #[must_use]
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            backend: Box::new(FsTopicBackend::new(dir)),
+        }
+    }
+
+    /// Construct a loader over an arbitrary [`TopicBackend`] (e.g. a gonzalo
+    /// substrate).
+    #[must_use]
+    pub fn with_backend(backend: Box<dyn TopicBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// List all topics.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by the underlying backend.
+    pub async fn list(&self) -> Result<Vec<TopicSummary>> {
+        self.backend.list().await
+    }
+
+    /// Read a topic by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by the underlying backend.
+    pub async fn read(&self, name: &str) -> Result<TopicFile> {
+        self.backend.read(name).await
+    }
+
+    /// Persist `draft`, returning a human-readable locator.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by the underlying backend.
+    pub async fn write(&self, draft: &TopicDraft) -> Result<String> {
+        self.backend.write(draft).await
+    }
+
+    /// Delete a topic by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by the underlying backend.
+    pub async fn delete(&self, name: &str) -> Result<()> {
+        self.backend.delete(name).await
+    }
+
+    /// Rebuild the `MEMORY.md` index body from the current topic set.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by the underlying backend.
+    pub async fn index(&self) -> Result<String> {
+        self.backend.index().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26,7 +101,7 @@ mod tests {
     use std::sync::Mutex;
 
     /// Minimal in-memory backend proving the trait is object-safe (`Box<dyn>`),
-    /// async, and Result-plumbed. Task 2 adds the real FsTopicBackend + facade.
+    /// async, and Result-plumbed. Task 2 adds the real `FsTopicBackend` + facade.
     #[derive(Default)]
     struct MockBackend {
         writes: Mutex<Vec<String>>,
@@ -34,7 +109,9 @@ mod tests {
 
     #[async_trait]
     impl TopicBackend for MockBackend {
-        async fn list(&self) -> Result<Vec<TopicSummary>> { Ok(Vec::new()) }
+        async fn list(&self) -> Result<Vec<TopicSummary>> {
+            Ok(Vec::new())
+        }
         async fn read(&self, _name: &str) -> Result<TopicFile> {
             Err(crate::error::MemoryError::Backend("mock".into()))
         }
@@ -42,8 +119,12 @@ mod tests {
             self.writes.lock().unwrap().push(draft.name.clone());
             Ok(format!("mock:{}", draft.name))
         }
-        async fn delete(&self, _name: &str) -> Result<()> { Ok(()) }
-        async fn index(&self) -> Result<String> { Ok(String::new()) }
+        async fn delete(&self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn index(&self) -> Result<String> {
+            Ok(String::new())
+        }
     }
 
     #[tokio::test]
@@ -60,5 +141,28 @@ mod tests {
             .unwrap();
         assert_eq!(locator, "mock:alpha");
         assert!(backend.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn facade_new_uses_fs_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = TopicLoader::new(tmp.path().to_path_buf());
+        loader
+            .write(&TopicDraft {
+                name: "alpha".into(),
+                description: "d".into(),
+                kind: TopicKind::Project,
+                body: "b".into(),
+            })
+            .await
+            .unwrap();
+        let names: Vec<_> = loader
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string()]);
     }
 }
