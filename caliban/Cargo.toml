@@ -24,6 +24,7 @@ path = "src/main.rs"
 # at link time (libxcb on Linux). See `caliban/src/tui/clipboard.rs`.
 default   = ["clipboard"]
 clipboard = ["dep:arboard"]
+gonzalo   = ["caliban-memory/gonzalo"]
 
 [dependencies]
 caliban-common             = { workspace = true }
