@@ -62,7 +62,9 @@ mod error_variant_tests {
 
     #[test]
     fn conflict_and_backend_variants_display() {
-        let c = MemoryError::Conflict { key: "caliban/memory:abc/foo".into() };
+        let c = MemoryError::Conflict {
+            key: "caliban/memory:abc/foo".into(),
+        };
         assert!(c.to_string().contains("conflict"));
         let b = MemoryError::Backend("boom".into());
         assert!(b.to_string().contains("boom"));
