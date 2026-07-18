@@ -51,7 +51,9 @@ impl TopicKind {
 /// Lightweight summary of a topic file (frontmatter only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicSummary {
-    /// The slug (kebab-case, must match filename stem).
+    /// The slug (kebab-case). The frontmatter value is authoritative — backends
+    /// key on it (the fs backend no longer reconciles it against the filename
+    /// stem, so both substrates treat `name` identically).
     pub name: String,
     /// One-line description (≤ 120 chars by convention).
     pub description: String,

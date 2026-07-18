@@ -119,7 +119,7 @@ mod tests {
     use std::sync::Mutex;
 
     /// Minimal in-memory backend proving the trait is object-safe (`Box<dyn>`),
-    /// async, and Result-plumbed. Task 2 adds the real `FsTopicBackend` + facade.
+    /// async, and Result-plumbed.
     #[derive(Default)]
     struct MockBackend {
         writes: Mutex<Vec<String>>,
