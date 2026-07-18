@@ -11,6 +11,7 @@
 
 pub mod ancestry_addendum;
 pub mod auto;
+pub mod backend;
 pub mod config;
 pub mod error;
 pub mod init_import;
@@ -23,7 +24,10 @@ pub mod sanitize;
 pub mod walk;
 
 pub use ancestry_addendum::AncestryAddendum;
-pub use auto::{TopicDraft, TopicFile, TopicKind, TopicLoader, TopicSummary, strip_html_comments};
+pub use auto::{TopicDraft, TopicFile, TopicKind, TopicSummary, strip_html_comments};
+#[cfg(feature = "gonzalo")]
+pub use backend::GonzaloTopicBackend;
+pub use backend::{FsTopicBackend, TopicBackend, TopicLoader};
 pub use config::{MemoryConfig, build_excludes};
 pub use error::{MemoryError, Result};
 pub use init_import::{INIT_FILENAMES, LegacyRulesFile, scan_init_files};

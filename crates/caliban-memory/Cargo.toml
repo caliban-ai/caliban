@@ -9,6 +9,7 @@ authors.workspace      = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 caliban-common = { workspace = true }
 tokio       = { workspace = true, features = ["fs", "io-util"] }
 tracing     = { workspace = true }
@@ -19,6 +20,11 @@ serde_yaml  = "0.9"
 serde_json  = { workspace = true }
 globset     = { workspace = true }
 chrono      = { workspace = true }
+gonzalo-core     = { version = "0.3", optional = true }
+gonzalo-store-fs = { version = "0.3", optional = true }
+
+[features]
+gonzalo = ["dep:gonzalo-core", "dep:gonzalo-store-fs"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

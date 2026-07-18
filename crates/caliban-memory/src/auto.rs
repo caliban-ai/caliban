@@ -51,7 +51,9 @@ impl TopicKind {
 /// Lightweight summary of a topic file (frontmatter only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicSummary {
-    /// The slug (kebab-case, must match filename stem).
+    /// The slug (kebab-case). The frontmatter value is authoritative — backends
+    /// key on it (the fs backend no longer reconciles it against the filename
+    /// stem, so both substrates treat `name` identically).
     pub name: String,
     /// One-line description (≤ 120 chars by convention).
     pub description: String,
@@ -76,218 +78,10 @@ pub struct TopicFile {
     pub path: PathBuf,
 }
 
-/// Draft passed to [`TopicLoader::write`]. The loader fills in path / on-disk
-/// frontmatter from these fields.
-#[derive(Debug, Clone)]
-pub struct TopicDraft {
-    /// The slug (kebab-case). Must pass [`validate_slug`].
-    pub name: String,
-    /// One-line description for the `MEMORY.md` index entry + frontmatter.
-    pub description: String,
-    /// Memory type classification.
-    pub kind: TopicKind,
-    /// Raw markdown body (no frontmatter — the loader emits it).
-    pub body: String,
-}
-
-/// Frontmatter shape used by [`TopicLoader::read`] / [`TopicLoader::list`].
-#[derive(Debug, Deserialize)]
-struct RawFrontmatter {
-    name: String,
-    description: String,
-    #[serde(default)]
-    metadata: RawMetadata,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawMetadata {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-}
-
-/// Enumerator + reader/writer for topic `.md` files under a single memory
-/// directory.
-#[derive(Debug, Clone)]
-pub struct TopicLoader {
-    dir: PathBuf,
-}
-
-impl TopicLoader {
-    /// Construct a loader over the given memory directory. The directory does
-    /// not have to exist yet — `list` returns an empty vec, and `write` will
-    /// create it on demand.
-    #[must_use]
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
-    }
-
-    /// The directory this loader manages.
-    #[must_use]
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// Enumerate every `.md` sibling of `MEMORY.md`, parsing frontmatter for
-    /// each. Files with malformed frontmatter are silently skipped with a
-    /// `warn!` log entry (rationale: a single corrupted topic file should not
-    /// brick the whole memory tier).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::Io`] if the directory exists but cannot be read.
-    pub fn list(&self) -> Result<Vec<TopicSummary>> {
-        let mut out = Vec::new();
-        if !self.dir.exists() {
-            return Ok(out);
-        }
-        let entries = std::fs::read_dir(&self.dir).map_err(|source| MemoryError::Io {
-            path: self.dir.clone(),
-            source,
-        })?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            // Skip the index file itself.
-            if path.file_name().and_then(|s| s.to_str()) == Some("MEMORY.md") {
-                continue;
-            }
-            match Self::read_summary(&path) {
-                Ok(mut summary) => {
-                    if summary.name != stem {
-                        tracing::warn!(
-                            target: caliban_common::tracing_targets::TARGET_MEMORY_AUTO,
-                            path = %path.display(),
-                            frontmatter_name = %summary.name,
-                            file_stem = %stem,
-                            "topic frontmatter name does not match filename; using filename",
-                        );
-                        summary.name = stem.to_string();
-                    }
-                    out.push(summary);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: caliban_common::tracing_targets::TARGET_MEMORY_AUTO,
-                        path = %path.display(),
-                        error = %e,
-                        "skipping malformed topic file",
-                    );
-                }
-            }
-        }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
-    }
-
-    /// Read a topic by slug. The slug must pass [`validate_slug`] — no path
-    /// separators, no `..`, no leading `.`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::InvalidSlug`] for traversal / illegal slugs,
-    /// [`MemoryError::Io`] if the file does not exist or cannot be read, and
-    /// [`MemoryError::InvalidTopic`] if the frontmatter is malformed.
-    pub fn read(&self, name: &str) -> Result<TopicFile> {
-        validate_slug(name)?;
-        let path = self.dir.join(format!("{name}.md"));
-        let raw = std::fs::read_to_string(&path).map_err(|source| MemoryError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let (fm, body) = parse_frontmatter(&raw, &path)?;
-        let kind =
-            TopicKind::parse(fm.metadata.kind.as_deref().unwrap_or("")).ok_or_else(|| {
-                MemoryError::InvalidTopic {
-                    path: path.clone(),
-                    reason: format!(
-                        "metadata.type must be one of user|feedback|project|reference (got {:?})",
-                        fm.metadata.kind
-                    ),
-                }
-            })?;
-        Ok(TopicFile {
-            name: fm.name,
-            description: fm.description,
-            kind,
-            body: body.to_string(),
-            path,
-        })
-    }
-
-    /// Atomically write a topic file (`<slug>.md`) and update the `MEMORY.md`
-    /// index line for it. Returns the topic's absolute path on success.
-    ///
-    /// Write semantics:
-    /// 1. Write the topic body + frontmatter to `<slug>.md.tmp`.
-    /// 2. Rename to `<slug>.md` (atomic on the same filesystem).
-    /// 3. Rewrite `MEMORY.md` with an updated index line for the slug
-    ///    (`MEMORY.md` is rewritten via the same tmp+rename dance).
-    ///
-    /// A crash between (2) and (3) leaves an orphan topic file that
-    /// `rebuild-index` can re-detect.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::InvalidSlug`] for bad slugs, [`MemoryError::Io`]
-    /// on any IO failure.
-    pub fn write(&self, draft: &TopicDraft) -> Result<PathBuf> {
-        validate_slug(&draft.name)?;
-        std::fs::create_dir_all(&self.dir).map_err(|source| MemoryError::Io {
-            path: self.dir.clone(),
-            source,
-        })?;
-
-        let path = self.dir.join(format!("{}.md", draft.name));
-        let serialized = render_topic_file(draft);
-        caliban_common::fs::write_atomic(&path, serialized.as_bytes()).map_err(|source| {
-            MemoryError::Io {
-                path: path.clone(),
-                source,
-            }
-        })?;
-
-        update_index_line(&self.dir, draft)?;
-        Ok(path)
-    }
-
-    /// Delete a topic file by slug and remove its `MEMORY.md` index line.
-    /// Missing files are treated as success (idempotent delete).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::InvalidSlug`] for bad slugs or [`MemoryError::Io`]
-    /// on IO failure.
-    pub fn delete(&self, name: &str) -> Result<()> {
-        validate_slug(name)?;
-        let path = self.dir.join(format!("{name}.md"));
-        match std::fs::remove_file(&path) {
-            Ok(()) | Err(_) if !path.exists() => {}
-            Err(e) => {
-                return Err(MemoryError::Io {
-                    path: path.clone(),
-                    source: e,
-                });
-            }
-            Ok(()) => {}
-        }
-        remove_index_line(&self.dir, name)?;
-        Ok(())
-    }
-
-    fn read_summary(path: &Path) -> Result<TopicSummary> {
-        let raw = std::fs::read_to_string(path).map_err(|source| MemoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let (fm, _) = parse_frontmatter(&raw, path)?;
+impl TopicSummary {
+    /// Parse a topic summary from raw file text (frontmatter only).
+    pub(crate) fn parse(raw: &str, path: &Path) -> Result<TopicSummary> {
+        let (fm, _) = parse_frontmatter(raw, path)?;
         let kind =
             TopicKind::parse(fm.metadata.kind.as_deref().unwrap_or("")).ok_or_else(|| {
                 MemoryError::InvalidTopic {
@@ -305,6 +99,50 @@ impl TopicLoader {
             path: path.to_path_buf(),
         })
     }
+}
+
+impl TopicFile {
+    /// Parse a full topic (frontmatter + body) from raw file text.
+    pub(crate) fn parse(raw: &str, path: &Path) -> Result<TopicFile> {
+        let (_, body) = parse_frontmatter(raw, path)?;
+        let s = TopicSummary::parse(raw, path)?;
+        Ok(TopicFile {
+            name: s.name,
+            description: s.description,
+            kind: s.kind,
+            body: body.to_string(),
+            path: s.path,
+        })
+    }
+}
+
+/// Draft passed to [`crate::TopicLoader::write`]. The loader fills in path /
+/// on-disk frontmatter from these fields.
+#[derive(Debug, Clone)]
+pub struct TopicDraft {
+    /// The slug (kebab-case). Must pass [`validate_slug`].
+    pub name: String,
+    /// One-line description for the `MEMORY.md` index entry + frontmatter.
+    pub description: String,
+    /// Memory type classification.
+    pub kind: TopicKind,
+    /// Raw markdown body (no frontmatter — the loader emits it).
+    pub body: String,
+}
+
+/// Frontmatter shape used by [`crate::TopicLoader::read`] / [`crate::TopicLoader::list`].
+#[derive(Debug, Deserialize)]
+struct RawFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    metadata: RawMetadata,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMetadata {
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// Validate a topic slug. Rules: non-empty, no path separators (`/`, `\\`),
@@ -376,7 +214,7 @@ fn parse_frontmatter<'a>(raw: &'a str, path: &Path) -> Result<(RawFrontmatter, &
 }
 
 /// Render a [`TopicDraft`] to on-disk markdown (frontmatter + body).
-fn render_topic_file(draft: &TopicDraft) -> String {
+pub(crate) fn render_topic_file(draft: &TopicDraft) -> String {
     let mut out = String::with_capacity(draft.body.len() + 256);
     out.push_str("---\n");
     out.push_str("name: ");
@@ -411,107 +249,6 @@ fn escape_yaml_string(s: &str) -> String {
         }
     }
     out
-}
-
-/// Update (or insert) the index line for `draft.name` inside `MEMORY.md`.
-/// Atomic via tmp + rename.
-fn update_index_line(dir: &Path, draft: &TopicDraft) -> Result<()> {
-    let index_path = dir.join("MEMORY.md");
-    let existing = match std::fs::read_to_string(&index_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => {
-            return Err(MemoryError::Io {
-                path: index_path.clone(),
-                source,
-            });
-        }
-    };
-
-    let new_line = format!(
-        "- [{title}]({slug}.md) — {kind}: {desc}",
-        title = draft.name,
-        slug = draft.name,
-        kind = draft.kind.as_str(),
-        desc = draft.description.lines().next().unwrap_or("").trim(),
-    );
-
-    let new_body = rewrite_with_index_line(&existing, &draft.name, &new_line);
-    caliban_common::fs::write_atomic(&index_path, new_body.as_bytes()).map_err(|source| {
-        MemoryError::Io {
-            path: index_path.clone(),
-            source,
-        }
-    })?;
-    Ok(())
-}
-
-/// Remove a topic's index line, if present.
-fn remove_index_line(dir: &Path, slug: &str) -> Result<()> {
-    let index_path = dir.join("MEMORY.md");
-    let existing = match std::fs::read_to_string(&index_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(MemoryError::Io {
-                path: index_path.clone(),
-                source,
-            });
-        }
-    };
-    let needle = format!("]({slug}.md)");
-    let kept: Vec<&str> = existing.lines().filter(|l| !l.contains(&needle)).collect();
-    let mut new_body = kept.join("\n");
-    if existing.ends_with('\n') && !new_body.ends_with('\n') {
-        new_body.push('\n');
-    }
-    caliban_common::fs::write_atomic(&index_path, new_body.as_bytes()).map_err(|source| {
-        MemoryError::Io {
-            path: index_path.clone(),
-            source,
-        }
-    })?;
-    Ok(())
-}
-
-/// Insert-or-replace the index line for `slug`. We match on the
-/// `](<slug>.md)` substring, which is robust against operators tweaking the
-/// title or one-line summary in place.
-fn rewrite_with_index_line(existing: &str, slug: &str, new_line: &str) -> String {
-    if existing.is_empty() {
-        let mut s = String::from("# Memory index\n\n");
-        s.push_str(new_line);
-        s.push('\n');
-        return s;
-    }
-    let needle = format!("]({slug}.md)");
-    let mut replaced = false;
-    let mut out_lines: Vec<String> = Vec::with_capacity(existing.lines().count() + 1);
-    for line in existing.lines() {
-        if !replaced && line.contains(&needle) {
-            out_lines.push(new_line.to_string());
-            replaced = true;
-        } else {
-            out_lines.push(line.to_string());
-        }
-    }
-    if !replaced {
-        // Append after the last existing index-style line, otherwise at EOF.
-        let mut insert_idx = out_lines.len();
-        // Insert after the last `- [` bullet line if any exist.
-        for (i, line) in out_lines.iter().enumerate().rev() {
-            if line.trim_start().starts_with("- [") {
-                insert_idx = i + 1;
-                break;
-            }
-        }
-        out_lines.insert(insert_idx, new_line.to_string());
-    }
-    let mut s = out_lines.join("\n");
-    if existing.ends_with('\n') || !s.ends_with('\n') {
-        s.push('\n');
-    }
-    s
 }
 
 /// Strip every `<!-- … -->` HTML comment (greedy, multi-line) from `body`.
@@ -552,159 +289,11 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     fn topic_md(name: &str, kind: &str, desc: &str, body: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: \"{desc}\"\nmetadata:\n  node_type: memory\n  type: {kind}\n---\n\n{body}\n",
         )
-    }
-
-    #[test]
-    fn list_enumerates_topic_files_excluding_memory_md() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("MEMORY.md"),
-            "# Memory index\n\n- [foo](foo.md) — user: foo\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("foo.md"),
-            topic_md("foo", "user", "foo desc", "body"),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("bar.md"),
-            topic_md("bar", "feedback", "bar desc", "body"),
-        )
-        .unwrap();
-
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let topics = loader.list().unwrap();
-        let names: Vec<_> = topics.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["bar", "foo"]);
-        assert!(topics.iter().any(|t| matches!(t.kind, TopicKind::User)));
-        assert!(topics.iter().any(|t| matches!(t.kind, TopicKind::Feedback)));
-    }
-
-    #[test]
-    fn read_round_trips_a_topic() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("user-role.md"),
-            topic_md(
-                "user-role",
-                "user",
-                "role + context",
-                "# User role\n\nSenior engineer.\n",
-            ),
-        )
-        .unwrap();
-
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let topic = loader.read("user-role").unwrap();
-        assert_eq!(topic.name, "user-role");
-        assert_eq!(topic.kind, TopicKind::User);
-        assert!(topic.body.contains("Senior engineer."));
-    }
-
-    #[test]
-    fn write_creates_topic_and_updates_index() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("MEMORY.md"), "# Memory index\n\n").unwrap();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let path = loader
-            .write(&TopicDraft {
-                name: "personal-email".to_string(),
-                description: "use personal email for ~/dev/personal/**".to_string(),
-                kind: TopicKind::Feedback,
-                body: "Use john.ford2002@gmail.com.\n".to_string(),
-            })
-            .unwrap();
-        assert!(path.exists());
-        assert!(!dir.join("personal-email.md.tmp").exists());
-
-        // Topic file contains frontmatter + body.
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("name: personal-email"));
-        assert!(written.contains("type: feedback"));
-        assert!(written.contains("john.ford2002@gmail.com"));
-
-        // Index updated.
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        assert!(index.contains("[personal-email](personal-email.md)"));
-        assert!(index.contains("feedback:"));
-    }
-
-    #[test]
-    fn write_updates_existing_index_line_in_place() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("MEMORY.md"),
-            "# Memory index\n\n- [foo](foo.md) — user: old desc\n",
-        )
-        .unwrap();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "foo".to_string(),
-                description: "new desc".to_string(),
-                kind: TopicKind::User,
-                body: "body".to_string(),
-            })
-            .unwrap();
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        // exactly one entry for foo
-        assert_eq!(index.matches("[foo](foo.md)").count(), 1);
-        assert!(index.contains("new desc"));
-        assert!(!index.contains("old desc"));
-    }
-
-    #[test]
-    fn read_rejects_invalid_type_in_frontmatter() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("bad.md"), topic_md("bad", "junk", "desc", "body")).unwrap();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let err = loader.read("bad").unwrap_err();
-        assert!(matches!(err, MemoryError::InvalidTopic { .. }));
-    }
-
-    #[test]
-    fn read_rejects_missing_required_frontmatter_fields() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("incomplete.md"),
-            "---\ndescription: \"no name\"\nmetadata:\n  type: user\n---\n\nbody\n",
-        )
-        .unwrap();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let err = loader.read("incomplete").unwrap_err();
-        assert!(matches!(err, MemoryError::InvalidTopic { .. }));
-    }
-
-    #[test]
-    fn cross_reference_brackets_preserved_in_body() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let body = "Crosslinks: [[parity-gap-matrix]], [[sprint-mode]].\n".to_string();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "user-role".to_string(),
-                description: "role".to_string(),
-                kind: TopicKind::User,
-                body: body.clone(),
-            })
-            .unwrap();
-        let topic = loader.read("user-role").unwrap();
-        assert!(topic.body.contains("[[parity-gap-matrix]]"));
-        assert!(topic.body.contains("[[sprint-mode]]"));
     }
 
     #[test]
@@ -732,25 +321,6 @@ mod tests {
         assert!(!stripped.contains("line two"));
     }
 
-    #[test]
-    fn delete_removes_file_and_index_line() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "tmp-topic".to_string(),
-                description: "tmp".to_string(),
-                kind: TopicKind::Project,
-                body: "body".to_string(),
-            })
-            .unwrap();
-        loader.delete("tmp-topic").unwrap();
-        assert!(!dir.join("tmp-topic.md").exists());
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        assert!(!index.contains("tmp-topic.md"));
-    }
-
     // --- TopicKind ----------------------------------------------------------
 
     #[test]
@@ -774,98 +344,6 @@ mod tests {
         assert_eq!(TopicKind::parse(""), None);
         assert_eq!(TopicKind::parse("   "), None);
         assert_eq!(TopicKind::parse("junk"), None);
-    }
-
-    // --- TopicLoader accessors / list edge cases ----------------------------
-
-    #[test]
-    fn loader_dir_returns_managed_directory() {
-        let tmp = TempDir::new().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        assert_eq!(loader.dir(), tmp.path());
-    }
-
-    #[test]
-    fn list_on_nonexistent_dir_returns_empty() {
-        let tmp = TempDir::new().unwrap();
-        let missing = tmp.path().join("does-not-exist");
-        let loader = TopicLoader::new(missing);
-        assert!(loader.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn list_skips_non_md_files_and_subdirectories() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("notes.txt"), "not markdown").unwrap();
-        std::fs::create_dir(dir.join("subdir")).unwrap();
-        // A `.md` directory entry must also be ignored (not a file).
-        std::fs::create_dir(dir.join("dir.md")).unwrap();
-        std::fs::write(
-            dir.join("ok.md"),
-            topic_md("ok", "project", "ok desc", "body"),
-        )
-        .unwrap();
-
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let topics = loader.list().unwrap();
-        let names: Vec<_> = topics.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["ok"]);
-    }
-
-    #[test]
-    fn list_skips_malformed_topic_file() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        // Malformed: no frontmatter delimiters at all.
-        std::fs::write(dir.join("broken.md"), "no frontmatter here\n").unwrap();
-        std::fs::write(
-            dir.join("good.md"),
-            topic_md("good", "reference", "good desc", "body"),
-        )
-        .unwrap();
-
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let topics = loader.list().unwrap();
-        let names: Vec<_> = topics.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["good"]);
-        assert_eq!(topics[0].kind, TopicKind::Reference);
-    }
-
-    #[test]
-    fn list_uses_filename_when_frontmatter_name_mismatches() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        // Frontmatter name "wrong" but file stem is "actual-stem".
-        std::fs::write(
-            dir.join("actual-stem.md"),
-            topic_md("wrong", "user", "desc", "body"),
-        )
-        .unwrap();
-
-        let loader = TopicLoader::new(dir.to_path_buf());
-        let topics = loader.list().unwrap();
-        assert_eq!(topics.len(), 1);
-        assert_eq!(topics[0].name, "actual-stem");
-        assert_eq!(topics[0].description, "desc");
-    }
-
-    // --- read error paths ---------------------------------------------------
-
-    #[test]
-    fn read_rejects_invalid_slug() {
-        let tmp = TempDir::new().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        let err = loader.read("../escape").unwrap_err();
-        assert!(matches!(err, MemoryError::InvalidSlug { .. }));
-    }
-
-    #[test]
-    fn read_missing_file_is_io_error() {
-        let tmp = TempDir::new().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        let err = loader.read("nope").unwrap_err();
-        assert!(matches!(err, MemoryError::Io { .. }));
     }
 
     // --- parse_frontmatter edge cases ---------------------------------------
@@ -977,140 +455,6 @@ mod tests {
         assert_eq!(escape_yaml_string("a\nb"), "a\\nb");
         assert_eq!(escape_yaml_string("a\rb"), "a\\rb");
         assert_eq!(escape_yaml_string("plain"), "plain");
-    }
-
-    #[test]
-    fn write_then_read_round_trips_description_with_quotes() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "quoted".to_string(),
-                description: "use \"smart\" quotes \\ backslash".to_string(),
-                kind: TopicKind::Reference,
-                body: "body".to_string(),
-            })
-            .unwrap();
-        let topic = loader.read("quoted").unwrap();
-        assert_eq!(topic.description, "use \"smart\" quotes \\ backslash");
-        assert_eq!(topic.kind, TopicKind::Reference);
-    }
-
-    // --- index handling -----------------------------------------------------
-
-    #[test]
-    fn write_creates_index_with_header_when_none_exists() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "first".to_string(),
-                description: "first desc".to_string(),
-                kind: TopicKind::User,
-                body: "body".to_string(),
-            })
-            .unwrap();
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        assert!(index.starts_with("# Memory index\n\n"));
-        assert!(index.contains("[first](first.md)"));
-    }
-
-    #[test]
-    fn write_appends_after_last_bullet_line() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("MEMORY.md"),
-            "# Memory index\n\n- [aaa](aaa.md) — user: a\n\nTrailing prose paragraph.\n",
-        )
-        .unwrap();
-        let loader = TopicLoader::new(dir.to_path_buf());
-        loader
-            .write(&TopicDraft {
-                name: "bbb".to_string(),
-                description: "b desc".to_string(),
-                kind: TopicKind::User,
-                body: "body".to_string(),
-            })
-            .unwrap();
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        let lines: Vec<&str> = index.lines().collect();
-        let aaa_idx = lines.iter().position(|l| l.contains("aaa.md")).unwrap();
-        let bbb_idx = lines.iter().position(|l| l.contains("bbb.md")).unwrap();
-        let prose_idx = lines
-            .iter()
-            .position(|l| l.contains("Trailing prose"))
-            .unwrap();
-        // New bullet inserted right after the last existing bullet, before prose.
-        assert_eq!(bbb_idx, aaa_idx + 1);
-        assert!(bbb_idx < prose_idx);
-    }
-
-    #[test]
-    fn rewrite_with_index_line_appends_at_eof_when_no_bullets() {
-        let out = rewrite_with_index_line(
-            "# Memory index\n\nSome prose.\n",
-            "x",
-            "- [x](x.md) — user: d",
-        );
-        assert!(out.contains("Some prose."));
-        assert!(out.trim_end().ends_with("- [x](x.md) — user: d"));
-        assert!(out.ends_with('\n'));
-    }
-
-    #[test]
-    fn rewrite_with_index_line_adds_trailing_newline_when_existing_lacks_one() {
-        // existing does not end with '\n' and is non-empty.
-        let out =
-            rewrite_with_index_line("- [x](x.md) — user: old", "x", "- [x](x.md) — user: new");
-        assert!(out.contains("new"));
-        assert!(!out.contains("old"));
-        assert!(out.ends_with('\n'));
-    }
-
-    #[test]
-    fn remove_index_line_on_missing_index_is_ok() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        // No MEMORY.md exists; remove_index_line must succeed silently.
-        remove_index_line(dir, "ghost").unwrap();
-        assert!(!dir.join("MEMORY.md").exists());
-    }
-
-    #[test]
-    fn remove_index_line_preserves_other_entries_and_trailing_newline() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("MEMORY.md"),
-            "# Memory index\n\n- [keep](keep.md) — user: k\n- [drop](drop.md) — user: d\n",
-        )
-        .unwrap();
-        remove_index_line(dir, "drop").unwrap();
-        let index = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        assert!(index.contains("[keep](keep.md)"));
-        assert!(!index.contains("drop.md"));
-        assert!(index.ends_with('\n'));
-    }
-
-    // --- delete edge cases --------------------------------------------------
-
-    #[test]
-    fn delete_rejects_invalid_slug() {
-        let tmp = TempDir::new().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        let err = loader.delete("a/b").unwrap_err();
-        assert!(matches!(err, MemoryError::InvalidSlug { .. }));
-    }
-
-    #[test]
-    fn delete_missing_topic_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let loader = TopicLoader::new(tmp.path().to_path_buf());
-        // Deleting a topic that was never written succeeds.
-        loader.delete("never-existed").unwrap();
     }
 
     // --- validate_slug NUL --------------------------------------------------

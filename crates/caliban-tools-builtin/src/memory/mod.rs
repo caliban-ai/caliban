@@ -66,7 +66,7 @@ impl Tool for ReadMemoryTopicTool {
 
     async fn invoke(&self, input: Value, _cx: ToolContext) -> Result<Vec<ContentBlock>, ToolError> {
         let parsed: ReadInput = crate::parse_input(input)?;
-        let topic = self.loader.read(&parsed.name).map_err(|e| match e {
+        let topic = self.loader.read(&parsed.name).await.map_err(|e| match e {
             caliban_memory::MemoryError::InvalidSlug { .. } => {
                 ToolError::invalid_input(e.to_string())
             }
@@ -172,7 +172,7 @@ impl Tool for WriteMemoryTopicTool {
             kind,
             body: parsed.body,
         };
-        let path = self.loader.write(&draft).map_err(|e| match e {
+        let locator = self.loader.write(&draft).await.map_err(|e| match e {
             caliban_memory::MemoryError::InvalidSlug { .. } => {
                 ToolError::invalid_input(e.to_string())
             }
@@ -180,9 +180,8 @@ impl Tool for WriteMemoryTopicTool {
         })?;
         Ok(vec![ContentBlock::Text(TextBlock {
             text: format!(
-                "→ Wrote memory topic '{}' to {} and updated MEMORY.md index",
+                "→ Wrote memory topic '{}' to {locator} and updated MEMORY.md index",
                 draft.name,
-                path.display(),
             ),
             cache_control: None,
         })])

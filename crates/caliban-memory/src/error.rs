@@ -40,7 +40,33 @@ pub enum MemoryError {
         /// Reason it was rejected.
         reason: String,
     },
+    /// A storage-backend error surfaced from a non-fs substrate (e.g. gonzalo).
+    #[error("memory backend error: {0}")]
+    Backend(String),
+
+    /// An optimistic-concurrency conflict on write/delete. Dormant on the
+    /// single-writer fs substrate; live once remote sync exists.
+    #[error("memory write conflict at {key}")]
+    Conflict {
+        /// The topic key involved in the conflict.
+        key: String,
+    },
 }
 
 /// Convenience `Result` alias for this crate.
 pub type Result<T> = std::result::Result<T, MemoryError>;
+
+#[cfg(test)]
+mod error_variant_tests {
+    use super::MemoryError;
+
+    #[test]
+    fn conflict_and_backend_variants_display() {
+        let c = MemoryError::Conflict {
+            key: "caliban/memory:abc/foo".into(),
+        };
+        assert!(c.to_string().contains("conflict"));
+        let b = MemoryError::Backend("boom".into());
+        assert!(b.to_string().contains("boom"));
+    }
+}

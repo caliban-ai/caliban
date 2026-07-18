@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::auto::strip_html_comments;
+use crate::backend::{FsTopicBackend, TopicBackend};
 use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::prefix::{MemoryPrefix, ProjectTier, TierFile, TierKind};
@@ -56,18 +57,28 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
     let auto_disabled = config.disable_auto;
 
     // Seed the auto-memory dir if it doesn't exist yet (skip when disabled —
-    // we don't want a CI run to create a project dir).
-    let auto_md = if auto_disabled {
-        None
-    } else {
-        Some(ensure_auto_memory(&config.auto_memory_dir).await?)
-    };
+    // we don't want a CI run to create a project dir). This is purely for
+    // on-disk discoverability (a human can `ls`/open `MEMORY.md`); the
+    // spliced body below is always derived from the backend, never read back
+    // off this file.
+    if !auto_disabled {
+        ensure_auto_memory(&config.auto_memory_dir).await?;
+    }
 
     let global = read_optional(config.global_path.as_deref()).await?;
-    let auto_raw = if let Some(p) = auto_md.as_deref() {
-        read_optional_with_caps(Some(p), AUTO_MAX_LINES, AUTO_MAX_BYTES).await?
-    } else {
+    let auto_raw = if auto_disabled {
         None
+    } else {
+        // fs-only affordance; non-fs substrates reworked in #473.
+        let backend = FsTopicBackend::new(config.auto_memory_dir.clone());
+        let body = backend.index().await?;
+        let memory_md_path = config.auto_memory_dir.join("MEMORY.md");
+        Some(cap_text(
+            memory_md_path,
+            &body,
+            AUTO_MAX_LINES,
+            AUTO_MAX_BYTES,
+        ))
     };
 
     let global = global.map(post_process_static);
@@ -275,30 +286,12 @@ async fn read_optional(path: Option<&Path>) -> Result<Option<TierFile>> {
     }))
 }
 
-/// Read with cap-by-lines-or-bytes (whichever wins first). Used for the auto
-/// tier where the spec mandates a strict 200-line / 25 KB ceiling on the
-/// spliced body.
-async fn read_optional_with_caps(
-    path: Option<&Path>,
-    max_lines: usize,
-    max_bytes: usize,
-) -> Result<Option<TierFile>> {
-    let Some(path) = path else { return Ok(None) };
-    match tokio::fs::metadata(path).await {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(MemoryError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            });
-        }
-        Ok(_) => {}
-    }
-    let raw_bytes = tokio::fs::read(path).await.map_err(|e| MemoryError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
+/// Cap already-loaded text by lines-or-bytes (whichever wins first), tagging
+/// the result with `path` for operator-facing display (the body itself is no
+/// longer necessarily a verbatim read of a single on-disk file — it may be a
+/// backend-derived projection). Used for the auto tier where the spec
+/// mandates a strict 200-line / 25 KB ceiling on the spliced body.
+fn cap_text(path: PathBuf, raw: &str, max_lines: usize, max_bytes: usize) -> TierFile {
     let total_bytes = raw.len();
 
     // Apply caps. We walk lines and accumulate, stopping when either ceiling
@@ -315,15 +308,15 @@ async fn read_optional_with_caps(
     }
     let truncated_bytes = total_bytes.saturating_sub(kept.len());
 
-    Ok(Some(TierFile {
-        path: path.to_path_buf(),
+    TierFile {
+        path,
         estimated_tokens: estimate_tokens(&kept),
         body: kept,
         truncated_bytes,
-    }))
+    }
 }
 
-async fn ensure_auto_memory(dir: &Path) -> Result<PathBuf> {
+async fn ensure_auto_memory(dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| MemoryError::AutoMemorySeed {
@@ -332,7 +325,7 @@ async fn ensure_auto_memory(dir: &Path) -> Result<PathBuf> {
         })?;
     let memory_md = dir.join("MEMORY.md");
     if tokio::fs::try_exists(&memory_md).await.unwrap_or(false) {
-        return Ok(memory_md);
+        return Ok(());
     }
     tokio::fs::write(&memory_md, SEED_MEMORY_MD)
         .await
@@ -340,7 +333,7 @@ async fn ensure_auto_memory(dir: &Path) -> Result<PathBuf> {
             path: memory_md.clone(),
             source: e,
         })?;
-    Ok(memory_md)
+    Ok(())
 }
 
 /// Apply per-scope caps from `config`, then the combined `max_tokens` ceiling.
@@ -487,6 +480,7 @@ fn truncate_tier(prefix: &mut MemoryPrefix, kind: TierKind, max_tokens: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auto::{TopicDraft, TopicKind};
     use crate::prefix::{MemoryPrefix, TierFile, TierKind};
 
     fn tier(body: &str) -> TierFile {
@@ -496,6 +490,15 @@ mod tests {
             body: body.to_string(),
             truncated_bytes: 0,
         }
+    }
+
+    /// Raw topic-file text matching the frontmatter [`crate::auto::TopicSummary`]
+    /// parses. Written directly (bypassing [`FsTopicBackend::write`]) so tests
+    /// that need many topics don't pay for `write`'s per-call index rewrite.
+    fn topic_md_raw(name: &str, kind: &str, desc: &str, body: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: \"{desc}\"\nmetadata:\n  node_type: memory\n  type: {kind}\n---\n\n{body}\n",
+        )
     }
 
     #[test]
@@ -679,22 +682,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_derives_auto_index_from_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let be = FsTopicBackend::new(tmp.path().to_path_buf());
+        be.write(&TopicDraft {
+            name: "gg".into(),
+            description: "hook line".into(),
+            kind: TopicKind::Project,
+            body: "b".into(),
+        })
+        .await
+        .unwrap();
+        let cfg = MemoryConfig::for_test(tmp.path().to_path_buf());
+        let prefix = load(&cfg).await.unwrap();
+        let auto = prefix.auto.as_ref().expect("auto tier loaded");
+        assert!(auto.body.contains("[gg](gg.md)"));
+    }
+
+    #[tokio::test]
     async fn auto_load_caps_at_two_hundred_lines() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("memory");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut body = String::new();
+        // 400 topics → derived index has 400 entry lines (plus a 2-line
+        // header), well over the 200-line cap.
         for i in 0..400 {
-            writeln!(body, "line-{i:04}").unwrap();
+            let name = format!("topic-{i:04}");
+            std::fs::write(
+                dir.join(format!("{name}.md")),
+                topic_md_raw(&name, "project", "d", "body"),
+            )
+            .unwrap();
         }
-        std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
 
         let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
-        // Strip the conventions block we add before counting.
-        let kept_lines = auto.body.lines().filter(|l| l.starts_with("line-")).count();
-        assert_eq!(kept_lines, AUTO_MAX_LINES);
+        let kept_entries = auto
+            .body
+            .lines()
+            .filter(|l| l.starts_with("- [topic-"))
+            .count();
+        // 200 total lines kept = 2-line header + 198 entries.
+        assert_eq!(kept_entries, AUTO_MAX_LINES - 2);
         assert!(auto.truncated_bytes > 0);
     }
 
@@ -703,25 +733,30 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("memory");
         std::fs::create_dir_all(&dir).unwrap();
-        // 10 lines but each line is ~5 KB → cap on bytes hits before the line cap.
-        let mut body = String::new();
+        // 10 topics, each with a ~5 KB description → the derived index's
+        // byte cap hits well before the 200-line cap.
         for i in 0..10 {
-            let chunk = "x".repeat(5_000);
-            writeln!(body, "{i}-{chunk}").unwrap();
+            let name = format!("topic-{i:02}");
+            let desc = "x".repeat(5_000);
+            std::fs::write(
+                dir.join(format!("{name}.md")),
+                topic_md_raw(&name, "project", &desc, "body"),
+            )
+            .unwrap();
         }
-        std::fs::write(dir.join("MEMORY.md"), &body).unwrap();
 
         let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
-        // Body kept ≤ 25 KB before we appended conventions.
-        // We can't assert exact byte length post-conventions, but truncated_bytes
-        // must be set and the kept body shouldn't contain every line.
         assert!(auto.truncated_bytes > 0);
-        let lines_with_x = auto.body.lines().filter(|l| l.contains("xxxx")).count();
+        let kept_entries = auto
+            .body
+            .lines()
+            .filter(|l| l.starts_with("- [topic-"))
+            .count();
         assert!(
-            lines_with_x < 10,
-            "expected truncation, got {lines_with_x} lines"
+            kept_entries < 10,
+            "expected truncation, got {kept_entries} entries"
         );
     }
 
@@ -730,10 +765,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("memory");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("MEMORY.md"),
-            "# Memory index\n<!-- secret comment -->\n- [foo](foo.md) — user: visible\n",
-        )
+        let be = FsTopicBackend::new(dir.clone());
+        be.write(&TopicDraft {
+            name: "foo".into(),
+            description: "visible <!-- secret comment -->".into(),
+            kind: TopicKind::User,
+            body: "b".into(),
+        })
+        .await
         .unwrap();
         let cfg = MemoryConfig::for_test(dir.clone());
         let p = load(&cfg).await.unwrap();
