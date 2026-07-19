@@ -8,7 +8,7 @@ competing agents, and (soon) against standard benchmarks.
 | Directory | Contents |
 |-----------|----------|
 | [`probes/`](probes/) | Dated, point-in-time findings from live probes of caliban against real backends (LMStudio, Ollama, parallel subagents, …). Each file is a snapshot; keep old ones for history. |
-| [`competitors/`](competitors/) | Per-competitor capability inventories and parity analysis. One subdirectory per competitor. Currently: [`claude-code/`](competitors/claude-code/) — a documented-capability inventory and the caliban ↔ Claude Code parity gap matrix. |
+| [`competitors/`](competitors/) | Per-competitor capability inventories and parity analysis. One subdirectory per competitor, each with a documented-capability inventory + a caliban ↔ competitor parity gap matrix. Currently: [`claude-code/`](competitors/claude-code/) (primary parity target), [`codex/`](competitors/codex/) (OpenAI Codex CLI), [`opencode/`](competitors/opencode/) (OpenCode — open-source terminal agent, direct head-to-head), and [`openclaw/`](competitors/openclaw/) (OpenClaw — a multi-channel agent gateway that orchestrates coding agents rather than being one). |
 
 ## Conventions
 
