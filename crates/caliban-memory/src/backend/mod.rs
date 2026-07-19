@@ -1,5 +1,6 @@
 //! The storage seam for auto-memory topics.
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::auto::{TopicDraft, TopicFile, TopicSummary};
 use crate::error::Result;
@@ -35,7 +36,7 @@ use std::path::PathBuf;
 /// Public facade over a chosen [`TopicBackend`]. `new` selects the fs backend
 /// (behaviour-equivalent to the historical `std::fs` loader).
 pub struct TopicLoader {
-    backend: Box<dyn TopicBackend>,
+    backend: Arc<dyn TopicBackend>,
 }
 
 impl std::fmt::Debug for TopicLoader {
@@ -55,7 +56,7 @@ impl TopicLoader {
     #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
-            backend: Box::new(FsTopicBackend::new(dir)),
+            backend: Arc::new(FsTopicBackend::new(dir)),
         }
     }
 
@@ -63,6 +64,15 @@ impl TopicLoader {
     /// substrate).
     #[must_use]
     pub fn with_backend(backend: Box<dyn TopicBackend>) -> Self {
+        Self {
+            backend: Arc::from(backend),
+        }
+    }
+
+    /// Construct a loader over an arbitrary [`TopicBackend`] wrapped in an [`Arc`],
+    /// allowing the backend to be shared across multiple paths.
+    #[must_use]
+    pub fn with_backend_arc(backend: Arc<dyn TopicBackend>) -> Self {
         Self { backend }
     }
 
@@ -182,5 +192,25 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn with_backend_arc_shares_one_instance() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn TopicBackend> =
+            Arc::new(FsTopicBackend::new(tmp.path().to_path_buf()));
+        let loader = TopicLoader::with_backend_arc(Arc::clone(&backend));
+        // The same Arc backs the loader; writing through the loader is visible via the shared handle.
+        loader
+            .write(&TopicDraft {
+                name: "a".into(),
+                description: "d".into(),
+                kind: TopicKind::User,
+                body: "b".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(backend.list().await.unwrap().len(), 1);
     }
 }
