@@ -182,9 +182,8 @@ parity specifically:
 1. **Client/server core + `serve`/`attach` + ACP** (B/I) — a backend other
    front-ends (web, IDE, another agent) attach to. This is OpenCode's biggest
    architectural difference and **overlaps with the "caliban as a worker
-   backend" strategic note in the [OpenClaw
-   matrix](../openclaw/parity-gap-matrix.md)** — a server/ACP surface would
-   serve both.
+   backend" note under [OpenClaw](../openclaw/README.md)** (the full OpenClaw
+   comparison lives in the Prospero repo) — a server/ACP surface would serve both.
 2. **LSP integration** (H) — feed Language-Server diagnostics/symbols to the
    agent. No caliban analogue; high coding-quality leverage.
 3. **Auto-formatters on edit** (H) — run prettier/gofmt/etc. after file edits.
