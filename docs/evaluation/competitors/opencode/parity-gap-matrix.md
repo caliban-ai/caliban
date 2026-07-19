@@ -4,8 +4,9 @@
 > (this project) and **OpenCode** (`opencode.ai`) — a genuine head-to-head
 > terminal-coding-agent competitor. Refresh it whenever a major feature lands
 > or OpenCode ships a new capability. Use it — alongside the
-> [Claude Code](../claude-code/parity-gap-matrix.md) and
-> [Codex](../codex/parity-gap-matrix.md) matrices — to prioritize the next sprint.
+> [Claude Code](../claude-code/parity-gap-matrix.md),
+> [Codex](../codex/parity-gap-matrix.md), and
+> [Grok Build](../grok-build/parity-gap-matrix.md) matrices — to prioritize the next sprint.
 >
 > **How to use it:** unlike OpenClaw (a gateway that *orchestrates* coding
 > agents), OpenCode is the same *kind* of thing as caliban, so most rows are
