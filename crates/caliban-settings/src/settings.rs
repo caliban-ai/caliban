@@ -244,10 +244,14 @@ pub struct ToolsConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageSubstrate {
+    /// Gonzalo-free local filesystem backend (default; no feature required).
     #[default]
     Fs,
+    /// A remote gonzalo daemon (requires the `gonzalo` build feature).
     Remote,
+    /// Gonzalo git substrate — recognized but not wired yet (#469).
     Git,
+    /// Gonzalo S3 substrate — recognized but not wired yet (#469).
     S3,
 }
 
@@ -266,7 +270,9 @@ pub struct RemoteStorageConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
+    /// Which substrate backs memory storage (default `fs`).
     pub substrate: StorageSubstrate,
+    /// Remote daemon connection settings; required when `substrate = remote`.
     pub remote: Option<RemoteStorageConfig>,
 }
 

@@ -24,7 +24,7 @@ path = "src/main.rs"
 # at link time (libxcb on Linux). See `caliban/src/tui/clipboard.rs`.
 default   = ["clipboard"]
 clipboard = ["dep:arboard"]
-gonzalo   = ["caliban-memory/gonzalo"]
+gonzalo   = ["caliban-memory/gonzalo", "dep:gonzalo-core", "dep:gonzalo-store-server"]
 
 [dependencies]
 caliban-common             = { workspace = true }
@@ -52,6 +52,8 @@ caliban-images             = { workspace = true }
 caliban-worktrees          = { workspace = true }
 caliban-supervisor         = { workspace = true }
 caliban-settings           = { workspace = true }
+gonzalo-core               = { version = "0.3", optional = true }
+gonzalo-store-server       = { version = "0.3", optional = true }
 rust_decimal               = { version = "1", default-features = false }
 anyhow                     = { workspace = true }
 clap                       = { version = "4", features = ["derive", "env"] }
@@ -83,6 +85,7 @@ uuid                     = { workspace = true }
 arc-swap                 = { workspace = true }
 
 [dev-dependencies]
+gonzalo-store-fs = { version = "0.3" }
 caliban-provider = { workspace = true, features = ["mock"] }
 tokio-util       = { workspace = true }
 wiremock         = { workspace = true }
