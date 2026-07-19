@@ -235,6 +235,42 @@ pub struct ToolsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// storage — memory storage substrate selection (#473)
+// ---------------------------------------------------------------------------
+
+/// Which gonzalo substrate backs memory storage. `fs` (default) is the
+/// gonzalo-free local backend; `remote` targets a gonzalo daemon. `git`/`s3`
+/// parse but are not wired yet (tracked in #469).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageSubstrate {
+    #[default]
+    Fs,
+    Remote,
+    Git,
+    S3,
+}
+
+/// Connection settings for a remote gonzalo daemon.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteStorageConfig {
+    /// Base URL of the gonzalod HTTP endpoint (e.g. `http://host:8080`).
+    pub url: String,
+    /// NAME of the environment variable holding the bearer token. The token
+    /// itself is never stored in settings.json.
+    pub token_env: Option<String>,
+}
+
+/// Memory storage substrate selection (#473). Absent ⇒ `fs` ⇒ unchanged.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StorageConfig {
+    pub substrate: StorageSubstrate,
+    pub remote: Option<RemoteStorageConfig>,
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
@@ -293,6 +329,10 @@ pub struct Settings {
     // ----- memory -----------------------------------------------------------
     /// Memory tier knobs (passed to `caliban_memory::MemoryConfig`).
     pub memory: Option<serde_json::Value>,
+
+    // ----- storage ----------------------------------------------------------
+    /// Memory storage substrate selection (#473).
+    pub storage: StorageConfig,
 
     // ----- plugins ----------------------------------------------------------
     /// Plugin manager knobs.
@@ -1141,6 +1181,54 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
         assert_eq!(
             from_settings.total_handler_count(),
             from_legacy.total_handler_count()
+        );
+    }
+
+    #[cfg(test)]
+    mod storage_config_tests {
+        use super::{Settings, StorageSubstrate};
+
+        #[test]
+        fn absent_storage_defaults_to_fs() {
+            let s: Settings = serde_json::from_str("{}").unwrap();
+            assert_eq!(s.storage.substrate, StorageSubstrate::Fs);
+            assert!(s.storage.remote.is_none());
+        }
+
+        #[test]
+        fn parses_remote_with_url_and_token_env() {
+            let s: Settings = serde_json::from_str(
+                r#"{ "storage": { "substrate": "remote", "remote": { "url": "http://h:8080", "token_env": "GONZALO_TOKEN" } } }"#,
+            )
+            .unwrap();
+            assert_eq!(s.storage.substrate, StorageSubstrate::Remote);
+            let r = s.storage.remote.unwrap();
+            assert_eq!(r.url, "http://h:8080");
+            assert_eq!(r.token_env.as_deref(), Some("GONZALO_TOKEN"));
+        }
+
+        #[test]
+        fn unknown_storage_key_is_rejected() {
+            let e = serde_json::from_str::<Settings>(
+                r#"{ "storage": { "substrate": "fs", "nope": 1 } }"#,
+            );
+            assert!(e.is_err(), "deny_unknown_fields should reject 'nope'");
+        }
+
+        #[test]
+        fn unknown_substrate_value_is_rejected() {
+            let e = serde_json::from_str::<Settings>(r#"{ "storage": { "substrate": "sqlite" } }"#);
+            assert!(e.is_err(), "unknown substrate variant should fail");
+        }
+    }
+
+    #[test]
+    fn schema_accepts_remote_storage_block() {
+        let doc = serde_json::json!({ "storage": { "substrate": "remote", "remote": { "url": "http://h:8080", "token_env": "T" } } });
+        let errors = crate::schema::validate_value(&doc);
+        assert!(
+            errors.is_empty(),
+            "schema rejected valid storage: {errors:?}"
         );
     }
 }
