@@ -44,14 +44,17 @@ async fn build_remote_backend(
     let slug = workspace_slug(auto_memory_dir);
     let backend = GonzaloTopicBackend::new(store, slug);
     // Fail-fast connectivity probe: a healthy daemon answers `list`.
-    backend.list().await.map_err(|e| {
-        let url = storage
-            .remote
-            .as_ref()
-            .map(|r| r.url.as_str())
-            .unwrap_or("<none>");
-        format!("gonzalo remote {url} unreachable/unauthorized: {e}")
-    })?;
+    // `remote_store` above already errors when `storage.remote` is `None`, so
+    // it's provably `Some` here.
+    let url = &storage
+        .remote
+        .as_ref()
+        .expect("remote_store already validated Some")
+        .url;
+    backend
+        .list()
+        .await
+        .map_err(|e| format!("gonzalo remote {url} unreachable/unauthorized: {e}"))?;
     Ok(Arc::new(backend))
 }
 
@@ -74,14 +77,13 @@ fn remote_store(storage: &StorageConfig) -> Result<Arc<dyn gonzalo_core::Store>,
     Ok(Arc::new(store))
 }
 
-/// Stable per-workspace slug = blake3 hex of the canonical memory dir. Reuses
-/// gonzalo's own content hasher (no new dep). Matches #470's RecordKey scheme.
+/// Stable per-workspace slug = blake3 hex of the configured memory-dir path.
+/// Deterministic regardless of whether the dir exists yet, and independent of
+/// symlink resolution. Reuses gonzalo's content hasher (no new dep). Matches
+/// #470's `RecordKey` scheme.
 #[cfg(feature = "gonzalo")]
 fn workspace_slug(auto_memory_dir: &Path) -> String {
-    let canon = auto_memory_dir
-        .canonicalize()
-        .unwrap_or_else(|_| auto_memory_dir.to_path_buf());
-    gonzalo_core::ContentHash::of(canon.to_string_lossy().as_bytes()).0
+    gonzalo_core::ContentHash::of(auto_memory_dir.to_string_lossy().as_bytes()).0
 }
 
 #[cfg(test)]
@@ -133,6 +135,8 @@ mod gonzalo_tests {
     use super::*;
     use std::sync::Arc;
 
+    use caliban_settings::{RemoteStorageConfig, StorageConfig, StorageSubstrate};
+
     #[tokio::test]
     async fn probe_succeeds_on_healthy_store() {
         use caliban_memory::GonzaloTopicBackend;
@@ -142,5 +146,51 @@ mod gonzalo_tests {
         let store: Arc<dyn gonzalo_core::Store> = Arc::new(FsStore::new(tmp.path().to_path_buf()));
         let be = GonzaloTopicBackend::new(store, "wsslug");
         assert!(be.list().await.is_ok());
+    }
+
+    #[test]
+    fn workspace_slug_is_deterministic_and_path_sensitive() {
+        let a = workspace_slug(std::path::Path::new("/some/mem/dir"));
+        let a2 = workspace_slug(std::path::Path::new("/some/mem/dir"));
+        let b = workspace_slug(std::path::Path::new("/other/mem/dir"));
+        assert_eq!(a, a2, "same path must hash identically");
+        assert_ne!(a, b, "different paths must differ");
+        assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn remote_store_ok_with_url_and_no_token() {
+        let cfg = StorageConfig {
+            substrate: StorageSubstrate::Remote,
+            remote: Some(RemoteStorageConfig {
+                url: "http://127.0.0.1:8080".into(),
+                token_env: None,
+            }),
+        };
+        // ServerStore::http is lazy (no connection), so construction succeeds without a daemon.
+        assert!(remote_store(&cfg).is_ok());
+    }
+
+    #[test]
+    fn remote_store_errors_without_remote_block() {
+        let cfg = StorageConfig {
+            substrate: StorageSubstrate::Remote,
+            remote: None,
+        };
+        let e = remote_store(&cfg).err().unwrap();
+        assert!(e.contains("requires a [storage.remote] block"), "got: {e}");
+    }
+
+    #[test]
+    fn remote_store_errors_when_token_env_unset() {
+        let cfg = StorageConfig {
+            substrate: StorageSubstrate::Remote,
+            remote: Some(RemoteStorageConfig {
+                url: "http://127.0.0.1:8080".into(),
+                token_env: Some("CALIBAN_TEST_TOKEN_DEFINITELY_UNSET_9df3".into()),
+            }),
+        };
+        let e = remote_store(&cfg).err().unwrap();
+        assert!(e.contains("not set"), "got: {e}");
     }
 }
