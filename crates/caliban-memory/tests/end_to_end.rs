@@ -44,7 +44,8 @@ async fn end_to_end_with_tempdir() {
     // The auto tier's index is always derived from the topic-backend
     // listing now (never a verbatim read of MEMORY.md), so exercise that
     // through a real topic write rather than hand-writing MEMORY.md.
-    FsTopicBackend::new(auto_dir.clone())
+    let backend = FsTopicBackend::new(auto_dir.clone());
+    backend
         .write(&TopicDraft {
             name: "foo".into(),
             description: "bar".into(),
@@ -59,7 +60,7 @@ async fn end_to_end_with_tempdir() {
         Some(project_md.clone()),
         auto_dir.clone(),
     );
-    let prefix = load(&cfg).await.unwrap();
+    let prefix = load(&cfg, &backend).await.unwrap();
 
     assert!(prefix.global.is_some(), "global should load");
     assert!(prefix.project.is_some(), "project should load");
@@ -82,12 +83,15 @@ async fn end_to_end_with_tempdir() {
 
 #[tokio::test]
 async fn end_to_end_seeds_empty_memory_md_on_first_run() {
+    use caliban_memory::FsTopicBackend;
+
     let tmp = tempfile::TempDir::new().unwrap();
     let auto_dir = tmp.path().join("auto");
     assert!(!auto_dir.exists());
 
     let cfg = config_with(None, None, auto_dir.clone());
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(auto_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
 
     let memory_md = auto_dir.join("MEMORY.md");
     assert!(memory_md.exists(), "seed MEMORY.md should be created");
@@ -115,14 +119,15 @@ async fn end_to_end_seeds_empty_memory_md_on_first_run() {
 
 #[tokio::test]
 async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
-    use caliban_memory::{TopicDraft, TopicKind, TopicLoader};
+    use caliban_memory::{FsTopicBackend, TopicDraft, TopicKind, TopicLoader};
 
     let tmp = tempfile::TempDir::new().unwrap();
     let auto_dir = tmp.path().join("auto");
     let cfg = config_with(None, None, auto_dir.clone());
+    let backend = FsTopicBackend::new(auto_dir.clone());
 
     // Seed first to populate MEMORY.md.
-    load(&cfg).await.unwrap();
+    load(&cfg, &backend).await.unwrap();
 
     // Programmatic write of a user topic via the public API.
     let loader = TopicLoader::new(auto_dir.clone());
@@ -137,7 +142,7 @@ async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
         .unwrap();
 
     // Reload should pick up the new MEMORY.md index entry.
-    let prefix = load(&cfg).await.unwrap();
+    let prefix = load(&cfg, &backend).await.unwrap();
     let auto = prefix.auto.as_ref().unwrap();
     assert!(
         auto.body.contains("[user-role](user-role.md)"),
@@ -151,14 +156,17 @@ async fn end_to_end_topic_write_then_index_resplice_roundtrip() {
 
 #[tokio::test]
 async fn end_to_end_missing_global_and_project_yields_none_tiers() {
+    use caliban_memory::FsTopicBackend;
+
     let tmp = tempfile::TempDir::new().unwrap();
     let auto_dir = tmp.path().join("auto");
     // Reference files that don't exist:
     let bogus_global = tmp.path().join("missing-global.md");
     let bogus_project = tmp.path().join("missing-project.md");
 
-    let cfg = config_with(Some(bogus_global), Some(bogus_project), auto_dir);
-    let prefix = load(&cfg).await.unwrap();
+    let cfg = config_with(Some(bogus_global), Some(bogus_project), auto_dir.clone());
+    let backend = FsTopicBackend::new(auto_dir);
+    let prefix = load(&cfg, &backend).await.unwrap();
 
     assert!(prefix.global.is_none());
     assert!(prefix.project.is_none());

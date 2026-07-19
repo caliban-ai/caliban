@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::auto::strip_html_comments;
-use crate::backend::{FsTopicBackend, TopicBackend};
+use crate::backend::TopicBackend;
 use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::prefix::{MemoryPrefix, ProjectTier, TierFile, TierKind};
@@ -46,6 +46,10 @@ const CONVENTIONS_BLOCK: &str = concat!(
 /// Load all three memory tiers from disk, enforce the token budget, and return
 /// the assembled [`MemoryPrefix`].
 ///
+/// `backend` derives the auto-memory tier's index (the caller-configured
+/// [`TopicBackend`], e.g. [`crate::backend::FsTopicBackend`]); it is not
+/// constructed internally so non-fs substrates can be plugged in.
+///
 /// Missing files are not errors — they contribute `None` tiers.
 ///
 /// # Errors
@@ -53,7 +57,7 @@ const CONVENTIONS_BLOCK: &str = concat!(
 /// Returns [`MemoryError::Io`] if a tier file exists but cannot be read
 /// (permissions, etc.), or [`MemoryError::AutoMemorySeed`] if the auto-memory
 /// directory exists check / seed write fails.
-pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
+pub async fn load(config: &MemoryConfig, backend: &dyn TopicBackend) -> Result<MemoryPrefix> {
     let auto_disabled = config.disable_auto;
 
     // Seed the auto-memory dir if it doesn't exist yet (skip when disabled —
@@ -69,8 +73,6 @@ pub async fn load(config: &MemoryConfig) -> Result<MemoryPrefix> {
     let auto_raw = if auto_disabled {
         None
     } else {
-        // fs-only affordance; non-fs substrates reworked in #473.
-        let backend = FsTopicBackend::new(config.auto_memory_dir.clone());
         let body = backend.index().await?;
         let memory_md_path = config.auto_memory_dir.join("MEMORY.md");
         Some(cap_text(
@@ -481,6 +483,7 @@ fn truncate_tier(prefix: &mut MemoryPrefix, kind: TierKind, max_tokens: usize) {
 mod tests {
     use super::*;
     use crate::auto::{TopicDraft, TopicKind};
+    use crate::backend::FsTopicBackend;
     use crate::prefix::{MemoryPrefix, TierFile, TierKind};
 
     fn tier(body: &str) -> TierFile {
@@ -694,7 +697,7 @@ mod tests {
         .await
         .unwrap();
         let cfg = MemoryConfig::for_test(tmp.path().to_path_buf());
-        let prefix = load(&cfg).await.unwrap();
+        let prefix = load(&cfg, &be).await.unwrap();
         let auto = prefix.auto.as_ref().expect("auto tier loaded");
         assert!(auto.body.contains("[gg](gg.md)"));
     }
@@ -716,7 +719,8 @@ mod tests {
         }
 
         let cfg = MemoryConfig::for_test(dir.clone());
-        let p = load(&cfg).await.unwrap();
+        let backend = FsTopicBackend::new(dir.clone());
+        let p = load(&cfg, &backend).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
         let kept_entries = auto
             .body
@@ -746,7 +750,8 @@ mod tests {
         }
 
         let cfg = MemoryConfig::for_test(dir.clone());
-        let p = load(&cfg).await.unwrap();
+        let backend = FsTopicBackend::new(dir.clone());
+        let p = load(&cfg, &backend).await.unwrap();
         let auto = p.auto.as_ref().expect("auto loaded");
         assert!(auto.truncated_bytes > 0);
         let kept_entries = auto
@@ -775,7 +780,7 @@ mod tests {
         .await
         .unwrap();
         let cfg = MemoryConfig::for_test(dir.clone());
-        let p = load(&cfg).await.unwrap();
+        let p = load(&cfg, &be).await.unwrap();
         let auto = p.auto.as_ref().unwrap();
         assert!(!auto.body.contains("secret comment"));
         assert!(auto.body.contains("[foo](foo.md)"));
@@ -836,7 +841,8 @@ mod tests {
         // to race with parallel tests that call `load()`.
         let mut cfg = MemoryConfig::for_test(dir.clone());
         cfg.disable_auto = true;
-        let p = load(&cfg).await.unwrap();
+        let backend = FsTopicBackend::new(dir.clone());
+        let p = load(&cfg, &backend).await.unwrap();
         assert!(p.auto.is_none(), "auto tier should be dropped");
     }
 

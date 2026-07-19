@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use caliban_memory::project_walk::WalkStop;
-use caliban_memory::{AncestryAddendum, MemoryConfig, load};
+use caliban_memory::{AncestryAddendum, FsTopicBackend, MemoryConfig, load};
 
 fn write(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
@@ -39,7 +39,8 @@ async fn ancestor_walk_and_imports_integration() {
     cfg.disable_walk = false;
     cfg.non_interactive = true; // auto-deny external (none exist anyway)
 
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
     let project_tier = prefix.project_tier.as_ref().expect("project tier built");
 
     // base_files = [root/CLAUDE.md, sub/CLAUDE.md] (broad → narrow).
@@ -104,7 +105,8 @@ async fn disable_walk_env_falls_back_to_legacy_single_file() {
     cfg.disable_walk = true;
     cfg.project_walk_root = root.to_path_buf();
 
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
     let project = prefix.project.expect("legacy project loaded");
     assert!(project.body.contains("ROOT-LEGACY"));
     assert!(
@@ -129,7 +131,8 @@ async fn agents_md_loaded_directly_alongside_claude_md() {
     cfg.project_walk_root = root.to_path_buf();
     cfg.disable_walk = false;
 
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
     let tier = prefix.project_tier.as_ref().unwrap();
     let names: Vec<String> = tier
         .base_files
@@ -159,7 +162,8 @@ async fn claude_md_excludes_skip_matching_files() {
     cfg.disable_walk = false;
     cfg.claude_md_excludes = caliban_memory::build_excludes(["CLAUDE.md"]).unwrap();
 
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
     let tier = prefix.project_tier.unwrap();
     let bodies: Vec<&str> = tier.base_files.iter().map(|f| f.body.as_str()).collect();
     assert!(
@@ -184,10 +188,11 @@ async fn additional_directories_claude_md_includes_extra_walks() {
     cfg.project_walk_root = primary.clone();
     cfg.disable_walk = false;
     cfg.additional_dirs = vec![extra.clone()];
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
 
     // Without the flag, the extra dir contributes nothing.
     cfg.additional_directories_claude_md = false;
-    let prefix = load(&cfg).await.unwrap();
+    let prefix = load(&cfg, &backend).await.unwrap();
     let bodies: Vec<&str> = prefix
         .project_tier
         .as_ref()
@@ -201,7 +206,7 @@ async fn additional_directories_claude_md_includes_extra_walks() {
 
     // With the flag, the extra dir's CLAUDE.md is appended.
     cfg.additional_directories_claude_md = true;
-    let prefix = load(&cfg).await.unwrap();
+    let prefix = load(&cfg, &backend).await.unwrap();
     let bodies: Vec<&str> = prefix
         .project_tier
         .as_ref()
@@ -233,7 +238,8 @@ async fn rules_dot_caliban_directory_loaded_into_active_rules() {
     cfg.project_walk_root = root.to_path_buf();
     cfg.disable_walk = false;
 
-    let prefix = load(&cfg).await.unwrap();
+    let backend = FsTopicBackend::new(cfg.auto_memory_dir.clone());
+    let prefix = load(&cfg, &backend).await.unwrap();
     let tier = prefix.project_tier.as_ref().unwrap();
     let always: Vec<_> = tier
         .active_rules
