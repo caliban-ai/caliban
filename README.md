@@ -7,6 +7,10 @@
 
 # caliban
 
+<p align="center">
+  <a href="https://discord.gg/jq4P4R5EGh"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20the%20chat-5865F2?logo=discord&logoColor=white"></a>
+</p>
+
 A from-scratch Rust agent harness that puts the operator in control of model
 routing, memory, skills, and prompt context.
 
@@ -33,6 +37,11 @@ routing, memory, skills, and prompt context.
 - **Rust-fast.** Harness overhead should be negligible compared to model
   latency. The user's time-to-result is dominated by the model, not the
   runtime.
+
+## Community
+
+Join the [caliban Discord](https://discord.gg/jq4P4R5EGh) for discussions,
+questions, and to keep up with development.
 
 ## License
 
