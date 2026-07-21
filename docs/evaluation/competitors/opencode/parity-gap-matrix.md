@@ -5,8 +5,9 @@
 > terminal-coding-agent competitor. Refresh it whenever a major feature lands
 > or OpenCode ships a new capability. Use it — alongside the
 > [Claude Code](../claude-code/parity-gap-matrix.md),
-> [Codex](../codex/parity-gap-matrix.md), and
-> [Grok Build](../grok-build/parity-gap-matrix.md) matrices — to prioritize the next sprint.
+> [Codex](../codex/parity-gap-matrix.md),
+> [Grok Build](../grok-build/parity-gap-matrix.md), and
+> [Google Antigravity](../antigravity/parity-gap-matrix.md) matrices — to prioritize the next sprint.
 >
 > **How to use it:** unlike OpenClaw (a gateway that *orchestrates* coding
 > agents), OpenCode is the same *kind* of thing as caliban, so most rows are

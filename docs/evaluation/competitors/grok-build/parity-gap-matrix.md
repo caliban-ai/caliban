@@ -5,9 +5,10 @@
 > a genuine head-to-head competitor. Refresh it whenever a major feature lands
 > or Grok Build ships a new capability. Use it — alongside the
 > [Claude Code](../claude-code/parity-gap-matrix.md),
-> [Codex](../codex/parity-gap-matrix.md), and
-> [OpenCode](../opencode/parity-gap-matrix.md) matrices — to prioritize the next
-> sprint.
+> [Codex](../codex/parity-gap-matrix.md),
+> [OpenCode](../opencode/parity-gap-matrix.md), and
+> [Google Antigravity](../antigravity/parity-gap-matrix.md) matrices — to
+> prioritize the next sprint.
 >
 > **How to use it:** Grok Build is the same *kind* of thing as caliban (a
 > terminal coding agent), so most rows are real apples-to-apples comparisons.
