@@ -346,7 +346,15 @@ async fn main() -> Result<()> {
     // settings-load EX_CONFIG (78) exit above.
     let workspace_root_for_memory = workspace.root().to_path_buf();
     let memory_cfg_for_backend = caliban_memory::MemoryConfig::from_env(&workspace_root_for_memory);
-    let topic_backend: Arc<dyn caliban_memory::TopicBackend> =
+    // --bare (ADR 0025) skips auto-memory entirely; do NOT run the storage factory
+    // (a remote substrate would probe the daemon and could fatally exit here) for a
+    // subsystem bare mode never touches. Use an unused fs placeholder in that case,
+    // mirroring worker.rs's reasoning.
+    let topic_backend: Arc<dyn caliban_memory::TopicBackend> = if args.bare {
+        Arc::new(caliban_memory::FsTopicBackend::new(
+            memory_cfg_for_backend.auto_memory_dir.clone(),
+        ))
+    } else {
         match startup::storage::build_topic_backend(
             &settings_outcome.settings.storage,
             &memory_cfg_for_backend.auto_memory_dir,
@@ -358,7 +366,8 @@ async fn main() -> Result<()> {
                 eprintln!("[caliban] storage config error: {e}");
                 std::process::exit(78);
             }
-        };
+        }
+    };
 
     let mut registry = startup::build_registry(
         &args,
