@@ -113,7 +113,7 @@ impl SlashCommand for MemoryCommand {
         let sub = parts.next().unwrap_or("").trim();
         let rest = parts.next().unwrap_or("").trim();
         match sub {
-            "" => match caliban_memory::load(&cfg).await {
+            "" => match caliban_memory::load(&cfg, ctx.app.topic_backend.as_ref()).await {
                 Ok(p) => {
                     ctx.app.transcript.push(TranscriptLine::Info(format!(
                         "memory tiers ({} tokens / {} budget):",

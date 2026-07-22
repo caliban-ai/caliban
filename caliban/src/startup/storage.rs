@@ -1,8 +1,10 @@
 //! Feature-aware memory-backend factory (config → `TopicBackend`).
-// `build_topic_backend` and its helpers are wired into startup in Task 5 (#473);
-// until then they are reachable only from tests, so allow dead_code module-wide.
-// Remove this once the startup wiring calls the factory.
-#![allow(dead_code)]
+//!
+//! `build_topic_backend` is wired into startup by `main.rs`/`worker.rs` (via
+//! `compose::build_registry`/`compose::resolve_system_prompt`) and by the TUI
+//! `/memory` slash handler, so a single config-selected backend backs the
+//! auto-memory tools, the system-prompt memory splice, and the TUI memory
+//! commands (#473).
 use std::path::Path;
 use std::sync::Arc;
 
