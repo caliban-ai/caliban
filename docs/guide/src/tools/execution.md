@@ -24,7 +24,9 @@ additional_directories = [
 
 ```admonish note title="Path restriction vs. the OS sandbox"
 `--restrict-paths` enforces containment at the Rust level before a process is spawned.
-The [OS Sandbox](./sandbox.md) enforces containment at the OS level inside the subprocess.
+The [OS Sandbox](./sandbox.md) enforces containment at the OS level inside the subprocess —
+under the workspace fence it also **denies network egress** (loopback still works) and
+**scrubs secret-named environment variables** from `Bash` commands by default.
 They are independent and complementary: use both for defense-in-depth.
 ```
 

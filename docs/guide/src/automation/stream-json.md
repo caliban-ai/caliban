@@ -82,6 +82,8 @@ Each tool invocation produces a `tool_use` frame (emitted once the model finishe
 {"type": "tool_result", "tool_use_id": "toolu_01ABC", "is_error": false, "content": [{"type": "text", "text": "test result: ok. 42 passed"}]}
 ```
 
+When `--include-tool-dispatch-events` is set, each `tool_result` frame also carries a `t_ms` field — the wall-clock milliseconds caliban spent dispatching that tool call — so consumers can correlate per-tool latency (#28). The field is omitted entirely when the flag is off.
+
 ### `message` — full assistant message (authoritative)
 
 Emitted at the end of each turn when `--include-partial-messages` is **not** set. When `--include-partial-messages` is set, text deltas stream via `text` frames instead and no `message` frame is emitted.
@@ -196,6 +198,7 @@ printf '{"type":"user","content":"how many Rust source files are here?"}\n' \
 |------|--------|
 | `--include-partial-messages` | Emit `text` and `thinking` delta frames as the model streams |
 | `--include-hook-events` | Emit a `hook_event` frame for each fired hook |
+| `--include-tool-dispatch-events` | Attach a `t_ms` dispatch duration to each `tool_result` frame |
 | `--replay-user-messages` | Echo each user prompt back as a `user` frame |
 
 ## Related pages

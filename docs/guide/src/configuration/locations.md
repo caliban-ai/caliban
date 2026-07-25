@@ -2,6 +2,10 @@
 
 Caliban resolves settings files from four on-disk scopes. Paths are **XDG-first on every platform** ([ADR 0050](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0050-xdg-first-path-locations.md)) — the same layout on Linux, macOS, and Windows.
 
+```admonish warning title="macOS moved out of ~/Library (0.5.0)"
+Before 0.5.0 caliban stored macOS config, data, cache, and state under the OS-native `~/Library/Application Support` / `~/Library/Caches` locations. Since ADR 0050 those live under the XDG defaults (`~/.config`, `~/.local/share`, `~/.cache`, `~/.local/state`) on macOS too. Old files are **not** auto-migrated — move any hand-authored settings to the new paths, or point `$XDG_CONFIG_HOME` at the old directory.
+```
+
 ## Scope paths
 
 ### Managed scope

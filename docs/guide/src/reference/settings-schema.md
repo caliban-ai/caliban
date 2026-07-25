@@ -62,6 +62,30 @@ action  = "ask"
 
 ---
 
+## Sandbox
+
+Nested under the `[sandbox]` table. OS-sandbox posture for Bash commands run
+under `--workspace` / `--restrict-paths` (#406, [ADR 0054](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0054-sandbox-confinement-posture.md)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `sandbox.network` | `"deny" \| "allow"` | `"deny"` (when the fence is active) | Network-egress posture for sandboxed commands. `"deny"` blocks egress (loopback still works) — `git fetch`, `cargo`, `npm install`, `gh`, `curl` fail; `"allow"` restores full egress. Overridden by `--sandbox-network` on the CLI. This is the first user-reachable sandbox setting. |
+
+```toml
+[sandbox]
+network = "allow"   # opt out of the default egress fence for this workspace
+```
+
+```admonish note title="Secret-scrubbing is automatic, not a settings key"
+Under `--workspace`, sandboxed commands also run with a scrubbed environment —
+secret-named variables (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`,
+`*CREDENTIAL*`, plus `OTEL_EXPORTER_OTLP_HEADERS`) are dropped from the child's
+environment (#405). This is on by default and is not (yet) configured through
+`settings.toml`.
+```
+
+---
+
 ## Hooks
 
 | Key | Type | Default | Description |

@@ -269,8 +269,8 @@ synthetic request.
 | Slash command registry | ✅ | [ADR 0040](docs/adr/0040-slash-command-registry.md) |
 | Model router v2 (declarative routes, capability filters) | ✅ | [ADR 0038](docs/adr/0038-model-router-v2.md) |
 | Health-check `caliban doctor` / `/doctor` | ✅ | `caliban/src/diagnostics.rs` |
-| Cost surfacing in TUI / `/cost` slash | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
-| Stream-idle watchdog, MaxTokens recovery, reactive compaction | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
+| Stream-idle watchdog, MaxTokens recovery, reactive compaction | ✅ | `crates/caliban-agent-core/src/stream/` (`recovery.rs`), [ADR 0009](docs/adr/0009-agent-core-design.md) |
+| Persistent cost readout in the statusline/TUI (the `/cost` and `/usage` slashes ship) | 🟡 backlog | [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) |
 
 `✅` = shipped on `main`. `🟡` = identified, scoped, not yet built — see
 the linked TODO entry for the exact file and suggested fix.
@@ -293,10 +293,11 @@ list with descriptions. The registry currently includes (non-exhaustive):
   `/heapdump`, `/voice`, `/tui`
 - **Exit:** `/quit`, `/exit`
 
-Some entries (e.g. `/cost`, `/effort`, `/resume`) are tracked as
-backlog work in [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1) — check there before
-assuming a slash listed here is fully implemented vs. registered as a
-stub.
+All of the commands above are registered and functional. A handful of
+Claude-Code-parity commands are still gaps — see the [caliban-ai Kanban
+board](https://github.com/orgs/caliban-ai/projects/1) and the [parity
+matrix](docs/evaluation/competitors/claude-code/parity-gap-matrix.md) for
+what remains.
 
 ## Subcommands
 

@@ -31,7 +31,7 @@ and configure it for a team or homelab; it describes behavior and workflows, not
 | **Reference** | [CLI flags](./reference/cli.md), settings schema, slash command index, environment variables, and file paths |
 
 ```admonish note title="Project status"
-Caliban v0.1.0 is a pre-release. The core feature set is daily-usable on `main` under
+Caliban v0.7.0 is a pre-1.0 release. The core feature set is daily-usable on `main` under
 [AGPL-3.0](./intro/status.md). See [Project Status](./intro/status.md) for what is
 shipped versus planned.
 ```

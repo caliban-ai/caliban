@@ -58,7 +58,7 @@ caliban adopts the standard `OTEL_*` env-var contract verbatim:
 | `OTEL_LOG_TOOL_CONTENT` | `0` | Include full tool output in spans |
 | `OTEL_LOG_RAW_API_BODIES` | `0` | Log raw provider request/response bodies (`0`, `1`, or `file:<dir>`) |
 
-mTLS is configured via `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY`, and `OTEL_EXPORTER_OTLP_CERTIFICATE`.
+caliban recognises the standard mTLS env vars — `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY`, and `OTEL_EXPORTER_OTLP_CERTIFICATE` — but wiring them into the exporter's TLS config is not yet implemented (tracked in #465): today they are parsed and otherwise ignored.
 
 ```admonish warning title="Content logging is a privacy footgun"
 `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_CONTENT`, and `OTEL_LOG_RAW_API_BODIES` send potentially sensitive content to your collector. Ensure your collector pipeline is appropriately access-controlled before enabling these.
@@ -69,6 +69,15 @@ mTLS is configured via `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_O
 Short-lived bearer tokens (e.g. from a secrets manager) can be injected without restarting caliban. Set `telemetry.otel_headers_helper` in your settings to a path; caliban spawns it at startup and periodically (`telemetry.otel_headers_refresh`, default `5m`), parses stdout as `key=value` lines, and merges them with `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on collision).
 
 Alternatively, the env-var escape hatch `CALIBAN_OTEL_HEADERS_HELPER=/path/to/script` achieves the same effect without a settings file.
+
+## Traces
+
+When OTLP export is enabled, caliban emits OpenTelemetry traces following the [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) (ADR 0053):
+
+- a `gen_ai` chat-generation span per model request, carrying the `gen_ai.*` request/response attributes;
+- an `execute_tool` span per tool call, carrying `gen_ai.tool.*` attributes, nested under the model request that issued it.
+
+Prompt and completion content is **not** recorded on spans by default. Set `OTEL_LOG_USER_PROMPTS=1` to attach the `gen_ai` input/output messages to spans — enable it only against an access-controlled collector, since those messages contain user content.
 
 ## Metric names
 
@@ -82,6 +91,8 @@ OTLP metrics use the `caliban.` prefix (mirroring Claude Code's `claude_code.` n
 | `caliban.lines_of_code.count` | Counter | Lines touched by file-edit tools |
 | `caliban.code_edit_tool.decision` | Counter | Permission decisions on edit tools |
 | `caliban.active_time.total` | Gauge (seconds) | Wall time the agent loop ran |
+
+Of these, only `caliban.session.count` currently reaches the collector. The other instruments are defined and the metrics pipeline is wired end-to-end, but their emit call sites are not yet connected (cost/token/active-time emits are tracked in #467). This does not affect the in-session views: `/cost`, `/usage`, and `/context` read caliban's in-process accumulators directly, so they show real numbers whether or not OTLP export is enabled.
 
 ## Related pages
 

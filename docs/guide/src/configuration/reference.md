@@ -51,7 +51,7 @@ See [Permissions Concepts](../permissions/concepts.md) and [Pattern Grammar](../
 |-----|------|---------|-------------|
 | `hooks` | `{ event → handler[] }` | `{}` | Hook event map. Keys are event names (e.g. `"PreToolUse"`, `"SessionEnd"`); values are handler lists |
 | `disable_all_hooks` | `bool` | `false` | Kill-switch that disables every external hook handler. In-process hooks (permissions, audit) still run |
-| `allow_managed_hooks_only` | `bool` | `false` | When `true`, only hooks defined in the managed scope fire |
+| `allow_managed_hooks_only` | `bool` | `false` | When `true`, restrict firing to managed-scope hooks. Handler provenance is not yet tracked, so caliban currently fires **no** config hooks (with a warning) when this is set — see [Hooks](../extending/hooks.md) |
 | `allowed_http_hook_urls` | `string[]` | `[]` | Glob allowlist for HTTP hook endpoint URLs |
 | `http_hook_allowed_env_vars` | `string[]` | `[]` | Env-var names that HTTP hook handlers are allowed to read |
 
@@ -157,6 +157,31 @@ See [Configuring Providers & API Keys](../providers/configuration.md).
 | `enable_telemetry` | `bool` | `false` | Enable OpenTelemetry / cost emitter |
 
 See [Telemetry & Cost](../observability/telemetry.md).
+
+---
+
+## Sandbox
+
+OS-sandbox posture for Bash commands run under `--workspace` / `--restrict-paths` (ADR 0054). The whole `[sandbox]` table is optional; an unset block leaves the workspace fence at its defaults.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `sandbox.network` | `"deny"` \| `"allow"` | `"deny"` (when the workspace fence is active) | Network egress posture for sandboxed commands. `"deny"` blocks egress (loopback still works, so localhost test servers are fine); `"allow"` re-opens full egress for runs that genuinely need `git fetch`, `cargo`, `npm install`, or `gh`. CLI `--sandbox-network` overrides this |
+
+`sandbox.network` is the only key currently read from layered settings. Secret
+scrubbing is a **built-in behavior**, not a setting: under the workspace fence,
+secret-named env vars (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`,
+`*CREDENTIAL*`, `OTEL_EXPORTER_OTLP_HEADERS`) are always dropped from a sandboxed
+command's environment (#405). It is on by default and not configurable via
+`settings.json`/`settings.toml` today.
+
+```toml
+# .caliban/settings.toml
+[sandbox]
+network = "deny"
+```
+
+See [The OS Sandbox](../tools/sandbox.md).
 
 ---
 

@@ -15,6 +15,7 @@ What the fence guarantees (ADR 0054):
 | **Writes** | Confined to the workspace + temp dirs |
 | **Network** | **Blocked.** Loopback still works, so localhost test/dev servers are fine |
 | **Reads** | **Open** — the whole host, including `~/.ssh` and `~/.aws/credentials` |
+| **Environment** | **Scrubbed.** Secret-named variables (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`, `*CREDENTIAL*`, plus `OTEL_EXPORTER_OTLP_HEADERS`) are dropped from the command's env, so `ANTHROPIC_API_KEY` and the like are invisible to what the model runs |
 
 ```admonish warning title="Reads are open — and that is why the network is closed"
 A sandboxed command **can read your credential files**. It cannot send them

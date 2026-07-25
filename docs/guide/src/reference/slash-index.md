@@ -25,6 +25,7 @@ For a narrative introduction, see [Slash Commands](../interactive/slash-commands
 |---------|------|-------------|
 | `/model` | `[id]` | With no args: list the active provider's known model ids and the currently-selected one. With an id: switch the active model at runtime (same-provider in v1). |
 | `/effort` | `<level>` | Set reasoning effort for the next turn. Values: `low`, `medium`, `high`, `max`, `auto`. |
+| `/think` | `<on\|off\|auto\|budget>` | Toggle extended thinking independently of `/effort`. `auto` derives the budget from `/effort`; a bare `<budget>` (or `on <budget>`) sets an explicit token budget. No args reports the current setting. |
 | `/status` | — | Show provider / auth / subscription status. |
 | `/login` | — | Run the active provider's auth flow (full browser OAuth implementation pending the Auth spec). |
 | `/logout` | — | Clear cached credentials for the active provider (pending the Auth spec). |

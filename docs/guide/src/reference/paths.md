@@ -2,7 +2,7 @@
 
 Caliban is **XDG-first on every platform** ([ADR 0050](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0050-xdg-first-path-locations.md)). It uses the same directory layout on Linux, macOS, and Windows: `~/.config`, `~/.local/share`, `~/.local/state`, and `~/.cache` (each overridable by the matching `XDG_*_HOME` variable), with a `caliban/` app segment. macOS does **not** use `~/Library/Application Support`, and there is no `~/.caliban` home dotdir — a terminal-first tool keeps its files where CLI users look.
 
-```admonish warning title="Breaking change (v0.4.0)"
+```admonish warning title="Breaking change (v0.5.0)"
 Earlier builds stored user data under `~/Library/Application Support/caliban` (macOS) and `~/.caliban` (all platforms). Those locations are **abandoned with no automatic migration** — caliban starts fresh at the XDG paths below. To carry over Claude Code / Codex settings, use the manual importer: `caliban settings import --from ~/.claude/settings.json --scope user`.
 ```
 

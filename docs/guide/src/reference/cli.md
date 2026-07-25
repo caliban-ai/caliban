@@ -22,13 +22,20 @@ between releases, where every commit on `main` otherwise reports the same
 semver:
 
 ```text
-caliban 0.4.0 (d364def, 2026-07-03)
+caliban 0.7.0 (d364def, 2026-07-03)
 ```
 
 The parentheses carry the short commit SHA and that commit's date; an
 uncommitted working tree appends `-dirty` (`d364def-dirty`). Builds with no git
 metadata (release tarballs, `cargo install` from crates.io) report just the
-bare semver, `caliban 0.4.0`.
+bare semver, `caliban 0.7.0`.
+
+```admonish note title="Boolean flags accept an optional `=BOOL`"
+Every boolean flag below can be written bare (`--no-mcp`) or with an explicit
+value (`--no-mcp=true`, `--no-mcp=false`). The value accepts `true/false`,
+`1/0`, `yes/no`, or `on/off` (case-insensitive), which lets an env-var form like
+`CALIBAN_NO_MCP=1` map cleanly onto the flag.
+```
 
 ---
 
@@ -56,7 +63,9 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | `--json-schema <FILE_OR_JSON>` | — | Force structured final output matching the given JSON Schema. Value can be inline JSON or a path to a `.json` file. |
 | `--include-partial-messages` | `false` | Emit assistant text deltas as separate `text` frames in `stream-json` mode (default: aggregate into one `message` frame). |
 | `--include-hook-events` | `false` | Emit a `hook_event` frame per fired hook event in `stream-json` mode. |
+| `--include-tool-dispatch-events` | `false` | Attach a `t_ms` dispatch-duration (ms) to each `stream-json` `tool_result` frame so consumers can correlate per-tool latency (#28). |
 | `--replay-user-messages` | `false` | Echo each user prompt as a `user` frame in `stream-json` mode. |
+| `--verbose` | `false` | Dump full, untruncated tool inputs/outputs to stderr in `--output-format text`. No effect on `json`/`stream-json` (they already carry full frames). Env: `CALIBAN_VERBOSE`. |
 
 ---
 
@@ -102,6 +111,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | `--no-tools` | `false` | Disable all tools (chat-only mode). |
 | `--restrict-paths` | `false` | Reject tool paths outside the workspace root. **Implied when `--workspace` is set.** |
 | `--no-restrict-paths` | `false` | Opt out of path restriction (tools may read/write outside the workspace). Conflicts with `--restrict-paths`. |
+| `--sandbox-network <deny\|allow>` | `deny` (when fenced) | Egress posture for sandboxed Bash commands (#406). Under `--workspace`/`--restrict-paths` the OS sandbox **denies network egress by default** — `git fetch`, `cargo`, `npm install`, `gh`, and `curl` fail; loopback still works. Pass `allow` (or set `sandbox.network = "allow"` in settings) when a run genuinely needs the network. |
 | `--quiet` | `false` | Suppress tool-execution announcements. |
 
 ---
@@ -176,6 +186,7 @@ See [Permission Modes](../permissions/modes.md) and [Managing Rules](../permissi
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--debug` | `false` | Append-log events and draws to the platform debug log. `CALIBAN_DEBUG` (any non-empty value) also enables this. |
+| `--debug-file <PATH>` | — | Redirect debug output to this path instead of the default debug log. Implies `--debug`. Relative paths resolve against the CWD. Env: `CALIBAN_DEBUG_FILE`. |
 
 ---
 

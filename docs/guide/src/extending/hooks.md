@@ -41,7 +41,7 @@ Each hook entry declares one or more handlers. Two handler types are fully wired
 | `agent` | Experimental stub | Delegate to a sub-agent (async only) |
 
 ```admonish warning title="mcp / prompt / agent handlers are stubs"
-The `mcp`, `prompt`, and `agent` handler types are defined in the config schema and appear in `/hooks` output, but their dispatch logic is not yet wired. They will be activated as their upstream dependencies (ADR 0023 MCP wiring, ADR 0037 sub-agent fleet) land. Until then, any handler of these types is silently skipped at dispatch time.
+The `mcp`, `prompt`, and `agent` handler types are defined in the config schema and appear in `/hooks` output, but their dispatch logic is not yet wired. They will be activated as their upstream dependencies (ADR 0023 MCP wiring, ADR 0037 sub-agent fleet) land. Until then, any handler of these types is skipped at dispatch time with a logged warning — it is not silently dropped.
 ```
 
 ## Decision protocol
@@ -67,6 +67,10 @@ For `PreToolUse` and `UserPromptSubmit`, `command` and `http` handlers report th
 - anything else — Allow with a logged warning
 
 `PostToolUse` and observer-only hooks ignore the decision even when a handler provides one. Handlers marked `async = true` are fire-and-forget; their decisions are always ignored.
+
+### SessionStart context injection
+
+A `SessionStart` `command` or `http` handler may return an `additionalContext` string — either flat (`{"additionalContext": "…"}`) or nested under `hookSpecificOutput`. Caliban splices each returned block into the system prompt inside a `<session-context>` element, so a hook can inject dynamic per-session context (current branch, ticket ID, deploy status) without editing CLAUDE.md.
 
 ## Config: settings `hooks` table (preferred)
 
@@ -130,7 +134,7 @@ The legacy file uses the same TOML shape shown above (top-level keys plus `[[hoo
 | Setting / flag | Effect |
 |---|---|
 | `disable_all_hooks = true` | Bypasses all external handlers; in-process hooks (permissions, audit) still run |
-| `allow_managed_hooks_only = true` | Only handlers from the managed settings scope fire |
+| `allow_managed_hooks_only = true` | Intended to fire only managed-scope handlers. Until per-handler provenance is tracked, caliban conservatively fires **no** config hooks and logs a warning (see [#124](https://github.com/caliban-ai/caliban/issues/124)) |
 | `allowed_http_hook_urls` | URL glob allowlist; HTTP handlers fail closed if the URL isn't listed |
 | `http_hook_allowed_env_vars` | Env vars that may be expanded in HTTP handler headers |
 | `--no-hooks` | One-off CLI override; mirrors `disable_all_hooks` for a single run |
