@@ -11,6 +11,7 @@
 
 pub(crate) mod compose;
 pub(crate) mod drivers;
+pub(crate) mod storage;
 
 pub(crate) use compose::*;
 pub(crate) use drivers::*;

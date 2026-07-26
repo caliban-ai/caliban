@@ -375,6 +375,12 @@ pub(crate) struct App {
     /// modal flow before re-prompting; never persisted to disk —
     /// other scopes route through `caliban-settings::writer` instead.
     pub(crate) runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
+    /// Config-selected memory backend (#473), shared with `build_registry`'s
+    /// auto-memory tools and `resolve_system_prompt`'s memory splice.
+    /// `App::new` seeds a plain fs backend as a placeholder; `tui::run`
+    /// immediately overwrites it with the real startup-built backend (same
+    /// pattern as `runtime_rules` above).
+    pub(crate) topic_backend: Arc<dyn caliban_memory::TopicBackend>,
     /// When non-None, the Ask modal is showing the always-allow/deny sub-prompt
     /// (Phase 4). The operator opened it with `a` (always allow) or `d`
     /// (always deny) inside the Ask modal.
@@ -498,6 +504,10 @@ impl App {
         if !messages.is_empty() {
             context_window.record_history(&messages);
         }
+        // Placeholder — `tui::run` overwrites this with the real
+        // startup-built backend right after construction (#473).
+        let topic_backend: Arc<dyn caliban_memory::TopicBackend> =
+            Arc::new(caliban_memory::FsTopicBackend::new(cwd.clone()));
         Self {
             agent,
             session,
@@ -547,6 +557,7 @@ impl App {
             last_status_message: None,
             last_delta_at: std::time::Instant::now(),
             runtime_rules: Arc::new(caliban_agent_core::RuntimeRuleStore::new()),
+            topic_backend,
             always_subprompt: None,
             #[cfg(test)]
             scope_paths_override: None,

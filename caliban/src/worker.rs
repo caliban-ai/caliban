@@ -562,6 +562,16 @@ pub(crate) async fn run(
     let worker_settings = crate::startup::load_layered_settings(&args, workspace.root())
         .map(|o| o.settings)
         .unwrap_or_default();
+    // Workers always run `--bare` (see the `args` reassignment above), so
+    // `build_registry`'s auto-memory-tool branch never actually reads this
+    // value. Build a plain fs backend directly rather than the fallible
+    // `storage::build_topic_backend` factory, so a misconfigured/unreachable
+    // remote `[storage]` block can't add a new failure mode to worker
+    // startup for a feature that's always off here.
+    let memory_cfg_for_backend = caliban_memory::MemoryConfig::from_env(workspace.root());
+    let topic_backend: Arc<dyn caliban_memory::TopicBackend> = Arc::new(
+        caliban_memory::FsTopicBackend::new(memory_cfg_for_backend.auto_memory_dir),
+    );
     let registry = crate::startup::build_registry(
         &args,
         workspace,
@@ -569,6 +579,7 @@ pub(crate) async fn run(
         Arc::clone(&plan_mode),
         &[],
         &worker_settings,
+        &topic_backend,
     );
     let registry = filter_registry(registry, record.spec.tool_allowlist.as_deref());
 

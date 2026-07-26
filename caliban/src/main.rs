@@ -338,6 +338,37 @@ async fn main() -> Result<()> {
         })
         .collect();
 
+    // Build the config-selected memory backend once so the auto-memory
+    // tools (below), the system-prompt memory splice, and the TUI `/memory`
+    // handler all read/write through the same substrate (fs today; `remote`
+    // behind the `gonzalo` feature; #473). A bad `[storage]` config (e.g.
+    // `remote` unreachable) is a fatal startup error, mirroring the
+    // settings-load EX_CONFIG (78) exit above.
+    let workspace_root_for_memory = workspace.root().to_path_buf();
+    let memory_cfg_for_backend = caliban_memory::MemoryConfig::from_env(&workspace_root_for_memory);
+    // --bare (ADR 0025) skips auto-memory entirely; do NOT run the storage factory
+    // (a remote substrate would probe the daemon and could fatally exit here) for a
+    // subsystem bare mode never touches. Use an unused fs placeholder in that case,
+    // mirroring worker.rs's reasoning.
+    let topic_backend: Arc<dyn caliban_memory::TopicBackend> = if args.bare {
+        Arc::new(caliban_memory::FsTopicBackend::new(
+            memory_cfg_for_backend.auto_memory_dir.clone(),
+        ))
+    } else {
+        match startup::storage::build_topic_backend(
+            &settings_outcome.settings.storage,
+            &memory_cfg_for_backend.auto_memory_dir,
+        )
+        .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[caliban] storage config error: {e}");
+                std::process::exit(78);
+            }
+        }
+    };
+
     let mut registry = startup::build_registry(
         &args,
         workspace,
@@ -345,6 +376,7 @@ async fn main() -> Result<()> {
         Arc::clone(&plan_mode),
         &plugin_skill_roots,
         &settings_outcome.settings,
+        &topic_backend,
     );
 
     // MCP servers — Phase B: stdio + HTTP + SSE transports (ADR 0023).
@@ -509,6 +541,7 @@ async fn main() -> Result<()> {
             &agent,
             &cwd_for_prompt,
             &settings_snapshot,
+            topic_backend.as_ref(),
             &session_context,
         )
         .await
@@ -619,6 +652,7 @@ async fn main() -> Result<()> {
                 Some(settings_handle.clone()),
                 settings_sources_view,
                 runtime_rules,
+                topic_backend,
             )
             .await;
             // Force-flush batched OTLP spans + session-end metric before exit.

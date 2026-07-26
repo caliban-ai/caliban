@@ -115,6 +115,21 @@
       },
       "additionalProperties": true
     },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "substrate": { "enum": ["fs", "remote", "git", "s3"] },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": { "type": "string" },
+            "token_env": { "type": "string" }
+          }
+        }
+      }
+    },
     "plugins": { "type": "object", "additionalProperties": true },
     "output_style":  { "type": "string" },
     "editor_mode":   { "type": "string" },

@@ -568,6 +568,7 @@ pub(crate) fn build_registry(
     plan_mode: caliban_agent_core::SharedPlanMode,
     plugin_skill_roots: &[PathBuf],
     settings_snapshot: &caliban_settings::Settings,
+    topic_backend: &Arc<dyn caliban_memory::TopicBackend>,
 ) -> ToolRegistry {
     if args.no_tools {
         return ToolRegistry::new();
@@ -617,8 +618,9 @@ pub(crate) fn build_registry(
     // documents how to use the tools; without the skill, the model has no
     // protocol manual, so we gate both together. Skipped in bare mode.
     if !auto_memory_disabled() && !args.bare {
-        let cfg = caliban_memory::MemoryConfig::from_env(&workspace_root);
-        let topic_loader = Arc::new(caliban_memory::TopicLoader::new(cfg.auto_memory_dir));
+        let topic_loader = Arc::new(caliban_memory::TopicLoader::with_backend_arc(Arc::clone(
+            topic_backend,
+        )));
         r.register(Arc::new(ReadMemoryTopicTool::new(Arc::clone(
             &topic_loader,
         ))));
@@ -1622,6 +1624,7 @@ pub(crate) async fn resolve_system_prompt(
     agent: &Arc<Agent>,
     cwd_for_prompt: &std::path::Path,
     settings_snapshot: &caliban_settings::Settings,
+    topic_backend: &dyn caliban_memory::TopicBackend,
     session_context: &[String],
 ) -> Result<Option<String>> {
     let tool_names: Vec<&str> = agent.tools().names().collect();
@@ -1702,7 +1705,7 @@ pub(crate) async fn resolve_system_prompt(
             caliban_memory::MemoryConfig::from_env(&workspace_root),
             settings_snapshot,
         );
-        match caliban_memory::load(&cfg).await {
+        match caliban_memory::load(&cfg, topic_backend).await {
             Ok(prefix) => prefix.splice_into(&with_style),
             Err(e) => {
                 tracing::warn!(target: caliban_common::tracing_targets::TARGET_MEMORY, error = %e, "memory load failed; using default prompt without memory");
@@ -1959,12 +1962,16 @@ mod tests {
         let args = parse_args(&["--bare"]);
         let settings = caliban_settings::Settings::default();
         let cwd = std::env::current_dir().unwrap();
+        // Never touched (--bare short-circuits before the backend is used).
+        let backend: Arc<dyn caliban_memory::TopicBackend> =
+            Arc::new(caliban_memory::FsTopicBackend::new(cwd.clone()));
 
         let with_ctx = resolve_system_prompt(
             &args,
             &agent,
             &cwd,
             &settings,
+            backend.as_ref(),
             &["INJECTED-MARKER".to_string()],
         )
         .await
@@ -1976,10 +1983,11 @@ mod tests {
         );
         assert!(with_ctx.contains("INJECTED-MARKER"));
 
-        let without_ctx = resolve_system_prompt(&args, &agent, &cwd, &settings, &[])
-            .await
-            .unwrap()
-            .expect("default prompt in effect");
+        let without_ctx =
+            resolve_system_prompt(&args, &agent, &cwd, &settings, backend.as_ref(), &[])
+                .await
+                .unwrap()
+                .expect("default prompt in effect");
         assert!(
             !without_ctx.contains("<session-context>"),
             "no session-context block when no context is supplied"
