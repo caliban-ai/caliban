@@ -13,6 +13,8 @@ pub mod store;
 
 pub mod backend;
 
+#[cfg(feature = "gonzalo")]
+pub use backend::GonzaloSessionBackend;
 pub use backend::{FsSessionBackend, SessionBackend};
 pub use error::{Error, Result};
 pub use session::PersistedSession;
