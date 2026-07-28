@@ -86,7 +86,11 @@ fn invalid_name_in_save_rejected() {
     let store = SessionStore::new(tmp.path().to_path_buf());
     let mut bad = PersistedSession::new("bad name", "anthropic", "m");
     bad.messages.push(Message::user_text("x"));
-    assert!(store.save(&bad).is_err());
+    // `save` is now deferred: the enqueue succeeds, and the backend's name
+    // validation surfaces when the write is forced to drain.
+    store.save(&bad).unwrap();
+    assert!(store.flush().is_err());
+    assert!(store.last_write_error().is_some());
 }
 
 #[test]
@@ -97,7 +101,7 @@ fn pretty_json_is_human_readable() {
     // `save` is debounced; flush so the on-disk file exists for the
     // direct read below.
     store.flush().unwrap();
-    let path = store.path_for("test");
+    let path = tmp.path().join("test.json");
     let bytes = std::fs::read(&path).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(
