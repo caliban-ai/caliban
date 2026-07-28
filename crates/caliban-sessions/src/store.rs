@@ -94,7 +94,11 @@ impl SessionStore {
     /// validation — matching the pre-debounce behavior where a bad name was
     /// rejected before any write was attempted. Once past that check, this
     /// never errors on enqueue; deferred-write failures surface via `flush` /
-    /// `last_write_error`.
+    /// `last_write_error`. This is a narrower synchronous contract than
+    /// pre-#471, where directory-creation and serialization failures were
+    /// also returned from `save` directly: those now happen at drain time
+    /// alongside the write itself, so they only surface via `flush()` /
+    /// `last_write_error()`, never as an `Err` from this call.
     pub fn save(&self, session: &PersistedSession) -> Result<()> {
         crate::backend::fs::validate_name(&session.name)?;
         self.inner.writer.request(session.clone());

@@ -97,6 +97,8 @@ async fn build_remote_session_backend(
     let slug = workspace_slug(sessions_dir);
     let backend = GonzaloSessionBackend::new(store, slug);
     // Fail-fast connectivity probe: a healthy daemon answers `list`.
+    // `remote_store` above already errors when `storage.remote` is `None`, so
+    // it's provably `Some` here.
     let url = &storage
         .remote
         .as_ref()

@@ -219,6 +219,11 @@ impl DebouncedWriter {
             .send(WriterMsg::Load(name.to_string(), tx))
             .is_err()
         {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                session = %name,
+                "session writer gone; load degrading to not-found",
+            );
             return Ok(None);
         }
         rx.recv().unwrap_or(Ok(None))
@@ -229,6 +234,10 @@ impl DebouncedWriter {
     pub(crate) fn list(&self) -> Result<Vec<SessionMetadata>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         if self.inner.tx.send(WriterMsg::List(tx)).is_err() {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                "session writer gone; list degrading to empty",
+            );
             return Ok(Vec::new());
         }
         rx.recv().unwrap_or(Ok(Vec::new()))
@@ -245,6 +254,11 @@ impl DebouncedWriter {
             .send(WriterMsg::Delete(name.to_string(), tx))
             .is_err()
         {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                session = %name,
+                "session writer gone; delete degrading to no-op",
+            );
             return Ok(());
         }
         rx.recv().unwrap_or(Ok(()))
