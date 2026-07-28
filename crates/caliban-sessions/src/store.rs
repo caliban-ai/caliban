@@ -70,6 +70,7 @@ impl SessionStore {
     /// # Errors
     /// I/O, deserialization, or name-validation errors surfaced by the backend.
     pub fn load(&self, name: &str) -> Result<Option<PersistedSession>> {
+        crate::backend::fs::validate_name(name)?;
         self.inner.writer.load(name).map_err(Error::Persist)
     }
 
@@ -89,9 +90,13 @@ impl SessionStore {
     /// `Ok` (#414).
     ///
     /// # Errors
-    /// Never errors on enqueue; deferred-write failures surface via `flush` /
+    /// Returns `Error::InvalidName` synchronously if `session.name` fails
+    /// validation — matching the pre-debounce behavior where a bad name was
+    /// rejected before any write was attempted. Once past that check, this
+    /// never errors on enqueue; deferred-write failures surface via `flush` /
     /// `last_write_error`.
     pub fn save(&self, session: &PersistedSession) -> Result<()> {
+        crate::backend::fs::validate_name(&session.name)?;
         self.inner.writer.request(session.clone());
         Ok(())
     }
@@ -143,6 +148,7 @@ impl SessionStore {
     /// # Errors
     /// I/O or name-validation errors surfaced by the backend.
     pub fn delete(&self, name: &str) -> Result<()> {
+        crate::backend::fs::validate_name(name)?;
         self.inner.writer.delete(name).map_err(Error::Persist)
     }
 }
