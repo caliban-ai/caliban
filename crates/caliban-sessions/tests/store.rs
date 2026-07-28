@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use caliban_provider::{Message, Usage};
-use caliban_sessions::{PersistedSession, SessionStore};
+use caliban_sessions::{Error, PersistedSession, SessionStore};
 use tempfile::TempDir;
 
 fn fake_session() -> PersistedSession {
@@ -75,9 +75,28 @@ fn delete_missing_succeeds() {
 fn invalid_name_rejected() {
     let tmp = TempDir::new().unwrap();
     let store = SessionStore::new(tmp.path().to_path_buf());
-    assert!(store.load("../escape").is_err());
-    assert!(store.load("name with spaces").is_err());
-    assert!(store.load("").is_err());
+    // `load` validates synchronously, before any round trip through the
+    // debounced writer — matching pre-debounce behavior.
+    assert!(matches!(
+        store.load("../escape"),
+        Err(Error::InvalidName(_))
+    ));
+    assert!(matches!(
+        store.load("name with spaces"),
+        Err(Error::InvalidName(_))
+    ));
+    assert!(matches!(store.load(""), Err(Error::InvalidName(_))));
+}
+
+#[test]
+fn invalid_name_in_delete_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let store = SessionStore::new(tmp.path().to_path_buf());
+    // `delete` validates synchronously too.
+    assert!(matches!(
+        store.delete("../escape"),
+        Err(Error::InvalidName(_))
+    ));
 }
 
 #[test]
@@ -86,7 +105,14 @@ fn invalid_name_in_save_rejected() {
     let store = SessionStore::new(tmp.path().to_path_buf());
     let mut bad = PersistedSession::new("bad name", "anthropic", "m");
     bad.messages.push(Message::user_text("x"));
-    assert!(store.save(&bad).is_err());
+    // `save` validates the name synchronously and rejects before enqueueing
+    // anything on the debounced writer — matching pre-debounce behavior
+    // where a bad name never reached the writer at all.
+    assert!(matches!(store.save(&bad), Err(Error::InvalidName(_))));
+    // Nothing was enqueued, so there is no pending write and no recorded
+    // write failure.
+    assert!(store.flush().is_ok());
+    assert!(store.last_write_error().is_none());
 }
 
 #[test]
@@ -97,7 +123,7 @@ fn pretty_json_is_human_readable() {
     // `save` is debounced; flush so the on-disk file exists for the
     // direct read below.
     store.flush().unwrap();
-    let path = store.path_for("test");
+    let path = tmp.path().join("test.json");
     let bytes = std::fs::read(&path).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(

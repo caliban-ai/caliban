@@ -1414,11 +1414,14 @@ dependencies = [
 name = "caliban-sessions"
 version = "0.7.0"
 dependencies = [
+ "async-trait",
  "caliban-agent-core",
  "caliban-common",
  "caliban-provider",
  "chrono",
  "dirs",
+ "gonzalo-core",
+ "gonzalo-store-fs",
  "serde",
  "serde_json",
  "tempfile",

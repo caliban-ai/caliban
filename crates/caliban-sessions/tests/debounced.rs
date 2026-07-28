@@ -50,7 +50,7 @@ fn single_save_within_window_results_in_one_write() {
     store.save(&fake_session("single", "hi")).unwrap();
     store.flush().unwrap();
 
-    assert!(store.path_for("single").exists());
+    assert!(tmp.path().join("single.json").exists());
     assert_eq!(
         count_entries(tmp.path()),
         1,
@@ -115,7 +115,7 @@ fn window_expiry_flushes_to_disk_without_explicit_flush() {
     let store = SessionStore::new(tmp.path().to_path_buf());
 
     store.save(&fake_session("auto", "x")).unwrap();
-    let path = store.path_for("auto");
+    let path = tmp.path().join("auto.json");
 
     // Poll for the writer's own timer to fire — give it well more than
     // the 250 ms window. We assert via polling (not a fixed sleep) so
@@ -138,7 +138,7 @@ fn window_expiry_flushes_to_disk_without_explicit_flush() {
 fn flush_blocks_until_pending_write_completes() {
     let tmp = TempDir::new().unwrap();
     let store = SessionStore::new(tmp.path().to_path_buf());
-    let path = store.path_for("sync");
+    let path = tmp.path().join("sync.json");
 
     store.save(&fake_session("sync", "now")).unwrap();
     // The 250 ms window is still wide open here; the file must not
@@ -165,7 +165,7 @@ fn dropping_store_drains_pending_request() {
     let tmp = TempDir::new().unwrap();
     let path = {
         let store = SessionStore::new(tmp.path().to_path_buf());
-        let p = store.path_for("dropped");
+        let p = tmp.path().join("dropped.json");
         store.save(&fake_session("dropped", "bye")).unwrap();
         // Do NOT flush — rely on `Drop` to drain the buffered request.
         p

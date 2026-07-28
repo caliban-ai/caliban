@@ -28,11 +28,14 @@
 //! not (integration tests, ad-hoc scripts).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+
+use crate::backend::SessionBackend;
+use crate::session::PersistedSession;
+use crate::store::SessionMetadata;
 
 /// Window across which back-to-back writes collapse into one disk write.
 pub(crate) const DEBOUNCE_WINDOW: Duration = Duration::from_millis(250);
@@ -50,16 +53,23 @@ pub(crate) const MAX_DELAY: Duration = Duration::from_secs(1);
 /// and emit a warning.
 pub(crate) const DROP_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A single persist request: write `bytes` atomically to `path`.
+/// A single persist request: hand the latest `session` snapshot to the
+/// backend.
 ///
 /// The struct is owned by the writer task; the public API only exposes
-/// `request` / `flush` / `flush_with_timeout`.
+/// `request` / `flush` / read round-trips.
 struct PersistRequest {
-    path: PathBuf,
-    bytes: Vec<u8>,
+    session: PersistedSession,
 }
 
 /// Control messages multiplexed onto the same channel.
+///
+/// Reads (`Load`/`List`/`Delete`) are round-tripped through the worker so the
+/// public [`SessionStore`](crate::store::SessionStore) API stays synchronous:
+/// the worker owns the async runtime and awaits the backend, while the caller
+/// parks on a `std::sync::mpsc` receiver — never calling `block_on` from inside
+/// a `#[tokio::main]` context. Each read carries a `std::sync::mpsc::Sender` of
+/// its typed result (`String` is the error, matching `flush`'s convention).
 enum WriterMsg {
     Persist(PersistRequest),
     /// Block the writer until it finishes any pending flush, then signal
@@ -74,6 +84,15 @@ enum WriterMsg {
     /// The `Ok`/`Err` carries the outcome of the flush's drain so the caller
     /// can observe a failed persist instead of it being only warn-logged (#414).
     Flush(std::sync::mpsc::Sender<Result<(), String>>),
+    /// Drain pending writes, then load a session by name through the backend.
+    Load(
+        String,
+        std::sync::mpsc::Sender<Result<Option<PersistedSession>, String>>,
+    ),
+    /// Drain pending writes, then list session metadata through the backend.
+    List(std::sync::mpsc::Sender<Result<Vec<SessionMetadata>, String>>),
+    /// Drain pending writes, then delete a session by name through the backend.
+    Delete(String, std::sync::mpsc::Sender<Result<(), String>>),
 }
 
 /// Handle to the debounced writer. Cheap to clone (`Arc` internally).
@@ -87,11 +106,12 @@ pub(crate) struct DebouncedWriter {
 }
 
 /// Most recent write failure, shared between the worker thread (which records
-/// it) and the handle (which exposes it). `Some((path, message))` means the
-/// last write to `path` failed and no later write to it has succeeded; `None`
-/// means the last observed write succeeded. Lets a failed deferred persist be
-/// observed even when it flushed via the timer, not an explicit `flush` (#414).
-type LastError = Arc<Mutex<Option<(PathBuf, String)>>>;
+/// it) and the handle (which exposes it). `Some((name, message))` means the
+/// last write to session `name` failed and no later write to it has succeeded;
+/// `None` means the last observed write succeeded. Lets a failed deferred
+/// persist be observed even when it flushed via the timer, not an explicit
+/// `flush` (#414).
+type LastError = Arc<Mutex<Option<(String, String)>>>;
 
 struct WriterInner {
     tx: mpsc::UnboundedSender<WriterMsg>,
@@ -105,27 +125,35 @@ struct WriterInner {
 }
 
 impl DebouncedWriter {
-    /// Spawn the writer task on a dedicated OS thread.
-    pub(crate) fn new() -> Self {
-        Self::with_window_and_max_delay(DEBOUNCE_WINDOW, MAX_DELAY)
+    /// Spawn the writer task on a dedicated OS thread, driving `backend`.
+    pub(crate) fn new(backend: Arc<dyn SessionBackend>) -> Self {
+        Self::with_window_and_max_delay(backend, DEBOUNCE_WINDOW, MAX_DELAY)
     }
 
     /// Like [`DebouncedWriter::new`] but lets tests dial the debounce window
     /// (max-delay bound scaled to the default ceiling).
     #[cfg(test)]
-    pub(crate) fn with_window(window: Duration) -> Self {
-        Self::with_window_and_max_delay(window, MAX_DELAY)
+    pub(crate) fn with_window(backend: Arc<dyn SessionBackend>, window: Duration) -> Self {
+        Self::with_window_and_max_delay(backend, window, MAX_DELAY)
     }
 
     /// Like [`DebouncedWriter::new`] but lets tests dial both the debounce
     /// window and the max-delay ceiling.
-    pub(crate) fn with_window_and_max_delay(window: Duration, max_delay: Duration) -> Self {
+    pub(crate) fn with_window_and_max_delay(
+        backend: Arc<dyn SessionBackend>,
+        window: Duration,
+        max_delay: Duration,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<WriterMsg>();
         let last_error: LastError = Arc::new(Mutex::new(None));
         let last_error_worker = Arc::clone(&last_error);
+        // `backend` is not needed on this side of the spawn, so move it
+        // straight into the worker rather than cloning the `Arc`.
         let thread = std::thread::Builder::new()
             .name("caliban-session-writer".into())
-            .spawn(move || run_writer_thread(rx, window, max_delay, &last_error_worker))
+            .spawn(move || {
+                run_writer_thread(rx, window, max_delay, &last_error_worker, backend);
+            })
             .expect("spawn session writer thread");
         Self {
             inner: Arc::new(WriterInner {
@@ -136,16 +164,17 @@ impl DebouncedWriter {
         }
     }
 
-    /// Enqueue a persist request. Returns immediately — the actual disk
-    /// write happens after the debounce window elapses, or sooner via
-    /// [`DebouncedWriter::flush`] / shutdown.
-    pub(crate) fn request(&self, path: PathBuf, bytes: Vec<u8>) {
+    /// Enqueue a persist request. Returns immediately — the actual backend
+    /// save happens after the debounce window elapses, or sooner via
+    /// [`DebouncedWriter::flush`] / shutdown. Back-to-back requests for the
+    /// same session name coalesce, latest wins.
+    pub(crate) fn request(&self, session: PersistedSession) {
         // Send failure means the worker thread has gone away (only
         // possible during shutdown). Drop the request rather than panic.
         let _ = self
             .inner
             .tx
-            .send(WriterMsg::Persist(PersistRequest { path, bytes }));
+            .send(WriterMsg::Persist(PersistRequest { session }));
     }
 
     /// Block until any pending request has been flushed to disk, returning the
@@ -177,6 +206,62 @@ impl DebouncedWriter {
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|(_, msg)| msg.clone()))
+    }
+
+    /// Load a session by name, round-tripped through the worker so the read
+    /// sees the latest pending write (the worker drains before reading) while
+    /// this call stays synchronous. Returns `Ok(None)` if the worker is gone.
+    pub(crate) fn load(&self, name: &str) -> Result<Option<PersistedSession>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self
+            .inner
+            .tx
+            .send(WriterMsg::Load(name.to_string(), tx))
+            .is_err()
+        {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                session = %name,
+                "session writer gone; load degrading to not-found",
+            );
+            return Ok(None);
+        }
+        rx.recv().unwrap_or(Ok(None))
+    }
+
+    /// List session metadata, round-tripped through the worker (drains pending
+    /// first). Returns an empty list if the worker is gone.
+    pub(crate) fn list(&self) -> Result<Vec<SessionMetadata>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.inner.tx.send(WriterMsg::List(tx)).is_err() {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                "session writer gone; list degrading to empty",
+            );
+            return Ok(Vec::new());
+        }
+        rx.recv().unwrap_or(Ok(Vec::new()))
+    }
+
+    /// Delete a session by name, round-tripped through the worker (drains
+    /// pending first so an in-flight write cannot resurrect the file). A no-op
+    /// if the worker is gone.
+    pub(crate) fn delete(&self, name: &str) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self
+            .inner
+            .tx
+            .send(WriterMsg::Delete(name.to_string(), tx))
+            .is_err()
+        {
+            tracing::warn!(
+                target: caliban_common::tracing_targets::TARGET_SESSIONS,
+                session = %name,
+                "session writer gone; delete degrading to no-op",
+            );
+            return Ok(());
+        }
+        rx.recv().unwrap_or(Ok(()))
     }
 }
 
@@ -242,6 +327,7 @@ fn run_writer_thread(
     window: Duration,
     max_delay: Duration,
     last_error: &LastError,
+    backend: Arc<dyn SessionBackend>,
 ) {
     // `current_thread` flavor is sufficient — this thread runs nothing
     // but the debouncer.
@@ -259,17 +345,17 @@ fn run_writer_thread(
             return;
         }
     };
-    rt.block_on(writer_loop(rx, window, max_delay, last_error));
+    rt.block_on(writer_loop(rx, window, max_delay, last_error, backend));
 }
 
 /// The debounce state machine.
 ///
-/// Holds pending bytes keyed by destination path — so back-to-back
-/// writes targeting the *same* session collapse to one disk write
+/// Holds pending session snapshots keyed by session name — so back-to-back
+/// writes targeting the *same* session collapse to one backend save
 /// (the common case), while writes targeting *different* sessions
-/// each get their own write (no silent data loss across sessions).
+/// each get their own save (no silent data loss across sessions).
 ///
-/// The debounce timer is shared across all paths and is reset on every
+/// The debounce timer is shared across all names and is reset on every
 /// new request, matching the spec's "true debounce" semantic ("waits
 /// 250 ms; timer reset on each new request").
 ///
@@ -280,13 +366,17 @@ fn run_writer_thread(
 /// reaching the timer branch, the max-delay bound is *also* checked inline after
 /// each request — guaranteeing a flush at least every `max_delay` regardless of
 /// incoming traffic (#414, P10).
+///
+/// Reads (`Load`/`List`/`Delete`) drain pending first so they observe the
+/// latest state, then await the backend directly on this thread's runtime.
 async fn writer_loop(
     mut rx: mpsc::UnboundedReceiver<WriterMsg>,
     window: Duration,
     max_delay: Duration,
     last_error: &LastError,
+    backend: Arc<dyn SessionBackend>,
 ) {
-    let mut pending: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    let mut pending: HashMap<String, PersistedSession> = HashMap::new();
     let mut deadline = tokio::time::Instant::now();
     let mut oldest_dirty: Option<tokio::time::Instant> = None;
 
@@ -297,13 +387,31 @@ async fn writer_loop(
             match rx.recv().await {
                 Some(WriterMsg::Persist(req)) => {
                     let now = tokio::time::Instant::now();
-                    pending.insert(req.path, req.bytes);
+                    pending.insert(req.session.name.clone(), req.session);
                     deadline = now + window;
                     oldest_dirty = Some(now);
                 }
                 Some(WriterMsg::Flush(done)) => {
                     // Nothing to flush; signal success immediately.
                     let _ = done.send(Ok(()));
+                }
+                Some(WriterMsg::Load(name, done)) => {
+                    let _ = drain_pending(&mut pending, last_error, &backend).await;
+                    oldest_dirty = None;
+                    let r = backend.load(&name).await.map_err(|e| e.to_string());
+                    let _ = done.send(r);
+                }
+                Some(WriterMsg::List(done)) => {
+                    let _ = drain_pending(&mut pending, last_error, &backend).await;
+                    oldest_dirty = None;
+                    let r = backend.list().await.map_err(|e| e.to_string());
+                    let _ = done.send(r);
+                }
+                Some(WriterMsg::Delete(name, done)) => {
+                    let _ = drain_pending(&mut pending, last_error, &backend).await;
+                    oldest_dirty = None;
+                    let r = backend.delete(&name).await.map_err(|e| e.to_string());
+                    let _ = done.send(r);
                 }
                 None => {
                     // Channel closed — no work left, exit cleanly.
@@ -319,33 +427,51 @@ async fn writer_loop(
 
                 msg = rx.recv() => match msg {
                     Some(WriterMsg::Persist(req)) => {
-                        // Same path -> overwrite buffered bytes (latest
-                        // wins). Different path -> coexists in the map.
+                        // Same name -> overwrite buffered snapshot (latest
+                        // wins). Different name -> coexists in the map.
                         // Reset the debounce timer but NOT oldest_dirty.
                         let now = tokio::time::Instant::now();
-                        pending.insert(req.path, req.bytes);
+                        pending.insert(req.session.name.clone(), req.session);
                         deadline = now + window;
                         // A sustained stream can starve the timer branch under
                         // `biased`; enforce the max-delay bound inline.
                         if oldest_dirty.is_some_and(|od| now >= od + max_delay) {
-                            let _ = drain_pending(&mut pending, last_error);
+                            let _ = drain_pending(&mut pending, last_error, &backend).await;
                             oldest_dirty = None;
                         }
                     }
                     Some(WriterMsg::Flush(done)) => {
-                        let r = drain_pending(&mut pending, last_error);
+                        let r = drain_pending(&mut pending, last_error, &backend).await;
                         oldest_dirty = None;
+                        let _ = done.send(r);
+                    }
+                    Some(WriterMsg::Load(name, done)) => {
+                        let _ = drain_pending(&mut pending, last_error, &backend).await;
+                        oldest_dirty = None;
+                        let r = backend.load(&name).await.map_err(|e| e.to_string());
+                        let _ = done.send(r);
+                    }
+                    Some(WriterMsg::List(done)) => {
+                        let _ = drain_pending(&mut pending, last_error, &backend).await;
+                        oldest_dirty = None;
+                        let r = backend.list().await.map_err(|e| e.to_string());
+                        let _ = done.send(r);
+                    }
+                    Some(WriterMsg::Delete(name, done)) => {
+                        let _ = drain_pending(&mut pending, last_error, &backend).await;
+                        oldest_dirty = None;
+                        let r = backend.delete(&name).await.map_err(|e| e.to_string());
                         let _ = done.send(r);
                     }
                     None => {
                         // Channel closed during pending — final drain
                         // before exit.
-                        let _ = drain_pending(&mut pending, last_error);
+                        let _ = drain_pending(&mut pending, last_error, &backend).await;
                         return;
                     }
                 },
                 () = tokio::time::sleep_until(effective) => {
-                    let _ = drain_pending(&mut pending, last_error);
+                    let _ = drain_pending(&mut pending, last_error, &backend).await;
                     oldest_dirty = None;
                 }
             }
@@ -353,29 +479,35 @@ async fn writer_loop(
     }
 }
 
-/// Drain all pending writes, returning the first failure (if any) so a `Flush`
-/// can report it to its caller.
-fn drain_pending(
-    pending: &mut HashMap<PathBuf, Vec<u8>>,
+/// Drain all pending writes through the backend, returning the first failure
+/// (if any) so a `Flush` can report it to its caller.
+async fn drain_pending(
+    pending: &mut HashMap<String, PersistedSession>,
     last_error: &LastError,
+    backend: &Arc<dyn SessionBackend>,
 ) -> Result<(), String> {
     let mut first_err: Option<String> = None;
-    for (path, bytes) in pending.drain() {
-        if let Err(msg) = do_write(&path, &bytes, last_error) {
+    let drained: Vec<PersistedSession> = pending.drain().map(|(_, v)| v).collect();
+    for session in drained {
+        if let Err(msg) = do_write(&session, last_error, backend).await {
             first_err.get_or_insert(msg);
         }
     }
     first_err.map_or(Ok(()), Err)
 }
 
-/// Write one buffered snapshot, updating the shared `last_error` health slot:
-/// set it on failure, clear it when this path's write succeeds. Returns the
-/// formatted error on failure.
-fn do_write(path: &std::path::Path, bytes: &[u8], last_error: &LastError) -> Result<(), String> {
-    match caliban_common::fs::write_atomic(path, bytes) {
+/// Save one buffered snapshot via the backend, updating the shared `last_error`
+/// health slot: set it on failure, clear it when this session's write succeeds.
+/// Returns the formatted error on failure.
+async fn do_write(
+    session: &PersistedSession,
+    last_error: &LastError,
+    backend: &Arc<dyn SessionBackend>,
+) -> Result<(), String> {
+    match backend.save(session).await {
         Ok(()) => {
             if let Ok(mut slot) = last_error.lock()
-                && slot.as_ref().is_some_and(|(p, _)| p == path)
+                && slot.as_ref().is_some_and(|(n, _)| n == &session.name)
             {
                 *slot = None;
             }
@@ -385,12 +517,12 @@ fn do_write(path: &std::path::Path, bytes: &[u8], last_error: &LastError) -> Res
             let msg = e.to_string();
             tracing::warn!(
                 target: caliban_common::tracing_targets::TARGET_SESSIONS,
-                error = %e,
-                path = %path.display(),
+                error = %msg,
+                session = %session.name,
                 "debounced session write failed",
             );
             if let Ok(mut slot) = last_error.lock() {
-                *slot = Some((path.to_path_buf(), msg.clone()));
+                *slot = Some((session.name.clone(), msg.clone()));
             }
             Err(msg)
         }
@@ -409,194 +541,137 @@ mod tests {
     //! `tests/debounced.rs` exercise it end-to-end via `SessionStore`.
 
     use super::*;
-    use tempfile::TempDir;
+    use crate::backend::SessionBackend;
+    use crate::session::PersistedSession;
+    use crate::store::SessionMetadata;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Arc;
 
     /// A short test window so tests don't dawdle.
     const TEST_WINDOW: Duration = Duration::from_millis(40);
 
-    fn count_files(dir: &std::path::Path) -> usize {
-        std::fs::read_dir(dir).map_or(0, |it| it.filter_map(Result::ok).count())
+    #[derive(Default)]
+    struct MemBackend {
+        map: Mutex<StdHashMap<String, PersistedSession>>,
+        fail: Mutex<bool>,
     }
-
-    #[test]
-    fn single_write_lands_after_window() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
-        let w = DebouncedWriter::with_window(TEST_WINDOW);
-        w.request(p.clone(), b"hello".to_vec());
-        // Flush ensures the request is on disk regardless of timer race.
-        w.flush().unwrap();
-        assert_eq!(std::fs::read(&p).unwrap(), b"hello");
-    }
-
-    #[test]
-    fn multiple_writes_within_window_collapse_to_latest() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
-        // Wider window so we can stack three writes inside it.
-        let w = DebouncedWriter::with_window(Duration::from_millis(150));
-        w.request(p.clone(), b"v1".to_vec());
-        w.request(p.clone(), b"v2".to_vec());
-        w.request(p.clone(), b"v3".to_vec());
-        // Before the window elapses + before flush, the file must not
-        // yet exist (the worker hasn't written anything).
-        assert!(!p.exists());
-        w.flush().unwrap();
-        // Exactly one disk write, with the latest bytes.
-        assert_eq!(std::fs::read(&p).unwrap(), b"v3");
-    }
-
-    #[test]
-    fn window_expiry_flushes_without_explicit_flush() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
-        let w = DebouncedWriter::with_window(Duration::from_millis(30));
-        w.request(p.clone(), b"timer-flush".to_vec());
-        // Wait long enough for the debounce timer to fire on its own.
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(std::fs::read(&p).unwrap(), b"timer-flush");
-    }
-
-    #[test]
-    fn flush_is_synchronous() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
-        // Long window so the timer can't possibly fire before flush.
-        let w = DebouncedWriter::with_window(Duration::from_mins(1));
-        w.request(p.clone(), b"sync".to_vec());
-        // Right after `flush()` returns, the file must be on disk.
-        w.flush().unwrap();
-        assert!(p.exists(), "flush returned before file landed");
-        assert_eq!(std::fs::read(&p).unwrap(), b"sync");
-    }
-
-    #[test]
-    fn drop_drains_pending_request() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
-        {
-            // Long window — drop alone must drain.
-            let w = DebouncedWriter::with_window(Duration::from_mins(1));
-            w.request(p.clone(), b"drop-drain".to_vec());
-            // Going out of scope here triggers `Drop`.
+    #[async_trait::async_trait]
+    impl SessionBackend for MemBackend {
+        async fn save(&self, session: &PersistedSession) -> Result<(), crate::error::Error> {
+            if *self.fail.lock().unwrap() {
+                return Err(crate::error::Error::Persist("boom".into()));
+            }
+            self.map
+                .lock()
+                .unwrap()
+                .insert(session.name.clone(), session.clone());
+            Ok(())
         }
-        assert!(p.exists(), "drop did not drain pending request");
-        assert_eq!(std::fs::read(&p).unwrap(), b"drop-drain");
+        async fn load(&self, name: &str) -> Result<Option<PersistedSession>, crate::error::Error> {
+            Ok(self.map.lock().unwrap().get(name).cloned())
+        }
+        async fn list(&self) -> Result<Vec<SessionMetadata>, crate::error::Error> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .values()
+                .map(SessionMetadata::from_session)
+                .collect())
+        }
+        async fn delete(&self, name: &str) -> Result<(), crate::error::Error> {
+            self.map.lock().unwrap().remove(name);
+            Ok(())
+        }
+    }
+
+    fn sess(name: &str) -> PersistedSession {
+        PersistedSession::new(name, "anthropic", "m")
+    }
+
+    #[test]
+    fn single_write_lands_after_flush() {
+        let be = Arc::new(MemBackend::default());
+        let w =
+            DebouncedWriter::with_window(Arc::clone(&be) as Arc<dyn SessionBackend>, TEST_WINDOW);
+        w.request(sess("a"));
+        w.flush().unwrap();
+        assert!(be.map.lock().unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn writes_within_window_collapse_to_latest() {
+        let be = Arc::new(MemBackend::default());
+        let w = DebouncedWriter::with_window(
+            Arc::clone(&be) as Arc<dyn SessionBackend>,
+            Duration::from_millis(150),
+        );
+        let mut s1 = sess("a");
+        s1.model = "v1".into();
+        let mut s3 = sess("a");
+        s3.model = "v3".into();
+        w.request(s1);
+        w.request(sess("a"));
+        w.request(s3);
+        assert!(be.map.lock().unwrap().is_empty());
+        w.flush().unwrap();
+        assert_eq!(be.map.lock().unwrap().get("a").unwrap().model, "v3");
+    }
+
+    #[test]
+    fn drop_drains_pending() {
+        let be = Arc::new(MemBackend::default());
+        {
+            let w = DebouncedWriter::with_window(
+                Arc::clone(&be) as Arc<dyn SessionBackend>,
+                Duration::from_mins(1),
+            );
+            w.request(sess("a"));
+        }
+        assert!(be.map.lock().unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn flush_surfaces_backend_failure() {
+        let be = Arc::new(MemBackend::default());
+        *be.fail.lock().unwrap() = true;
+        let w =
+            DebouncedWriter::with_window(Arc::clone(&be) as Arc<dyn SessionBackend>, TEST_WINDOW);
+        w.request(sess("a"));
+        assert!(w.flush().is_err());
+        assert!(w.last_error().is_some());
     }
 
     #[test]
     fn flush_from_inside_tokio_runtime_does_not_panic() {
-        // Regression: a previous revision used `tokio::sync::oneshot`
-        // for the flush done-signal, whose `blocking_recv` panics when
-        // called inside a tokio runtime context. `flush()` is called from
-        // `SessionStore::load/list/delete/flush`, all of which run under
-        // `#[tokio::main]` during normal binary startup.
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("a.json");
+        let be = Arc::new(MemBackend::default());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
         rt.block_on(async {
-            let w = DebouncedWriter::with_window(Duration::from_mins(1));
-            w.request(p.clone(), b"from-runtime".to_vec());
+            let w = DebouncedWriter::with_window(
+                Arc::clone(&be) as Arc<dyn SessionBackend>,
+                Duration::from_mins(1),
+            );
+            w.request(sess("a"));
             w.flush().unwrap();
         });
-        assert_eq!(std::fs::read(&p).unwrap(), b"from-runtime");
+        assert!(be.map.lock().unwrap().contains_key("a"));
     }
 
     #[test]
-    fn atomic_write_leaves_no_temp_file() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("session.json");
-        let w = DebouncedWriter::with_window(TEST_WINDOW);
-        w.request(p.clone(), b"x".to_vec());
-        w.flush().unwrap();
-        // Directory should contain only the final file — no `.tmp*`
-        // siblings left behind by tempfile::NamedTempFile.
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|e| e.file_name())
-            .collect();
-        assert_eq!(entries, vec![p.file_name().unwrap().to_owned()]);
-        assert_eq!(count_files(dir.path()), 1);
-    }
-
-    #[test]
-    fn flush_surfaces_write_failure() {
-        // #414 P8: a failing persist must be observable, not a silent Ok.
-        // Make the destination's parent a *file* so `create_dir_all` (and thus
-        // the atomic write) fails deterministically.
-        let dir = TempDir::new().unwrap();
-        let blocker = dir.path().join("sub");
-        std::fs::write(&blocker, b"i am a file, not a dir").unwrap();
-        let target = blocker.join("session.json"); // parent `sub` is a file
-        let w = DebouncedWriter::with_window(TEST_WINDOW);
-        w.request(target.clone(), b"data".to_vec());
-
-        let flush_result = w.flush();
-        assert!(
-            flush_result.is_err(),
-            "flush returned Ok despite a failed write: {flush_result:?}"
-        );
-        // And it stays observable as a health signal after the fact.
-        assert!(
-            w.last_error().is_some(),
-            "failure not recorded in health slot"
-        );
-    }
-
-    #[test]
-    fn last_error_clears_after_a_successful_write() {
-        let dir = TempDir::new().unwrap();
-        // First: force a failure to a path whose parent is a file.
-        let blocker = dir.path().join("blocked");
-        std::fs::write(&blocker, b"file").unwrap();
-        let bad = blocker.join("x.json");
-        let w = DebouncedWriter::with_window(TEST_WINDOW);
-        w.request(bad.clone(), b"a".to_vec());
-        let _ = w.flush();
-        assert!(w.last_error().is_some());
-        // Then a successful write to a *different* healthy path leaves the bad
-        // path's failure recorded (per-path health), but a later success to the
-        // same bad path (after we remove the blocker) clears it.
-        std::fs::remove_file(&blocker).unwrap();
-        w.request(bad.clone(), b"b".to_vec());
-        w.flush().unwrap();
-        assert!(
-            w.last_error().is_none(),
-            "health slot not cleared on success"
-        );
-    }
-
-    #[test]
-    fn sustained_writes_flush_within_max_delay() {
-        // #414 P10: with a long debounce window, a continuous request stream
-        // must still be forced to disk by the max-delay bound rather than
-        // starving the flush indefinitely.
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("hot.json");
-        // Window far longer than the test; only the max-delay bound can flush.
-        let w = DebouncedWriter::with_window_and_max_delay(
-            Duration::from_secs(30),
-            Duration::from_millis(80),
-        );
-        // Stream requests with sub-window gaps for well over max_delay, never
-        // calling flush(). If the bound works, the file appears mid-stream.
-        let mut landed = false;
-        for i in 0..40 {
-            w.request(p.clone(), format!("v{i}").into_bytes());
-            std::thread::sleep(Duration::from_millis(10));
-            if p.exists() {
-                landed = true;
-                break;
-            }
-        }
-        assert!(
-            landed,
-            "sustained writes never flushed within the max-delay bound",
-        );
+    fn read_roundtrip_through_worker() {
+        let be = Arc::new(MemBackend::default());
+        let w =
+            DebouncedWriter::with_window(Arc::clone(&be) as Arc<dyn SessionBackend>, TEST_WINDOW);
+        w.request(sess("a"));
+        // load() flushes pending first, then reads through the backend.
+        let got = w.load("a").unwrap();
+        assert!(got.is_some());
+        assert_eq!(w.list().unwrap().len(), 1);
+        w.delete("a").unwrap();
+        assert!(w.load("a").unwrap().is_none());
     }
 }

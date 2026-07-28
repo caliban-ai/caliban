@@ -1569,30 +1569,30 @@ pub(crate) fn build_agent(
     Ok(Arc::new(builder.build()?))
 }
 
+/// Whether any flag requires a session store: `--session`, `--continue`, or
+/// `--resume`. Mirrors the gate that used to live inline in `resolve_session`,
+/// so `main` can build the backend (which may probe a remote daemon) only when
+/// a session is actually needed.
+pub(crate) fn session_store_needed(args: &Args) -> bool {
+    args.session.is_some() || args.continue_latest || args.resume.is_some()
+}
+
 /// Resolve the session store and load (or create) the persisted session.
 /// Seeds the shared todos handle + plan-mode flag from the persisted
 /// snapshot if any.
+///
+/// The backend is built by `main` (via `startup::storage::build_session_backend`,
+/// gated on [`session_store_needed`]) and injected here, so a `remote` substrate
+/// probes the daemon exactly once at startup. `None` (e.g. `--bare`, or no
+/// session flag) yields no store, matching the memory factory's `--bare` skip.
 pub(crate) fn resolve_session(
     args: &Args,
     model: &str,
     todos: &caliban_agent_core::SharedTodos,
     plan_mode: &caliban_agent_core::SharedPlanMode,
+    session_backend: Option<Arc<dyn caliban_sessions::SessionBackend>>,
 ) -> Result<(Option<SessionStore>, Option<PersistedSession>)> {
-    // Build the session store whenever any flag actually needs one:
-    // `--session <NAME>` (legacy), `--continue`, or `--resume <NAME>`.
-    // Without this, `--sessions-dir <X> --continue` (no `--session`) would
-    // silently fall back to scanning `~/.caliban/sessions` and find nothing,
-    // then no-op into a fresh ephemeral run — exactly Finding 11 of the
-    // 2026-05-27 LM Studio probe.
-    let needs_store = args.session.is_some() || args.continue_latest || args.resume.is_some();
-    let store = if needs_store {
-        Some(SessionStore::new(match &args.sessions_dir {
-            Some(d) => d.clone(),
-            None => SessionStore::default_root()?,
-        }))
-    } else {
-        None
-    };
+    let store = session_backend.map(SessionStore::with_backend);
     let session = if let (Some(store), Some(name)) = (&store, &args.session) {
         Some(match store.load(name)? {
             Some(existing) => existing,
