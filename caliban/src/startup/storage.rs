@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use caliban_memory::{FsTopicBackend, TopicBackend};
+use caliban_sessions::{FsSessionBackend, SessionBackend};
 use caliban_settings::{StorageConfig, StorageSubstrate};
 
 /// Build the memory backend the config selects. `fs` is always available;
@@ -48,6 +49,55 @@ async fn build_remote_backend(
     // Fail-fast connectivity probe: a healthy daemon answers `list`.
     // `remote_store` above already errors when `storage.remote` is `None`, so
     // it's provably `Some` here.
+    let url = &storage
+        .remote
+        .as_ref()
+        .expect("remote_store already validated Some")
+        .url;
+    backend
+        .list()
+        .await
+        .map_err(|e| format!("gonzalo remote {url} unreachable/unauthorized: {e}"))?;
+    Ok(Arc::new(backend))
+}
+
+/// Build the session backend the config selects. Mirrors `build_topic_backend`:
+/// `fs` is always available; `remote` requires the `gonzalo` feature; `git`/`s3`
+/// are recognized but not wired yet (#469). Errors are fatal config errors.
+// Wired into `main.rs` in Task 6; the allow drops away with that caller.
+#[allow(dead_code)]
+pub(crate) async fn build_session_backend(
+    storage: &StorageConfig,
+    sessions_dir: &Path,
+) -> Result<Arc<dyn SessionBackend>, String> {
+    match storage.substrate {
+        StorageSubstrate::Fs => Ok(Arc::new(FsSessionBackend::new(sessions_dir))),
+        StorageSubstrate::Remote => build_remote_session_backend(storage, sessions_dir).await,
+        other @ (StorageSubstrate::Git | StorageSubstrate::S3) => Err(format!(
+            "storage.substrate {other:?} is recognized but not wired yet (tracked in #469); use fs or remote"
+        )),
+    }
+}
+
+#[cfg(not(feature = "gonzalo"))]
+#[allow(clippy::unused_async)] // async for signature parity with the gonzalo variant
+async fn build_remote_session_backend(
+    _storage: &StorageConfig,
+    _sessions_dir: &Path,
+) -> Result<Arc<dyn SessionBackend>, String> {
+    Err("this build lacks gonzalo support; rebuild with `--features gonzalo` to use a remote substrate".to_string())
+}
+
+#[cfg(feature = "gonzalo")]
+async fn build_remote_session_backend(
+    storage: &StorageConfig,
+    sessions_dir: &Path,
+) -> Result<Arc<dyn SessionBackend>, String> {
+    use caliban_sessions::GonzaloSessionBackend;
+    let store = remote_store(storage)?;
+    let slug = workspace_slug(sessions_dir);
+    let backend = GonzaloSessionBackend::new(store, slug);
+    // Fail-fast connectivity probe: a healthy daemon answers `list`.
     let url = &storage
         .remote
         .as_ref()
@@ -125,6 +175,38 @@ mod tests {
     async fn remote_without_feature_errors_clearly() {
         let tmp = tempfile::tempdir().unwrap();
         let e = build_topic_backend(&cfg(StorageSubstrate::Remote), tmp.path())
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("--features gonzalo"), "got: {e}");
+    }
+
+    #[tokio::test]
+    async fn session_fs_builds_without_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let be = build_session_backend(&cfg(StorageSubstrate::Fs), tmp.path())
+            .await
+            .unwrap();
+        assert!(be.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_git_and_s3_error_as_not_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        for sub in [StorageSubstrate::Git, StorageSubstrate::S3] {
+            let e = build_session_backend(&cfg(sub), tmp.path())
+                .await
+                .err()
+                .unwrap();
+            assert!(e.contains("not wired"), "got: {e}");
+        }
+    }
+
+    #[cfg(not(feature = "gonzalo"))]
+    #[tokio::test]
+    async fn session_remote_without_feature_errors_clearly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = build_session_backend(&cfg(StorageSubstrate::Remote), tmp.path())
             .await
             .err()
             .unwrap();
