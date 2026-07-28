@@ -64,8 +64,7 @@ async fn build_remote_backend(
 /// Build the session backend the config selects. Mirrors `build_topic_backend`:
 /// `fs` is always available; `remote` requires the `gonzalo` feature; `git`/`s3`
 /// are recognized but not wired yet (#469). Errors are fatal config errors.
-// Wired into `main.rs` in Task 6; the allow drops away with that caller.
-#[allow(dead_code)]
+/// Wired into `main.rs` startup (#471).
 pub(crate) async fn build_session_backend(
     storage: &StorageConfig,
     sessions_dir: &Path,

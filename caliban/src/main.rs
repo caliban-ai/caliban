@@ -526,10 +526,47 @@ async fn main() -> Result<()> {
     let session_context = startup::fire_session_start(&args, &agent, &model).await;
     let _ = hooks_cfg_summary; // silence unused when not later consumed
 
+    // Build the config-selected session backend once (fs today; `remote` behind
+    // the `gonzalo` feature; #471), mirroring the memory factory above. Only when
+    // a session flag actually needs a store — so a `remote` substrate probes the
+    // daemon exactly once, and only when relevant. `--bare` skips it entirely (a
+    // remote probe could fatally exit here for a subsystem bare mode never uses),
+    // leaving `session_backend` as `None` → no store. A bad `[storage]` config is
+    // a fatal startup error (EX_CONFIG / 78), matching the memory factory.
+    let session_backend: Option<Arc<dyn caliban_sessions::SessionBackend>> =
+        if startup::compose::session_store_needed(&args) && !args.bare {
+            let sessions_dir = match &args.sessions_dir {
+                Some(d) => d.clone(),
+                None => caliban_sessions::SessionStore::default_root().unwrap_or_else(|e| {
+                    eprintln!("[caliban] sessions dir error: {e}");
+                    std::process::exit(78);
+                }),
+            };
+            match startup::storage::build_session_backend(
+                &settings_outcome.settings.storage,
+                &sessions_dir,
+            )
+            .await
+            {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    eprintln!("[caliban] storage config error: {e}");
+                    std::process::exit(78);
+                }
+            }
+        } else {
+            None
+        };
+
     // Resolve session store + persisted session (when --session is given).
     // Seeds the shared todos handle and plan-mode flag from the snapshot.
-    let (store, mut session) =
-        preflight!(startup::resolve_session(&args, &model, &todos, &plan_mode));
+    let (store, mut session) = preflight!(startup::resolve_session(
+        &args,
+        &model,
+        &todos,
+        &plan_mode,
+        session_backend
+    ));
 
     // Resolve system prompt from CLI flags (or build default), then layer
     // the active output-style block + memory-tier prefix when the default

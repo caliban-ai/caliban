@@ -320,6 +320,9 @@ fn resolve_resume(
     }
     let store_for_resume = match store {
         Some(s) => s.clone(),
+        // Last-resort local fallback: main builds the configured backend whenever a
+        // session is needed, so this only triggers in --bare/test paths. fs is the
+        // safe default here (no remote probe from a fallback).
         None => SessionStore::new(
             SessionStore::default_root()
                 .map_err(|e| headless::HeadlessError::SessionLoad(e.to_string()))?,
