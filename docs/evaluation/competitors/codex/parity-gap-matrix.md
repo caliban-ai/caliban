@@ -24,10 +24,12 @@ Codex-surface concept with no intended caliban analogue (e.g. hosted cloud). A
 ✅ here means "caliban does the equivalent thing," not that the two are
 byte-for-byte identical.
 
-**Last refreshed:** 2026-07-18 (initial capture — derived from
-[`capability-inventory.md`](capability-inventory.md) snapshot 2026-07-18;
-caliban state cross-referenced from the [Claude Code parity
+**Last refreshed:** 2026-07-27 (primary-source refresh of the Codex facts —
+derived from [`capability-inventory.md`](capability-inventory.md) snapshot
+2026-07-27; caliban state cross-referenced from the [Claude Code parity
 matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #485).
+This pass corrected Codex-side facts and notes only — caliban ratings were not
+re-verified against `main`.
 
 > **Caveat:** rows tagged **⚠** depend on a Codex fact still flagged uncertain
 > in the inventory (§14 there) or on a caliban detail inferred from the Claude
@@ -53,7 +55,8 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #485)
 | `codex apply` (apply a diff to the tree) | 🔴 | no standalone diff-apply subcommand; caliban's agent edits in place |
 | `codex review` (non-interactive review) | 🔴 | `/code-review` is skill-level, deferred to the Skills polish sub-project |
 | `codex mcp` (manage MCP servers) | ✅ | `caliban mcp` + `/mcp` (ADR-0023) |
-| `codex mcp-server` (Codex **as** an MCP server) | 🔴 ⚠ | caliban is an MCP client only; exposing caliban itself as an MCP server is unbuilt |
+| `codex mcp-server` (Codex **as** an MCP server) | 🔴 | caliban is an MCP client only; exposing caliban itself as an MCP server is unbuilt |
+| `codex app-server` (programmatic local server) | 🔴 | no analogue; caliban has no programmatic local server surface to drive it (sibling to `mcp-server`; no ACP surface documented for Codex either) |
 | `codex plugin` + `marketplace` | ✅ | `caliban plugin {install,list,enable,disable,remove,info,update}` + marketplace (ADR-0030) |
 | `codex sandbox` (run a command under a policy) | 🟡 | caliban has OS sandbox but no standalone "sandbox an arbitrary command" subcommand (ADR-0032) |
 | `codex execpolicy` (evaluate rule files) | 🟡 | `caliban perms lint/test/explain` cover rule evaluation; not a 1:1 exec-policy evaluator |
@@ -88,7 +91,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #485)
 |---|---|---|
 | Orthogonal sandbox × approval axes | ✅ | permission rules/modes (approval axis) + OS sandbox (boundary axis) compose independently (ADR-0029/0032/0045) |
 | Sandbox modes (`read-only` / `workspace-write` / `danger-full-access`) | ✅ | permission modes + sandbox filesystem allow/deny map cover the equivalent spectrum |
-| Approval policies (`untrusted`/`on-request`/`on-failure`/`never`) | 🟡 | caliban modes (`default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions`) overlap but don't map 1:1; no `on-failure`-style escalate-on-error policy |
+| Approval policies (`untrusted`/`on-request`/`never`) | 🟡 | caliban modes (`default`/`acceptEdits`/`plan`/`auto`/`dontAsk`/`bypassPermissions`) overlap but don't map 1:1. (`on-failure` is deprecated upstream — not a real gap; 🟡 reflects the mode-shape divergence, not a missing policy) |
 | macOS Seatbelt enforcement | ✅ | ADR-0032 |
 | Linux `bubblewrap` / user-namespace enforcement | ✅ | ADR-0032 (Linux/WSL) |
 | Windows native sandbox | 🔴 | Windows sandbox deferred |
@@ -102,7 +105,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #485)
 | Per-server enable / tool allow-deny / approval mode | ✅ | per-server permission scoping + `enabled_tools` equivalents |
 | OAuth / bearer auth for HTTP servers | ✅ | PKCE + loopback OAuth, keyring store (ADR-0023 Phase C) |
 | Startup / tool timeouts | ✅ | `CALIBAN_MCP_TIMEOUT` / `CALIBAN_MCP_TOOL_TIMEOUT` |
-| Codex **as** MCP server (`mcp-server`) | 🔴 ⚠ | see B — unbuilt |
+| Codex **as** MCP server (`mcp-server`) | 🔴 | see B — unbuilt (Codex `mcp-server` existence confirmed; caliban gap stands) |
 
 ## G. Models & providers
 
@@ -140,7 +143,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #485)
 | Capability (Codex) | Caliban | Notes |
 |---|---|---|
 | Custom subagent definitions with per-agent model/sandbox/MCP overrides | ✅ | subagent frontmatter (`model`, `tools`, `permissionMode`, `mcpServers`, `isolation: worktree`) (ADR-0037) |
-| Subagent file format | 🟡 ⚠ | caliban uses Markdown+frontmatter; Codex canonical is TOML (inventory §11 flags version drift) |
+| Subagent file format | 🟡 | caliban uses Markdown+frontmatter; Codex canonical is TOML (confirmed — required fields `name`/`description`/`developer_instructions`). Divergence accurate |
 | Auto-parallelized delegation, orchestration auto-managed | 🟡 | `AgentTool` + background fleet exist, but fan-out is agent-driven, not an automatic orchestrator |
 | Worktree isolation | ✅ | `caliban-worktrees`, `isolation: worktree` (ADR-0037) |
 | Background fleet + supervisor daemon | ✅ | `caliban-supervisor` + `caliband` (ADR-0037) |
@@ -194,8 +197,7 @@ to chase Codex parity specifically:
    automatically fans work out to the background subagent fleet.
 4. **Standalone `sandbox` / `execpolicy` subcommands** (B/E) — run/evaluate an
    arbitrary command under a sandbox policy outside a full session.
-5. **`on-failure` approval policy** (E) — run sandboxed, escalate only on error.
-6. **AGENTS.md as a live, first-class instruction source** (H) — read it
+5. **AGENTS.md as a live, first-class instruction source** (H) — read it
    directly (with nested precedence), not just ingest it at `/init`.
 
 Cloud plane, IDE extension, and GitHub-app review are **deliberately out of

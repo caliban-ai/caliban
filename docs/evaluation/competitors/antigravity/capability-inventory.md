@@ -1,6 +1,6 @@
 # Google Antigravity documented-capability inventory
 
-> **Static snapshot — captured 2026-07-20.**
+> **Static snapshot — captured 2026-07-27.**
 >
 > Structured snapshot of **Google Antigravity**'s documented surface, captured
 > from the canonical docs at `https://antigravity.google/docs/*`, the launch
@@ -27,21 +27,23 @@
 > - **Out of scope (n/a):** the GUI editor chrome (tab-completion, inline
 >   command palette) and Google's hosted model plane.
 >
-> **⚠ Fetch caveat:** the canonical `antigravity.google` docs, the Google
+> **Fetch status:** the canonical `antigravity.google/docs/*` pages, the Google
 > Developers blog launch post, and the `codelabs.developers.google.com`
-> walkthroughs all **403 automated fetch** (bot protection), so the detail below
-> was cross-checked from secondary write-ups (tutorials, reviews, comparison
-> articles) rather than read directly off the canonical pages. Rows carrying
-> residual uncertainty are marked **⚠ verify** (see §14); re-confirm them against
-> the live docs on the next re-baseline.
+> walkthroughs are all **directly readable now (HTTP 200)** — the earlier "403 to
+> automated fetch / secondary sources only" caveat is resolved. The detail below
+> is read straight off the canonical pages, which are now the source of record.
+> Rows carrying residual uncertainty are marked **⚠ verify** (see the
+> uncertainties list below).
 >
 > **Currency markers:** launched **2026-11-18** in **free public preview**
-> alongside Gemini 3 Pro; cross-platform (macOS / Windows / Linux). Default model
-> at launch: **Gemini 3 Pro** (generous preview rate limits, reported to refresh
-> every ~5 hours); also **Claude Sonnet 4.5** and **GPT-OSS** selectable, with
-> **Gemini 3.5 Flash** added later. Pricing drifted post-launch — a credit /
+> alongside Gemini 3 Pro; cross-platform (macOS / Windows / Linux). Launch-era
+> default model was **Gemini 3 Pro**; the current `/docs/models` roster is
+> **Gemini 3.6 Flash**, **Gemini 3.5 Flash**, **Gemini 3.1 Pro**, **Claude
+> Sonnet 4.6 (thinking)**, **Claude Opus 4.6 (thinking)**, **GPT-OSS-120b**, plus
+> **Nano Banana 2** (images). Pricing drifted post-launch — a credit /
 > subscription structure and reported price increases landed by **2026-03**
-> (user protest reported). Use these to gauge drift on the next re-baseline.
+> (user protest reported), and a `/docs/pricing` page now gates models "by plan."
+> Use these to gauge drift on the next re-baseline.
 >
 > **Re-baseline cadence:** refresh manually before each parity-prioritization
 > review. When refreshing, re-fetch the upstream docs, update the sections
@@ -51,7 +53,17 @@
 > Conventions: *surfaces* = user-visible primitives; "Config = X" lines name the
 > canonical configuration mechanism. **(orch)** marks orchestration-layer surface
 > that is Prospero's category, not caliban's. Items still carrying upstream
-> uncertainty are marked **⚠ verify** (see §14).
+> uncertainty are marked **⚠ verify** (see the uncertainties list below).
+
+> **Corrections applied this pass (2026-07-27):** now reading the canonical docs
+> directly (200, no more 403 caveat); permissions reframed from coarse presets to
+> the fine-grained Deny > Ask > Allow rule engine (launch-era preset names appear
+> superseded); CLI binary pinned to `agy` (+ install script); model roster
+> refreshed (Gemini 3.6/3.5 Flash, 3.1 Pro, Claude Sonnet/Opus 4.6, GPT-OSS-120b,
+> Nano Banana 2); added the **Antigravity SDK** (§14, the biggest prior miss),
+> Antigravity 2.0 standalone Agent Manager + `/schedule`, Hooks/Sidecars/Plugins,
+> the fuller slash-command set, and full MCP transport/config detail;
+> uncertainties (a)/(b)/(d) resolved, (c)/(e)/(f)/(g-knowledge-base) still open.
 
 ## 1. Overview / surfaces
 
@@ -96,23 +108,32 @@
   interactions and remote/SSH sessions.
 - **Positioning:** the closest analogue to caliban's own surface; Google has run
   dedicated "Agentic Coding with the Antigravity CLI" material.
-- ⚠ verify — exact binary name, subcommand list, headless / non-interactive
-  (`-p`-style) flag, and structured-output format are **not confirmed** off the
-  canonical docs (they 403'd automated fetch). Treat §3 as "a terminal agent
-  exists and runs the agentic loop," not an exhaustive CLI reference.
+- **Binary / install:** the CLI binary is **`agy`**; install via
+  `curl -fsSL https://antigravity.google/cli/install.sh | bash` → `~/.local/bin/agy`
+  (per `/docs/cli/install`). The CLI overview names "headless" workflows,
+  Gemini CLI migration, and conversation export shared between the CLI and
+  Antigravity 2.0.
+- **Slash commands (documented):** `/agents`, `/codesearch`, `/credits`,
+  `/diff`, `/permissions`, `/resume`, `/statusline`, `/title`, `/usage`,
+  `/browser`, `/schedule`.
+- ⚠ verify — only the exact CLI non-interactive flag (`-p` / `--print`) is still
+  unshown (it points to `/docs/cli/reference`, not yet fetched). Headless /
+  structured-output operation itself is confirmed via the SDK (§14).
 
 ## 4. Editor view & Agent Manager
 
 - **Editor view:** VS Code-style editor with AI tab-completion, inline commands,
   and a synchronous chat/composer — the "be hands-on" surface. Largely **n/a**
   for caliban parity (GUI editor chrome).
-- **Agent Manager (orch):** a multi-agent pane / dashboard. Spin up **parallel
-  agents** on different tasks/workspaces, watch each one's plan and progress,
-  approve steps, and **leave comments/feedback on any Artifact** (Google
-  Docs-style commenting) to steer an agent mid-task.
-- **Slash commands (observed):** `/agents` (monitor subagents, inspect detail
-  views, handle approvals), `/permissions` (set autonomy level). ⚠ verify — full
-  slash-command set.
+- **Agent Manager (orch):** as of **Antigravity 2.0** this is a **standalone
+  desktop "command center"** (no longer just a pane inside the IDE) — project
+  grouping, multi-workspace, async task management, and **scheduled tasks**. Spin
+  up **parallel agents** on different tasks/workspaces, watch each one's plan and
+  progress, approve steps, and **leave comments/feedback on any Artifact** (Google
+  Docs-style commenting) to steer an agent mid-task. Conversation export is
+  shared between the CLI and Antigravity 2.0.
+- **Scheduled tasks:** `/schedule` drives recurring / scheduled task automation
+  from the Agent Manager. (Full documented slash-command set is in §3.)
 
 ## 5. Config system
 
@@ -131,15 +152,19 @@
 
 ## 6. Permissions / autonomy
 
+- **Fine-grained permission engine (not coarse presets):** per `/docs/permissions`,
+  Antigravity runs a **unified permission engine** with **Deny > Ask > Allow**
+  precedence over **six action categories** — `read_file`, `write_file`,
+  `read_url`, `execute_url`, `command` (matched by **prefix or regex**),
+  `unsandboxed`, and `mcp` — with wildcard / path / domain targets and
+  in-approval scope expansion. This is a genuine per-command / per-tool
+  allow-ask-deny rule grammar, not a small set of coarse modes.
 - **Terminal Command Auto Execution policy** chosen at first setup — governs how
-  much the agent does without asking.
-- **Autonomy levels (observed):** **Secure**, **Review-driven** (recommended for
-  production — agent asks before running terminal commands and before finalizing
-  plans), **Agent-driven** (more autonomous), and **Custom**.
-- **`/permissions`** switches level at runtime: **request-review**,
-  **always-proceed**, or **strict**.
-- ⚠ verify — whether a finer-grained per-tool / per-command allow-ask-deny rule
-  grammar exists beyond these coarse modes.
+  much the agent does without asking, expressed through the same rule engine.
+- **`/permissions`** adjusts the policy at runtime.
+- The launch-era named autonomy presets (**Secure / Review-driven / Agent-driven
+  / Custom**) appear **superseded** — the current docs describe the rule engine
+  rather than those preset names.
 
 ## 7. Plan / verify workflow
 
@@ -164,13 +189,16 @@
 
 ## 9. Models & providers
 
-- **Default:** **Gemini 3 Pro** (generous preview rate limits).
-- **Also selectable:** **Anthropic Claude Sonnet 4.5** and **OpenAI GPT-OSS**;
-  **Gemini 3.5 Flash** added post-launch. Model optionality inside one platform
-  is a stated feature.
+- **Current roster (`/docs/models`):** **Gemini 3.6 Flash**, **Gemini 3.5
+  Flash**, **Gemini 3.1 Pro**, **Claude Sonnet 4.6 (thinking)**, **Claude Opus
+  4.6 (thinking)**, **GPT-OSS-120b**, plus **Nano Banana 2** for image
+  generation. Model optionality inside one platform is a stated feature; models
+  are gated "by plan."
+- **Launch-era note:** the header "Default: Gemini 3 Pro" reflects the launch
+  configuration; the current roster above has drifted from the launch trio.
 - **Auth:** Google account (preview). ⚠ verify — BYO-API-key path for the
-  third-party models, and whether local/OpenAI-compatible endpoints are
-  configurable.
+  third-party models; the models page shows **no** documented local /
+  OpenAI-compatible / BYO-endpoint path.
 
 ## 10. Tools
 
@@ -199,6 +227,9 @@
 
 - **Rules** (§5) are the always-on constitution; **skills / `skills.md`** package
   reusable procedures for "autonomous developer pipelines" (per Codelabs).
+- **Customization surfaces:** the docs "Customization" section lists **Hooks**,
+  **Sidecars**, and **Plugins** alongside MCP / Skills / Rules-Workflows — the
+  extension story is broader than just skills + rules.
 - ⚠ verify — whether there is a hosted **marketplace** for skills/rules or only
   local files + community rule packs.
 
@@ -207,12 +238,34 @@
 - **MCP client:** configure MCP **servers** and choose which **MCP tools** are
   allowed **per project** (so global servers aren't blanket-exposed to every
   workspace's agent) — real-time context to local tools, databases, and external
-  services.
+  services. Per `/docs/mcp`, transports are **stdio + Streamable HTTP + SSE +
+  websocket**; config lives at **`~/.gemini/config/mcp_config.json`** (global) and
+  **`.agents/mcp_config.json`** (workspace), an `mcpServers` object supporting
+  `disabled` / `disabledTools`, plus one-click Google Cloud server install.
 - **Browser extension:** the Chrome extension is exposed to the agent as a tool
   (screenshots, navigation, recordings) — the browser half of the verify loop.
-- **Headless / CI:** ⚠ verify — no confirmed first-party headless/CI or GitHub
-  Action surface for Antigravity off the canonical docs (the CLI, §3, is the
-  likeliest path); treat as unconfirmed.
+- **Headless / CI:** Antigravity **does** ship a first-party programmatic /
+  headless surface — the **Antigravity SDK** (§14) plus **`/schedule`** scheduled
+  tasks. The earlier "no confirmed first-party headless/CI" note is resolved.
+
+## 14. Antigravity SDK (headless Python agent framework)
+
+- **What it is:** `pip install google-antigravity` — a **programmatic Python
+  agent framework** described in `/docs/sdk/overview` as a **"headless API that
+  decouples agent logic from execution environments."** This is the surface that
+  materially changes the "can Antigravity be driven programmatically?" story: it
+  **can** be driven headlessly, contradicting the earlier "no confirmed
+  first-party headless/CI" reading.
+- **Capabilities:** built-in tools (file I/O, code editing, shell); **custom
+  Python tools**; MCP servers; reusable **skills**; a **deny-by-default
+  declarative permission policy**; **lifecycle hooks** (Inspect / Decide /
+  Transform across **9 lifecycle points**); **streaming**; **multimodal** input;
+  **sub-agents**; **structured output via Pydantic schemas**; **human-in-the-loop**;
+  and token / thinking-trace **observability**.
+- **Relationship to the CLI:** the SDK is the headless engine; the `agy` CLI (§3)
+  is the interactive terminal front-end. Together they resolve the earlier CLI /
+  headless / structured-output uncertainty (only the exact CLI non-interactive
+  flag remains unshown).
 
 ---
 
@@ -232,45 +285,60 @@
 4. **Knowledge base / learning as a core primitive** — cross-session memory of
    useful context and snippets. caliban has session context + CLAUDE.md memory,
    not an accumulating learned-knowledge store.
-5. **Multi-model optionality in one platform** — Gemini 3 Pro default plus Claude
-   Sonnet 4.5, GPT-OSS, and Gemini 3.5 Flash selectable.
-6. **Autonomy-level presets** — Secure / Review-driven / Agent-driven / Custom
-   with a first-run "Terminal Command Auto Execution" choice.
+5. **Multi-model optionality in one platform** — Gemini 3.1 Pro, Gemini 3.6/3.5
+   Flash, Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS-120b, and Nano Banana 2
+   (images) all selectable.
+6. **Fine-grained permission engine** — a Deny > Ask > Allow rule engine over six
+   action categories (read_file / write_file / read_url / execute_url / command /
+   unsandboxed / mcp) with a first-run "Terminal Command Auto Execution" choice —
+   not a small set of coarse presets.
 7. **VS Code-lineage GUI + tab-completion / inline commands** — a synchronous
    editor experience (**n/a** for a terminal agent).
 
 ## Explicit uncertainties to re-verify before the next parity pass
 
-- **(a)** Canonical `antigravity.google/docs/*`, the Google Developers blog
-  launch post, and `codelabs.developers.google.com` all **403 automated fetch** —
-  the whole inventory leans on secondary sources; re-read directly next pass.
-- **(b)** Antigravity **CLI** specifics — binary name, subcommands, headless
-  `-p`-style flag, structured-output format (§3).
+- **(a)** ~~403 automated fetch~~ **RESOLVED** — all canonical
+  `antigravity.google/docs/*` pages, the launch blog, and the Codelabs
+  walkthroughs return HTTP 200 and are read directly; the caveat is refuted.
+- **(b)** Antigravity **CLI** specifics **RESOLVED** — binary is `agy`, install
+  script confirmed, slash-command set documented, and headless / structured
+  output confirmed via the SDK (Pydantic). Only the exact CLI non-interactive
+  flag (`-p` / `--print`) is still unshown (points to `/docs/cli/reference`) (§3).
 - **(c)** Whether per-agent workspaces use **git worktrees** or separate
-  checkouts (§8).
-- **(d)** Permission granularity beyond the coarse autonomy presets (§6).
-- **(e)** Config compatibility — whether `CLAUDE.md` is read, and exact
-  `skills.md` layout/discovery (§5, §12).
-- **(f)** Pricing / tier structure after the preview (credits, subscription,
-  reported increases) (§2).
-- **(g)** Knowledge-base storage scope and editability (§11); MCP transport
-  support (stdio vs HTTP) (§13); any first-party headless/CI surface (§13).
+  checkouts — **STILL OPEN** (docs describe "Projects" combining folders but not
+  the git isolation mechanism) (§8).
+- **(d)** Permission granularity **RESOLVED/refuted** — a fine-grained
+  Deny > Ask > Allow rule engine over six action categories exists (§6).
+- **(e)** Config compatibility — **PARTIAL**: global `~/.gemini`, workspace
+  `.agents/`, and a Skills docs page exist, but `CLAUDE.md` compat is unconfirmed
+  (Antigravity uses `GEMINI.md` + `AGENTS.md`) and the exact `skills.md` layout
+  is not pinned (§5, §12).
+- **(f)** Pricing / tier structure after the preview — **PARTIAL**: a
+  `/docs/pricing` page exists and models are gated "by plan," but exact tier
+  names / prices are unpinned (§2).
+- **(g)** Knowledge-base storage scope and editability — **STILL OPEN** (§11).
+  (MCP transport support **RESOLVED**: stdio + Streamable HTTP + SSE + websocket;
+  first-party headless/CI surface **RESOLVED**: SDK + `/schedule` — §13, §14.)
 
 ---
 
-## Source pages (referenced 2026-07-20)
+## Source pages (referenced 2026-07-27)
 
 Canonical docs at `https://antigravity.google/docs/<slug>` and the Google
-Developers blog (⚠ **403 to automated fetch** — cross-checked from secondary
-sources). Launch: 2026-11-18 alongside Gemini 3 Pro.
+Developers blog — all **directly readable (HTTP 200)** this pass and now the
+source of record. Launch: 2026-11-18 alongside Gemini 3 Pro.
 
 | Page | URL | Notes |
 |---|---|---|
-| Product / download | `antigravity.google` | surfaces, download, platforms |
-| Docs home | `antigravity.google/docs/home` | overview |
-| Agent docs | `antigravity.google/docs/agent` | agent loop, personas |
-| Agent modes & settings | `antigravity.google/docs/agent-modes-settings` | autonomy, permissions |
-| Launch post | `developers.googleblog.com/build-with-google-antigravity-our-new-agentic-development-platform` | surfaces, Artifacts, models |
+| Product / download | `antigravity.google` | surfaces, download, Antigravity 2.0 |
+| Docs home | `antigravity.google/docs/home` | overview, Customization (Hooks/Sidecars/Plugins) |
+| Getting Started | `antigravity.google/docs/getting-started` | Editor/Agent Manager, `/schedule` |
+| Models | `antigravity.google/docs/models` | model roster, Nano Banana 2 |
+| Permissions | `antigravity.google/docs/permissions` | Deny>Ask>Allow rule engine |
+| MCP | `antigravity.google/docs/mcp` | transports, config paths |
+| CLI overview | `antigravity.google/docs/cli/overview` | headless workflows, Gemini CLI migration |
+| CLI install | `antigravity.google/docs/cli/install` | `agy` binary, install script |
+| SDK overview | `antigravity.google/docs/sdk/overview` | `google-antigravity` headless Python framework |
+| Launch post | `developers.googleblog.com/build-with-google-antigravity-our-new-agentic-development-platform` | surfaces, Artifacts, launch-era models |
 | Getting Started codelab | `codelabs.developers.google.com/getting-started-google-antigravity` | Editor/Agent Manager, MCP, browser |
-| Pipelines codelab | `codelabs.developers.google.com/autonomous-ai-developer-pipelines-antigravity` | `AGENTS.md` + `skills.md` |
 | Browser extension | `chromewebstore.google.com/detail/antigravity-browser-exten/eeijfnjmjelapkebgockoeaadonbchdd` | browser agent tool |
