@@ -21,6 +21,14 @@ pub enum Error {
     /// rather than only warn-logged (#414).
     #[error("session persist failed: {0}")]
     Persist(String),
+    /// A remote optimistic-concurrency write lost a race: the store's current
+    /// revision differed from the one this write expected. Surfaced (not
+    /// union-merged) so a divergent multi-writer save is observable (#471).
+    #[error("session '{name}' conflict: a concurrent write moved it")]
+    Conflict {
+        /// The session name that conflicted.
+        name: String,
+    },
 }
 
 /// Convenience alias for `Result<T, Error>`.
