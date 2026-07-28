@@ -230,3 +230,19 @@ pub struct SessionMetadata {
     /// Total tokens consumed (input + output) across all turns.
     pub total_tokens: u32,
 }
+
+impl SessionMetadata {
+    /// Derive list metadata from a full session (shared by all backends).
+    #[must_use]
+    pub fn from_session(session: &PersistedSession) -> Self {
+        Self {
+            name: session.name.clone(),
+            updated_at: session.updated_at,
+            turn_count: session.turn_count(),
+            total_tokens: session
+                .total_usage
+                .input_tokens
+                .saturating_add(session.total_usage.output_tokens),
+        }
+    }
+}
