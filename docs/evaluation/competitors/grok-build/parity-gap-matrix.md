@@ -88,7 +88,7 @@ the [Claude Code parity matrix](../claude-code/parity-gap-matrix.md) and the
 | Autonomy modes (`ask` / `auto` classifier / `always-approve`) | ✅ | ask + auto-approve + bypass modes; Grok's `auto` classifier auto-approves safe calls, prompts on risky — caliban has an equivalent auto tier |
 | Allow/deny/ask rule grammar with patterns | ✅ | *at parity, not finer* — Grok has `allow`/`deny`/`ask` arrays with `Bash(git *)`/`Read(src**)`/`Edit(**/*.rs)`/`MCPTool(...)` patterns + verbose object form, `deny > ask > allow` (Claude-Code-class). caliban's grammar matches; **correction: the prior "finer-grained than Grok's" note was wrong** |
 | User vs project-scoped permission override | ✅ | four config scopes with merge (ADR-0026); Grok honors `[permission]` in project `.grok/config.toml` |
-| Kernel-enforced sandbox profiles (`off`/`workspace`/`read-only`/`strict`/`devbox` + custom `sandbox.toml`) | 🔴 | Grok ships OS-sandbox profiles (`restrict_network`, `read_only`/`read_write`/`deny` path lists, kernel-enforced) selectable via `--sandbox`/`GROK_SANDBOX`; caliban has no OS-level sandbox layer (permission gating only). **Shared with Codex `sandbox_mode` + OpenCode** |
+| Kernel-enforced sandbox (fs allow/deny + network gating) | ✅ | caliban ships an OS sandbox — macOS **Seatbelt** + Linux **bubblewrap**, filesystem allow/deny, network gating (ADR-0032/0054) — covering the spectrum of Grok's `restrict_network`/`read_only`/`read_write`/`deny`. Grok's *named presets* (`off`/`workspace`/`read-only`/`strict`/`devbox` + custom `sandbox.toml`, `--sandbox`/`GROK_SANDBOX`) are an ergonomic wrapper; caliban exposes the equivalent as sandbox modes (🟡 on the named-preset ergonomics only) |
 
 ## F. Agents / subagents
 
@@ -119,7 +119,7 @@ the [Claude Code parity matrix](../claude-code/parity-gap-matrix.md) and the
 | read/write/edit/shell(`bash`)/search(`grep`)/`webfetch`/git/subagent | ✅ | full built-in tool set present |
 | Diff-gated edits before apply | ✅ | edit review + auto-checkpoint + `/rewind` (ADR-0028) |
 | Image input | ✅ | `caliban-images` (ADR-0039) |
-| LSP servers (via plugins) | 🟡 | **correction:** Grok *does* integrate LSP (as a plugin extension type) — prior "no LSP" note was wrong. caliban LSP state ⚠ verify against `main`; see the [OpenCode LSP row](../opencode/parity-gap-matrix.md) |
+| LSP servers (via plugins) | 🔴 | **correction:** Grok *does* integrate LSP (as a plugin extension type) — prior "no LSP" note was wrong. caliban has no LSP integration (no `caliban-lsp` crate / LSP ADR as of `main`) — a real gap, shared with the [OpenCode LSP row](../opencode/parity-gap-matrix.md) |
 
 ## I. Plan mode
 
@@ -165,10 +165,8 @@ chase Grok Build parity specifically:
    caliban. **Overlaps with the OpenCode `serve`/`attach`/ACP row, Codex
    `mcp-server`/`app-server`, and Antigravity's headless SDK** — one surface
    serves every sibling matrix. Tracked as epic **#503**.
-2. **Kernel-enforced sandbox profiles** (E) — Grok's `off`/`workspace`/
-   `read-only`/`strict`/`devbox` + custom `sandbox.toml` give OS-level isolation
-   caliban lacks. **Shared with Codex `sandbox_mode` + OpenCode** — a cross-peer
-   gap, not Grok-specific.
+2. **LSP integration** (H) — Grok integrates language servers via plugins;
+   caliban has none. **Shared with the OpenCode LSP row** — not Grok-specific.
 3. **Arena Mode** (F) — parallel competing agent outputs for comparison; no
    caliban analogue.
 4. **Hosted marketplace skill *search*** (`grok skill search`) (C/J) — caliban's

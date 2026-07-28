@@ -172,7 +172,7 @@
 
 1. **Native Claude Code / AGENTS.md compatibility** — reads `CLAUDE.md`, `.claude/` (skills, agents, MCPs, hooks, rules), the AGENTS.md family, and Claude Code marketplaces/plugins with zero conversion.
 2. **Claude-Code-class permission rule grammar** — `allow`/`deny`/`ask` arrays with `Bash(...)`/`Read(...)`/`Edit(...)`/`MCPTool(...)` patterns (and a verbose object form), `deny > ask > allow` — *plus* an `auto` classifier mode. (This was previously mis-scored as coarser than caliban's; it is at parity.)
-3. **Kernel-enforced sandbox profiles** — `off`/`workspace`/`read-only`/`strict`/`devbox` + custom `sandbox.toml` (`extends`, `restrict_network`, `read_only`/`read_write`, `deny`).
+3. **Named sandbox-profile ergonomics** — caliban already has an OS sandbox (Seatbelt + bubblewrap, ADR-0032/0054); Grok's distinction is the *named-preset* packaging: `off`/`workspace`/`read-only`/`strict`/`devbox` + custom `sandbox.toml` (`extends`, `restrict_network`, `read_only`/`read_write`, `deny`), selectable by name.
 4. **8 parallel subagents with per-subagent worktree isolation** + **Arena Mode** competing outputs.
 5. **ACP agent over JSON-RPC** (`grok agent stdio`) — a concrete protocol surface for being driven by editors/automation, with MCP servers wired in at `session/new`.
 6. **LSP servers via plugins** — language-server integration is a supported plugin extension type.
