@@ -50,6 +50,11 @@ pub struct ExecWorkerLauncher {
     control_endpoint: Option<String>,
 }
 
+/// Filename, inside an agent's `session_dir`, that the worker's stdout and
+/// stderr are captured to (#507). Public so an orchestrator or an operator
+/// debugging a `failed` agent knows where to look without guessing.
+pub const WORKER_LOG_FILENAME: &str = "worker.log";
+
 impl ExecWorkerLauncher {
     /// Build a launcher that execs `caliban_exe`.
     pub fn new(caliban_exe: impl Into<PathBuf>) -> Self {
@@ -146,9 +151,38 @@ impl WorkerLauncher for ExecWorkerLauncher {
         if !record.working_dir.as_os_str().is_empty() {
             cmd.current_dir(&record.working_dir);
         }
+        // #507: the worker's own stderr is the only explanation of a preflight
+        // failure. Discarding it left a `failed` agent with an empty container
+        // log and no artifact anywhere naming the cause — the reason had to be
+        // recovered by reconstructing the command and re-running it by hand.
+        // Capture both streams next to the session instead. Append rather than
+        // truncate so a respawn does not erase the attempt that explains why it
+        // was respawned.
+        //
+        // Opening the log must never fail the launch: a missing or read-only
+        // session dir degrades to the previous discard behavior with a warning,
+        // so a diagnostics improvement can't become a new way to fail a spawn.
+        let log_path = record.session_dir.join(WORKER_LOG_FILENAME);
+        let (out, err) = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|f| f.try_clone().map(|dup| (f, dup)))
+        {
+            Ok((f, dup)) => (std::process::Stdio::from(f), std::process::Stdio::from(dup)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "caliban_supervisor",
+                    path = %log_path.display(),
+                    error = %e,
+                    "could not open the worker log; this worker's output will be discarded"
+                );
+                (std::process::Stdio::null(), std::process::Stdio::null())
+            }
+        };
         cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(out)
+            .stderr(err);
         let child = cmd.spawn()?;
         let pid = child
             .id()
@@ -259,5 +293,63 @@ mod tests {
             socket.exists(),
             "worker should have created the socket file"
         );
+    }
+
+    /// Write an executable stand-in for the `caliban` binary that reproduces a
+    /// worker dying during preflight: a line on stderr, then a non-zero exit.
+    #[cfg(unix)]
+    fn failing_worker_exe(dir: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let exe = dir.join("fake-caliban");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\necho 'provider: ANTHROPIC_API_KEY is not set' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    /// #507: the worker's stdout/stderr went to `Stdio::null()`, so a worker
+    /// that died at preflight left `status: failed` in the registry, an empty
+    /// container log, and no file anywhere naming the cause — the only way to
+    /// learn it was to reconstruct the command and re-run it by hand (which is
+    /// exactly what #93's evidence section had to do, and what a live-cluster
+    /// diagnosis had to do again). Capture it next to the session instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_launcher_captures_failing_worker_output_to_the_session_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = failing_worker_exe(dir.path());
+        let rec = record(dir.path().join("agent.sock"), dir.path().to_path_buf());
+
+        let mut handle = ExecWorkerLauncher::new(&exe).launch(&rec).unwrap();
+        let status = handle.child.wait().await.unwrap();
+        assert!(!status.success(), "the stand-in worker exits non-zero");
+
+        let log = std::fs::read_to_string(dir.path().join(WORKER_LOG_FILENAME))
+            .expect("a failed worker must leave its output in the session dir");
+        assert!(
+            log.contains("ANTHROPIC_API_KEY is not set"),
+            "the captured log must carry the worker's own diagnosis, got: {log:?}"
+        );
+    }
+
+    /// #507: capturing diagnostics must never become a new way to fail a spawn.
+    /// An unwritable session dir falls back to discarding output — the worker
+    /// still launches.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_launcher_still_launches_when_the_log_cannot_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = failing_worker_exe(dir.path());
+        // A session dir that does not exist: opening the log inside it fails.
+        let missing = dir.path().join("no-such-session-dir");
+        let rec = record(dir.path().join("agent.sock"), missing);
+
+        let mut handle = ExecWorkerLauncher::new(&exe)
+            .launch(&rec)
+            .expect("an unopenable worker log must not fail the launch");
+        let _ = handle.child.wait().await.unwrap();
     }
 }
