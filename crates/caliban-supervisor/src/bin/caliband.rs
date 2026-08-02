@@ -11,6 +11,7 @@
 //!         [--advertise-host caliband.pod]  # host clients dial for agents
 //!         [--agent-port-base 7100]
 //!         [--tls-cert cert.pem --tls-key key.pem [--tls-ca ca.pem]]
+//!         [--tls-server-name caliband]     # SAN workers verify (default: advertise host)
 //!         [--token <bearer>]
 //! ```
 //!
@@ -38,6 +39,11 @@ struct Args {
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     tls_ca: Option<PathBuf>,
+    /// Server name a worker validates the control listener's cert against when
+    /// reporting status over TLS (#510). Must match a SAN on the serving cert.
+    /// Defaults to the advertise host; override when the cert SAN differs from
+    /// the DNS name workers dial (e.g. a k8s Service short name).
+    tls_server_name: Option<String>,
     token: Option<String>,
 }
 
@@ -69,6 +75,7 @@ fn parse_args() -> Result<Args, String> {
             "--tls-cert" => a.tls_cert = it.next().map(PathBuf::from),
             "--tls-key" => a.tls_key = it.next().map(PathBuf::from),
             "--tls-ca" => a.tls_ca = it.next().map(PathBuf::from),
+            "--tls-server-name" => a.tls_server_name = it.next(),
             "--token" => a.token = it.next(),
             "-h" | "--help" => {
                 eprintln!(
@@ -76,7 +83,7 @@ fn parse_args() -> Result<Args, String> {
                      \x20               [--data-base <path>] [--listen <host:port>]\n\
                      \x20               [--advertise-host <host>] [--agent-port-base <port>]\n\
                      \x20               [--tls-cert <pem> --tls-key <pem>] [--tls-ca <pem>]\n\
-                     \x20               [--token <bearer>]"
+                     \x20               [--tls-server-name <name>] [--token <bearer>]"
                 );
                 std::process::exit(0);
             }
@@ -105,6 +112,9 @@ fn parse_args() -> Result<Args, String> {
     a.tls_ca = a
         .tls_ca
         .or_else(|| env_opt("CALIBAN_DAEMON_TLS_CA").map(PathBuf::from));
+    a.tls_server_name = a
+        .tls_server_name
+        .or_else(|| env_opt("CALIBAN_DAEMON_TLS_SERVER_NAME"));
     a.token = a.token.or_else(|| env_opt("CALIBAN_DAEMON_TOKEN"));
 
     if a.workspace_root.is_none() {
@@ -249,13 +259,26 @@ fn build_supervisor(
     // and passes per-agent TLS/token + the daemon control endpoint via env so
     // the worker can secure its own listener and report status back.
     let control_endpoint = network_control_endpoint(&advertise_host, args);
+    // #510: forward the control-plane CA + server name so the worker can dial
+    // the (TLS) control listener to report status. The CA is only forwarded
+    // when caliband itself was given one (--tls-ca) — it cannot forward a CA it
+    // never received. The server name defaults to the advertise host (the name
+    // the worker's endpoint uses); the worker otherwise falls back to
+    // `localhost`, wrong for any non-local topology. Override --tls-server-name
+    // when the serving cert's SAN differs from the dialed host.
+    let control_tls_server_name = args
+        .tls_server_name
+        .clone()
+        .or_else(|| Some(advertise_host.clone()));
     let launcher = Arc::new(
-        caliban_supervisor::ExecWorkerLauncher::sibling_of_current_exe().with_agent_network(
-            args.tls_cert.clone(),
-            args.tls_key.clone(),
-            args.token.clone(),
-            control_endpoint,
-        ),
+        caliban_supervisor::ExecWorkerLauncher::sibling_of_current_exe()
+            .with_agent_network(
+                args.tls_cert.clone(),
+                args.tls_key.clone(),
+                args.token.clone(),
+                control_endpoint,
+            )
+            .with_control_tls(args.tls_ca.clone(), control_tls_server_name),
     );
 
     Ok(
