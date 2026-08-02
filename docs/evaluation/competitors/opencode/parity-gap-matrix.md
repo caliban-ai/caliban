@@ -23,10 +23,12 @@
 OpenCode-surface concept with no intended caliban analogue (e.g. hosted plane).
 A ✅ means "caliban does the equivalent thing," not byte-identical.
 
-**Last refreshed:** 2026-07-18 (initial capture — derived from
-[`capability-inventory.md`](capability-inventory.md) snapshot 2026-07-18;
-caliban state cross-referenced from the [Claude Code parity
-matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487).
+**Last refreshed:** 2026-07-27 (primary-source refresh of the OpenCode column —
+derived from [`capability-inventory.md`](capability-inventory.md) snapshot
+2026-07-27, verified against live `opencode.ai/docs/*` (HTTP 200); caliban state
+cross-referenced from the [Claude Code parity
+matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh and
+**not** re-verified against `main` this pass — competitor facts/notes only; #487).
 
 > **Caveat:** rows tagged **⚠** depend on an OpenCode fact still flagged
 > uncertain in the inventory (§14 there) or on a caliban detail inferred from
@@ -45,8 +47,8 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487)
 
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
-| Client/server core; sessions survive client disconnects | 🔴 | caliban is a single-process TUI + headless `-p`; `caliband` supervises subagents, not a session server clients attach to |
-| Headless HTTP server (`opencode serve`) | 🔴 | no API server surface |
+| Client/server core; sessions survive client disconnects | 🔴 | caliban is a single-process TUI + headless `-p`; `caliband` supervises subagents, not a session server clients attach to. Note: default `opencode` **already** runs a TUI-client + server together — client/server is its default shape, not an opt-in mode |
+| Headless HTTP server (`opencode serve`) | 🔴 | no API server surface. Gap is **more pronounced** than a bare "no server": OpenCode publishes an **OpenAPI 3.1** spec at `/doc` with HTTP basic auth (`OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`) — a fully specified, driveable API, not just a socket |
 | Attach a client to a running backend (`opencode attach`) | 🔴 | no attach model |
 | Web UI (`opencode web`) | 🔴 | terminal-first (shared with the Claude Code long-tail) |
 | ACP (Agent Client Protocol) server (`opencode acp`) | 🔴 | no editor-driving protocol server |
@@ -89,8 +91,8 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487)
 | Per-command bash patterns, last-match-wins | ✅ | `Bash(...)` patterns; deny→ask→allow precedence |
 | Agent-level permission overrides | ✅ | subagent `permissionMode` + tool scoping (ADR-0037) |
 | `external_directory` gate | ✅ | `additionalDirectories` + `--add-dir` |
-| `doom_loop` (repeated-identical-call) guard | 🔴 | turn-loop resilience exists, but no dedicated repeated-call guard |
-| `.env` read denied by default | 🟡 | achievable via rules; not a shipped default |
+| `doom_loop` (repeated-identical-call) guard | 🔴 | turn-loop resilience exists, but no dedicated repeated-call guard. OpenCode's `doom_loop` fires specifically when the **same tool call repeats 3 times with identical input** (confirmed `/docs/permissions/`) |
+| `.env` read denied by default | 🟡 | achievable via rules; not a shipped default. OpenCode ships `*.env` / `*.env.*` **deny** rules out of the box (confirmed `/docs/permissions/`) |
 
 ## F. Agents / subagents
 
@@ -123,7 +125,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487)
 |---|---|---|
 | `read`/`write`/`edit`/`bash`/`glob`/`grep`/`webfetch`/`websearch`/`task`/`skill` | ✅ | full built-in tool set present |
 | Snapshot file-tracking + `/undo`/`/redo` | ✅ | auto-checkpoint + `/rewind` (ADR-0028) |
-| LSP integration (diagnostics/symbols to the agent) | 🔴 | no Language-Server integration — an OpenCode-distinctive gap |
+| LSP integration (diagnostics/symbols to the agent) | 🔴 | no Language-Server integration — an OpenCode-distinctive gap. OpenCode's LSP is **default-off** (`"lsp": true` to enable) but ships **30+ built-in servers** (Python/TS/Rust/Go/PHP…) with auto-install once on |
 | Auto-formatters on edit (`formatter`) | 🔴 | no post-edit formatter hook |
 | User-defined custom tools (`.opencode/tools/`) | 🟡 | extend via MCP/skills/plugins; no first-class custom-tool dir |
 | Image input | ✅ | `caliban-images` (ADR-0039) |
@@ -134,7 +136,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487)
 |---|---|---|
 | MCP client (local + remote servers) | ✅ | rmcp client, stdio + HTTP (ADR-0023) |
 | `mcp add/list/auth/logout` CLI | ✅ | `caliban mcp` |
-| Driven via HTTP server / ACP / SDK | 🔴 | see B — no server/ACP surface for being driven |
+| Driven via HTTP server / ACP / SDK | 🔴 | see B — no server/ACP surface for being driven. OpenCode's driving surface is substantial: **OpenAPI 3.1** HTTP API + a typed **`@opencode-ai/sdk`** (JS/TS, `createOpencode()` / `createOpencodeClient()`) + a **Go SDK** + `acp` — the caliban gap here is deeper than "no socket." (Dedicated MCP-*server* mode leaning-refuted upstream — canonical MCP slug 404'd this pass) |
 
 ## J. Sharing / sessions / persistence
 
@@ -158,7 +160,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh; #487)
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
 | Plugins (npm-loaded) | ✅ | `caliban plugin` marketplace (ADR-0030) |
-| SDK / documented Server API | 🔴 | no embedding SDK / HTTP API |
+| SDK / documented Server API | 🔴 | no embedding SDK / HTTP API. OpenCode ships a **generated, type-safe JS/TS SDK** (`@opencode-ai/sdk`), a **Go SDK**, and an **OpenAPI 3.1** server spec (`/doc`) — the 🔴 reflects a genuinely richer competitor surface, not merely a missing endpoint |
 | Managed config + MDM | ✅ | managed settings scope (ADR-0026/0045) |
 | Resource-access policies (`experimental.policies`) | 🟡 | permissions + sandbox cover much of this; no separate policy engine |
 | Hosted model gateway (OpenCode Zen) | n/a | no first-party hosted gateway |
@@ -180,16 +182,19 @@ Capabilities OpenCode has that caliban lacks and that aren't already tracked by
 the Claude Code matrix — the highest-signal candidates if we chase OpenCode
 parity specifically:
 
-1. **Client/server core + `serve`/`attach` + ACP** (B/I) — a backend other
-   front-ends (web, IDE, another agent) attach to. This is OpenCode's biggest
-   architectural difference and **overlaps with the "caliban as a worker
-   backend" note under [OpenClaw](../openclaw/README.md)** (the full OpenClaw
-   comparison lives in the Prospero repo) — a server/ACP surface would serve both.
+1. **Client/server core + `serve`/`attach` + ACP + typed SDKs** (B/I) — a
+   backend other front-ends (web, IDE, another agent) attach to, exposed via an
+   **OpenAPI 3.1** spec (`/doc`), a typed **`@opencode-ai/sdk`** (JS/TS) and a
+   **Go SDK**. This is OpenCode's biggest architectural difference (and its
+   *default* runtime shape, not an opt-in mode) and **overlaps with the "caliban
+   as a worker backend" note under [OpenClaw](../openclaw/README.md)** (the full
+   OpenClaw comparison lives in the Prospero repo) — a server/ACP/SDK surface
+   would serve both.
 2. **LSP integration** (H) — feed Language-Server diagnostics/symbols to the
    agent. No caliban analogue; high coding-quality leverage.
 3. **Auto-formatters on edit** (H) — run prettier/gofmt/etc. after file edits.
 4. **`doom_loop` guard** (E) — a dedicated repeated-identical-tool-call circuit
-   breaker.
+   breaker (OpenCode's fires at **3 identical calls**).
 5. **Self-update** (A) — `caliban upgrade`.
 6. **GitHub Action + PR checkout** (K) — shared with the Codex/Claude Code
    long-tail; already a known deferred sub-project.
