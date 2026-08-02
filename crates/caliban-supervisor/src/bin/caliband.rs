@@ -11,7 +11,7 @@
 //!         [--advertise-host caliband.pod]  # host clients dial for agents
 //!         [--agent-port-base 7100]
 //!         [--tls-cert cert.pem --tls-key key.pem [--tls-ca ca.pem]]
-//!         [--tls-server-name caliband]     # SAN workers verify (default: advertise host)
+//!         [--tls-server-name caliband]     # SAN workers verify (else inherited/unset, #512)
 //!         [--token <bearer>]
 //! ```
 //!
@@ -40,9 +40,10 @@ struct Args {
     tls_key: Option<PathBuf>,
     tls_ca: Option<PathBuf>,
     /// Server name a worker validates the control listener's cert against when
-    /// reporting status over TLS (#510). Must match a SAN on the serving cert.
-    /// Defaults to the advertise host; override when the cert SAN differs from
-    /// the DNS name workers dial (e.g. a k8s Service short name).
+    /// reporting status over TLS (#510). Must match a SAN on the serving cert
+    /// (e.g. the daemon's k8s Service name). #512: never defaulted to the
+    /// advertise host (the dial name ≠ what the cert proves) — when unset, the
+    /// worker keeps any inherited `CALIBAN_CONTROL_TLS_SERVER_NAME` instead.
     tls_server_name: Option<String>,
     token: Option<String>,
 }
@@ -259,17 +260,34 @@ fn build_supervisor(
     // and passes per-agent TLS/token + the daemon control endpoint via env so
     // the worker can secure its own listener and report status back.
     let control_endpoint = network_control_endpoint(&advertise_host, args);
-    // #510: forward the control-plane CA + server name so the worker can dial
-    // the (TLS) control listener to report status. The CA is only forwarded
-    // when caliband itself was given one (--tls-ca) — it cannot forward a CA it
-    // never received. The server name defaults to the advertise host (the name
-    // the worker's endpoint uses); the worker otherwise falls back to
-    // `localhost`, wrong for any non-local topology. Override --tls-server-name
-    // when the serving cert's SAN differs from the dialed host.
-    let control_tls_server_name = args
-        .tls_server_name
-        .clone()
-        .or_else(|| Some(advertise_host.clone()));
+    // #510: forward the control-plane CA so the worker can dial the (TLS)
+    // control listener to report status — only when caliband itself was given
+    // one (--tls-ca); it cannot forward a CA it never received.
+    //
+    // #512: the server name is resolved separately and is NEVER derived from the
+    // advertise host. Forward only an explicit --tls-server-name /
+    // CALIBAN_DAEMON_TLS_SERVER_NAME; otherwise leave the worker var unset so an
+    // operator's inherited CALIBAN_CONTROL_TLS_SERVER_NAME stands (#510 silently
+    // clobbered it with the advertise host, breaking a config that had worked by
+    // ordinary env inheritance). If control TLS is on but no name is resolvable
+    // anywhere, warn at startup — the worker would verify against `localhost`,
+    // which the serving cert cannot prove, and every status report would fail
+    // silently.
+    let (control_tls_server_name, warn_missing_server_name) = resolve_control_tls_server_name(
+        args.tls_server_name.as_deref(),
+        args.tls_ca.is_some(),
+        env_opt("CALIBAN_CONTROL_TLS_SERVER_NAME").as_deref(),
+    );
+    if warn_missing_server_name {
+        tracing::warn!(
+            "control-plane TLS is configured (--tls-ca) but no worker TLS server name is set \
+             (neither --tls-server-name / CALIBAN_DAEMON_TLS_SERVER_NAME nor an inherited \
+             CALIBAN_CONTROL_TLS_SERVER_NAME); workers will verify the control listener against \
+             `localhost`, which the serving cert almost certainly cannot prove, so status \
+             reports will fail. Set --tls-server-name to the cert's SAN (e.g. the daemon's \
+             Service name)."
+        );
+    }
     let launcher = Arc::new(
         caliban_supervisor::ExecWorkerLauncher::sibling_of_current_exe()
             .with_agent_network(
@@ -297,8 +315,114 @@ fn network_control_endpoint(advertise_host: &str, args: &Args) -> Option<String>
     Some(format!("{advertise_host}:{port}"))
 }
 
+/// Resolve the TLS server name to forward to workers for verifying the daemon's
+/// control listener, plus whether the resulting config is a silent-failure risk
+/// worth warning about at startup (#512).
+///
+/// The server name is **never** derived from the advertise host: the advertise
+/// host is *where workers dial*, the server name is *what the cert must prove*,
+/// and they coincide only when the serving cert carries the dial name as a SAN —
+/// false for the k8s Service topology this feature exists for. #510 defaulted to
+/// the advertise host and stranded a live cluster.
+///
+/// - `configured`: explicit `--tls-server-name` / `CALIBAN_DAEMON_TLS_SERVER_NAME`.
+/// - `tls_ca_set`: whether control TLS is in play (`--tls-ca`); without it
+///   workers dial plaintext by design and a server name is irrelevant.
+/// - `inherited`: `CALIBAN_CONTROL_TLS_SERVER_NAME` in the daemon's own env,
+///   which the worker inherits when the launcher forwards nothing.
+///
+/// Returns `(name_to_forward, warn)`. `name_to_forward` is `None` unless a name
+/// was explicitly configured, so an inherited/explicit worker value stands
+/// rather than being clobbered by a derived one. `warn` is `true` only when
+/// control TLS is on yet no name is resolvable from any source — the worker
+/// would then fall back to `localhost`, which the serving cert almost certainly
+/// cannot prove, and every status report would fail.
+fn resolve_control_tls_server_name(
+    configured: Option<&str>,
+    tls_ca_set: bool,
+    inherited: Option<&str>,
+) -> (Option<String>, bool) {
+    let forwarded = configured.map(str::to_string);
+    let warn = tls_ca_set && forwarded.is_none() && inherited.is_none();
+    (forwarded, warn)
+}
+
 fn tracing_subscriber_init() {
     // No-op: callers can set RUST_LOG to enable; we skip a heavy
     // subscriber setup for the binary entry point so the daemon stays
     // light. (`caliban` itself wires the file-based subscriber.)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #512: the worker's TLS verification identity must never be *derived* from
+    /// the advertise host. The advertise host is where workers dial; the server
+    /// name is what the cert must prove. #510 defaulted the name to the
+    /// advertise host and stranded a live cluster (cert SAN was `caliband`, the
+    /// dial name a k8s Service FQDN). With no name configured anywhere, forward
+    /// nothing.
+    #[test]
+    fn server_name_is_not_derived_from_the_advertise_host() {
+        let (forwarded, _warn) = resolve_control_tls_server_name(None, true, None);
+        assert_eq!(
+            forwarded, None,
+            "an unconfigured server name must not be filled in with a derived value"
+        );
+    }
+
+    /// An explicitly-configured name (`--tls-server-name` /
+    /// `CALIBAN_DAEMON_TLS_SERVER_NAME`) is forwarded verbatim and needs no
+    /// warning — the operator said what the cert proves.
+    #[test]
+    fn explicit_server_name_is_forwarded_without_warning() {
+        let (forwarded, warn) = resolve_control_tls_server_name(Some("caliband"), true, None);
+        assert_eq!(forwarded, Some("caliband".to_string()));
+        assert!(
+            !warn,
+            "an explicit server name is not a silent-failure risk"
+        );
+    }
+
+    /// #512 fix #2: an operator's inherited `CALIBAN_CONTROL_TLS_SERVER_NAME`
+    /// (present in the daemon's env, which the worker inherits) must stand — so
+    /// caliband forwards nothing (no clobber) and, because a value exists, does
+    /// not warn.
+    #[test]
+    fn inherited_env_value_is_left_to_stand_without_warning() {
+        let (forwarded, warn) = resolve_control_tls_server_name(None, true, Some("caliband"));
+        assert_eq!(
+            forwarded, None,
+            "must not forward a derived value that would clobber the inherited one"
+        );
+        assert!(!warn, "an inherited value is not a silent-failure risk");
+    }
+
+    /// #512 AC#1: control TLS in play (`--tls-ca` set) with no server name
+    /// resolvable from any source is the silent-failure config — the worker
+    /// would verify against `localhost`, which the serving cert cannot prove.
+    /// caliband must flag it so it is observable at startup, not only after a
+    /// stranded agent.
+    #[test]
+    fn control_tls_without_any_server_name_warns() {
+        let (forwarded, warn) = resolve_control_tls_server_name(None, true, None);
+        assert_eq!(forwarded, None);
+        assert!(
+            warn,
+            "a TLS control listener with no resolvable server name must be flagged"
+        );
+    }
+
+    /// No control TLS (`--tls-ca` unset) means workers dial plaintext by design;
+    /// a missing server name is irrelevant, so there is nothing to warn about.
+    #[test]
+    fn no_control_tls_never_warns() {
+        let (forwarded, warn) = resolve_control_tls_server_name(None, false, None);
+        assert_eq!(forwarded, None);
+        assert!(
+            !warn,
+            "without control TLS there is no verification to misconfigure"
+        );
+    }
 }

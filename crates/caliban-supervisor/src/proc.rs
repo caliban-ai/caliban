@@ -378,6 +378,37 @@ mod tests {
         );
     }
 
+    /// #512 fix #2: when no control-plane server name is configured, the
+    /// launcher must NOT set `CALIBAN_CONTROL_TLS_SERVER_NAME` on the worker —
+    /// leaving an operator's inherited value in the pod env to stand. The CA is
+    /// still forwarded (it *was* configured). Before #512 caliband derived a
+    /// name from the advertise host and passed it here unconditionally, silently
+    /// clobbering the deliberately-set inherited value and breaking a config
+    /// that had worked by ordinary env inheritance.
+    #[test]
+    fn tcp_launch_without_server_name_leaves_the_inherited_var_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = ExecWorkerLauncher::new("caliban")
+            .with_agent_network(
+                Some(PathBuf::from("/tls/cert.pem")),
+                Some(PathBuf::from("/tls/key.pem")),
+                Some("tok".into()),
+                Some("caliband:8443".into()),
+            )
+            .with_control_tls(Some(PathBuf::from("/tls/ca.pem")), None);
+        let cmd = launcher.build_command(&tcp_record(dir.path().to_path_buf()));
+        let envs = env_map(&cmd);
+        assert_eq!(
+            envs.get("CALIBAN_CONTROL_TLS_CA").map(String::as_str),
+            Some("/tls/ca.pem"),
+            "a configured CA must still be forwarded"
+        );
+        assert!(
+            !envs.contains_key("CALIBAN_CONTROL_TLS_SERVER_NAME"),
+            "an unconfigured server name must not be set, so an inherited value stands"
+        );
+    }
+
     /// #510: the control-plane TLS env is TCP-mode wiring. A Unix-socket agent
     /// reports over `--control-socket`, so the launcher must not leak these
     /// vars into a Unix worker's environment.
