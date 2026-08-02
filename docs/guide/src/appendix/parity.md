@@ -1,6 +1,6 @@
 # Parity vs Claude Code
 
-Caliban tracks feature parity with Claude Code in a living matrix. This page summarises the current state by theme. The full matrix — including per-row notes and ADR cross-references — lives at [`docs/parity-gap-matrix.md`](https://github.com/caliban-ai/caliban/blob/main/docs/parity-gap-matrix.md) in the repository.
+Caliban tracks feature parity with Claude Code in a living matrix. This page summarises the current state by theme. The full matrix — including per-row notes and ADR cross-references — lives at [`docs/evaluation/competitors/claude-code/parity-gap-matrix.md`](https://github.com/caliban-ai/caliban/blob/main/docs/evaluation/competitors/claude-code/parity-gap-matrix.md) in the repository.
 
 **Legend:** ✅ parity · 🟡 partial · 🔴 not yet
 
@@ -26,11 +26,11 @@ Layered settings (managed > user > project > local), `/config` interactive edito
 
 ### E — TUI ergonomics 🟡
 
-Status bar, mouse scroll, transcript viewer, `@file` attach, `!` shell escape, external editor (`Ctrl+G`), `Ctrl+O` transcript dump, background bash (`Ctrl+B`), image/vision input, permission Ask modal, and reverse history search are shipped. Notable gaps: vim editing mode (🔴), slash-menu typeahead (🟡 partial), multi-line input (🟡 partial), and voice dictation (🔴).
+Status bar, mouse scroll, transcript viewer, `@file` attach, `!` shell escape, external editor (`Ctrl+G`), `Ctrl+O` transcript dump, background bash (`Ctrl+B`), image/vision input, permission Ask modal, reverse history search, slash-menu typeahead (fuzzy subsequence matching), and backslash-continuation multi-line input are shipped. Notable gaps: vim editing mode (🔴) and voice dictation (🔴).
 
 ### F — Built-in tools ✅
 
-Bash, Edit, Glob, Grep, Read, Write, WebFetch, TodoWrite, Skill, AgentTool, NotebookEdit, MultiEdit, WebSearch, and background-bash are shipped. PowerShell tool and `ToolSearch` / `WaitForMcpServers` (relevant once MCP is fully real) are 🔴.
+Bash, Edit, Glob, Grep, Read, Write, WebFetch, TodoWrite, Skill, AgentTool, NotebookEdit, MultiEdit, WebSearch, and background-bash are shipped. `ToolSearch` / `WaitForMcpServers` are 🟡 partial (ADR-0046: v1 machinery ships opt-in via `tools.lazy_mcp`; default flips on in v1.1). PowerShell tool is 🔴.
 
 ### G — Sub-agents ✅
 
@@ -42,7 +42,7 @@ Config validation, real spawn/handshake, stdio + HTTP/SSE + streamable-HTTP tran
 
 ### I — Model router & providers ✅
 
-Purpose-keyed routing, fallback chains, hedging, circuit breakers, capability filtering, Anthropic/OpenAI/Ollama/Google/Bedrock/Vertex providers, and effort levels are shipped. Azure Foundry is 🔴; extended-thinking toggle is 🟡 partial.
+Purpose-keyed routing, fallback chains, hedging, circuit breakers, capability filtering, Anthropic/OpenAI/Ollama/Google/Bedrock/Vertex providers, effort levels, and the extended-thinking toggle (`/think` runtime control, decoupled from `/effort`) are shipped. Azure Foundry is 🔴.
 
 ### J — Headless / CI ✅
 
@@ -74,7 +74,7 @@ IDE extensions (VS Code / Cursor / JetBrains), GitHub App, claude.ai/code web, i
 | Azure Foundry provider | 🔴 | Provider adapter not yet written |
 | GitHub Actions workflow | 🔴 | Separate sub-project |
 | Devcontainer feature | 🔴 | Separate sub-project |
-| `ToolSearch` / `WaitForMcpServers` | 🔴 | Only relevant once MCP is fully real |
+| `ToolSearch` / `WaitForMcpServers` | 🟡 | ADR-0046; v1 machinery opt-in via `tools.lazy_mcp`, default flips on in v1.1 |
 | Skill-dependent slash commands | 🔴 | `/code-review`, `/run`, `/verify`, `/batch` |
 | Cloud / IDE / mobile surfaces (N) | 🔴 | All large investments; deferred |
 

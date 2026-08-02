@@ -6,8 +6,8 @@ Slash commands are operator-level shortcuts you type directly in the TUI input b
 
 Type `/` in the input bar to open the suggestion menu. A fuzzy typeahead list appears showing all registered commands grouped by category.
 
-```admonish warning title="Typeahead is partially implemented"
-The slash-menu fuzzy typeahead is marked 🟡 (partial) in the [parity matrix](../appendix/parity.md). Basic prefix matching works; full fuzzy ranking and category grouping are in progress.
+```admonish note title="How the typeahead ranks matches"
+The slash-menu typeahead does case-insensitive **fuzzy subsequence** matching (marked ✅ in the [parity matrix](../appendix/parity.md) since 0.4.0): typing `cfg` matches `/config`. Matches at the start or on a word boundary, and contiguous runs, rank ahead of scattered ones, with alphabetical name as the tiebreak.
 ```
 
 Continue typing to narrow the list, then press `Enter` (or `Tab`) to select a command. Some commands run immediately (`immediate: true`) and return to the input bar; others open an overlay or emit output to the transcript.

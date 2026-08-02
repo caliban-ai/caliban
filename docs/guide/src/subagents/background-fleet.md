@@ -1,9 +1,9 @@
 # The Background Fleet
 
 Caliban can run sub-agents in the background — detached from your current
-session — and let you monitor, attach to, or stop them at will. A per-repo
-supervisor daemon (`caliband`) owns the fleet and keeps agents alive even
-after the parent `caliban` process exits.
+session — and let you monitor, attach to, or stop them at will. A
+per-workspace supervisor daemon (`caliband`) owns the fleet and keeps agents
+alive even after the parent `caliban` process exits.
 
 ## Spawning a background agent
 
@@ -28,7 +28,10 @@ check back via `caliban attach <id>`.
 ## The `caliband` daemon
 
 `caliband` is a separate binary shipped alongside `caliban`. It runs as a
-per-repo daemon, meaning each git repository gets its own daemon instance.
+per-*workspace* daemon: each workspace root gets its own daemon instance. A
+workspace is usually a single git repository, but since v0.5.0 the supervisor
+can manage a workspace spanning multiple sources (repos), each with its own
+worktree isolation.
 
 **Socket path** (resolution order):
 
@@ -37,8 +40,10 @@ per-repo daemon, meaning each git repository gets its own daemon instance.
 2. `$XDG_RUNTIME_DIR/caliban/<hash>.sock` if `$XDG_RUNTIME_DIR` is set.
 3. `$TMPDIR/caliban-daemon/<hash>.sock` (fallback; typical on macOS).
 
-The `<hash>` is a 16-hex-char SHA-256 prefix of the absolute repo root path,
-so each repo gets a stable, unique socket without naming collisions.
+The `<hash>` is a 16-hex-char SHA-256 prefix of the absolute workspace root
+path, so each workspace gets a stable, unique socket without naming collisions.
+(For a single-repo workspace the workspace root is the repo root, so the socket
+is unchanged from earlier releases.)
 
 `caliband` auto-starts when any `caliban agents` command or `--bg` flag
 needs it. You should rarely need to launch it directly.
@@ -50,6 +55,29 @@ To also install the daemon run:
     cargo install caliban-supervisor --bin caliband
 
 Both binaries must be on your `$PATH` for background fleet features to work.
+```
+
+## Networked control plane (beta)
+
+By default `caliband` serves its control plane over the local Unix domain
+socket described above. Since v0.5.0 it can instead serve that same
+line-delimited (NDJSON) protocol over **TCP**, so a remote client (for example
+prospero) can drive the fleet across the network rather than only from the same
+host. Enable it by passing `--listen <host:port>` (or setting
+`CALIBAN_DAEMON_LISTEN`) when the daemon starts:
+
+```bash
+caliband --workspace-root /path/to/workspace \
+  --listen 0.0.0.0:7070 \
+  --tls-cert cert.pem --tls-key key.pem \
+  --token "$CALIBAN_DAEMON_TOKEN"
+```
+
+```admonish warning title="TCP mode is fail-closed"
+The networked control plane requires **both** a bearer token (`--token`) and
+TLS (`--tls-cert`/`--tls-key`) — since v0.6.0 the daemon refuses to bind a TCP
+listener that is unauthenticated or plaintext. The default Unix-socket mode is
+unchanged and needs neither. The TCP transport is still **beta**.
 ```
 
 ## Agent lifecycle states

@@ -59,13 +59,13 @@ was built from, so you can pin exactly which point in history a binary
 corresponds to:
 
 ```text
-caliban 0.4.0 (d364def, 2026-07-03)
+caliban 0.7.0 (a1b2c3d, 2026-07-15)
 ```
 
 The parentheses hold the short commit SHA and that commit's date; a build with
-uncommitted changes appends `-dirty` (e.g. `d364def-dirty`). Builds made
+uncommitted changes appends `-dirty` (e.g. `a1b2c3d-dirty`). Builds made
 without git metadata (release tarballs, `cargo install` from crates.io) report
-just the bare semver — `caliban 0.4.0`.
+just the bare semver — `caliban 0.7.0`.
 
 ## Optional: cloud transport feature flags
 

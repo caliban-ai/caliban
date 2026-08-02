@@ -78,6 +78,7 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 |----------|---------|-------------|
 | `CALIBAN_NO_SUB_AGENT` | — | Any non-empty value disables the built-in `AgentTool`. |
 | `CALIBAN_DAEMON_RUNTIME_DIR` | Platform default | Override the runtime socket directory for the supervisor daemon. |
+| `CALIBAN_DAEMON_LISTEN` | — | TCP listen address (e.g. `0.0.0.0:7000`) that switches the `caliband` supervisor into networked control-plane mode; the `caliban agents` CLI dials the same address to reach a remote daemon. Unset means the local Unix-socket path. TLS/token come from the `CALIBAN_DAEMON_TLS_*` / `CALIBAN_DAEMON_TOKEN` vars. |
 
 ---
 
@@ -119,6 +120,17 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 
 ---
 
+## Web Search
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CALIBAN_WEBSEARCH_PROVIDER` | `brave` | Web-search backend for the `WebSearch` tool. Values: `brave`, `tavily`, `exa`. |
+| `BRAVE_API_KEY` | — | API key for the Brave search provider. |
+| `TAVILY_API_KEY` | — | API key for the Tavily search provider. |
+| `EXA_API_KEY` | — | API key for the Exa search provider. |
+
+---
+
 ## Output
 
 | Variable | Default | Description |
@@ -138,6 +150,7 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | OTel OTLP transport protocol. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | Additional headers for the OTLP exporter. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60s` | OTel metric export interval. |
+| `OTEL_LOG_USER_PROMPTS` | `false` | Opt-in capture of prompt/completion content on `gen_ai` spans. Off by default; any truthy value records user prompts and model completions as span content (ADR 0053). |
 | `OTEL_LOGS_EXPORTER` | `otlp` | OTel logs exporter type. |
 | `OTEL_METRICS_EXPORTER` | `otlp` | OTel metrics exporter type. |
 | `OTEL_TRACES_EXPORTER` | `otlp` | OTel traces exporter type. |

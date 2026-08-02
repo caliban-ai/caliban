@@ -41,7 +41,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | # | Title | Status |
 |---|---|---|
 | [0009](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted (sequential-tools clause superseded by 0016) |
-| [0010](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted |
+| [0010](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted (restricted-mode default amended by 0048) |
 | [0016](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0016-parallel-tool-dispatch.md) | Parallel tool dispatch (semaphore-bounded; supersedes 0009 sequential clause) | accepted |
 | [0021](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0021-sub-agent-primitive.md) | Sub-agent primitive (`AgentTool`; synchronous in-process; allowlist-filtered registry) | accepted |
 
@@ -72,8 +72,10 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 |---|---|---|
 | [0020](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0020-permission-rules.md) | Permission rules layered on Hooks (TOML rule sources; interactive Ask) | accepted |
 | [0029](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0029-permission-modes-and-auto-mode.md) | Permission modes (acceptEdits / auto / dontAsk / bypassPermissions) + auto-mode classifier | accepted |
-| [0032](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0032-os-sandbox.md) | OS-level sandbox (macOS Seatbelt + Linux bubblewrap) | accepted |
+| [0032](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0032-os-sandbox.md) | OS-level sandbox (macOS Seatbelt + Linux bubblewrap) | accepted (confinement posture refined by 0054) |
 | [0045](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0045-permissions-v2-and-toml-primary-config.md) | Permissions v2 — TOML-primary config + richer rule schema | accepted |
+| [0048](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0048-workspace-default-restricted.md) | `--workspace` restricts file/shell tools by default (amends 0010) | accepted |
+| [0054](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0054-sandbox-confinement-posture.md) | Sandbox confinement posture — keep filesystem reads open, close network egress by default under `--workspace` (refines 0032) | accepted |
 
 ### Configuration & settings
 
@@ -81,6 +83,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 |---|---|---|
 | [0026](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | accepted |
 | [0043](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0043-arc-swap-shared-state.md) | `arc-swap` as the read-mostly shared-state primitive | accepted |
+| [0050](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0050-xdg-first-path-locations.md) | XDG-first path locations on all platforms (drops the macOS-native `~/Library` default; amends 0017) | accepted |
 
 ### Extensibility: hooks, skills, plugins, output styles
 
@@ -96,7 +99,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 
 | # | Title | Status |
 |---|---|---|
-| [0017](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted |
+| [0017](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0017-mcp-client-architecture.md) | MCP client architecture (stdio v1; tools surface as `mcp__<server>__<tool>`) | accepted (stdio-only scope superseded by 0023; macOS `mcp.toml` path amended by 0050) |
 | [0023](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0023-mcp-v2-transports-and-oauth.md) | MCP v2 — transports, OAuth, elicitation, resources | accepted |
 | [0044](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0044-rmcp-version-pin.md) | `rmcp` 1.7 version pin (dedicated-PR bumps) | accepted |
 | [0046](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0046-two-stage-tool-surface.md) | Two-stage tool surface — lazy MCP schema loading + ToolSearch | accepted |
@@ -114,12 +117,17 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 
 | # | Title | Status |
 |---|---|---|
-| [0025](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | accepted |
-| [0033](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | accepted |
+| [0025](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0025-headless-output-protocol.md) | Headless / print mode + JSON output protocol | accepted (result-frame shape amended by 0049) |
+| [0033](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | accepted (GenAI semconv scope refined by 0053) |
+| [0049](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
+| [0053](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0053-otel-genai-semconv-only.md) | OpenTelemetry GenAI semantic conventions — emit `gen_ai.*` only, no vendor-specific or cost attributes (builds on 0033) | accepted |
 
 ### Sub-agents & background fleet
 
 | # | Title | Status |
 |---|---|---|
-| [0037](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted |
+| [0037](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by 0047; per-repo identity + worktree isolation amended by 0052) |
 | [0042](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0042-caliband-binary-placement.md) | `caliband` sibling-binary placement (under `caliban-supervisor`) | accepted |
+| [0047](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
+| [0051](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0051-caliband-network-transport.md) | `caliband` network transport — NDJSON over TCP+TLS with a bearer token (Unix socket retained for local; gRPC deferred) | accepted |
+| [0052](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0052-workspace-scoped-caliband.md) | Workspace-scoped `caliband` — multi-source workspace identity + wired per-source worktree isolation (amends 0037) | accepted |

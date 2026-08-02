@@ -1,6 +1,6 @@
 # Project Status
 
-Caliban v0.1.0 is a pre-release. The binary (`caliban`) is daily-usable from `main`; the
+Caliban v0.7.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
 core agent loop, TUI, headless mode, sessions, permissions, tools, MCP, sub-agents, memory,
 sandbox, and telemetry are all shipped. A number of parity gaps with Claude Code remain.
 
@@ -33,8 +33,6 @@ Some rows in the parity matrix are 🟡 (partial / experimental):
 
 | Area | State |
 |---|---|
-| Slash-menu typeahead | 🟡 partial |
-| Multi-line input (Shift+Enter native) | 🟡 partial |
 | Vim editing mode in TUI | 🔴 not yet |
 | Cost surfacing in TUI (`/cost` display) | 🟡 backlog |
 | GitHub Actions workflow / devcontainer feature | 🔴 planned |

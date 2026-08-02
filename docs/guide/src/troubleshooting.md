@@ -118,8 +118,7 @@ Pass `--debug` (or set `CALIBAN_DEBUG=1`) to write a detailed event + render log
 
 | OS | Path |
 |---|---|
-| macOS | `~/Library/Caches/caliban/debug.log` |
-| Linux / WSL | `~/.cache/caliban/debug.log` |
+| macOS / Linux / WSL | `~/.cache/caliban/debug.log` (or `$XDG_CACHE_HOME/caliban/debug.log`) |
 
 ```admonish warning title="Debug log can be large"
 The debug log grows quickly under active use. Delete or rotate it after capturing the relevant session. It contains full message content, tool inputs/outputs, and provider requests — do not share it if your prompts contain sensitive information.
