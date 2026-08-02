@@ -6,7 +6,7 @@
 //! status (0 = Done, non-zero = Failed).
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use caliban_agent_core::{InputProvider, RunSettings};
@@ -90,12 +90,31 @@ trait StatusSink: Send + Sync {
 struct ControlSocketStatus {
     client: caliban_supervisor::SupervisorClient,
     id: String,
+    /// #510: status reporting is best-effort, but silently dropping *every*
+    /// report is what turned a control-plane TLS misconfiguration into an
+    /// invisible failure — the agent sat in `Running` forever while every Idle
+    /// report was swallowed. Warn on the first failure so the cause surfaces
+    /// once, without spamming the log or making a non-critical path fatal.
+    warned: AtomicBool,
 }
 
 #[async_trait::async_trait]
 impl StatusSink for ControlSocketStatus {
     async fn set(&self, status: caliban_supervisor::proto::AgentStatus) {
-        let _ = self.client.report_status(&self.id, status).await; // best-effort
+        // Best-effort: a control-plane hiccup must never fail the run. But the
+        // first failure is logged (#510) — a total, silent loss of status
+        // reporting is exactly what hid the earlier TLS-config gap.
+        if let Err(e) = self.client.report_status(&self.id, status).await
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                id = %self.id,
+                error = %e,
+                "failed to report agent status to the daemon control plane; \
+                 status reporting is best-effort and further failures will be \
+                 silent — an interactive agent may appear stuck in Running"
+            );
+        }
     }
 }
 
@@ -462,6 +481,7 @@ pub(crate) async fn run(
                 Arc::new(ControlSocketStatus {
                     client,
                     id: record.id.clone(),
+                    warned: AtomicBool::new(false),
                 })
             }),
             Err(e) => {

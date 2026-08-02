@@ -48,6 +48,16 @@ pub struct ExecWorkerLauncher {
     /// Daemon control endpoint (`host:port`) the worker reports status to over
     /// the network in TCP mode (the network counterpart to `control_socket`).
     control_endpoint: Option<String>,
+    /// Control-plane CA PEM path forwarded to the worker so it can *verify* the
+    /// daemon's TLS control listener when dialing status reports (#510). The
+    /// counterpart to `agent_tls_cert_path` (which secures the worker's own
+    /// listener): without this the worker dials plaintext against a TLS
+    /// listener and every Idle/Running report is silently dropped.
+    control_tls_ca_path: Option<PathBuf>,
+    /// TLS server name the worker validates the control listener's cert against
+    /// (#510). Must match a SAN on the daemon's serving cert; the worker
+    /// otherwise defaults to `localhost`, wrong for any non-local topology.
+    control_tls_server_name: Option<String>,
 }
 
 /// Filename, inside an agent's `session_dir`, that the worker's stdout and
@@ -104,10 +114,31 @@ impl ExecWorkerLauncher {
         self.control_endpoint = control_endpoint;
         self
     }
+
+    /// Configure the control-plane TLS material the worker needs to *dial* the
+    /// daemon's status listener over TLS (#510) — the counterpart to the
+    /// per-agent listener material in [`with_agent_network`]. `ca_path` is the
+    /// CA the daemon was itself given (`--tls-ca`), so it can hand its own
+    /// down; `server_name` must match the serving cert's SAN. Both optional and
+    /// passed to the child via env only when the agent's endpoint is TCP.
+    #[must_use]
+    pub fn with_control_tls(
+        mut self,
+        ca_path: Option<PathBuf>,
+        server_name: Option<String>,
+    ) -> Self {
+        self.control_tls_ca_path = ca_path;
+        self.control_tls_server_name = server_name;
+        self
+    }
 }
 
-impl WorkerLauncher for ExecWorkerLauncher {
-    fn launch(&self, record: &AgentRecord) -> std::io::Result<WorkerHandle> {
+impl ExecWorkerLauncher {
+    /// Build the `caliban __agent-worker …` command for `record` without
+    /// spawning it. Split out of [`launch`](WorkerLauncher::launch) so the
+    /// env-wiring contract (which vars a TCP vs. Unix worker receives) can be
+    /// asserted directly, without inspecting a live child's environment.
+    fn build_command(&self, record: &AgentRecord) -> tokio::process::Command {
         let manifest_path = record.session_dir.join("manifest.json");
         let mut cmd = tokio::process::Command::new(&self.caliban_exe);
         cmd.arg("__agent-worker")
@@ -139,6 +170,18 @@ impl WorkerLauncher for ExecWorkerLauncher {
                 // network to report Idle/Running (best-effort; QA-validated).
                 if let Some(ep) = &self.control_endpoint {
                     cmd.env("CALIBAN_CONTROL_ENDPOINT", ep);
+                }
+                // #510: the control listener is TLS in this topology, so the
+                // worker also needs the CA to verify it and the server name to
+                // match the cert SAN — otherwise it dials plaintext against a
+                // TLS listener and every status report is silently dropped,
+                // stranding an interactive agent in `Running`. Symmetric with
+                // the per-agent TLS material passed just above.
+                if let Some(ca) = &self.control_tls_ca_path {
+                    cmd.env("CALIBAN_CONTROL_TLS_CA", ca);
+                }
+                if let Some(server_name) = &self.control_tls_server_name {
+                    cmd.env("CALIBAN_CONTROL_TLS_SERVER_NAME", server_name);
                 }
             }
         }
@@ -183,6 +226,13 @@ impl WorkerLauncher for ExecWorkerLauncher {
         cmd.stdin(std::process::Stdio::null())
             .stdout(out)
             .stderr(err);
+        cmd
+    }
+}
+
+impl WorkerLauncher for ExecWorkerLauncher {
+    fn launch(&self, record: &AgentRecord) -> std::io::Result<WorkerHandle> {
+        let mut cmd = self.build_command(record);
         let child = cmd.spawn()?;
         let pid = child
             .id()
@@ -276,6 +326,79 @@ mod tests {
             let pid = child.id().expect("sh child pid");
             Ok(WorkerHandle { pid, child })
         }
+    }
+
+    /// Build a TCP-endpoint record so `launch`'s network-mode env block runs
+    /// (the Unix `record()` above takes the socket branch instead).
+    fn tcp_record(session_dir: PathBuf) -> AgentRecord {
+        let mut rec = record(PathBuf::from("unused.sock"), session_dir);
+        rec.endpoint = crate::transport::Endpoint::Tcp {
+            addr: "10.0.0.5:8443".into(),
+        };
+        rec
+    }
+
+    /// Collect the child command's env as a map for assertion.
+    fn env_map(cmd: &tokio::process::Command) -> std::collections::HashMap<String, String> {
+        cmd.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect()
+    }
+
+    /// #510: over a TLS control listener the worker must be handed the CA and
+    /// server name so it can *verify* the daemon when dialing status reports.
+    /// Before the fix the launcher forwarded `CALIBAN_CONTROL_ENDPOINT` but
+    /// neither TLS input, so the worker dialed plaintext against a TLS listener
+    /// and every Idle/Running report was silently dropped — leaving an
+    /// interactive agent stuck in `Running` forever.
+    #[test]
+    fn tcp_launch_forwards_control_plane_tls_material_to_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = ExecWorkerLauncher::new("caliban")
+            .with_agent_network(
+                Some(PathBuf::from("/tls/cert.pem")),
+                Some(PathBuf::from("/tls/key.pem")),
+                Some("tok".into()),
+                Some("caliband:8443".into()),
+            )
+            .with_control_tls(Some(PathBuf::from("/tls/ca.pem")), Some("caliband".into()));
+        let cmd = launcher.build_command(&tcp_record(dir.path().to_path_buf()));
+        let envs = env_map(&cmd);
+        assert_eq!(
+            envs.get("CALIBAN_CONTROL_TLS_CA").map(String::as_str),
+            Some("/tls/ca.pem"),
+            "worker must receive the control-plane CA so it can verify the TLS listener"
+        );
+        assert_eq!(
+            envs.get("CALIBAN_CONTROL_TLS_SERVER_NAME")
+                .map(String::as_str),
+            Some("caliband"),
+            "worker must receive the server name to match against the cert SAN"
+        );
+    }
+
+    /// #510: the control-plane TLS env is TCP-mode wiring. A Unix-socket agent
+    /// reports over `--control-socket`, so the launcher must not leak these
+    /// vars into a Unix worker's environment.
+    #[test]
+    fn unix_launch_omits_control_plane_tls_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = ExecWorkerLauncher::new("caliban")
+            .with_control_tls(Some(PathBuf::from("/tls/ca.pem")), Some("caliband".into()));
+        let cmd = launcher.build_command(&record(
+            dir.path().join("agent.sock"),
+            dir.path().to_path_buf(),
+        ));
+        let envs = env_map(&cmd);
+        assert!(
+            !envs.contains_key("CALIBAN_CONTROL_TLS_CA"),
+            "Unix mode must not forward the control-plane CA"
+        );
+        assert!(
+            !envs.contains_key("CALIBAN_CONTROL_TLS_SERVER_NAME"),
+            "Unix mode must not forward the control-plane server name"
+        );
     }
 
     #[tokio::test]
