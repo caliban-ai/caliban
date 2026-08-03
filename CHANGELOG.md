@@ -9,6 +9,57 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-02
+
+Two threads define this release. **Storage moves behind the gonzalo facade** —
+sessions, auto-memory, and configuration now persist through a pluggable storage
+substrate that can be backed by a local store or a remote gonzalo daemon, laying
+the groundwork for multi-host and cluster deployments. And the **sub-agent
+control plane is fixed end-to-end**: interactive sub-agents launched over the
+Kubernetes TLS session-plane could never report their status back to the daemon —
+every Idle/Running report was silently dropped, stranding an agent in `Running`
+forever. Three fixes close that gap and make the failure observable if it ever
+recurs.
+
+### Added
+
+- **Sessions persist through the gonzalo facade** (#471): session state is now
+  written via the gonzalo storage facade with an async debounce-writer,
+  decoupling session persistence from the local filesystem and smoothing bursty
+  writes. (#506)
+- **Storage substrate selection + remote gonzalo daemon config** (#473): choose
+  where caliban persists its state, including pointing at a remote gonzalo
+  daemon, configured through `settings.json`. (#502)
+- **Auto-memory routed through the gonzalo facade** (#470, pilot): auto-memory
+  topics now flow through the same storage substrate as sessions — the first
+  consumer of the shared facade beyond sessions. (#484)
+
+### Fixed
+
+- **Interactive sub-agents report status over the TLS control plane** (#512):
+  the daemon no longer derives the worker's TLS verification identity from the
+  advertise host — the dial name and the cert's SAN are different things, and
+  defaulting one to the other made the worker verify against a name the serving
+  cert could not prove. An explicitly-set `CALIBAN_CONTROL_TLS_SERVER_NAME`
+  inherited from the pod environment is now preserved instead of being clobbered
+  by a derived value, and the daemon warns at startup when control TLS is
+  configured with no resolvable server name. (#513)
+- **Workers receive the control-plane TLS material they need to dial the
+  daemon** (#510): the launcher now forwards `CALIBAN_CONTROL_TLS_CA` and
+  `CALIBAN_CONTROL_TLS_SERVER_NAME` to workers, so a worker on a TLS control
+  listener can complete the handshake instead of dialing plaintext and having
+  every status report silently dropped. A dropped status report is now logged
+  once so the failure is observable. (#511)
+- **Worker stdout/stderr is captured instead of discarded** (#509): a worker
+  that dies during preflight now leaves its output in the session directory
+  (`worker.log`) instead of an empty container log, so the cause of a `failed`
+  agent can be read rather than reconstructed by hand.
+
+Docs: user guide + README refreshed for the 0.2.0–0.7.0 span (#500); competitor
+evaluation refreshed with Codex, OpenCode, OpenClaw, Grok Build, and Google
+Antigravity areas plus a primary-source pass (#488, #489, #490, #491, #505);
+Discord badge and community section added to the README (#492).
+
 ## [0.7.0] - 2026-07-15
 
 This release makes the `--workspace` sandbox a **real confinement boundary**.
@@ -554,7 +605,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/caliban-ai/caliban/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/caliban-ai/caliban/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/caliban-ai/caliban/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/caliban-ai/caliban/compare/v0.4.0...v0.5.0

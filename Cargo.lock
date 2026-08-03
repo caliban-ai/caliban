@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "caliban"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-agent-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-checkpoint"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-agent-core",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "reqwest 0.12.28",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-images"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-mcp-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-memory"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-common",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-model-router"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-output-styles"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "caliban-agent-core",
  "caliban-common",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-plugins"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "caliban-common",
  "chrono",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-anthropic"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-bedrock"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-google"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-ollama"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-openai"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-provider-vertex"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-common",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-sandbox"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "globset",
  "serde",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-sessions"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-agent-core",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-settings"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-skills"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-agent-core",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-supervisor"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "caliban-common",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-telemetry"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "caliban-common",
  "caliban-provider",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-tools-builtin"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "caliban-worktrees"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "git2",
  "serde",
