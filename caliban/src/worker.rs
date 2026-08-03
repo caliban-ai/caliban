@@ -1398,6 +1398,47 @@ mod tests {
         );
     }
 
+    /// #512 fix #3 / AC#3: a failed status report must be observable at least
+    /// once without re-running the worker by hand. #510 added a warn-once latch
+    /// (`warned`) so a total, silent loss of status reporting — the very thing
+    /// that hid the control-plane TLS misconfig — surfaces on the first failure
+    /// without spamming the log. This locks it in: a client dialing a closed
+    /// port fails every report; the latch must flip on the first failure and
+    /// stay set (the warn fires once, not per report).
+    #[tokio::test]
+    async fn control_status_latches_a_warning_on_the_first_failed_report() {
+        use caliban_supervisor::proto::AgentStatus;
+
+        // A TCP client pointed at a closed port: every report_status fails.
+        let client =
+            caliban_supervisor::SupervisorClient::new_tcp("127.0.0.1:1".to_string(), None, None);
+        let sink = ControlSocketStatus {
+            client,
+            id: "agent-0001".to_string(),
+            warned: AtomicBool::new(false),
+        };
+
+        assert!(
+            !sink.warned.load(Ordering::Relaxed),
+            "no failure has occurred yet"
+        );
+
+        // First failing report: the latch must flip so the cause is surfaced.
+        sink.set(AgentStatus::Idle).await;
+        assert!(
+            sink.warned.load(Ordering::Relaxed),
+            "the first failed status report must be surfaced (warn-once latch set)"
+        );
+
+        // A second failing report must not reset the latch — warn once, not
+        // once per report.
+        sink.set(AgentStatus::Running).await;
+        assert!(
+            sink.warned.load(Ordering::Relaxed),
+            "the latch stays set; further failures are silent by design"
+        );
+    }
+
     // --- Idle-timeout tests (#81 ticket 5) ---
 
     /// With no clients attached and an 80ms timeout, `next_input` must return
