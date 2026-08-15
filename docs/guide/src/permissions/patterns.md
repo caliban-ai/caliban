@@ -1,17 +1,27 @@
 # Pattern Grammar
 
-A pattern is the `pattern` field in a `[[permissions.rules]]` entry (or the argument to `--allow`/`--deny`/`--ask` on the CLI). It encodes the tool name and an optional argument specifier separated by a colon.
+A pattern is the `pattern` field in a `[[permissions.rules]]` entry (or the argument to `--allow`/`--deny`/`--ask` on the CLI). It encodes the tool name and an optional argument specifier.
+
+The specifier can be written two ways — `Tool:<glob>` or `Tool(<glob>)`. They are **interchangeable**; pick whichever reads better. This page uses the colon form throughout, and every form below has an equivalent paren spelling.
 
 ## Forms at a glance
 
 | Form | Description |
 |------|-------------|
 | `Tool` | Match any invocation of `Tool`, regardless of arguments. |
-| `Tool:<glob>` | Match `Tool` when its first argument matches `<glob>`. |
-| `Bash:~<glob>` | Match `Bash` when `<glob>` appears **anywhere** in the command string. |
-| `Tool:key=<glob>` | Match `Tool` when the named input field matches `<glob>` (dotted keys supported). |
+| `Tool:<glob>` / `Tool(<glob>)` | Match `Tool` when its first argument matches `<glob>`. |
+| `Bash:~<glob>` / `Bash(~<glob>)` | Match `Bash` when `<glob>` appears **anywhere** in the command string. |
+| `Tool:key=<glob>` / `Tool(key=<glob>)` | Match `Tool` when the named input field matches `<glob>` (dotted keys supported). |
 | `Tool:k1=<g1>,k2=<g2>` | Multiple key=glob pairs, **AND-combined**. |
 | `*` | Catch-all — matches every tool. |
+
+In the paren form the glob is everything between the **first** `(` and the **trailing** `)`, so a `(`, `)`, or `:` inside the glob is taken literally — `Bash(scp host:/tmp/*)` and `Bash(echo (hi))` both work. A `:` appearing *before* the first `(` selects the colon form, leaving the parens as literal glob text.
+
+```admonish warning title="Rules that can never match"
+An unclosed `Bash(git *`, an empty `Bash()`, or a malformed glob such as `Bash:[unclosed` cannot match any tool call. caliban **warns at startup** (and on `caliban perms add`) naming the offending pattern, rather than letting it fail closed and silently.
+
+Note that `Bash()` is an *empty glob*, not a synonym for the bare `Bash` — it deliberately does not widen into "allow every shell command".
+```
 
 ## Glob characters
 
@@ -94,6 +104,7 @@ action  = "allow"
 |---------|---------|----------------|
 | `Bash` | Any `Bash` call | — |
 | `Bash:git *` | `git push`, `git commit -m "…"` | `gitk`, `sudo git push` |
+| `Bash(git *)` | _identical to `Bash:git *`_ | _idem_ |
 | `Bash:~git *` | `sudo git push`, `bash -c "git fetch"` | commands with no `git ` substring |
 | `Bash:rm *` | `rm -rf /tmp` | `sudo rm -rf /tmp` (use `~rm *` for that) |
 | `Edit:**/*.rs` | `/repo/src/main.rs`, `/repo/crates/x/lib.rs` | `/tmp/scratch.py` |

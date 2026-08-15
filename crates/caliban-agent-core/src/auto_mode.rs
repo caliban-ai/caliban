@@ -177,10 +177,11 @@ fn pattern_list_matches(list: &[String], ctx: &ToolCtx<'_>) -> bool {
 }
 
 fn pattern_matches(pattern: &str, ctx: &ToolCtx<'_>) -> bool {
-    let (tool_pat, arg_pat) = match pattern.split_once(':') {
-        Some((t, a)) => (t, Some(a)),
-        None => (pattern, None),
-    };
+    // Share the permission matcher's splitter so `[permissions.auto]` lists
+    // accept the same two spellings as `allow`/`deny`/`ask` rules — otherwise
+    // `Bash(git *)` would work in one config block and silently never match in
+    // the other (#518).
+    let (tool_pat, arg_pat) = crate::permissions_matcher::split_pattern(pattern);
     if tool_pat != "*" && !matches_glob(tool_pat, ctx.tool_name) {
         return false;
     }
@@ -552,6 +553,27 @@ mod tests {
         assert_eq!(
             cfg.static_match(&ctx("Read", &input)),
             Some(AutoVerdict::Allow)
+        );
+    }
+
+    /// `[permissions.auto]` lists share the permission-rule grammar, so the
+    /// `Tool(<glob>)` spelling we tell operators to use must work here too
+    /// (#518) — it used to parse as a literal tool name and never match.
+    #[test]
+    fn static_match_accepts_paren_grammar() {
+        let cfg = AutoModeConfig {
+            hard_deny: vec!["Bash(sudo *)".into()],
+            ..AutoModeConfig::default()
+        };
+        let input = serde_json::json!({"command": "sudo rm /tmp"});
+        assert_eq!(
+            cfg.static_match(&ctx("Bash", &input)),
+            Some(AutoVerdict::HardDeny)
+        );
+        assert_eq!(
+            cfg.static_match(&ctx("Bash", &serde_json::json!({"command": "ls"}))),
+            None,
+            "the paren form must stay narrow here too"
         );
     }
 

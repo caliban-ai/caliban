@@ -106,6 +106,8 @@ caliban perms import --from ~/.claude/settings.json --dry-run
 caliban perms import --from ~/.claude/settings.json --scope user
 ```
 
+Patterns are copied through verbatim. Claude Code writes the parenthesised form (`Bash(git *)`, `Edit(src/**)`), which caliban's matcher accepts as-is — an imported rule set is live immediately, with no rewriting step. See [Pattern Grammar](./patterns.md).
+
 ### `export` — export rules to stdout
 
 Outputs the current scope's rules in TOML (default) or JSON format, suitable for redirecting into a new file or piping to another tool.
@@ -130,17 +132,20 @@ caliban perms audit --action deny --since 2026-06-01T00:00:00Z
 caliban perms audit --tool Write --head 20
 ```
 
-### `lint` — check for duplicate rules
+### `lint` — check for duplicate or dead rules
 
-Scans a scope's rule list for duplicate `(pattern, action)` pairs and prints them. Exits 0 if clean, 1 if duplicates are found.
+Scans a scope's rule list for duplicate `(pattern, action)` pairs, and for patterns that can never match any tool call (an unclosed `Bash(git *`, an empty `Bash()`, a malformed glob). Exits 0 if clean, 1 if anything is found.
 
 ```bash
 caliban perms lint --scope project
-# OK (no duplicate patterns)
+# OK (no duplicate or never-matching patterns)
 
 caliban perms lint --scope user
 # duplicate: pattern="Bash:git *" action=allow
+# never matches: `Bash(git *` has an unclosed `(` — write `Tool(<glob>)` or `Tool:<glob>`
 ```
+
+Never-matching rules are worth linting for because they fail *closed and silently* — the runtime treats an uncompilable glob as "no match", so the operator only sees an unexplained denial.
 
 ```admonish tip title="Scopes quick reference"
 Rules are read from `managed → user → project → local` (earlier scopes shadow later). The `caliban perms add` default scope is `project`; `caliban perms import` defaults to `user`. Use `--scope` to override.

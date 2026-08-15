@@ -277,6 +277,12 @@ fn cmd_add(
         eprintln!("[caliban perms] no writable path for scope {s:?}");
         return 1;
     };
+    // Surface a rule that can never match at write time rather than letting it
+    // fail closed and silently at the first tool call (#518). Non-fatal: the
+    // operator may be scripting, and a dead rule is inert, not dangerous.
+    if let Some(why) = caliban_agent_core::permissions_matcher::validate_pattern(pattern) {
+        eprintln!("[caliban perms] warning: {why}");
+    }
     let rule = caliban_settings::RuleSpec {
         pattern: pattern.to_owned(),
         action: action.to_owned(),
@@ -461,7 +467,8 @@ fn cmd_audit(
     0
 }
 
-/// Detect duplicate patterns in a scope's permission rules.
+/// Detect duplicate patterns, and patterns that can never match, in a scope's
+/// permission rules.
 fn cmd_lint(scope: Option<&str>) -> i32 {
     let Some(s) = parse_scope(scope.or(Some("project"))) else {
         return 1;
@@ -476,17 +483,24 @@ fn cmd_lint(scope: Option<&str>) -> i32 {
     };
     let rules = loaded.settings.permission_rules();
     let mut seen = std::collections::HashSet::new();
-    let mut dupes: usize = 0;
+    let mut problems: usize = 0;
     for r in &rules {
         // Deduplicate on (pattern, action-string) pair; `Action` doesn't impl `Hash`.
         let a = action_str(r.action);
         if !seen.insert((r.tool.clone(), a)) {
             println!("duplicate: pattern={:?} action={a}", r.tool);
-            dupes += 1;
+            problems += 1;
+        }
+        // A rule whose glob can't compile fails closed and silently at runtime
+        // (`glob_match` maps a bad pattern to `false`), so lint is the only
+        // place an operator can find out (#518).
+        if let Some(why) = caliban_agent_core::permissions_matcher::validate_pattern(&r.tool) {
+            println!("never matches: {why}");
+            problems += 1;
         }
     }
-    if dupes == 0 {
-        println!("OK (no duplicate patterns)");
+    if problems == 0 {
+        println!("OK (no duplicate or never-matching patterns)");
         0
     } else {
         1

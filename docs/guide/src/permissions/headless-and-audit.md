@@ -15,6 +15,9 @@ The deny message is tailored to the tool class:
 | `Bash` | `--allow 'Bash(<glob>)'` for a targeted rule, or `--auto-allow` (flagged dangerous) |
 | Other tools | `--allow '<Tool>'` or `--auto-allow` |
 
+The rule the message prints works when pasted verbatim: `Tool(<glob>)` and
+`Tool:<glob>` are interchangeable spellings (see [Pattern Grammar](./patterns.md)).
+
 ### Opt-in strategies
 
 Choose the least-permissive option that satisfies the task:

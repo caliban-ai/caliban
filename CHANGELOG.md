@@ -9,6 +9,21 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Permission patterns accept the `Tool(<glob>)` form** (#518): the matcher
+  split rule patterns on `:` only, so the rule caliban itself prints on a
+  headless denial — ``--allow 'Bash(git *)'`` — parsed as a tool literally named
+  `Bash(git *)` and could never match. Following the printed guidance verbatim
+  left the tool denied. `Tool(<glob>)` and `Tool:<glob>` are now interchangeable
+  spellings everywhere patterns are parsed, including `[permissions.auto]`
+  lists. This also un-breaks `caliban perms import`: Claude Code writes the
+  parenthesised form and the importer copies patterns through verbatim, so every
+  rule in a migrated config was previously inert. Rules that can never match (an
+  unclosed `Bash(git *`, an empty `Bash()`, a malformed glob) are now reported at
+  startup, by `caliban perms lint`, and by `caliban perms add`, instead of
+  failing closed and silently.
+
 ## [0.8.0] - 2026-08-02
 
 Two threads define this release. **Storage moves behind the gonzalo facade** —

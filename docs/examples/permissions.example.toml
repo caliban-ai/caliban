@@ -70,6 +70,13 @@ action  = "ask"
 #                         multiple key=glob pairs comma-separated AND together
 # *                     — catch-all
 #
+# `Tool(<glob>)` is an accepted alternative spelling of `Tool:<glob>` and
+# means exactly the same thing — e.g. `Bash(git *)` == `Bash:git *`. In the
+# paren form the glob runs from the first `(` to the trailing `)`, so a
+# literal `(`, `)`, or `:` inside it is fine: `Bash(scp host:/tmp/*)`.
+# A pattern that can never match (unclosed `Bash(git *`, empty `Bash()`, or a
+# malformed glob) is reported with a warning at startup.
+#
 # File-edit tools (Read, Write, Edit, MultiEdit, NotebookEdit):
 #   the file path is workspace-normalized before matching, so
 #   `Edit:src/**/*.rs` works from anywhere inside the repo.
