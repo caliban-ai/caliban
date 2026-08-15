@@ -56,8 +56,11 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 
 > **Caveat:** rows tagged **⚠** depend on a Pi fact still flagged uncertain in the
 > inventory (§19 there) or on a caliban detail that could not be settled from the
-> source this pass. Three rows below also **correct** claims in the sibling
-> matrices — they are called out inline.
+> source this pass. **Six** rows below also **correct** claims in the sibling
+> matrices (§A, §D, §F, §G, §H, §L) — each is called out inline and anchored by
+> section + row label rather than line number, because line numbers into those
+> files are not stable (the `claude-code/` matrix is being refreshed concurrently
+> on another branch). Tracked for propagation as **#519**.
 
 ---
 
@@ -67,7 +70,7 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 |---|---|---|
 | One-line install (npm / `curl \| sh` / PowerShell / pnpm / bun) | 🔴 | caliban documents only `cargo build --release`; `docs/guide/src/getting-started/installation.md` still says *"There are no pre-built releases yet."* All 8 versions through 0.8.0 *are* live on crates.io, but `Cargo.toml:182-187` calls the crates *"plumbing… explicitly internal/unstable"* and no doc teaches `cargo install caliban` |
 | Prebuilt standalone binaries (6 targets, `SHA256SUMS`, reproducible builds) | 🔴 | `gh release view v0.8.0 --json assets` returns **zero assets** on every release; no workflow uploads binaries |
-| Published container image | ✅ | `ghcr.io/caliban-ai/caliban`, tags 0.5.0–0.8.0 (`docs/container.md`, `.github/workflows/release-image.yml`, PR #298). Pi ships a Dockerfile for sandboxing but publishes no image. ⚠ **corrects** `../codex/parity-gap-matrix.md:44`, which still says the image is "not yet shipped" |
+| Published container image | ✅ | `ghcr.io/caliban-ai/caliban`, tags 0.5.0–0.8.0 (`docs/container.md`, `.github/workflows/release-image.yml`, PR #298). Pi ships a Dockerfile for sandboxing but publishes no image. ⚠ **corrects** the install row in §A ("Install & distribution") of [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md), which still parenthesises the image as "not yet shipped" |
 | Self-update (`pi update --self`) | 🔴 | no `update`/`upgrade` variant in `caliban/src/args.rs`; only `caliban plugin update <name>` |
 | Windows support | 🟡 | caliban builds on Windows but `crates/caliban-sandbox` has **no Windows backend** (ADR-0032:35-36), so Bash runs unfenced there. Pi requires a bash shell on Windows |
 | Android / Termux | 🔴 | no mobile target; Pi ships a dedicated Termux page |
@@ -108,7 +111,7 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 |---|---|---|
 | Global + project settings, nested deep-merge | ✅ | five scopes (managed / user / project / local / CLI) with per-key merge semantics (ADR-0045, `crates/caliban-settings/src/{scope,merge}.rs`) |
 | Managed / enterprise scope | ➕ | `/etc/caliban/managed-settings.*` + MDM delivery (ADR-0026/0045). Pi documents only global + project |
-| `AGENTS.md` + `CLAUDE.md` ingestion with ancestor walk | ✅ | `ANCESTRY_FILENAMES = [".caliban.md", "CLAUDE.md", "AGENTS.md"]` (`crates/caliban-memory/src/project_walk.rs:42`), ADR-0036. ⚠ **corrects** `../antigravity/parity-gap-matrix.md:86`, which marks `AGENTS.md` ingestion 🟡 "verify" |
+| `AGENTS.md` + `CLAUDE.md` ingestion with ancestor walk | ✅ | `ANCESTRY_FILENAMES = [".caliban.md", "CLAUDE.md", "AGENTS.md"]` (`crates/caliban-memory/src/project_walk.rs:42`), ADR-0036. ⚠ **corrects** the *"`AGENTS.md` project context file"* row in §D ("Config system") of [`../antigravity/parity-gap-matrix.md`](../antigravity/parity-gap-matrix.md), which marks ingestion 🟡 "⚠ verify against `main`" |
 | `@`-imports with cycle detection | ➕ | depth cap 5 + cycle detection + external-path approval allowlist (`project_imports.rs`, ADR-0036/0050). Pi has no import mechanism |
 | Per-directory override file (`AGENTS.override.md`) | 🔴 | caliban concatenates ancestry files with no per-directory replace semantics (`project_walk.rs`) |
 | System-prompt replace / append files (`SYSTEM.md`, `APPEND_SYSTEM.md`) | 🟡 | `/output-style` splices a prefix into the prompt (ADR-0031, `compose.rs:1699,1709`), but there is no full-prompt replacement file and no `--system-prompt`/`--append-system-prompt` flag in `caliban/src/args.rs` |
@@ -137,7 +140,7 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 | Capability (Pi) | Caliban | Notes |
 |---|---|---|
 | Provider breadth (40 built-in) | 🟡 | `--provider` accepts only `anthropic \| openai \| ollama \| google` (`ProviderKind`, `caliban/src/args.rs:19-25`); `router::build_one` (`caliban/src/router.rs:84-172`) errors *"unknown provider"* on anything else |
-| Bedrock / Vertex | 🟡 | `crates/caliban-provider-{bedrock,vertex}` are library-complete (ADR-0034) but **`caliban/Cargo.toml:31-35` does not depend on them**, and `rg 'bedrock\|vertex' caliban/src/` returns nothing — unreachable from the CLI. ⚠ **corrects** `../claude-code/parity-gap-matrix.md:174-175` and `../codex/parity-gap-matrix.md:114`, which both mark these ✅ |
+| Bedrock / Vertex | 🟡 | `crates/caliban-provider-{bedrock,vertex}` are library-complete (ADR-0034) but **`caliban/Cargo.toml:31-35` does not depend on them**, so no CLI code path can construct either — unreachable from the binary. `rg -i 'bedrock\|vertex' caliban/src/` has exactly **one** hit, and it is prose, not a code path: the `/login` stub's placeholder text (`caliban/src/tui/slash/model.rs:174`) promising *"`aws sso login` for Bedrock, `gcloud auth login` for Vertex"* once the Auth spec lands. ⚠ **corrects** the ✅ `Bedrock` / `Vertex` rows in §I ("Model router & providers") of [`../claude-code/parity-gap-matrix.md`](../claude-code/parity-gap-matrix.md) and the ✅ *"Multiple providers + local models"* row in §G ("Models & providers") of [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md), which lists Bedrock/Vertex among caliban's providers |
 | Azure OpenAI | 🟡 | a cargo feature on the OpenAI crate, unwired to the CLI. Azure AI Foundry is issue **#30** |
 | Local runners (Ollama / LM Studio / vLLM / SGLang / OpenAI-compatible) | ✅ | Ollama is first-class with **dynamic model discovery** (`/api/tags`, `/api/show`, `/api/ps`, XDG-cached); LM Studio and vLLM via `OPENAI_BASE_URL`, probed at [`probes/2026-05-27-lmstudio-probe-findings.md`](../../probes/2026-05-27-lmstudio-probe-findings.md). Dynamic discovery for those two is issues **#318**/**#317** |
 | Declarative custom-model file, hot-reloaded on the model picker | 🟡 | `caliban.toml` declares routes and models with a walk-up discovery and a `caliban router debug` inspector (ADR-0038), but adding a **new provider endpoint** still requires a Rust crate, and the file is not re-read when `/model` opens |
@@ -175,13 +178,13 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 | Configurable skill-path array / cross-harness reuse | 🔴 | roots are **fixed** to `<ws>/.caliban/skills/`, `$XDG_CONFIG_HOME/caliban/skills/`, and plugin dirs (`crates/caliban-skills/src/loader.rs:11-21`). Pi documents `"skills": ["~/.claude/skills", "~/.codex/skills"]` as a first-class setting — a cheap, high-goodwill win |
 | Bundled skill library | 🔴 | exactly **one** skill ships — `auto-memory` (`crates/caliban-skills/src/builtins/auto_memory.md`); `crates/caliban-skills` is 555 LOC total. Pi points at `anthropics/skills` and `badlogic/pi-skills` |
 | Install a skill from npm / git / a registry | 🔴 | no `caliban skills install`; third-party skills arrive only by manual copy or bundled inside a plugin |
-| Scripted in-process extensions with an event API | 🔴 | caliban's extension seam is **hooks**, not scripts: 18 first-class events with 5 external handler types (`ShellCommandHook`, `HttpHook`, `PromptHook`, `AgentHook`, `McpHook` — `hooks_router.rs`, ADR-0024), which can block or modify tool calls. But there is no in-process API to register tools, renderers, keybindings, commands, or UI, and **9 declared events are reserved and never fired** (ADR-0024:28-31). Pi exposes **33 events** and a ~75-member API |
+| Scripted in-process extensions with an event API | 🔴 | caliban's extension seam is **hooks**, not scripts: 18 first-class events with 5 external handler types (`ShellCommandHook`, `HttpHook`, `PromptHook`, `AgentHook`, `McpHook` — `hooks_router.rs`, ADR-0024), which can block or modify tool calls. But there is no in-process API to register tools, renderers, keybindings, commands, or UI, and **9 declared events are reserved and never fired** ([`docs/adr/0024-hook-event-taxonomy.md`](../../../adr/0024-hook-event-taxonomy.md):31-34 — `Setup`, `UserPromptExpansion`, `PostToolBatch`, `InstructionsLoaded`, `WorktreeCreate`, `WorktreeRemove`, `Elicitation`, `ElicitationResult`, `TeammateIdle`). Pi exposes **33 events** and a ~75-member API |
 | Extension-registered LLM-callable tools | 🔴 | see §G |
 | Extension-registered UI (widgets, overlays, dialogs, autocomplete) | 🔴 | the TUI is compiled-in (`caliban/src/tui/`); no rendering extension point exists |
 | Custom slash commands / prompt templates | 🔴 | all 38 slash commands are compiled-in Rust `impl SlashCommand` (`caliban/src/tui/slash.rs:280-293`). There is **no `.caliban/commands/*.md` loader and no `$ARGUMENTS` substitution** — explicitly out of scope in `docs/superpowers/specs/2026-05-24-slash-command-coverage-design.md:302-303`. Issues **#102**/**#103**. Pi gets `/review` from dropping `review.md` in a directory |
 | Themes | 🔴 | zero `theme` hits in `caliban/src/`; the only trace is an opaque `tui` settings value (`crates/caliban-settings/src/settings.rs:358`). Issue **#10**. (Pi ships only 2 built-ins but a full 51-token JSON schema with hot reload) |
 | Configurable keybindings | 🔴 | every binding is hardcoded in `caliban/src/tui/events.rs`; no keybindings file. Pi exposes **76 bindable actions** in `keybindings.json` with Emacs/Vim presets |
-| Package format bundling skills + hooks + agents + MCP + commands | 🟡 | `plugin.json` **declares** `components: {skills, hooks, agents, output_styles, mcp_servers, commands}` (`crates/caliban-plugins/src/manifest.rs:16-68`), but only **one** aggregation is ever consumed: of `PluginManager`'s five methods, `rg 'hooks_configs\|mcp_servers()\|agent_roots\|output_style_roots\|skill_roots' caliban/src/` returns **`skill_roots` only** (`manager.rs:262` → `main.rs:326`). Hooks, MCP servers, and agents are parsed, namespaced, `${CALIBAN_PLUGIN_ROOT}`-expanded, then **discarded**; `components.commands` has no aggregation function at all (`manifest.rs:66`, deferred to ADR-0040, which shipped without closing the loop). ⚠ **corrects** `../claude-code/parity-gap-matrix.md:82`, which marks this ✅ |
+| Package format bundling skills + hooks + agents + MCP + commands | 🟡 | `plugin.json` **declares** `components: {skills, hooks, agents, output_styles, mcp_servers, commands}` (`crates/caliban-plugins/src/manifest.rs:16-68`), but only **one** aggregation is ever consumed: of `PluginManager`'s five methods, `rg 'hooks_configs\|mcp_servers()\|agent_roots\|output_style_roots\|skill_roots' caliban/src/` returns **`skill_roots` only** (`manager.rs:262` → `main.rs:326`). Hooks, MCP servers, and agents are parsed, namespaced, `${CALIBAN_PLUGIN_ROOT}`-expanded, then **discarded**; `components.commands` has no aggregation function at all (`manifest.rs:66`, deferred to ADR-0040, which shipped without closing the loop). ⚠ **corrects** the ✅ *"Plugin packages (bundle skills + hooks + agents + MCP + output-styles)"* row in §B ("Hooks & extensibility") of [`../claude-code/parity-gap-matrix.md`](../claude-code/parity-gap-matrix.md) |
 | Output styles from a package | 🟡 | works, but **by accident** — `caliban-output-styles` independently globs `$XDG_DATA_HOME/caliban/plugins/*/output-styles/*.md` (`crates/caliban-output-styles/src/loader.rs:70-71`) while `PluginManager::output_style_roots()` is dead code. `force_for_plugin` is provably inert: `compose.rs` hardcodes `enabled_plugins = &[]` and the `/output-style` overlay renders a literal `[force_for_plugin — inert until ADR 0030]` badge (`caliban/src/tui/slash/existing.rs:331-332`) |
 | Install from npm / git / local path | 🟡 | `caliban plugin install` supports a marketplace tarball (sha256-verified, trust record in `$XDG_DATA_HOME/caliban/trust/plugins.json`, hardened HTTP client via PRs #158/#187) and `--dir` sideload, but **no git-URL install** — only doc-comment placeholders in `crates/caliban-plugins/src/discovery.rs:2,11`. No signature verification |
 | Project-scoped, team-shared package set with auto-install | 🔴 | plugin enablement is **env-var-only** (`CALIBAN_ENABLED_PLUGINS`); the `plugins` settings key is an opaque `serde_json::Value` that is never deserialized (`crates/caliban-settings/src/settings.rs:343-345`), so a repo **cannot commit its plugin set**. Pi's `pi install -l` writes `.pi/settings.json` and auto-installs on next start |
@@ -203,10 +206,10 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 > **Aside (not a Pi-parity item, but found while verifying this section):** caliban's
 > own denial message tells users to *"re-run with `--allow 'Bash(<glob>)'"*
 > (`permissions.rs:371-374`, echoed at `README.md:402`), but `split_pattern`
-> (`permissions_matcher.rs:29-33`) splits on `:` only — so a parens-form rule
+> (`permissions_matcher.rs:30-34`) splits on `:` only — so a parens-form rule
 > silently never matches. The working form is `Bash:git *`, used correctly at
-> `README.md:341,345` and in `docs/examples/permissions.example.toml:29-38`. Worth
-> its own bug ticket.
+> `README.md:341,345` and in `docs/examples/permissions.example.toml:29-38`. Confirmed
+> in review and filed as **#518**.
 
 ## J. Agents / sub-agents
 
@@ -247,7 +250,7 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 | Capability (Pi) | Caliban | Notes |
 |---|---|---|
 | MCP client | ➕ | full client — stdio + HTTP + SSE, OAuth, elicitation with a bounded queue, resources with URI templates, per-server permission scoping (ADR-0023/0044, `crates/caliban-mcp-client/`). **Pi has no MCP at all**, by design; `pi-mcp-adapter` is the single most-downloaded package in its gallery (~354.4K/mo) |
-| MCP management CLI | 🔴 | ⚠ **correction to the sibling matrices:** there is **no `caliban mcp` subcommand** — the `CalibanCommand` enum in `caliban/src/args.rs` has no `Mcp` variant. Management is declarative TOML + the `/mcp` overlay + `--no-mcp`. Both `../opencode/parity-gap-matrix.md:65,138` and `../grok-build/parity-gap-matrix.md:66,150` mark `caliban mcp` ✅ in error |
+| MCP management CLI | 🔴 | ⚠ **correction to the sibling matrices:** there is **no `caliban mcp` subcommand** — the `CalibanCommand` enum in `caliban/src/args.rs` has no `Mcp` variant. Management is declarative TOML + the `/mcp` overlay + `--no-mcp`. Four sibling rows cite `caliban mcp` ✅ in error: the *"MCP management"* rows in §C ("CLI subcommands") and §I ("MCP") of [`../opencode/parity-gap-matrix.md`](../opencode/parity-gap-matrix.md), and in §C ("CLI subcommands") and §L ("MCP / ACP / CI") of [`../grok-build/parity-gap-matrix.md`](../grok-build/parity-gap-matrix.md) |
 | MCP sampling / prompts | n/a | not implemented in caliban (zero hits); Pi has no MCP surface to compare against |
 | MCP server mode | n/a | caliban exposes none (epic **#503**); Pi has none either |
 
@@ -355,12 +358,18 @@ caliban **➕** rows. They are the moat — a matrix pass should not read them a
 ecosystem promptly re-adds several of them as paid-in-attention community packages.
 
 **Explicitly out of scope for this matrix:** the token-efficiency question. Pi's
-headline claim is that it sends substantially less context per turn, and caliban's
-base system prompt measures ~845 chars (`caliban/src/system_prompt.rs:11-52`)
-against Pi's ~1,352 (inventory §5) — but neither figure is a per-turn measurement,
-and **no primary source states Pi's often-quoted "~200 tokens"** (inventory §19(1)).
-That is a [`probes/`](../../probes/) question, not a matrix row; #515 defers it to a
-separate ticket.
+headline claim is that it sends substantially less context per turn. **Do not try
+to settle that from static prompt sizes** — the two are not comparably shaped. Pi's
+default prompt is a single template literal, measurable at 1,353 chars (a 330-char
+skeleton plus a 1,023-char paragraph of its own doc paths — inventory §5); caliban's
+is *assembled programmatically* across the 287 lines of
+`caliban/src/system_prompt.rs`, with per-tool descriptions, todo state, and cwd
+spliced in at build time, so it has no single static figure to quote. Both then
+append per-tool text, instructions, and skills blocks. Neither side's number is a
+per-turn measurement, and **no primary source states Pi's often-quoted "~200
+tokens"** (inventory §19(1)). That is a [`probes/`](../../probes/) question — one
+that has to *measure* real turns rather than count template characters — not a
+matrix row; #515 defers it to a separate ticket.
 
 ---
 
@@ -379,6 +388,8 @@ separate ticket.
    permission system, MCP, or sub-agents to *core* would be the most significant
    competitive change this matrix could record.
 5. Resolve any **⚠** rows against Pi's live docs and caliban `main` when you touch
-   them — including the three sibling-matrix corrections noted in §A, §D, §F, §G,
-   §H, and §L, which should be propagated to those files on their next refresh.
+   them — including the **six** sibling-matrix corrections noted in §A, §D, §F,
+   §G, §H, and §L, which should be propagated to those files on their next
+   refresh (tracked as **#519**). They are anchored by section + row label, not
+   line number, so they still resolve after those files are re-flowed.
 6. Bump the **Last refreshed** date at the top.

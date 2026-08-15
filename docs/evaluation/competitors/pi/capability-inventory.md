@@ -47,9 +47,9 @@
 > **Re-baseline cadence:** refresh manually before each parity-prioritization
 > review. When refreshing, re-fetch the upstream docs, update the sections below,
 > bump the snapshot date in this header, and propagate any new rows into
-> `parity-gap-matrix.md` in the same commit. Pi ships **~one release every 2.5
-> days** (§18), so this snapshot ages faster than any sibling inventory — treat a
-> months-old capture as stale.
+> `parity-gap-matrix.md` in the same commit. Pi has shipped **255 releases in 255
+> days**, currently ~one every 2.5 days (§18), so this snapshot ages faster than
+> any sibling inventory — treat a months-old capture as stale.
 >
 > Conventions: *surfaces* = user-visible primitives; "Config = X" lines name the
 > canonical configuration mechanism. **(tk)** marks broader-toolkit surface that is
@@ -203,11 +203,17 @@ lives in `packages/coding-agent/src/cli/args.ts`.
   (`find` covers it), no todo tool, no task/subagent tool, no notebook tool.
 - **Extensions may register new tools *and override the built-ins*** (see §7),
   including swapping their backends for remote or sandboxed execution.
-- **System prompt:** a single template literal in `src/core/system-prompt.ts`,
-  **~1,352 chars (~338 tokens)** measured — or ~330 chars without the paragraph
-  that lists Pi's own doc paths. Per-tool one-liners, guideline bullets, context
-  files, the skills XML block, and `Current working directory:` are appended.
-  ⚠ **No primary source states a token count** — see §19(1).
+- **System prompt:** a single template literal in `src/core/system-prompt.ts`
+  (the `let prompt = \`…\`` block). Measured on the static text, interpolations
+  unresolved: **1,353 chars total**, of which the *"Pi documentation (read only
+  when the user asks about pi itself…)"* paragraph — a list of every doc path — is
+  **1,023 chars (76%)**, leaving a **330-char instructional skeleton**. The 76%
+  split is real, not a transcription error: that one paragraph dominates the
+  literal. At the usual ~4-chars-per-token rule of thumb that is **~338 tokens**
+  full / **~83 tokens** skeleton — a **character-derived estimate, not a
+  tokenizer measurement**. Per-tool one-liners, guideline bullets, context files,
+  the skills XML block, and `Current working directory:` are all appended on top.
+  ⚠ **No primary source states any token count** — see §19(1).
 
 ## 6. Skills
 
@@ -632,7 +638,8 @@ the APIs returned this pass — see §19 for the three that diverge.
 | Repo created | **2025-08-09T14:03:50Z** | GitHub API |
 | Latest release | **v0.84.2**, 2026-08-14T10:14:32Z | releases API |
 | Total releases | **255** | releases API |
-| Releases in the last 60 days | **24** (v0.79.5 → v0.84.2) — ~1 per 2.5 days | releases API |
+| All-time release rate | **255 releases over the 255 days** from v0.12.0 (2025-12-02) to v0.84.2 (2026-08-14) — **~1/day** | releases API |
+| Recent release rate | **24 in the last 60 days** (v0.79.5 → v0.84.2) — **~1 per 2.5 days**, i.e. *slower* than the all-time rate | releases API |
 | First tagged release | **v0.12.0**, 2025-12-02T11:24:16Z ⚠ | releases API |
 | Contributors | **271** ⚠ | `gh api …/contributors --paginate` |
 | npm 30-day downloads (`pi-coding-agent`) | **6,040,652** (2026-07-11 → 08-09) ⚠ | `api.npmjs.org` |
@@ -685,15 +692,21 @@ auto-closed by default. Maintainers review auto-closed issues daily."*
     reproducible binaries.
 11. **A self-documenting agent** — the system prompt embeds paths to Pi's own
     README, docs, and examples, so *"you can also ask the agent to explain itself."*
-12. **Release cadence of ~1 per 2.5 days** across 255 releases.
+12. **Sustained release cadence** — 255 releases in the 255 days since the first
+    tag (~1/day all-time); the trailing-60-day rate is ~1 per 2.5 days.
 
-## Explicit uncertainties to re-verify before the next parity pass
+## 19. Explicit uncertainties to re-verify before the next parity pass
 
 - **(1) The "~200-token system prompt" claim — UNCONFIRMED.** No primary source
-  states a token count. The measured default template is **~1,352 chars (~338
-  tokens)**, or ~330 chars (~83 tokens) excluding the paragraph listing Pi's own
-  doc paths, before per-tool snippets, guidelines, context files, and the skills
-  block are appended. **Do not assert "~200 tokens."** Cite the source file.
+  states any token count. Measured off the `let prompt = \`…\`` literal in
+  `src/core/system-prompt.ts` (static text, interpolations unresolved): **1,353
+  chars total = a 330-char instructional skeleton + a 1,023-char paragraph listing
+  Pi's own doc paths** (that paragraph really is 76% of the literal). At ~4
+  chars/token that is ~338 / ~83 tokens — a **character-derived estimate, not a
+  tokenizer measurement**. Per-tool snippets, guidelines, context files, and the
+  skills block are appended on top, so the *effective* prompt is larger than any
+  of these numbers. **Do not assert "~200 tokens."** Cite the source file, say
+  which of the three figures you mean, and label estimates as estimates.
 - **(2) Contributor count — DIVERGES from #515.** `gh api …/contributors
   --paginate` returns **271**, not 30 (top: `badlogic` 3,537 commits, `mitsuhiko`
   521, `christianklotz` 142). The 30 figure may have been a commit-threshold count;
@@ -722,7 +735,8 @@ auto-closed by default. Maintainers review auto-closed issues daily."*
 - **(11) The experimental `pi-server`/`pi-client`/`pi-protocol` trio** is absent
   from every coding-agent doc page and from the README package table. Whether it is
   intended to become a driveable session server is unstated — recheck next pass,
-  because it would change row **C-6**.
+  because it would change row **B-4** (*Standalone session server (`pi serve`)*),
+  which is currently **n/a** on the grounds that neither project ships one.
 
 ---
 
@@ -762,6 +776,10 @@ All **HTTP 200** this pass. `github.com/badlogic/pi-mono` **301 →**
 | RPC mode | `/docs/latest/rpc` | 33 commands, extension-UI sub-protocol |
 | TUI library | `/docs/latest/tui` | **(tk)** component API for extension authors |
 | Termux | `/docs/latest/termux` | Android support caveats |
+| Windows | `/docs/latest/windows` | bash-shell requirement (§2) |
+| tmux | `/docs/latest/tmux` | `extended-keys on` requirement (§4) |
+| Shell aliases | `/docs/latest/shell-aliases` | shell integration (§4) |
+| Development | `/docs/latest/development` | contributor build/test guide |
 | Package gallery | `pi.dev/packages` | 5,311 shown; `pi-package` keyword |
 | Install script | `pi.dev/install.sh` | wraps npm |
 | Repo README | `raw.githubusercontent.com/earendil-works/pi/main/README.md` | philosophy, non-goals, supply chain |
