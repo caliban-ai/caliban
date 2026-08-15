@@ -123,7 +123,6 @@ Skills now formally follow the **Agent Skills open standard**
   - Left/Right — cycle dialog tabs. Up/Down or `Ctrl+P`/`Ctrl+N` — cursor, then history at row boundaries.
   - `Alt+M` — Windows fallback for Shift+Tab when VT input mode is unavailable.
   - `Ctrl+_` / `Ctrl+Shift+-` — undo last input edit.
-  - `Ctrl+T` inside the `/theme` picker — toggle syntax highlighting.
   - `:` at start — **emoji shortcode** completion (v2.1.217+); `emojiCompletionEnabled: false` disables.
   - `?` on empty input — toggle the shortcut help panel.
   - `Ctrl+E` on a Bash/PowerShell permission prompt — model-generated command explanation (`permissionExplainerEnabled`).

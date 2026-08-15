@@ -20,9 +20,19 @@ shipped PR's v2 follow-up notes.
 
 > **A ✅ means the capability is reachable by a user of the shipped binary.**
 > Machinery that exists, compiles, and is unit-tested but has no production
-> call site is **🟡 at best** — the 2026-08-15 pass down-ticked eight rows on
-> exactly that basis. Cite a file path, ADR, or PR in the Notes column for
-> every tick.
+> call site is **🟡 at best** — the commonest single cause among the
+> 2026-08-15 pass's 18 down-ticks. Cite a file path, ADR, or PR in the Notes
+> column for every tick.
+>
+> **Counting convention** (so the numbers below are reproducible): a
+> *down-tick* is any row whose status got worse than the row that covered it
+> before, **including** a combined row split into worse-scoring halves — the
+> row's state got worse either way. An *up-tick* is the reverse. Deleting a
+> duplicate row is neither. Counts are of **capability-table rows in §A–§N**,
+> not raw emoji: the pre-2026-08-15 header counted emoji and so swept in the
+> legend and prose, reading "110/14/18" for what was really 103/5/11 rows. The
+> status-audit table under *Tier ordering* scores old roadmap items rather
+> than capabilities and is excluded from every count here.
 
 **Last refreshed:** 2026-08-15 (primary-source re-baseline of **both** halves,
 matching the 2026-07-27 standard set for the other competitors in #505.
@@ -31,14 +41,20 @@ re-captured from `docs.claude.com` / `code.claude.com` at Claude Code
 **v2.1.233** — the doc site grew ~24 → 100+ pages, three slugs moved
 (`iam`→`authentication`, `ide-integrations`→`vs-code`+`jetbrains`,
 `sdk/overview`→`agent-sdk/overview`), and new upstream surface was propagated
-into sections A/B/E/F/G/H/I/J/K/M/N below. **(b) Caliban:** every 🔴/🟡 row
+into sections A/B/C/D/E/F/G/H/I/J/K/M/N below. **(b) Caliban:** every 🔴/🟡 row
 plus ~20 ✅ rows re-verified against `main` at v0.8.0 (165 PRs merged since the
-last tick). Net **4 up-ticks** (`claude doctor` 🔴→✅, GitHub Actions 🔴→🟡,
-plus two rows split into honest halves), **12 down-ticks** — the recurring
-pattern is machinery built and tested but never wired to a production call
-site (OTel metric emitters #467, OTLP mTLS #465, sandbox domain ACLs #477,
-image ingest, structured-output wire mode) — and **19 new rows** covering ADRs
-0047–0054 and new upstream surface. Prior refresh 2026-06-17 (#15 slash-menu
+last tick). Row counts moved **103 ✅ / 5 🟡 / 11 🔴 → 104 ✅ / 24 🟡 / 26 🔴**
+(119 → 154 rows, **+35 net**; 29 carry an explicit **New row** marker, the
+other 6 are marked *Previously unrowed* or *Split from* — two combined §M rows
+became four, and four capabilities were promoted out of another row's notes).
+**2 up-ticks** (`caliban doctor`
+🔴→✅, GitHub Actions 🔴→🟡) and **18 down-ticks** — the recurring pattern is
+machinery built and tested but never wired to a production call site (OTel
+metric emitters #467, OTLP mTLS #465, sandbox domain ACLs #477, image ingest,
+structured-output wire mode, the `ConfigChange`/`CwdChanged`/`Notification`
+hooks, and the whole settings live-reload watcher). Also deletes one duplicate
+row (§G's ✅ "Hook inheritance for subagents", which contradicted §B's 🟡 —
+that deletion is neither an up- nor a down-tick). Prior refresh 2026-06-17 (#15 slash-menu
 typeahead: ticked row E "Slash-menu typeahead" 🟡 → ✅; `SlashCommandRegistry::suggest`
 now does case-insensitive fuzzy subsequence matching with start/word-boundary +
 contiguity ranking, superseding plain substring filtering. Prior refresh
@@ -142,14 +158,14 @@ terminal/CLI parity is reached.
 | `before_tool` / `after_tool` (in-process) | ✅ | |
 | `SessionStart` / `SessionEnd` / `UserPromptSubmit` | ✅ | ADR-0024 (in-process surface) |
 | `PreCompact` / `PostCompact` | ✅ | ADR-0024 (in-process surface) |
-| `ConfigChange` / `CwdChanged` / `FileChanged` | ✅ | ADR-0024 (in-process surface) |
+| `ConfigChange` / `CwdChanged` / `FileChanged` | 🟡 | **Down-ticked 2026-08-15.** Only **`FileChanged`** is dispatched (`crates/caliban-agent-core/src/tool.rs:50`). `Hooks::config_change` and `Hooks::cwd_changed` are declared with their `Ctx` types in `hooks.rs` but have **zero `.config_change(` / `.cwd_changed(` call sites anywhere in the workspace** — not even in tests. Same shape as the image-ingest and metric-emitter gaps: the surface exists, nothing fires it |
 | Subagent lifecycle events (`SubagentStart`/`Stop`, `TaskCreated`/`Completed`) | ✅ | ADR-0024 (in-process surface) |
 | `PermissionRequest` / `PermissionDenied` | ✅ | ADR-0024 (in-process surface) |
 | Hook decision protocol (JSON stdout / exit codes) | ✅ | ADR-0024; exit-2 denials no longer swallowed (#171) |
 | `SessionStart` context injection (`additionalContext` → system prompt) | ✅ | #106 surface (`session_start` → `SessionStartOutcome`) + #121 config-hook execution: a `[[hooks.SessionStart]]` command/http handler's `additionalContext` reaches the prompt end-to-end |
 | Handler types: `command` / `http` / `mcp_tool` / `prompt` / `agent` | 🟡 | **Down-ticked 2026-08-15.** Only `command` + `http` execute. `mcp`/`prompt`/`agent` are still v1 stubs that log *"config hook kind not yet executable at runtime; skipping"* and return `Allow` (`crates/caliban-agent-core/src/hooks_router.rs:344`, pinned by test `bridge_builds_command_and_skips_stub_kinds`). Upstream renamed the `mcp` handler to **`mcp_tool`** and added `statusMessage`, `once`, `asyncRewake`, `shell`, `allowedEnvVars`, and a `model` field — none adopted |
-| Config hooks (`[[hooks.*]]`) execute at runtime | 🟡 | **Down-ticked 2026-08-15.** #121 composes config handlers into the agent chain, but `hooks_router.rs::event_supported` (line 250) admits **only `PreToolUse` / `PostToolUse` / `SessionStart`** — a `[[hooks.UserPromptSubmit]]`, `PreCompact`, `SessionEnd`, or subagent-event handler is warn-and-skipped (#185 H4). The in-process events above all fire; you just cannot attach a *config* handler to them. `disable_all_hooks` honored; `allow_managed_hooks_only` fires none until scope provenance lands (#124) |
-| Hook event coverage vs upstream's 31 events | 🟡 | **New row.** Upstream now documents 31 events; caliban's in-process taxonomy covers the core loop but has no `Setup`, `UserPromptExpansion`, `StopFailure`, `Notification`, `PostToolUseFailure`, `PostToolBatch`, `TeammateIdle`, `InstructionsLoaded`, `WorktreeCreate`/`Remove`, `Elicitation`/`ElicitationResult`, and (new at v2.1.2xx) **`MessageDisplay`** / **`DirectoryAdded`**. Decision protocol also lacks the new `escalate` decision and `retry` field |
+| Config hooks (`[[hooks.*]]`) execute at runtime | 🟡 | **Down-ticked 2026-08-15.** #121 composes config handlers into the agent chain, but `hooks_router.rs::event_supported` (line 250) admits **only `PreToolUse` / `PostToolUse` / `SessionStart`** — a `[[hooks.UserPromptSubmit]]`, `PreCompact`, `SessionEnd`, or subagent-event handler is warn-and-skipped (#185 H4). Of the in-process events above, everything except `ConfigChange`/`CwdChanged`/`Notification` fires; you just cannot attach a *config* handler to them. `disable_all_hooks` honored; `allow_managed_hooks_only` fires none until scope provenance lands (#124) |
+| Hook event coverage vs upstream's 31 events | 🟡 | **New row.** Upstream documents 31 events. Caliban's taxonomy splits three ways. **(1) Declared and dispatched:** the core loop (see the rows above). **(2) Declared but never dispatched** — the surface exists, nothing fires it: **`Notification`** (`Hooks::notification` + `NotificationCtx`, `crates/caliban-agent-core/src/hooks.rs:493`; implemented by the headless sink at `caliban/src/headless/hooks_sink.rs:217`, but the only `.notification(` *call* sites are in `crates/caliban-agent-core/tests/hooks_events.rs`), plus `ConfigChange` and `CwdChanged`. **(3) Absent entirely** — no trait method at all: `Setup`, `UserPromptExpansion`, `StopFailure`, `PostToolUseFailure`, `PostToolBatch`, `TeammateIdle`, `InstructionsLoaded`, `WorktreeCreate`/`Remove`, `Elicitation`/`ElicitationResult`, and (new at v2.1.2xx) **`MessageDisplay`** / **`DirectoryAdded`**. Decision protocol also lacks the new `escalate` decision and `retry` field |
 | Hook inheritance for subagents | 🟡 | **Contradiction resolved 2026-08-15** — the duplicate ✅ row in §G was wrong and has been deleted. `inherit_hooks: true` is the default (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:90`) but propagates only the **permission** slice (`InheritableHookConfig` = rules/mode/audit/runtime_rules, `caliban/src/hook_inherit.rs`) to **background** sub-agents (`caliban/src/worker.rs:608`). **Foreground sub-agents get `NoopHooks`** — `install_sub_agent`'s factory never calls `.hooks()` (`caliban/src/startup/compose.rs:884-927`; its own doc comment at :854 says "deferred to v2"). Config `[[hooks.*]]` handlers and closure hooks never cross to any sub-agent |
 | Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | ✅ | ADR-0030; `caliban-plugins` orchestrator parses `plugin.json`, expands `${CALIBAN_PLUGIN_ROOT}` (+ `${CLAUDE_PLUGIN_ROOT}` alias), namespaces items, and feeds existing loaders. Marketplace install + trust gating + `caliban plugin {install,list,enable,disable,remove,info,update}` (`crates/caliban-plugins/src/cli.rs`); marketplace fetches routed through the SSRF-guarded client (#158) |
 
@@ -174,7 +190,7 @@ terminal/CLI parity is reached.
 |---|---|---|
 | Layered settings (managed / user / project / local) with merge semantics | ✅ | ADR-0026; crate `caliban-settings` loads JSON/TOML at four canonical scopes with documented per-key merge rules + `--settings` / `--setting-sources` CLI flags + `parent_settings_behavior: "block"` lockdown. Legacy per-feature TOMLs still load when the unified file is absent. TOML primary per ADR-0045; JSON accepted on read with WARN. `Settings.model` / `fallback_model` consumed at startup via `EffectiveModel::resolve`. Scope attribution fixed #463. Known drift: schema rejects a valid key / accepts a phantom key (#498) |
 | `/config` interactive editor | ✅ | ADR-0026 (Phase 1); `/config` overlay surfaces the merged effective settings + scope chain (provenance per key). Tabbed write-back editor still deferred |
-| Live reload (`ConfigChange` hook) | ✅ | ADR-0026; `SettingsWatcher` (notify, 250 ms debounce) fires on every scope file change. `model` / `output_style` flagged restart-required in the diff |
+| Live reload (`ConfigChange` hook) | 🟡 | **Down-ticked 2026-08-15.** ADR-0026's `SettingsWatcher` (notify, 250 ms debounce, `crates/caliban-settings/src/watcher.rs:31`) is real and unit-tested — but it is **never constructed in the binary**. The only `SettingsWatcher::watch` call in the tree is inside its own `#[tokio::test]` (`watcher.rs:149`); `rg 'SettingsWatcher' caliban/src/` returns nothing. Settings are loaded once into `settings_snapshot` at startup, so **no key live-reloads today** and the `ConfigChange` hook never fires (see §B). The `model` / `output_style` restart-required diff logic exists but is unreachable |
 | `apiKeyHelper` (dynamic auth refresh) | ✅ | ADR-0026; `ApiKeyHelperPool` invokes the helper without a shell, caches per `refreshIntervalMs` (default 5 min, `CALIBAN_API_KEY_HELPER_TTL_MS`), warns at `slowHelperWarningMs`. Wired into `startup::build_provider` and `router::build_one`; `RefreshingProvider<P>` invalidates and rebuilds on a 401/403, retrying once |
 | Schema validation | ✅ | ADR-0026; embedded schema at `caliban-settings/src/schema.json` validated via `jsonschema` (Draft-7); invalid documents warn but don't abort |
 | Settings-key surface vs upstream | 🟡 | **New row.** Upstream's `settings.json` grew from ~80 to ~140 top-level keys at v2.1.233 (autocompact, workflows, agent teams, cross-session, artifacts, theme, gateway/federation auth, managed version gating, `sandbox.credentials`, …). caliban implements the Claude-Code-compatible core; the long tail is unimplemented and mostly out of scope until the corresponding features exist |
@@ -325,10 +341,15 @@ loads nested project style dirs between cwd and repo root.
 
 > **Honesty pass 2026-08-15.** The registry
 > (`caliban/src/tui/slash.rs::SlashCommandRegistry`, ADR-0040) has **40
-> registered names** (36 visible + 4 hidden). Nine are pure stubs and four are
-> partial. The previous version of this section bundled stubs into ✅ rows
-> whose own notes admitted they were stubs; those rows are now split so each
-> command carries its true status.
+> registered names** (36 visible + 4 hidden: `/exit`, `/plugin`, `/voice`,
+> `/system`). Of those 40, **ten are pure stubs** (`/agents`, `/login`,
+> `/logout`, `/status`, `/setup-token`, `/heapdump`, `/feedback`, `/tui`,
+> `/loop`, `/voice`) and **three are partial** (`/output-style`,
+> `/statusline`, `/resume`); the other 27 are real. The previous version of
+> this section bundled stubs into ✅ rows whose own notes admitted they were
+> stubs; those rows are now split so each command carries its true status.
+> **All 40 registered names now have a row.** The 🔴 rows at the bottom of the
+> table are commands that are *not registered at all* — absent, not stubbed.
 
 | Command | Caliban | Notes |
 |---|---|---|
@@ -340,6 +361,7 @@ loads nested project style dirs between cwd and repo root.
 | `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay |
 | `/recap`, `/btw` | ✅ | ADR-0040. Upstream's `/btw` has since become a threaded overlay with fork/copy/clear — not adopted |
 | `/doctor` | ✅ | **Split out of the old `/doctor, /heapdump, /feedback` row.** Real: `crate::diagnostics::Diagnostics::run`, `--deep` supported |
+| `/system` (hidden) | ✅ | **Previously unrowed** — the last of the 40 registered names to get a row. Real: opens the active-system-prompt overlay (`caliban/src/tui/slash/observe.rs:390` → `Overlay::System` → `overlay.rs:238::system_lines`). Marked `hidden: true`, "present for backwards compat; not in spec" — no Claude Code analogue |
 | `/output-style` | 🟡 | **Previously unrowed.** Lists the registry and the active style, but selection is still env-var only (`CALIBAN_OUTPUT_STYLE`); no picker |
 | `/statusline` | 🟡 | **Split from the old `/statusline, /tui` row.** Reports the live `statusLine` command/timeout/padding; no editor |
 | `/resume` | 🟡 | **Down-ticked.** Real listing + name-substring filter, but the in-place picker overlay is still deferred (`caliban/src/tui/slash/session.rs:180`) pending `Overlay` support for non-`Copy` variants |
@@ -352,7 +374,7 @@ loads nested project style dirs between cwd and repo root.
 | Immediate (mid-turn) slash dispatch | ✅ | **Previously unrowed (#13/#78).** `SlashCommandMeta.immediate` / `is_immediate_slash` (`caliban/src/tui/slash.rs:269`) — 33 commands execute immediately instead of requiring a confirmation round-trip |
 | `/theme` | 🔴 | No `/theme` command and no TUI color system; the only "theme" reference is a doc comment calling the TUI settings table opaque |
 | `/code-review`, `/security-review`, `/review`, `/ultrareview` | 🔴 | Zero matches in the repo, as commands or as skills. Depends on the Skills polish sub-project |
-| `/run`, `/verify`, `/debug`, `/batch` | 🔴 | The bundled-skills mechanism exists (`crates/caliban-skills/src/builtins.rs`, `include_str!`-embedded) but ships **exactly one** skill — `auto-memory`. Upstream ships eight bundled skills and has made `/doctor` one of them |
+| `/run`, `/verify`, `/debug`, `/batch` | 🔴 | The bundled-skills mechanism exists (`crates/caliban-skills/src/builtins.rs`, `include_str!`-embedded) but ships **exactly one** skill — `auto-memory`. Upstream ships **nine**: the original eight (`/code-review` aka `/review`, `/batch`, `/debug`, `/loop`, `/claude-api`, `/run`, `/verify`, `/run-skill-generator`) plus `/doctor`, which moved from built-in command to bundled skill in v2.1.205 |
 | `/subtask`, `/tasks`, `/insights`, `/import`, `/schedule`, `/reload-plugins`, `/rename`, `/copy`, `/fast` | 🔴 | **New row (upstream).** Commands added upstream since 2026-05-24 with no caliban analogue. Upstream also **removed** `/output-style` (v2.1.91) and `/fork` (superseded by `/subtask`) |
 
 ## N. Long-tail surfaces (cloud / IDE / mobile)
@@ -387,16 +409,42 @@ computer-use**, **GitHub Code Review**, and the **Managed Agents** hosted API.
 
 ## Tier ordering (refresh when shipping)
 
-**Rewritten 2026-08-15.** Tiers 1–4 of the original ordering are **complete** —
-every numbered item is ✅ in the body with a shipped ADR behind it — and Tier 5
-is mostly done (auto-memory, NotebookEdit, WebSearch, background fleet, status
-line, output styles all ✅). The remaining work is a different shape, so the
-tiers below replace the old list rather than extending it.
+**Rewritten 2026-08-15.** Every item in the old Tiers 1–4 has **shipped** in
+the sense that its ADR is accepted and its crate exists — but "shipped" is not
+"✅", and an earlier draft of this section claimed the stronger thing ("every
+numbered item is ✅"), which is exactly the optimistic drift this refresh
+exists to remove. Audited against the body of this matrix, **6 of the 12
+numbered items are ✅ and 6 are not**:
+
+| Old tier item | Status now | Why |
+|---|---|---|
+| T1 #1 Hook event surface (B) | 🟡 | Four §B rows are 🟡 — handler types, config-hook events, `ConfigChange`/`CwdChanged`, subagent inheritance |
+| T1 #2 Settings hierarchy + `/config` (D) | 🟡 | Loading and `/config` are ✅, but live reload is 🟡 — `SettingsWatcher` is never constructed in the binary |
+| T1 #3 Headless `-p` + JSON (J) | ✅ | `--json-schema` is 🟡, but that is structured output, not the headless protocol |
+| T2 #4 TUI ergonomics (E) | 🟡 | Image/vision input is 🟡 (no caller); vim mode and voice are 🔴 |
+| T2 #5 Slash coverage (K, M) | 🟡 | Ten registered stubs + three partials in §M |
+| T2 #6 Checkpointing + `/rewind` (C) | ✅ | |
+| T3 #7 Real MCP wiring (H) | ✅ | |
+| T3 #8 Permission modes + auto-mode (A) | ✅ | |
+| T3 #9 Plugin system (B) | ✅ | Loader is real; `enabled_plugins` being hardcoded empty is a §L wiring bug, not a plugin-system gap |
+| T4 #10 OS sandbox (A) | 🟡 | Backends real, but one settings key and no per-hostname egress allowlist |
+| T4 #11 OTel + cost (K) | 🟡 | No logs pipeline; 1 of 6 metrics emits |
+| T4 #12 Bedrock + Vertex (I) | ✅ | |
+
+Tier 5 is likewise mostly-but-not-entirely done: auto-memory, NotebookEdit,
+WebSearch, background fleet, status line and output styles are ✅; vim mode,
+voice, and the GitHub Action / devcontainer packaging are not. **The honest
+summary is that the old tiers got caliban to feature-complete-on-paper, and the
+remaining work is finishing the last mile of things already built.** That is a
+different shape of work, so the tiers below replace the old list rather than
+extending it — and the four 🟡 items above are folded into them rather than
+being declared done.
 
 **Tier 1 — Truth debt (cheap, do first):**
 1. Keep this matrix honest as features land. The 2026-08-15 pass down-ticked
-   12 rows, all of the same shape: machinery built and tested, last mile into
-   production unwired. Prefer 🟡 at merge time over a ✅ that has to be undone.
+   18 rows; 13 of those were the same shape — machinery built and tested,
+   last mile into production unwired. Prefer 🟡 at merge time over a ✅ that
+   has to be undone.
 2. Close the stub clusters that currently *look* shipped: §M `/agents`,
    `/login`/`/logout`/`/status`/`/setup-token`, `/heapdump`, `/feedback`,
    `/tui`, `/loop`.
@@ -407,25 +455,28 @@ tiers below replace the old list rather than extending it.
 4. Consume the parsed OTLP mTLS material (#465).
 5. Give `caliban_images::resolve_image_attachments` a caller — an `--image`
    flag and a TUI paste path (§E).
-6. Flip `tools.lazy_mcp` on by default per ADR-0046's v1.1 promise (§F).
-7. Populate `enabled_plugins` at `startup/compose.rs:1680` so
+6. Construct `SettingsWatcher` in the binary so settings live-reload and the
+   `ConfigChange` hook actually fire (§D, §B) — and dispatch `CwdChanged` and
+   `Notification`, which have no call site either.
+7. Flip `tools.lazy_mcp` on by default per ADR-0046's v1.1 promise (§F).
+8. Populate `enabled_plugins` at `startup/compose.rs:1680` so
    `force_for_plugin` stops being inert (§L).
 
 **Tier 3 — Real feature gaps, ranked:**
-8. **Auth surface** — the largest stub cluster, and it has *no spec and no
+9. **Auth surface** — the largest stub cluster, and it has *no spec and no
    ADR*. Write the spec first.
-9. Hook inheritance for foreground sub-agents (`NoopHooks` today) + config
-   handlers on events beyond the three `event_supported` allows (§B).
-10. Sandbox configuration surface + the per-hostname egress allowlist (#477,
+10. Hook inheritance for foreground sub-agents (`NoopHooks` today) + config
+    handlers on events beyond the three `event_supported` allows (§B).
+11. Sandbox configuration surface + the per-hostname egress allowlist (#477,
     #481) — §A.
-11. `WaitForMcpServers` (#F), `/agents` fleet overlay, `/resume` picker.
-12. Native structured output for `--json-schema` (needs an ADR).
+12. `WaitForMcpServers` (§F), `/agents` fleet overlay, `/resume` picker.
+13. Native structured output for `--json-schema` (needs an ADR).
 
 **Tier 4 — Ecosystem / packaging:**
-13. Publish a reusable GitHub Action (#39) and a devcontainer feature (#40).
-14. Foundry provider (#30); PowerShell tool.
-15. Skills polish sub-project — currently **one** bundled skill; unblocks
-    `/code-review`, `/run`, `/verify`, `/debug`, `/batch`.
+14. Publish a reusable GitHub Action (#39) and a devcontainer feature (#40).
+15. Foundry provider (#30); PowerShell tool.
+16. Skills polish sub-project — currently **one** bundled skill vs upstream's
+    nine; unblocks `/code-review`, `/run`, `/verify`, `/debug`, `/batch`.
 
 **Tier 5 — TUI polish & long tail:**
 Vim mode, voice dictation, `/theme` + a color system, the fullscreen renderer,
@@ -446,4 +497,5 @@ emoji shortcodes, and everything in §N.
    history — append your entry and keep the prior "Prior refresh …" chain
    intact.
 4. Periodically re-verify the ✅ rows too, not just the 🔴/🟡 ones. A ✅ that
-   was true when it was written can rot; the 2026-08-15 pass found eight.
+   was true when it was written can rot; of the 2026-08-15 pass's 18
+   down-ticks, 17 were rows previously marked ✅.
