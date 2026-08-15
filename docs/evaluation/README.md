@@ -18,6 +18,44 @@ competing agents, and (soon) against standard benchmarks.
   Inventories are static, dated snapshots of a competitor's documented
   surface; re-baseline them manually before a parity-prioritization pass.
 
+### Scoring rule for parity matrices
+
+Three independent primary-source refreshes (#516 Claude Code, #517 Pi, #519
+the sibling sweep) each arrived at the same rule after each found the same
+failure mode — rows drift optimistic, because a capability gets ticked ✅ when
+it is *designed, scaffolded, or unit-tested*, and nobody ticks it back down
+when it turns out nothing calls it. Writing the rule down is what stops the
+drift recurring:
+
+> **A row is ✅ only when a production call path from the shipped binary
+> reaches it.** Machinery that compiles and is unit-tested but has no
+> non-test caller is **🟡 at most**. A capability with no user-reachable
+> path at all is **🔴**, however complete the crate behind it is.
+
+Corollaries, all of them things a real refresh has had to rule on:
+
+- **`#[allow(dead_code)]` is a 🔴/🟡 signal, not a formality.** If the only
+  callers of a function are its own `#[cfg(test)]` module, it is not shipped.
+- **A stub that prints "lands with the &lt;X&gt; spec" is 🔴**, even when the
+  command, flag, or overlay is registered and reachable.
+- **A parsed-but-unread config key is not a feature.** A settings field with
+  no reader, or a struct field hardwired empty at every production
+  constructor, scores as if it were absent.
+- **Design coverage is not implementation.** An accepted ADR or a spec in
+  `docs/superpowers/` justifies nothing above 🔴 on its own.
+- **Cite the evidence inline** — file path, ADR number, or PR/issue number —
+  in the Notes column of every row you change. Anchor cross-matrix
+  references by **section + row label, never line number**: these files get
+  re-flowed on every refresh, so a line anchor is self-invalidating.
+- **State your counting convention** when you report totals. The one in use:
+  counts are capability-table rows in the lettered sections; roadmap and
+  tier-audit tables are excluded; a combined row split into worse-scoring
+  halves counts as a down-tick, and deleting a duplicate row is neither.
+
+Prefer 🟡 at merge time over a ✅ that has to be undone. The matrices are the
+prioritization input — an overstated row causes a real gap to be skipped in
+sprint planning.
+
 ## Coming later
 
 Standardized benchmark runs (e.g. SWE-bench Lite) and their result
