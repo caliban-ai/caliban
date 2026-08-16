@@ -57,6 +57,15 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh and
 **not** re-verified against `main` that pass — competitor facts/notes only;
 #487).
 
+**Subsequent correction 2026-08-16 (#524):** **0 down-ticks, 1 up-tick, 0
+note-only corrections** — §A, row *"npm / Bun / pnpm / Yarn / Homebrew / Arch /
+Choco / Scoop / Mise / Docker"*, 🔴 → 🟡. Same counting convention as above; the
+row count is unchanged at **73**. This is the mirror image of the #519 failure
+mode: not a row scored optimistically, but shipped capability scored as absent —
+Docker is named in the row and the GHCR image ships, and cargo/crates.io is a
+package-manager channel that ships. The sibling *self-update* row below stays
+🔴 and is unaffected.
+
 > **Caveat:** rows tagged **⚠** depend on an OpenCode fact still flagged
 > uncertain in the inventory (§14 there). The "caliban detail inferred from the
 > Claude Code matrix rather than re-verified against `main`" half of this
@@ -69,7 +78,7 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh and
 
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
-| npm / Bun / pnpm / Yarn / Homebrew / Arch / Choco / Scoop / Mise / Docker | 🔴 | caliban builds from source via `cargo`; no package-manager channels yet |
+| npm / Bun / pnpm / Yarn / Homebrew / Arch / Choco / Scoop / Mise / Docker | 🟡 | **Up-ticked 2026-08-16 (#524).** The old note — "no package-manager channels yet" — was wrong twice over. (1) **Docker**, which this row explicitly names, *is* published: `ghcr.io/caliban-ai/caliban`, multi-arch on every `v*` tag (`.github/workflows/release-image.yml`, `docs/container.md`, PR #298) — the same correction §A of [`../pi/parity-gap-matrix.md`](../pi/parity-gap-matrix.md) ("Published container image") already applied to the sibling matrices. (2) **cargo/crates.io** is a package-manager channel and it ships: `.github/workflows/publish.yml` publishes on every `v*` tag, all 8 versions through 0.8.0 are live and unyanked, and the published crate carries `[[bin]] name = "caliban"` (`caliban/Cargo.toml`), so `cargo install caliban` installs a working binary — now the primary path in `docs/guide/src/getting-started/installation.md`. Not ✅: none of npm / Bun / pnpm / Yarn / Homebrew / Arch / Choco / Scoop / Mise ship, and cargo is not among the channels OpenCode offers — an OpenCode user cannot reach caliban through any tool they already have unless it is Docker |
 | Self-update (`opencode upgrade`) | 🔴 | no built-in updater |
 
 ## B. Architecture (client/server)

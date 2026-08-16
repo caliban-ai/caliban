@@ -18,7 +18,7 @@ routing, memory, skills, and prompt context.
 > sessions, ratatui TUI, headless `--print` mode, sub-agents, MCP, sandbox,
 > permissions, checkpoints, auto-memory, image input, and a multi-tier
 > settings system are all shipped. Many small parity gaps with Claude Code
-> remain — see [`docs/parity-gap-matrix.md`](docs/parity-gap-matrix.md) for
+> remain — see [`docs/evaluation/competitors/claude-code/parity-gap-matrix.md`](docs/evaluation/competitors/claude-code/parity-gap-matrix.md) for
 > the scoreboard and the [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1)
 > for the actionable backlog. Private repo, designed to be open-sourced.
 
@@ -37,6 +37,23 @@ routing, memory, skills, and prompt context.
 - **Rust-fast.** Harness overhead should be negligible compared to model
   latency. The user's time-to-result is dominated by the model, not the
   runtime.
+
+## Install
+
+caliban is published to [crates.io](https://crates.io/crates/caliban) on every
+`v*` tag, so the quickest path to a working binary is:
+
+```bash
+cargo install caliban --locked                              # -> ~/.cargo/bin/caliban
+cargo install caliban-supervisor --bin caliband --locked    # optional background-fleet daemon
+```
+
+Requires Rust 1.95 or newer. There are no pre-built binary downloads yet, so
+this compiles from source; the [container image](#container-image) is the
+no-build alternative. To build from a git checkout instead, see
+[Building](#building) below, or the guide's
+[Installation & Building](docs/guide/src/getting-started/installation.md) page
+for the full walkthrough.
 
 ## Community
 
@@ -603,11 +620,11 @@ cargo build --workspace \
 
 caliban tracks parity against Claude Code in two living documents:
 
-- [`docs/parity-gap-matrix.md`](docs/parity-gap-matrix.md) — checklist
+- [`docs/evaluation/competitors/claude-code/parity-gap-matrix.md`](docs/evaluation/competitors/claude-code/parity-gap-matrix.md) — checklist
   of capabilities, marked ✅ / 🟡 / 🔴, grouped into themes (A–N) with
   tier ordering at the bottom. Consult before prioritizing the next
   feature; tick rows in the same PR that closes a gap.
-- [`docs/claude-code-capability-inventory.md`](docs/claude-code-capability-inventory.md)
+- [`docs/evaluation/competitors/claude-code/capability-inventory.md`](docs/evaluation/competitors/claude-code/capability-inventory.md)
   — static snapshot of Claude Code's documented surface, captured from
   `docs.claude.com`. Re-baselined manually before each parity review.
 

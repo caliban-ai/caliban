@@ -54,6 +54,17 @@ GitHub/npm APIs — **primary sources only**. The caliban column was **re-verifi
 against the code on `main` at v0.8.0 (`81ee0ff`)** this pass, not inherited from
 the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 
+**Subsequent correction 2026-08-16 (#524):** **0 down-ticks, 1 up-tick, 0
+note-only corrections** — §A, row *"One-line install (npm / `curl | sh` /
+PowerShell / pnpm / bun)"*, 🔴 → 🟡. Counts are capability-table rows in the
+lettered sections, excluding **(tk)** toolkit rows and the ➕ caliban-ahead rows,
+per the shared convention. The 🔴 rested on a misreading of the `Cargo.toml`
+lint comment (see the row's note); `cargo install caliban` has worked since
+0.1.0. The neighbouring *prebuilt standalone binaries* and *self-update* rows
+were re-checked this pass and **stay 🔴** — `gh release view v0.8.0 --json
+assets` still returns zero assets on every release, and there is still no
+`update`/`upgrade` verb in `caliban/src/args.rs`.
+
 > **Caveat:** rows tagged **⚠** depend on a Pi fact still flagged uncertain in the
 > inventory (§19 there) or on a caliban detail that could not be settled from the
 > source this pass. **Six** rows below also **correct** claims in the sibling
@@ -68,7 +79,7 @@ the sibling matrices; every 🔴 and 🟡 cites a file path, ADR, issue, or PR.
 
 | Capability (Pi) | Caliban | Notes |
 |---|---|---|
-| One-line install (npm / `curl \| sh` / PowerShell / pnpm / bun) | 🔴 | caliban documents only `cargo build --release`; `docs/guide/src/getting-started/installation.md` still says *"There are no pre-built releases yet."* All 8 versions through 0.8.0 *are* live on crates.io, but `Cargo.toml:182-187` calls the crates *"plumbing… explicitly internal/unstable"* and no doc teaches `cargo install caliban` |
+| One-line install (npm / `curl \| sh` / PowerShell / pnpm / bun) | 🟡 | **Up-ticked 2026-08-16 (#524)** — the 🔴 rested on a misreading. caliban *does* have a one-line install: `cargo install caliban`, published on every `v*` tag (`.github/workflows/publish.yml`), all 8 versions through 0.8.0 live and unyanked, and the published crate carries `[[bin]] name = "caliban"` (`caliban/Cargo.toml`) — so the tarball installs a binary, not just library plumbing. The prior note cited `Cargo.toml` (workspace `[workspace.lints.clippy]`, `cargo_common_metadata`) as evidence the crates are *"plumbing… explicitly internal/unstable"*; that comment scopes itself to **"the 24 library crates"** and says the **binary "carries discovery metadata instead"** — i.e. the binary is deliberately meant to be found and installed, which its `keywords`/`categories`/`readme` on crates.io confirm. The claim that "no doc teaches `cargo install caliban`" was also false — `caliban/README.md` (the crates.io landing page) has taught it since 0.1.0, and it is now the primary path in `docs/guide/src/getting-started/installation.md` (#524). Not ✅: none of the five channels this row names ship, and `cargo install` presupposes a Rust 1.95+ toolchain and a multi-minute source compile, where Pi's `curl \| sh` drops a ready binary with no prerequisites |
 | Prebuilt standalone binaries (6 targets, `SHA256SUMS`, reproducible builds) | 🔴 | `gh release view v0.8.0 --json assets` returns **zero assets** on every release; no workflow uploads binaries |
 | Published container image | ✅ | `ghcr.io/caliban-ai/caliban`, tags 0.5.0–0.8.0 (`docs/container.md`, `.github/workflows/release-image.yml`, PR #298). Pi ships a Dockerfile for sandboxing but publishes no image. ⚠ **corrects** the install row in §A ("Install & distribution") of [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md), which still parenthesises the image as "not yet shipped" |
 | Self-update (`pi update --self`) | 🔴 | no `update`/`upgrade` variant in `caliban/src/args.rs`; only `caliban plugin update <name>` |

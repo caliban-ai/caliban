@@ -74,7 +74,7 @@ matrix](../claude-code/parity-gap-matrix.md) and the
 
 | Capability (Grok Build) | Caliban | Notes |
 |---|---|---|
-| One-line install script (`curl … x.ai/cli/install.sh`) | 🔴 | caliban builds from source via `cargo`; no install-script channel yet |
+| One-line install script (`curl … x.ai/cli/install.sh`) | 🔴 | No `curl \| sh` channel — rating stands. **Note corrected 2026-08-16 (#524):** "builds from source via `cargo`" understated distribution; `cargo install caliban` ships (`.github/workflows/publish.yml`, published on every `v*` tag, `[[bin]] name = "caliban"` in `caliban/Cargo.toml`). It is a package-manager install, not an install *script*, so it does not close this row |
 | Background self-update (`--no-auto-update` to disable) | 🔴 | no built-in updater |
 | Open-source harness/TUI (Apache-2.0) | ✅ | caliban is open source (harness + TUI in-repo) |
 
