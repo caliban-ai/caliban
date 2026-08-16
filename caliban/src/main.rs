@@ -15,6 +15,7 @@ mod plugin_cli;
 mod provider_wiring;
 mod refreshing_provider;
 mod router;
+mod serve;
 mod settings_cli;
 mod startup;
 mod stream_decode;
