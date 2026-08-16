@@ -43,14 +43,19 @@ pub enum StopReason {
 /// Token usage statistics for a response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
-    /// Tokens consumed from the input (prompt).
+    /// Total prompt tokens (the `OpenAI` convention), **inclusive** of any cached
+    /// portion. Every provider adapter normalizes to this: for Anthropic the
+    /// three disjoint wire counters are summed, and `cache_creation_input_tokens`
+    /// / `cache_read_input_tokens` below are informational **subsets** of this
+    /// value — never add them back on top of it (they were double-counted on the
+    /// generation span before #493).
     pub input_tokens: u32,
     /// Tokens generated in the output.
     pub output_tokens: u32,
-    /// Tokens written to the prompt cache, if applicable.
+    /// Cache-creation tokens, if applicable. A subset of `input_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,
-    /// Tokens read from the prompt cache, if applicable.
+    /// Cache-read tokens, if applicable. A subset of `input_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
 }
