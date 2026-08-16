@@ -1006,6 +1006,7 @@ dependencies = [
  "caliban-agent-core",
  "caliban-checkpoint",
  "caliban-common",
+ "caliban-drive",
  "caliban-images",
  "caliban-mcp-client",
  "caliban-memory",
@@ -1123,6 +1124,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "caliban-drive"
+version = "0.8.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "caliban-agent-core",
+ "caliban-provider",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

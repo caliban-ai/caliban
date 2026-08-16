@@ -1,0 +1,29 @@
+[package]
+name        = "caliban-drive"
+version.workspace = true
+description = "Transport-agnostic drive core (run / stream / status / input) for driving a caliban agent programmatically — internal crate for the caliban binary; no API stability, pin exact versions"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+rust-version.workspace = true
+
+[dependencies]
+caliban-agent-core = { workspace = true }
+caliban-provider   = { workspace = true }
+async-stream       = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+serde              = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+caliban-provider = { workspace = true, features = ["mock"] }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+serde_json       = { workspace = true }
+
+[lints]
+workspace = true

@@ -10,6 +10,7 @@ members = [
     "crates/caliban-provider-ollama",
     "crates/caliban-provider-google",
     "crates/caliban-agent-core",
+    "crates/caliban-drive",
     "crates/caliban-tools-builtin",
     "crates/caliban-sessions",
     "crates/caliban-checkpoint",
@@ -50,6 +51,7 @@ caliban-provider-openai    = { path = "crates/caliban-provider-openai",    versi
 caliban-provider-ollama    = { path = "crates/caliban-provider-ollama",    version = "0.8.0" }
 caliban-provider-google    = { path = "crates/caliban-provider-google",    version = "0.8.0" }
 caliban-agent-core         = { path = "crates/caliban-agent-core",         version = "0.8.0" }
+caliban-drive              = { path = "crates/caliban-drive",              version = "0.8.0" }
 caliban-tools-builtin      = { path = "crates/caliban-tools-builtin",      version = "0.8.0" }
 caliban-sessions           = { path = "crates/caliban-sessions",           version = "0.8.0" }
 caliban-checkpoint         = { path = "crates/caliban-checkpoint",         version = "0.8.0" }
