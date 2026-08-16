@@ -55,6 +55,16 @@ matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh;
 #485). That pass corrected Codex-side facts and notes only — caliban ratings
 were not re-verified against `main`.
 
+**Subsequent correction 2026-08-16 (#524):** **0 down-ticks, 0 up-ticks, 1
+note-only correction** — §A, row *"npm (`@openai/codex`) / Homebrew cask / shell
++ PowerShell installers"*. Same counting convention as above; the row count is
+unchanged at **75**. This is the mirror image of the #519 failure mode: not a
+row scored optimistically, but a shipped capability described as absent. The
+note claimed caliban only "builds from source via `cargo`" when the crates.io
+channel has shipped on every `v*` tag since 0.1.0. The **rating is deliberately
+left 🔴** — npm, the Homebrew cask, and the shell/PowerShell installers all
+genuinely do not exist.
+
 > **Caveat:** rows tagged **⚠** depend on a Codex fact still flagged uncertain
 > in the inventory (§14 there). The "caliban detail inferred from the Claude
 > Code matrix rather than re-verified against `main`" half of this caveat was
@@ -67,7 +77,7 @@ were not re-verified against `main`.
 
 | Capability (Codex) | Caliban | Notes |
 |---|---|---|
-| npm (`@openai/codex`) / Homebrew cask / shell + PowerShell installers | 🔴 | caliban builds from source via `cargo`; no published npm/brew/installer channel yet. **Note corrected 2026-08-15 (#519):** the parenthetical claim that the container image is "not yet shipped" was stale — `ghcr.io/caliban-ai/caliban` is published multi-arch on every `v*` tag (`.github/workflows/release-image.yml`, `docs/container.md`, PR #298). The image does not close *this* row (it is not a package-manager channel), but it is shipped |
+| npm (`@openai/codex`) / Homebrew cask / shell + PowerShell installers | 🔴 | None of the four channels this row names ship, so the rating stands. **Note corrected 2026-08-16 (#524):** the old note said caliban "builds from source via `cargo`; no published npm/brew/installer channel yet", which understated distribution — caliban **is** published to crates.io on every `v*` tag (`.github/workflows/publish.yml`, `scripts/publish.sh`), all 8 versions through 0.8.0 are live and unyanked, and the published `caliban` crate carries `[[bin]] name = "caliban"` (`caliban/Cargo.toml`), so `cargo install caliban` yields a working binary. That is a package-manager channel — just not one Codex offers, so it closes no cell in *this* row. **Note corrected 2026-08-15 (#519):** the parenthetical claim that the container image is "not yet shipped" was stale — `ghcr.io/caliban-ai/caliban` is published multi-arch on every `v*` tag (`.github/workflows/release-image.yml`, `docs/container.md`, PR #298). The image does not close *this* row either, but it is shipped |
 | Prebuilt binaries macOS (arm64+x86_64) / Linux (x86_64+arm64) | 🔴 | release-binary distribution not yet stood up |
 | Windows support | 🟡 | caliban runs on Windows/WSL for most paths; OS sandbox on Windows is deferred (see E) |
 

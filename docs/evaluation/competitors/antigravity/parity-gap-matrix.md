@@ -86,7 +86,7 @@ snapshot 2026-07-27, now read directly off the canonical
 |---|---|---|
 | Desktop-app download (macOS/Windows/Linux) | n/a | caliban is a terminal agent, not a GUI app; builds from source via `cargo` |
 | Free public-preview access (Google account) | n/a | no hosted account plane; caliban runs against your own provider keys |
-| One-line install / self-update channel | 🔴 | caliban builds from source; no install-script or auto-update channel yet (shared with the Grok Build / OpenCode long-tail) |
+| One-line install / self-update channel | 🔴 | No install-script or auto-update channel — rating stands (shared with the Grok Build / OpenCode long-tail); there is still no `update`/`upgrade` verb in `caliban/src/args.rs`. **Note corrected 2026-08-16 (#524):** "caliban builds from source" understated distribution — `cargo install caliban` ships (`.github/workflows/publish.yml`, `[[bin]] name = "caliban"` in `caliban/Cargo.toml`), it is just neither an install script nor a self-updater |
 
 ## B. Surfaces & architecture
 
