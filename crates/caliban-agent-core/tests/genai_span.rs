@@ -60,6 +60,48 @@ fn text_stream_events(
     ]
 }
 
+/// Stream whose `message_delta` usage carries the prompt-cache breakdown.
+///
+/// `input_tokens` is the IR-normalized TOTAL prompt size (inclusive of the
+/// cached portion), and `cache_creation`/`cache_read` are informational subsets
+/// of it — the convention every provider adapter emits. Used to prove the
+/// generation span does not re-add the cache counters on top of the already
+/// inclusive `input_tokens` (#493).
+fn cached_stream_events(
+    msg_id: &str,
+    model: &str,
+    text: &str,
+    stop: StopReason,
+) -> Vec<caliban_provider::error::Result<StreamEvent>> {
+    vec![
+        Ok(StreamEvent::MessageStart {
+            id: msg_id.to_owned(),
+            model: model.to_owned(),
+        }),
+        Ok(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_type: StreamingContentType::Text,
+        }),
+        Ok(StreamEvent::Delta {
+            index: 0,
+            delta: StreamingDelta::Text(text.to_owned()),
+        }),
+        Ok(StreamEvent::ContentBlockStop { index: 0 }),
+        Ok(StreamEvent::MessageDelta {
+            stop_reason: Some(stop),
+            usage_delta: Some(Usage {
+                // Total prompt = 300, of which 100 were cache-creation and 200
+                // cache-read. `input_tokens` already includes both subsets.
+                input_tokens: 300,
+                output_tokens: 4,
+                cache_creation_input_tokens: Some(100),
+                cache_read_input_tokens: Some(200),
+            }),
+        }),
+        Ok(StreamEvent::MessageStop),
+    ]
+}
+
 fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a Value> {
     span.attributes
         .iter()
@@ -172,5 +214,63 @@ async fn one_turn_emits_gen_ai_chat_span() {
     assert!(
         attr(chat, "gen_ai.request.top_p").is_none(),
         "unset top_p should be omitted",
+    );
+}
+
+/// #493: on a cached turn the generation span must record `input_tokens` as the
+/// already-inclusive total prompt size, NOT re-add the cache subsets on top of
+/// it. Regression guard against double-counting `cache_read + cache_creation`.
+#[tokio::test]
+async fn cached_turn_input_tokens_not_double_counted() {
+    let exporter = InMemorySpanExporterBuilder::new().build();
+    let provider = TracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let tracer = provider.tracer("caliban-test");
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let subscriber = Registry::default().with(otel_layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = Arc::new(MockProvider::new());
+    mock.enqueue_stream(cached_stream_events(
+        "msg1",
+        "resp-model",
+        "hi there",
+        StopReason::EndTurn,
+    ));
+
+    let agent = Arc::new(
+        Agent::builder()
+            .provider(provider_arc(Arc::clone(&mock)))
+            .model("req-model")
+            .max_tokens(1024)
+            .build()
+            .expect("build agent"),
+    );
+
+    let mut stream =
+        agent.stream_until_done(vec![Message::user_text("hi")], CancellationToken::new());
+    while let Some(ev) = stream.next().await {
+        ev.expect("event should not error");
+    }
+    drop(stream);
+
+    let spans = exporter.get_finished_spans().expect("in-memory spans");
+    let chat = spans
+        .iter()
+        .find(|s| s.name.starts_with("chat"))
+        .expect("expected a `chat` generation span");
+
+    // input_tokens is already inclusive of the 100 + 200 cache tokens, so the
+    // recorded value must be 300 — not 300 + 200 + 100 = 600.
+    assert_eq!(
+        attr(chat, "gen_ai.usage.input_tokens"),
+        Some(&Value::I64(300)),
+        "gen_ai.usage.input_tokens must not re-add cache_read + cache_creation",
+    );
+    assert_eq!(
+        attr(chat, "gen_ai.usage.output_tokens"),
+        Some(&Value::I64(4)),
+        "gen_ai.usage.output_tokens",
     );
 }

@@ -1863,14 +1863,14 @@ impl Agent {
                     "gen_ai.response.finish_reasons",
                     finish_reason_str(turn_stop_reason),
                 );
-                // ADR 0053: the cache-token breakdown has no stable semconv key,
-                // so fold it into the standard input-token count. Anthropic (and
-                // the OTLP-facing providers) report `input_tokens` exclusive of
-                // cached prompt tokens, so total prompt tokens =
-                // input + cache_read + cache_creation.
-                let genai_input_tokens = i64::from(turn_usage.input_tokens)
-                    + i64::from(turn_usage.cache_read_input_tokens.unwrap_or(0))
-                    + i64::from(turn_usage.cache_creation_input_tokens.unwrap_or(0));
+                // ADR 0053: the cache-token breakdown has no stable semconv key.
+                // Every provider adapter already normalizes `input_tokens` to the
+                // TOTAL prompt size, inclusive of the cached portion (cache_read +
+                // cache_creation are informational subsets of it — see
+                // `Usage::input_tokens`), so it maps straight onto the standard
+                // input-token count. Re-adding the cache counters here would
+                // double-count them (#493).
+                let genai_input_tokens = i64::from(turn_usage.input_tokens);
                 chat_span.record("gen_ai.usage.input_tokens", genai_input_tokens);
                 chat_span.record(
                     "gen_ai.usage.output_tokens",
