@@ -34,8 +34,26 @@ shipped PR's v2 follow-up notes.
 > status-audit table under *Tier ordering* scores old roadmap items rather
 > than capabilities and is excluded from every count here.
 
-**Last refreshed:** 2026-08-15 (primary-source re-baseline of **both** halves,
-matching the 2026-07-27 standard set for the other competitors in #505.
+**Last refreshed:** 2026-08-16 (#522 — **scoring only, no upstream
+re-baselining**: applies the production-call-path rule in
+[`docs/evaluation/README.md`](../../README.md) to this file, which PR #520
+(#519) deliberately skipped because PR #516 was rewriting it concurrently. That
+left this matrix — the one the evaluation README names as the primary
+prioritization input — as the last carrying rows the sweep would have corrected.
+**9 down-ticks, 0 up-ticks**, row counts **104 ✅ / 24 🟡 / 26 🔴 → 96 ✅ / 24 🟡
+/ 34 🔴** (154 rows, unchanged; no rows added or deleted). Seven ✅→🔴
+(§C auto-checkpoint, §C Esc-Esc, §H elicitation, §H resources, §I Bedrock, §I
+Vertex, §M `/rewind`), one ✅→🟡 (§B "Plugin packages") and one 🟡→🔴 (§C
+"Checkpoint limitations"). Every one is the same shape: complete, unit-tested machinery
+with **no production call site**. The Bedrock/Vertex and checkpointing halves
+match the treatment the codex / opencode / antigravity / grok-build matrices
+already carry; **§H elicitation and §H resources are new findings** surfaced by
+the "re-verify every remaining ✅ row" criterion — both are exported from
+`caliban-mcp-client` and constructed only inside their own `mod tests`. Also
+corrects the §L footnote's stale `compose.rs:1680` → `:1690` and re-audits the
+tier table (6 ✅ → 3 ✅ of 12). Prior refresh 2026-08-15 (primary-source
+re-baseline of **both** halves, matching the 2026-07-27 standard set for the
+other competitors in #505.
 **(a) Upstream:** [`capability-inventory.md`](capability-inventory.md)
 re-captured from `docs.claude.com` / `code.claude.com` at Claude Code
 **v2.1.233** — the doc site grew ~24 → 100+ pages, three slugs moved
@@ -167,7 +185,7 @@ terminal/CLI parity is reached.
 | Config hooks (`[[hooks.*]]`) execute at runtime | 🟡 | **Down-ticked 2026-08-15.** #121 composes config handlers into the agent chain, but `hooks_router.rs::event_supported` (line 250) admits **only `PreToolUse` / `PostToolUse` / `SessionStart`** — a `[[hooks.UserPromptSubmit]]`, `PreCompact`, `SessionEnd`, or subagent-event handler is warn-and-skipped (#185 H4). Of the in-process events above, everything except `ConfigChange`/`CwdChanged`/`Notification` fires; you just cannot attach a *config* handler to them. `disable_all_hooks` honored; `allow_managed_hooks_only` fires none until scope provenance lands (#124) |
 | Hook event coverage vs upstream's 31 events | 🟡 | **New row.** Upstream documents 31 events. Caliban's taxonomy splits three ways. **(1) Declared and dispatched:** the core loop (see the rows above). **(2) Declared but never dispatched** — the surface exists, nothing fires it: **`Notification`** (`Hooks::notification` + `NotificationCtx`, `crates/caliban-agent-core/src/hooks.rs:493`; implemented by the headless sink at `caliban/src/headless/hooks_sink.rs:217`, but the only `.notification(` *call* sites are in `crates/caliban-agent-core/tests/hooks_events.rs`), plus `ConfigChange` and `CwdChanged`. **(3) Absent entirely** — no trait method at all: `Setup`, `UserPromptExpansion`, `StopFailure`, `PostToolUseFailure`, `PostToolBatch`, `TeammateIdle`, `InstructionsLoaded`, `WorktreeCreate`/`Remove`, `Elicitation`/`ElicitationResult`, and (new at v2.1.2xx) **`MessageDisplay`** / **`DirectoryAdded`**. Decision protocol also lacks the new `escalate` decision and `retry` field |
 | Hook inheritance for subagents | 🟡 | **Contradiction resolved 2026-08-15** — the duplicate ✅ row in §G was wrong and has been deleted. `inherit_hooks: true` is the default (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:90`) but propagates only the **permission** slice (`InheritableHookConfig` = rules/mode/audit/runtime_rules, `caliban/src/hook_inherit.rs`) to **background** sub-agents (`caliban/src/worker.rs:608`). **Foreground sub-agents get `NoopHooks`** — `install_sub_agent`'s factory never calls `.hooks()` (`caliban/src/startup/compose.rs:884-927`; its own doc comment at :854 says "deferred to v2"). Config `[[hooks.*]]` handlers and closure hooks never cross to any sub-agent |
-| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | ✅ | ADR-0030; `caliban-plugins` orchestrator parses `plugin.json`, expands `${CALIBAN_PLUGIN_ROOT}` (+ `${CLAUDE_PLUGIN_ROOT}` alias), namespaces items, and feeds existing loaders. Marketplace install + trust gating + `caliban plugin {install,list,enable,disable,remove,info,update}` (`crates/caliban-plugins/src/cli.rs`); marketplace fetches routed through the SSRF-guarded client (#158) |
+| Plugin packages (bundle skills + hooks + agents + MCP + output-styles) | 🟡 | **Down-ticked 2026-08-16 (#522).** ADR-0030; `caliban-plugins` parses `plugin.json`, expands `${CALIBAN_PLUGIN_ROOT}` (+ `${CLAUDE_PLUGIN_ROOT}` alias) and namespaces items. The install/manage half is genuine: marketplace install + trust gating + `caliban plugin {install,list,enable,disable,remove,info,update}` (`crates/caliban-plugins/src/cli.rs`), fetches routed through the SSRF-guarded client (#158). **But of the five component aggregations on `PluginManager` (`crates/caliban-plugins/src/manager.rs:262-294`), only `skill_roots` has a non-test consumer** — `caliban/src/main.rs:326`, feeding the skill discovery roots at `startup/compose.rs:632`. `output_style_roots`, `agent_roots`, `hooks_configs` and `mcp_servers` are called **only from `manager.rs`'s own `mod tests`** (which begins at `manager.rs:299`). A sixth kind, `components.commands`, is resolved into `ResolvedComponents.commands` (`crates/caliban-plugins/src/manifest.rs:249`,`:268`) and has **no aggregation function at all**. So a plugin's `hooks.json`, `agents/`, `mcp/.mcp.json`, `output-styles/` and `commands/` are parsed, namespaced and expanded, then never handed to the hooks router, agent registry, MCP client, style registry or slash registry. The manager's only other production consumer is `plugin_manager.loaded()` (`caliban/src/main.rs:329`), which builds name/version/source descriptors for the headless `system/init` frame — metadata, not wiring. **Skills bundle; the other four advertised kinds do not.** See also the §L footnote (`enabled_plugins` hardcoded empty) |
 
 ## C. Memory & checkpointing
 
@@ -178,11 +196,11 @@ terminal/CLI parity is reached.
 | `@path/file` imports inside CLAUDE.md (recursion-bounded) | ✅ | ADR-0036. Note upstream **reduced its own max import depth from 5 to 4 hops** and now skips code spans/fences when parsing imports — worth matching on the next pass |
 | Auto-memory (model-written notes per project) | ✅ | ADR-0035; routed through the gonzalo storage facade in 0.8.0 (#470/#484) |
 | `claudeMdExcludes` for monorepos | ✅ | ADR-0036 |
-| Auto-checkpoint per prompt + `/rewind` | ✅ | ADR-0028; crate `caliban-checkpoint`; `CheckpointHook` snapshots file-tool pre-images per prompt under `$XDG_DATA_HOME/caliban/projects/<cwd-hash>/checkpoints/<session>/prompt-NNN/` (ADR-0050). Durability hardened in 0.6.0 (transactional restore, eviction ordering, atomic index — #412/#444); byte-cap sweeper #180; symlink escape closed #448. Residual: restore is still unconfined against symlink TOCTOU (#497) |
-| Esc-Esc / fork-from-checkpoint | ✅ | ADR-0028 — Esc-Esc on empty input opens the rewind overlay (`is_esc_chord` policy, 400 ms window). Fork-from-checkpoint stays 🔴 (sub-agent fleet spec) |
+| Auto-checkpoint per prompt + `/rewind` | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522) — brings this file in line with the four matrices #519 already corrected.** `caliban-checkpoint` is complete and unit-tested (store/recorder/restore/prune/hook, ADR-0028, durability hardening #412/#444/#180/#448) and **entirely unreachable from the shipped binary**. `CheckpointHook::new` has no construction site outside the crate itself — the three call sites are `crates/caliban-checkpoint/src/hook.rs:191` (its own unit test), `crates/caliban-checkpoint/tests/disabled_env.rs:30` and `tests/plan_mode_marker.rs:23` — so **nothing is ever snapshotted**. `caliban_checkpoint` appears nowhere in `caliban/src/startup/` or `caliban/src/main.rs`. Machinery, not a shipped path. #497 (restore vs symlink TOCTOU) describes code no user can reach |
+| Esc-Esc / fork-from-checkpoint | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522).** The chord is real — Esc-Esc on empty input sets `ViewState::Overlay(Overlay::Rewind)` (`caliban/src/tui/events.rs:729`, `is_esc_chord` 400 ms window) — but it opens onto nothing. `App::with_checkpoint_store` (`caliban/src/tui/app.rs:573`) is the only setter for `app.checkpoint_store` and carries `#[allow(dead_code, reason = "wired by main.rs once full /rewind action plumbing lands")]` with **zero callers anywhere in the workspace**, so the field is always `None` (`app.rs:550`) and `rewind_lines` short-circuits to "(checkpointing not enabled for this session)" (`caliban/src/tui/overlay.rs:826`). Even given a store, the per-entry actions are inert: `Overlay::Rewind` has no arm in the per-overlay key dispatcher (`caliban/src/tui/events.rs:562-589`), so it falls through to the read-only Esc/`q` handler. Fork-from-checkpoint remains unimplemented (sub-agent fleet spec) |
 | MicroCompact (LLM-free per-tool supersession janitor) | ✅ | Plan B (`2026-05-26-context-management`); `MicroCompactor` replaces superseded `ToolResult` blocks (per-tool key: `Read`→file_path, `Grep`/`Glob`→exact args, `WebFetch`→url; `Bash` never supersedable) with `[superseded: <tool>(<key>)]`. Ordering bug fixed #170 |
 | Tool-result size cap with overflow persistence | ✅ | Plan B; `ToolResultCap` (default 50 000 chars) writes overflow to **`$XDG_CACHE_HOME/caliban/tool-overflows/<session-id>/<tool-use-id>.txt`** (XDG-first per ADR-0050 — the old `~/Library/Caches/…` path in this row was stale), replaces inline content with `[truncated: N chars, full content at <path>]` + head/tail preview (`crates/caliban-agent-core/src/post_process.rs`). Window clamp fixed #182 |
-| Checkpoint limitations vs upstream | 🟡 | **New row.** Upstream documents a 100-checkpoint snapshot cap, a "Never mind" option, guided summaries, rewind past a cleared conversation (v2.1.191+), and explicit non-restoration of subagent edits and sym/hard-linked paths. caliban's overlay has none of the menu affordances beyond restore; the limitation set is undocumented |
+| Checkpoint limitations vs upstream | 🔴 | **Rewritten 2026-08-16 (#522) — the previous 🟡 wording assumed restore worked and only the *menu affordances* were missing. Nothing is snapshotted at all** (see the two rows above), so upstream's limitation surface has no caliban counterpart to compare against. Upstream documents a 100-checkpoint snapshot cap, a "Never mind" option, guided summaries, rewind past a cleared conversation (v2.1.191+), and explicit non-restoration of subagent edits and sym/hard-linked paths. caliban has no cap to hit, no restore to qualify, and no menu beyond the empty list. This row becomes meaningful only once `CheckpointHook` and `with_checkpoint_store` acquire production call sites |
 
 ## D. Configuration / settings
 
@@ -254,10 +272,10 @@ terminal/CLI parity is reached.
 | `/mcp` slash + per-server enable/auth | ✅ | ADR-0023 Phase C — glyphs (●/◐/○), `d/r/a/s/t` key hints |
 | OAuth flow + callback port | ✅ | ADR-0023 Phase C — PKCE + loopback, RFC 8414 discovery, manual config, keyring + file-store fallback. Hardened: https + issuer match enforced (#339), atomic `0600` token store (#341), cache-before-discovery + DCR `client_secret` persistence (#333), flow wired into the connection path (#300). Residual: manual-mode token/auth endpoints bypass the https guard (#496) |
 | OAuth Dynamic Client Registration (RFC 7591) | ✅ | **New row (#313/#315).** `oauth = "auto"` servers self-register a client when the provider supports DCR — ahead of Claude Code's documented surface, which only supports pre-configured credentials |
-| Elicitation (server-initiated input) | ✅ | ADR-0023 Phase C — `ElicitationBridge` mpsc → TUI, 5-min cap, auto-decline in `--print` |
+| Elicitation (server-initiated input) | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522) — found by the ✅ re-audit this ticket mandates; #519's sweep never reached this file.** `ElicitationBridge` is real and unit-tested (`crates/caliban-mcp-client/src/elicitation.rs:95`, mpsc + 5-min cap) and exported from `lib.rs:43`, but **it is never constructed outside its own test module**: `mod tests` begins at `elicitation.rs:234` and every `ElicitationBridge::new` / `::with_timeout` call site (`:241`, `:270`, `:289`, `:320`, `:344`) sits below it. There is no consumer anywhere else in `caliban-mcp-client` and **no `elicit` reference in `caliban/src/` at all** beyond the CLI flag — which is itself a documented no-op: `--permission-prompt-tool` is *"parsed-and-ignored with a warning (ADR 0023 Phase C will wire this)"* (`caliban/src/startup/drivers.rs:449-454`). The "mpsc → TUI" half of the old note describes a receiver that does not exist. No MCP server can prompt a caliban user today |
 | `${CLAUDE_PROJECT_DIR}` expansion | ✅ | Phase B `config::expand_value` (we use `mcp.toml`, not `.mcp.json`); settings-path MCP env expansion completed #309/#311 |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` / `MAX_MCP_OUTPUT_TOKENS` envs | ✅ | ADR-0023 — `CALIBAN_MCP_TIMEOUT`/`CALIBAN_MCP_TOOL_TIMEOUT` primary, `MCP_*` honoured for parity |
-| Resources (`@server:resource` references) | ✅ | ADR-0023 Phase C — `McpResource` cache, `list_changed` invalidation, URI-template positional expansion |
+| Resources (`@server:resource` references) | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522) — same re-audit as the row above.** The cache, `list_changed` invalidation and URI-template expansion are all implemented and unit-tested (`crates/caliban-mcp-client/src/resource.rs`, ADR-0023 Phase C) and re-exported at `lib.rs:57` — and that export has **no consumer**. `mod tests` begins at `resource.rs:265`; every `McpResource::new()` (`:309`, `:332`, `:352`) and every `ResourceMention::parse` call (`:388`–`:412`) is below it, the rest coming from `crates/caliban-mcp-client/tests/resource_integration.rs`. `McpResource` / `ResourceMention` / `expand_template` appear **nowhere else in the crate and nowhere in `caliban/src/`**: the TUI input path never parses an `@server:resource` mention and no `resources/list` RPC is ever issued. Typing `@github:readme` at the prompt does nothing |
 | Code-graph MCP consumption (gonzalo) | ✅ | **New row (#308/#310).** `search`/`node`/`callers`/`callees`/`impact`/`explore` wired over stdio or HTTP; hermetic contract test via an in-tree mock server (#344) |
 | WebSocket transport (`type: "ws"`) | 🔴 | **New row (upstream).** New third transport with `alwaysLoad`/`headersHelper`/`timeout`; caliban has stdio + HTTP/SSE only |
 | `headersHelper` + `claude mcp login`/`logout` | 🔴 | **New row (upstream v2.1.186+).** Dynamic per-server auth headers with 10 s timeout and 401/403 re-run, plus CLI-driven OAuth login/logout. caliban has neither |
@@ -272,8 +290,8 @@ terminal/CLI parity is reached.
 | Capability-based filtering (vision / thinking / tool_use) | ✅ | ADR-0038; `capabilities.rs`; `tool_use` parsed as a string enum #172 |
 | `caliban.toml` binary wiring | ✅ | ADR-0038; `discovery.rs` walk-up + binary `router::try_load` |
 | Anthropic / OpenAI / Ollama / Google providers | ✅ | Ollama gained dynamic model discovery + real context-window detection (#316/#60) |
-| Bedrock | ✅ | ADR-0034; `caliban-provider-bedrock` |
-| Vertex | ✅ | ADR-0034; `caliban-provider-vertex` |
+| Bedrock | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522), matching the codex matrix's §"Multiple providers" note.** `caliban-provider-bedrock` is real, complete and unit-tested (ADR-0034) — and **the binary does not depend on it**. `caliban/Cargo.toml` lists four provider crates (anthropic / openai / ollama / google) and neither bedrock nor vertex; `ProviderKind` has exactly those four variants (`caliban/src/args.rs:20-25`), so there is no `--provider` spelling, no `build_provider` arm (`startup/compose.rs:165`) and no `router::build_one` arm that can reach it. `BedrockProvider` is constructed **only** in its own crate's tests (`crates/caliban-provider-bedrock/tests/bedrock_provider.rs:112`,`:118`,`:127`,`:169`). Library-complete, binary-unreachable |
+| Vertex | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522).** Identical to Bedrock above: crate real and unit-tested, absent from `caliban/Cargo.toml`, no `ProviderKind` variant, and `VertexProvider` constructed only at `crates/caliban-provider-vertex/tests/vertex_provider.rs:64`,`:72`,`:276`. The workspace root `Cargo.toml` carries both crates as members with version pins, which is what made the old ✅ look defensible — membership is not reachability |
 | Foundry | 🔴 | No `caliban-provider-foundry` crate, no `ProviderKind::Foundry` (`caliban/src/args.rs:20`), no `router::build_one` arm (`caliban/src/router.rs:90`), no `rates.yaml` entry. Tracked in #30 |
 | Effort levels | 🟡 | **Down-ticked 2026-08-15 on upstream drift.** caliban ships `low`/`medium`/`high`/`max`/`auto` (`caliban/src/tui/slash/model.rs:116`; `EffortLevel` in `crates/caliban-model-router/src/config.rs:17` is Low/Medium/High). Upstream added **`xhigh`** and **`ultracode`** at v2.1.203+, and threads `effort` through hooks, subagent frontmatter, and OTel attributes |
 | Extended-thinking toggle wiring | ✅ | #100; `ThinkingSetting{Auto,Off,On(budget)}` on every live request, decoupled from `Effort`. Runtime control via `/think on\|off\|auto\|<budget>`. Honored by the Anthropic (`thinking`) and OpenAI (`reasoning`) converters. Per-turn thinking cap added #62 |
@@ -332,8 +350,12 @@ terminal/CLI parity is reached.
 and `select_active` implements it (`crates/caliban-output-styles/src/loader.rs:308`),
 and plugin packaging (ADR-0030) *has* now shipped — but the flag is still inert
 for a different reason: `enabled_plugins` is hard-coded to an empty vector at
-`caliban/src/startup/compose.rs:1680` ("v2: enabled_plugins is empty until ADR
+`caliban/src/startup/compose.rs:1690` ("v2: enabled_plugins is empty until ADR
 0030 ships the plugin system"), so no plugin style can ever win the override.
+**Line reference corrected 2026-08-16 (#522)** — it read `:1680`, which is not
+that statement. Note this is the *second* reason plugin output styles cannot
+work: even with a non-empty `enabled_plugins`, `PluginManager::output_style_roots`
+has no production caller at all (§B).
 Upstream separately **removed** its `/output-style` command in v2.1.91 and now
 loads nested project style dirs between cwd and repo root.
 
@@ -358,7 +380,7 @@ loads nested project style dirs between cwd and repo root.
 | `/context`, `/usage`, `/compact`, `/cost`, `/export` | ✅ | ADR-0033 logic surfaced through the registry (ADR-0040); `/cost` prints cumulative + per-(provider,model) USD; `/export [path] [--format json]` writes the session transcript |
 | `/config`, `/hooks`, `/mcp`, `/model`, `/effort`, `/think`, `/permissions` | ✅ | ADR-0040. `/model <id>` runtime-swaps via `Agent::try_swap_model` (same-provider); `/effort` and `/think` write `ArcSwap` state consumed on the next turn; `/permissions` is a real overlay (Tab cycles mode, `d` deletes a rule). **`/permissions` and `/think` had no M row before this refresh** |
 | `/plugin`, `/plugins` | ✅ | ADR-0030; drives `caliban_plugins::Cli::list` + `render_overlay` with enable/disable status |
-| `/rewind` | ✅ | ADR-0028; overlay lists per-prompt checkpoints (newest first); Esc-Esc opens the same overlay |
+| `/rewind` | 🔴 | **Down-ticked from ✅ 2026-08-16 (#522).** The command is registered and opens `Overlay::Rewind` (`caliban/src/tui/slash/dx.rs:27`), but the overlay is always empty — `app.checkpoint_store` is never populated, so `rewind_lines` renders "(checkpointing not enabled for this session)" (`caliban/src/tui/overlay.rs:826`). Registered and reachable, but functionally a stub; belongs with the §M stub cluster until checkpointing is wired. See §C |
 | `/recap`, `/btw` | ✅ | ADR-0040. Upstream's `/btw` has since become a threaded overlay with fork/copy/clear — not adopted |
 | `/doctor` | ✅ | **Split out of the old `/doctor, /heapdump, /feedback` row.** Real: `crate::diagnostics::Diagnostics::run`, `--deep` supported |
 | `/system` (hidden) | ✅ | **Previously unrowed** — the last of the 40 registered names to get a row. Real: opens the active-system-prompt overlay (`caliban/src/tui/slash/observe.rs:390` → `Overlay::System` → `overlay.rs:238::system_lines`). Marked `hidden: true`, "present for backwards compat; not in spec" — no Claude Code analogue |
@@ -409,12 +431,14 @@ computer-use**, **GitHub Code Review**, and the **Managed Agents** hosted API.
 
 ## Tier ordering (refresh when shipping)
 
-**Rewritten 2026-08-15.** Every item in the old Tiers 1–4 has **shipped** in
-the sense that its ADR is accepted and its crate exists — but "shipped" is not
-"✅", and an earlier draft of this section claimed the stronger thing ("every
-numbered item is ✅"), which is exactly the optimistic drift this refresh
-exists to remove. Audited against the body of this matrix, **6 of the 12
-numbered items are ✅ and 6 are not**:
+**Rewritten 2026-08-15; re-audited 2026-08-16 (#522).** Every item in the old
+Tiers 1–4 has **shipped** in the sense that its ADR is accepted and its crate
+exists — but "shipped" is not "✅", and an earlier draft of this section claimed
+the stronger thing ("every numbered item is ✅"), which is exactly the optimistic
+drift this refresh exists to remove. The 2026-08-15 pass scored this table 6 ✅ /
+6 not; applying the production-call-path rule to the three items that #519's
+sweep never reached (T2 #6, T3 #9, T4 #12) moves all three. Audited against the
+body of this matrix, **3 of the 12 numbered items are ✅ and 9 are not**:
 
 | Old tier item | Status now | Why |
 |---|---|---|
@@ -423,13 +447,13 @@ numbered items are ✅ and 6 are not**:
 | T1 #3 Headless `-p` + JSON (J) | ✅ | `--json-schema` is 🟡, but that is structured output, not the headless protocol |
 | T2 #4 TUI ergonomics (E) | 🟡 | Image/vision input is 🟡 (no caller); vim mode and voice are 🔴 |
 | T2 #5 Slash coverage (K, M) | 🟡 | Ten registered stubs + three partials in §M |
-| T2 #6 Checkpointing + `/rewind` (C) | ✅ | |
+| T2 #6 Checkpointing + `/rewind` (C) | 🔴 | **Corrected 2026-08-16 (#522).** `caliban-checkpoint` is complete and unit-tested but has no production call site — `CheckpointHook` is never constructed and `App::with_checkpoint_store` has zero callers, so nothing is snapshotted and `/rewind` always renders "(checkpointing not enabled for this session)". See §C |
 | T3 #7 Real MCP wiring (H) | ✅ | |
 | T3 #8 Permission modes + auto-mode (A) | ✅ | |
-| T3 #9 Plugin system (B) | ✅ | Loader is real; `enabled_plugins` being hardcoded empty is a §L wiring bug, not a plugin-system gap |
+| T3 #9 Plugin system (B) | 🟡 | **Corrected 2026-08-16 (#522).** Loader, CLI, marketplace and trust gating are real, but only `skill_roots` reaches a subsystem — hooks, agents, MCP servers, output styles and commands are parsed and dropped. `enabled_plugins` hardcoded empty is a second, separate wiring bug (§L). See §B |
 | T4 #10 OS sandbox (A) | 🟡 | Backends real, but one settings key and no per-hostname egress allowlist |
 | T4 #11 OTel + cost (K) | 🟡 | No logs pipeline; 1 of 6 metrics emits |
-| T4 #12 Bedrock + Vertex (I) | ✅ | |
+| T4 #12 Bedrock + Vertex (I) | 🔴 | **Corrected 2026-08-16 (#522).** Both crates are library-complete and unit-tested, but `caliban/Cargo.toml` depends on neither and `ProviderKind` has no variant for either, so no CLI or router path can construct them. See §I |
 
 Tier 5 is likewise mostly-but-not-entirely done: auto-memory, NotebookEdit,
 WebSearch, background fleet, status line and output styles are ✅; vim mode,
@@ -437,14 +461,16 @@ voice, and the GitHub Action / devcontainer packaging are not. **The honest
 summary is that the old tiers got caliban to feature-complete-on-paper, and the
 remaining work is finishing the last mile of things already built.** That is a
 different shape of work, so the tiers below replace the old list rather than
-extending it — and the four 🟡 items above are folded into them rather than
+extending it — and the nine non-✅ items above are folded into them rather than
 being declared done.
 
 **Tier 1 — Truth debt (cheap, do first):**
 1. Keep this matrix honest as features land. The 2026-08-15 pass down-ticked
    18 rows; 13 of those were the same shape — machinery built and tested,
-   last mile into production unwired. Prefer 🟡 at merge time over a ✅ that
-   has to be undone.
+   last mile into production unwired. The 2026-08-16 pass (#522) down-ticked
+   **9 more, all nine that shape**, including two (§H elicitation, §H
+   resources) that no prior pass had questioned. Prefer 🟡 at merge time over a
+   ✅ that has to be undone.
 2. Close the stub clusters that currently *look* shipped: §M `/agents`,
    `/login`/`/logout`/`/status`/`/setup-token`, `/heapdump`, `/feedback`,
    `/tui`, `/loop`.
@@ -459,23 +485,37 @@ being declared done.
    `ConfigChange` hook actually fire (§D, §B) — and dispatch `CwdChanged` and
    `Notification`, which have no call site either.
 7. Flip `tools.lazy_mcp` on by default per ADR-0046's v1.1 promise (§F).
-8. Populate `enabled_plugins` at `startup/compose.rs:1680` so
-   `force_for_plugin` stops being inert (§L).
+8. Populate `enabled_plugins` at `startup/compose.rs:1690` so
+   `force_for_plugin` stops being inert (§L) — and give the other four
+   `PluginManager` aggregations (`hooks_configs`, `agent_roots`, `mcp_servers`,
+   `output_style_roots`) production consumers, plus an aggregation for
+   `components.commands`, so a plugin bundles more than skills (§B).
+9. Construct `CheckpointHook` and call `App::with_checkpoint_store` so anything
+   is snapshotted and `/rewind` stops rendering "(checkpointing not enabled for
+   this session)"; add an `Overlay::Rewind` arm to the key dispatcher so the
+   per-entry actions do something (§C, §M).
+10. Construct `ElicitationBridge` and wire its receiver to the TUI, and give
+    `McpResource` / `ResourceMention` a caller on the prompt path, so MCP
+    elicitation and `@server:resource` mentions work (§H). Honour
+    `--permission-prompt-tool` instead of warning and ignoring it.
 
 **Tier 3 — Real feature gaps, ranked:**
-9. **Auth surface** — the largest stub cluster, and it has *no spec and no
-   ADR*. Write the spec first.
-10. Hook inheritance for foreground sub-agents (`NoopHooks` today) + config
+11. **Auth surface** — the largest stub cluster, and it has *no spec and no
+    ADR*. Write the spec first.
+12. Hook inheritance for foreground sub-agents (`NoopHooks` today) + config
     handlers on events beyond the three `event_supported` allows (§B).
-11. Sandbox configuration surface + the per-hostname egress allowlist (#477,
+13. Sandbox configuration surface + the per-hostname egress allowlist (#477,
     #481) — §A.
-12. `WaitForMcpServers` (§F), `/agents` fleet overlay, `/resume` picker.
-13. Native structured output for `--json-schema` (needs an ADR).
+14. `WaitForMcpServers` (§F), `/agents` fleet overlay, `/resume` picker.
+15. Native structured output for `--json-schema` (needs an ADR).
 
 **Tier 4 — Ecosystem / packaging:**
-14. Publish a reusable GitHub Action (#39) and a devcontainer feature (#40).
-15. Foundry provider (#30); PowerShell tool.
-16. Skills polish sub-project — currently **one** bundled skill vs upstream's
+16. Publish a reusable GitHub Action (#39) and a devcontainer feature (#40).
+17. Foundry provider (#30); PowerShell tool. Also **Bedrock and Vertex**, whose
+    crates are already library-complete — they need a `caliban/Cargo.toml`
+    dependency, a `ProviderKind` variant and a `build_provider` / `build_one`
+    arm, not new code (§I, #537).
+18. Skills polish sub-project — currently **one** bundled skill vs upstream's
     nine; unblocks `/code-review`, `/run`, `/verify`, `/debug`, `/batch`.
 
 **Tier 5 — TUI polish & long tail:**

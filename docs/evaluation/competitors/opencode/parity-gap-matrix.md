@@ -96,7 +96,7 @@ package-manager channel that ships. The sibling *self-update* row below stays
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
 | Non-interactive run (`run`, `--format json`) | ✅ | `-p` + `--output-format json/stream-json` (ADR-0025) |
-| Continue / session / fork flags | 🟡 | `/resume` + `--resume`; checkpoint fork partial (see Claude Code matrix) |
+| Continue / session / fork flags | 🟡 | `/resume` + `--resume` are real, which is what holds this row at 🟡. **Parenthetical corrected 2026-08-16 (#522):** it previously read "checkpoint fork partial (see Claude Code matrix)", but checkpointing is unreachable in the shipped binary — there is nothing to fork from. §H of this file already says so; the Claude Code matrix now agrees |
 | Provider auth (`auth login`) | 🟡 | `/login`/`/logout`/`/status` are stubs; auth via env + `apiKeyHelper` |
 | Manage agents (`agent create/list`) | 🟡 | subagent files exist; `/agents` editor is a stub |
 | List models (`models`) | 🟡 | `/model` runtime swap; no `models` catalog command |
