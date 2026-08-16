@@ -1121,6 +1121,16 @@ pub(crate) fn build_permissions(
     for r in settings_snapshot.permission_rules() {
         global_rules.push(r);
     }
+    // Say something out loud about rules that can never match. `glob_match`
+    // maps an uncompilable glob to `false`, so a typo'd rule fails closed and
+    // silently: the operator just sees a denial and has no reason to suspect
+    // their own rule (#518). Warn only — a bad rule is never fatal, and the
+    // built-in defaults below are not re-checked.
+    for r in &global_rules {
+        if let Some(why) = caliban_agent_core::permissions_matcher::validate_pattern(&r.tool) {
+            tracing::warn!(pattern = %r.tool, "permission rule can never match: {why}");
+        }
+    }
     global_rules.extend(default_rules());
     // Phase B: fold per-server `[server.X.permissions]` blocks into the
     // global rule list at the documented priority slot

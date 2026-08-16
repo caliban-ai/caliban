@@ -27,10 +27,101 @@ pub fn workspace_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
+/// Split a rule pattern into `(tool glob, optional arg spec)`.
+///
+/// Both documented spellings are accepted and mean exactly the same thing
+/// (#518): `Tool(<glob>)` — the form the non-interactive denial message and
+/// the README tell operators to paste — is normalized to `Tool:<glob>` before
+/// the colon split, so a pasted `--allow 'Bash(git *)'` actually matches.
+///
+/// The glob is everything between the *first* `(` and the *trailing* `)`, so a
+/// legitimate `)` or `:` inside the glob survives (`Bash(echo (hi))`,
+/// `Bash(scp host:/tmp/*)`). A `:` occurring *before* the first `(` means the
+/// operator used the colon form, so the parens are literal glob text and are
+/// left alone. Anything else — an unclosed `Tool(<glob>` in particular — is
+/// left verbatim so it fails closed rather than widening into an allow rule;
+/// [`validate_pattern`] is what makes such a typo visible.
+pub(crate) fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
+    if let Some(open) = paren_open(pattern)
+        && let Some(inner) = pattern[open + 1..].strip_suffix(')')
+    {
+        return (&pattern[..open], Some(inner));
+    }
     pattern
         .split_once(':')
         .map_or((pattern, None), |(name, spec)| (name, Some(spec)))
+}
+
+/// Report why `pattern` can never match, or `None` when it is well-formed.
+///
+/// `glob_match` maps an uncompilable glob to `false`, so a typo in a rule
+/// fails *closed and silently* — the operator sees a denial with no hint that
+/// their rule is the problem. Callers that load rules (startup, `caliban
+/// perms`) use this to say so out loud (#518).
+///
+/// Deliberately conservative: it only reports patterns that cannot match any
+/// input, never stylistic complaints, so wiring it into startup can't spam
+/// operators about rules that work.
+#[must_use]
+pub fn validate_pattern(pattern: &str) -> Option<String> {
+    // An unclosed `Tool(<glob>` is almost certainly a typo of the paren form:
+    // it degrades into a literal tool name that no tool can ever be called.
+    if paren_open(pattern).is_some() && !pattern.ends_with(')') {
+        return Some(format!(
+            "`{pattern}` has an unclosed `(` — write `Tool(<glob>)` or `Tool:<glob>`"
+        ));
+    }
+    let (tool_pat, spec) = split_pattern(pattern);
+    if tool_pat.is_empty() {
+        return Some(format!(
+            "`{pattern}` names no tool — write `Tool(<glob>)`, `Tool:<glob>`, or `*`"
+        ));
+    }
+    if tool_pat != "*"
+        && let Err(e) = compile_glob(tool_pat, false)
+    {
+        return Some(format!(
+            "`{pattern}` has an invalid tool glob `{tool_pat}`: {e}"
+        ));
+    }
+    let spec = spec?;
+    if spec.is_empty() {
+        return Some(format!(
+            "`{pattern}` has an empty glob — it matches nothing; use bare `{tool_pat}` to match every call"
+        ));
+    }
+    // `key=<glob>` pairs validate each glob; `~<glob>` and plain globs validate
+    // the one glob they carry.
+    let globs: Vec<&str> = if spec.contains('=') {
+        spec.split(',')
+            .map(|kv| kv.split_once('=').map_or(kv, |(_, g)| g))
+            .collect()
+    } else {
+        vec![spec.strip_prefix('~').unwrap_or(spec)]
+    };
+    for g in globs {
+        if let Err(e) = compile_glob(g, false) {
+            return Some(format!("`{pattern}` has an invalid glob `{g}`: {e}"));
+        }
+    }
+    None
+}
+
+/// Byte index of the `(` that opens a `Tool(<glob>)` spec, or `None` when the
+/// pattern isn't in that grammar. A `:` before the `(` means the operator used
+/// the colon form and the parens are literal glob text.
+fn paren_open(pattern: &str) -> Option<usize> {
+    let open = pattern.find('(')?;
+    match pattern.find(':') {
+        Some(colon) if colon < open => None,
+        _ => Some(open),
+    }
+}
+
+fn compile_glob(pat: &str, literal_separator: bool) -> Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pat)
+        .literal_separator(literal_separator)
+        .build()
 }
 
 fn is_file_edit_tool(name: &str) -> bool {
@@ -67,10 +158,13 @@ fn glob_match_path(pat: &str, hay: &std::path::Path) -> bool {
 ///
 /// # Pattern grammar
 ///
+/// `Tool(<glob>)` and `Tool:<glob>` are interchangeable spellings of the same
+/// rule — pick either (#518).
+///
 /// - `Tool` — match any invocation of `Tool`.
-/// - `Tool:<glob>` — glob the tool's first arg (`*`, `?`, `**`).
-/// - `Bash:~<glob>` — match anywhere in the bash command (sliding-window).
-/// - `Tool:key=<glob>` / `Tool:k1.k2=<glob>` — dotted-key accessor; comma-separated pairs are AND-combined.
+/// - `Tool:<glob>` / `Tool(<glob>)` — glob the tool's first arg (`*`, `?`, `**`).
+/// - `Bash:~<glob>` / `Bash(~<glob>)` — match anywhere in the bash command (sliding-window).
+/// - `Tool:key=<glob>` / `Tool(k1.k2=<glob>)` — dotted-key accessor; comma-separated pairs are AND-combined.
 /// - `*` — catch-all.
 ///
 /// For file-edit tools (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) the file path
@@ -400,6 +494,228 @@ mod tests {
             &ctx("Bash", &json!({"command": "gitk"})),
             std::path::Path::new("/")
         ));
+    }
+
+    /// Regression (#518): the non-interactive denial message and `README.md`
+    /// both tell operators to re-run with `--allow 'Bash(git *)'`. Before this
+    /// fix `split_pattern` only split on `:`, so that string parsed as a tool
+    /// literally named `Bash(git *)` and could never match — following the
+    /// printed guidance verbatim still left the call denied.
+    #[test]
+    fn suggested_paren_rule_from_deny_message_allows_the_denied_call() {
+        // The exact string the deny message / README tell users to paste.
+        let pattern = "Bash(git *)";
+        let i = json!({"command": "git push"});
+        assert!(
+            matches_with_workspace(pattern, &ctx("Bash", &i), std::path::Path::new("/")),
+            "the `--allow '{pattern}'` rule we print must actually match `git push`"
+        );
+        // …and it must still be *narrow*: a non-git command stays unmatched.
+        assert!(
+            !matches_with_workspace(
+                pattern,
+                &ctx("Bash", &json!({"command": "rm -rf /"})),
+                std::path::Path::new("/")
+            ),
+            "the paren form must not widen into a catch-all"
+        );
+    }
+
+    /// Option A: both grammars are accepted and mean the same thing, and a
+    /// bare `Tool` still matches any invocation.
+    #[test]
+    fn paren_and_colon_forms_are_equivalent_and_bare_tool_still_works() {
+        let ws = std::path::Path::new("/");
+        let git = json!({"command": "git push"});
+        let rm = json!({"command": "rm -rf /"});
+        for pat in ["Bash(git *)", "Bash:git *"] {
+            assert!(
+                matches_with_workspace(pat, &ctx("Bash", &git), ws),
+                "{pat} should match `git push`"
+            );
+            assert!(
+                !matches_with_workspace(pat, &ctx("Bash", &rm), ws),
+                "{pat} should not match `rm -rf /`"
+            );
+        }
+        // Bare tool name: no spec, matches every invocation.
+        assert!(matches_with_workspace("Bash", &ctx("Bash", &rm), ws));
+        assert!(!matches_with_workspace("Bash", &ctx("Read", &rm), ws));
+    }
+
+    /// The `~` anywhere-match form works inside parens too (`Bash(~rm)`), and
+    /// stays Bash-only just like `Bash:~rm`.
+    #[test]
+    fn paren_form_supports_anywhere_match() {
+        let ws = std::path::Path::new("/");
+        assert!(matches_with_workspace(
+            "Bash(~rm)",
+            &ctx("Bash", &json!({"command": "sudo rm -rf /"})),
+            ws
+        ));
+        assert!(!matches_with_workspace(
+            "Bash(~rm)",
+            &ctx("Bash", &json!({"command": "ls -la"})),
+            ws
+        ));
+        // ~glob is Bash-only regardless of which grammar spelled it.
+        assert!(!matches_with_workspace(
+            "Read(~rm)",
+            &ctx("Read", &json!({"path": "rm"})),
+            ws
+        ));
+    }
+
+    /// Path globs for file-edit tools keep their workspace anchoring in the
+    /// paren form, including the `..`-escape rejection from #216.
+    #[test]
+    fn paren_form_supports_file_edit_path_globs() {
+        let ws = std::path::Path::new("/repo");
+        assert!(matches_with_workspace(
+            "Edit(src/**/*.rs)",
+            &ctx("Edit", &json!({"path": "/repo/crates/x/src/y.rs"})),
+            ws
+        ));
+        assert!(
+            !matches_with_workspace(
+                "Edit(src/**/*.rs)",
+                &ctx("Edit", &json!({"path": "/etc/src/evil.rs"})),
+                ws
+            ),
+            "paren form must stay workspace-scoped like the colon form"
+        );
+        assert!(
+            !matches_with_workspace(
+                "Edit(**)",
+                &ctx("Edit", &json!({"path": "../../../../etc/passwd"})),
+                ws
+            ),
+            "a `..` escape must not match a workspace-scoped paren rule either"
+        );
+    }
+
+    /// The structured `key=<glob>` accessor works in the paren form, including
+    /// comma-separated AND-combined pairs.
+    #[test]
+    fn paren_form_supports_structured_key_specs() {
+        let ws = std::path::Path::new("/");
+        let i = json!({"repo": "anthropic/caliban", "title": "feat"});
+        assert!(matches_with_workspace(
+            "mcp__github__create_issue(repo=anthropic/*)",
+            &ctx("mcp__github__create_issue", &i),
+            ws
+        ));
+        assert!(matches_with_workspace(
+            "mcp__github__create_issue(repo=anthropic/*,title=feat*)",
+            &ctx("mcp__github__create_issue", &i),
+            ws
+        ));
+        assert!(!matches_with_workspace(
+            "mcp__github__create_issue(repo=anthropic/*,title=docs*)",
+            &ctx("mcp__github__create_issue", &i),
+            ws
+        ));
+    }
+
+    /// The glob is everything between the *first* `(` and the *trailing* `)`,
+    /// so a legitimate `)` or `:` inside the glob survives. Splitting on `:`
+    /// first would mangle `Bash(echo a:b)` into a tool named `Bash(echo a`.
+    #[test]
+    fn paren_form_preserves_inner_parens_and_colons() {
+        let ws = std::path::Path::new("/");
+        assert!(matches_with_workspace(
+            "Bash(echo (hi))",
+            &ctx("Bash", &json!({"command": "echo (hi)"})),
+            ws
+        ));
+        assert!(matches_with_workspace(
+            "Bash(scp host:/tmp/*)",
+            &ctx("Bash", &json!({"command": "scp host:/tmp/x"})),
+            ws
+        ));
+    }
+
+    /// A `:` *before* the first `(` means the operator wrote the colon form,
+    /// so the parens are literal glob text and must not be re-parsed.
+    #[test]
+    fn colon_form_wins_when_the_colon_comes_first() {
+        let ws = std::path::Path::new("/");
+        assert!(matches_with_workspace(
+            "Bash:echo (hi)",
+            &ctx("Bash", &json!({"command": "echo (hi)"})),
+            ws
+        ));
+    }
+
+    /// Unbalanced parens are *not* silently reinterpreted — they stay a
+    /// literal (never-matching) tool name, so the rule fails closed rather
+    /// than widening. `validate_pattern` is what makes this visible.
+    #[test]
+    fn unbalanced_paren_fails_closed() {
+        let ws = std::path::Path::new("/");
+        assert!(
+            !matches_with_workspace(
+                "Bash(git *",
+                &ctx("Bash", &json!({"command": "git push"})),
+                ws
+            ),
+            "an unclosed paren must not be treated as an allow rule for Bash"
+        );
+        assert!(validate_pattern("Bash(git *").is_some());
+    }
+
+    /// `Tool()` is an *empty* glob, not a bare `Tool`. Treating it as bare
+    /// would silently widen `Bash()` into "allow every shell command", so it
+    /// fails closed and is reported by `validate_pattern`.
+    #[test]
+    fn empty_paren_spec_fails_closed_and_is_flagged() {
+        let ws = std::path::Path::new("/");
+        assert!(
+            !matches_with_workspace("Bash()", &ctx("Bash", &json!({"command": "git push"})), ws),
+            "`Bash()` must not behave like a bare `Bash` catch-all"
+        );
+        assert!(validate_pattern("Bash()").is_some());
+    }
+
+    /// `validate_pattern` is quiet for every grammar we actually document, so
+    /// wiring it into startup can't spam operators with false positives.
+    #[test]
+    fn validate_pattern_accepts_documented_grammar() {
+        for pat in [
+            "*",
+            "Bash",
+            "Bash:git *",
+            "Bash(git *)",
+            "Bash:~rm",
+            "Bash(~rm)",
+            "Edit:src/**/*.rs",
+            "Edit(src/**/*.rs)",
+            "mcp__github__create_issue:repo=anthropic/*,title=feat*",
+            "mcp__github__create_issue(repo=anthropic/*)",
+            "mcp__*",
+            "Bash(echo (hi))",
+        ] {
+            assert_eq!(validate_pattern(pat), None, "{pat} should be accepted");
+        }
+    }
+
+    /// …but it does flag patterns that can never match, which today fail
+    /// closed and silently (`glob_match` maps a bad glob to `false`).
+    #[test]
+    fn validate_pattern_flags_never_matching_patterns() {
+        for pat in [
+            "Bash(git *",
+            "Bash()",
+            "Bash:[unclosed",
+            "Ba[d",
+            "(git *)",
+            ":git *",
+        ] {
+            assert!(
+                validate_pattern(pat).is_some(),
+                "{pat} can never match and should be reported"
+            );
+        }
     }
 
     #[test]

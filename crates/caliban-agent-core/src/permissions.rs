@@ -721,6 +721,49 @@ mod tests {
         );
     }
 
+    /// Pull the pattern out of the `--allow '<pattern>'` remediation a deny
+    /// message prints, so the test below exercises the *actual* printed text
+    /// rather than a hand-copied duplicate of it.
+    fn suggested_allow_pattern(msg: &str) -> String {
+        let after = msg
+            .split_once("--allow '")
+            .unwrap_or_else(|| panic!("deny message has no `--allow '<pattern>'`: {msg}"))
+            .1;
+        after
+            .split_once('\'')
+            .unwrap_or_else(|| panic!("unterminated `--allow '` in: {msg}"))
+            .0
+            .to_string()
+    }
+
+    /// Regression (#518): the remediation the deny message prints must work
+    /// when pasted verbatim. It used to advertise `--allow 'Bash(<glob>)'`
+    /// while the matcher split on `:` only, so `Bash(git *)` parsed as a tool
+    /// literally named `Bash(git *)` and the very next run was denied again.
+    #[tokio::test]
+    async fn suggested_bash_allow_rule_actually_allows_the_denied_call() {
+        let i = serde_json::json!({"command": "git push"});
+        // 1. Headless run with the built-in defaults: Bash is denied, and the
+        //    message tells the operator what to re-run with.
+        let d = hook(default_rules())
+            .before_tool(&ctx("Bash", &i))
+            .await
+            .unwrap();
+        let HookDecision::AskDenied(msg) = d else {
+            panic!("expected AskDenied, got {d:?}");
+        };
+        // 2. Do exactly what the message says: take its rule and fill in a glob.
+        let pasted = suggested_allow_pattern(&msg).replace("<glob>", "git *");
+        // 3. Re-run with that rule at top priority — it must now be allowed.
+        let mut rules = vec![rule(&pasted, Action::Allow)];
+        rules.extend(default_rules());
+        assert_eq!(
+            hook(rules).evaluate(&ctx("Bash", &i)),
+            Action::Allow,
+            "following the deny message verbatim (`--allow '{pasted}'`) must allow `git push`"
+        );
+    }
+
     /// Other tools (anything not file-edit and not Bash) should get a
     /// generic `--allow '<Tool>'` suggestion. `WebFetch` is a real built-in
     /// that defaults to Ask, so we use it here rather than a synthetic name.

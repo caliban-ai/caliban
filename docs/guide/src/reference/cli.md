@@ -134,7 +134,7 @@ See [Permission Modes](../permissions/modes.md) and [Managing Rules](../permissi
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--allow <PAT>` | — | Add an Allow rule at top priority. Repeatable. Pattern: `Tool` or `Tool:first-arg-glob`. |
+| `--allow <PAT>` | — | Add an Allow rule at top priority. Repeatable. Pattern: `Tool`, or `Tool:first-arg-glob` / `Tool(first-arg-glob)` (interchangeable). |
 | `--deny <PAT>` | — | Add a Deny rule at top priority. Repeatable. |
 | `--ask <PAT>` | — | Add an Ask rule at top priority. Repeatable. |
 | `--permission-mode <MODE>` | From settings or `default` | Initial permission mode. Valid values (camelCase): `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. Env: `CALIBAN_DEFAULT_PERMISSION_MODE`. |
@@ -246,7 +246,7 @@ Manage permission rules across all config scopes. See [Managing Rules](../permis
 | `perms import --from <PATH> [--scope <SCOPE>] [--dry-run]` | Import rules from a foreign config (Claude Code JSON, legacy caliban TOML). Default scope: `user`. |
 | `perms export [--scope <SCOPE>] [--format toml\|json]` | Export permission rules to stdout. Default format: `toml`. |
 | `perms audit [--since <ISO>] [--tool <NAME>] [--action <ACTION>] [--head <N>]` | Show the permission-decision audit log. |
-| `perms lint [--scope <SCOPE>]` | Check for duplicate or conflicting rules. Default scope: `project`. |
+| `perms lint [--scope <SCOPE>]` | Check for duplicate or conflicting rules, and for patterns that can never match. Default scope: `project`. |
 
 ---
 

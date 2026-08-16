@@ -319,7 +319,35 @@ action = "allow"
     );
     let out = perms(dir.path(), &["lint"]);
     assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("no duplicate patterns"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("OK ("));
+}
+
+/// #518: a rule that can never match (bad glob, unclosed paren, empty glob)
+/// fails closed and silently at runtime, so `lint` is where an operator finds
+/// out. The valid `Bash(git *)` alongside it must *not* be flagged.
+#[test]
+fn perms_lint_flags_never_matching_patterns_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    write_settings_with_rules(
+        dir.path(),
+        r#"
+[[permissions.rules]]
+pattern = "Bash(git *"
+action = "allow"
+
+[[permissions.rules]]
+pattern = "Bash(git *)"
+action = "allow"
+"#,
+    );
+    let out = perms(dir.path(), &["lint"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("never matches"), "got: {stdout}");
+    assert!(
+        stdout.matches("never matches").count() == 1,
+        "the well-formed paren rule must not be flagged; got: {stdout}"
+    );
 }
 
 #[test]

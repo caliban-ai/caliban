@@ -356,13 +356,22 @@ for a more complete example with comments and pattern notes.
 
 ### Pattern grammar
 
+`Tool:<glob>` and `Tool(<glob>)` are interchangeable spellings of the
+same rule — use whichever you prefer.
+
 - `Tool` — match any invocation of `Tool`.
-- `Tool:<glob>` — match the tool's first arg with `*`/`?`/`**` glob.
-- `Bash:~<glob>` — match anywhere in the bash command line (catches
-  `sudo rm`, `bash -c "rm …"`, etc.).
-- `Tool:key=<glob>` / `Tool:k1.k2=<glob>` — match a structured input
+- `Tool:<glob>` / `Tool(<glob>)` — match the tool's first arg with
+  `*`/`?`/`**` glob.
+- `Bash:~<glob>` / `Bash(~<glob>)` — match anywhere in the bash command
+  line (catches `sudo rm`, `bash -c "rm …"`, etc.).
+- `Tool:key=<glob>` / `Tool(k1.k2=<glob>)` — match a structured input
   field by dotted-key. Multiple `key=glob` comma-separated AND together.
 - `*` — catch-all.
+
+In the paren form the glob is everything between the first `(` and the
+trailing `)`, so `Bash(scp host:/tmp/*)` works as written. A rule that
+can never match — an unclosed `Bash(git *`, an empty `Bash()`, a
+malformed glob — is reported at startup instead of silently denying.
 
 For file-edit tools (`Read`, `Write`, `Edit`, `MultiEdit`,
 `NotebookEdit`) the file path is workspace-normalized before
