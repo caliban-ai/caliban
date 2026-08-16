@@ -47,7 +47,10 @@ ahead — Pi documents this as a deliberate non-goal or simply lacks it ·
 it, or no caliban analogue is wanted. A ✅ means "caliban does the equivalent
 thing," not byte-identical.
 
-**Last refreshed:** 2026-08-15 (initial pass; #515). The Pi column derives from
+**Last refreshed:** 2026-08-16 (caliban-side reachability sweep, **#523** — see
+the sweep block below; the Pi column was *not* re-baselined this pass). Prior:
+2026-08-16 (#524, install-row up-tick); 2026-08-15 (initial pass; #515). The Pi
+column derives from
 [`capability-inventory.md`](capability-inventory.md) snapshot 2026-08-15, read
 directly off `pi.dev/docs/latest/*`, the `earendil-works/pi` repo, and the
 GitHub/npm APIs — **primary sources only**. The caliban column was **re-verified
@@ -64,6 +67,40 @@ lint comment (see the row's note); `cargo install caliban` has worked since
 were re-checked this pass and **stay 🔴** — `gh release view v0.8.0 --json
 assets` still returns zero assets on every release, and there is still no
 `update`/`upgrade` verb in `caliban/src/args.rs`.
+
+**Reachability sweep 2026-08-16 (#523):** **2 down-ticks, 0 up-ticks, 6
+note-only corrections.** This is the first pass to apply the
+[production-call-path rule](../../README.md) to *this* file — the sibling
+matrices got it under #519 (`codex`, `grok-build`, `opencode`, `antigravity`)
+and #522 (`claude-code`), but Pi's was authored concurrently with #519 and was
+never swept. Every remaining ✅ **and ➕** row was re-checked for a call path
+that reaches it from the shipped binary, not merely a crate that compiles.
+
+- **Down-ticks.** §D *"Live config reload"* ✅ → 🔴; §K *"Checkpoint / rewind of
+  **files** as well as conversation"* ➕ → 🔴.
+- **Note-only corrections** (rating unmoved, evidence rewritten): §C *"Turn and
+  spend caps"*, §F *"Fallback chains / hedging / circuit breakers"*, §F
+  *"Purpose-keyed / fast-model split"*, §G *"Image input"*, §H *"Scripted
+  in-process extensions with an event API"*, §J *"Parallel fan-out with a
+  concurrency cap"*.
+- **➕ rows were in scope for the first time.** A ➕ asserts more than a ✅ — it
+  claims caliban does something Pi does not — so an unreachable ➕ is a *false
+  differentiator*, the most damaging failure mode in a competitive document. All
+  27 were audited; one (checkpoint/rewind, the file's flagship claim against Pi)
+  did not survive, and three more needed their evidence corrected while keeping
+  the rating. The remaining 23 hold.
+- **Not changed, deliberately:** §D *"Interactive settings editor"* stays 🟡 —
+  it is the accurate row, and the `claude-code` matrix scores the same artefact
+  ✅ in error. That side is **#522**'s to fix; see the row's note.
+
+**Row count.** 141 capability-table rows across the lettered sections §A–§N
+(§O is **(tk)** context and is excluded wholesale, as are the *Pi-distinctive
+gaps* list and the refresh-process table). Of those, **105 are scored rows**
+under the shared convention — 141 less the 26 ➕ caliban-ahead rows, 9 **n/a**
+rows, and 1 inline **(tk)** row. Current distribution: **23 ✅ · 34 🟡 · 48 🔴 ·
+26 ➕ · 9 n/a · 1 (tk)**. Note that the scored total moved 104 → 105 this pass:
+down-ticking a ➕ to 🔴 moves that row *into* the scored population, so the two
+down-ticks net one extra scored row rather than none.
 
 > **Caveat:** rows tagged **⚠** depend on a Pi fact still flagged uncertain in the
 > inventory (§19 there) or on a caliban detail that could not be settled from the
@@ -107,7 +144,7 @@ assets` still returns zero assets on every release, and there is still no
 | Piped stdin merged into the prompt | ✅ | headless accepts stdin |
 | Resume / continue headlessly | ✅ | `--continue` / `--resume <id>` (`caliban/src/headless/session_loader.rs`) |
 | Bidirectional RPC over stdio (33 commands + extension-UI sub-protocol) | 🟡 | `--input-format stream-json` handles only `user` and `control/interrupt` frames (ADR-0025). No command surface for model / session / tree / export control, and no UI request-response channel |
-| Turn and spend caps | ➕ | `--max-turns`, `--max-budget-usd`. Pi documents no turn or spend cap |
+| Turn and spend caps | ➕ | **Note-only correction 2026-08-16 (#523); rating unmoved — the two caps have different reach.** `--max-turns` is universal: it lands in `AgentConfig` (`caliban/src/startup/compose.rs:1469`) and so bounds the TUI and headless alike. `--max-budget-usd` is **headless-only** — its sole consumer is `headless::BudgetTracker::new(args.max_budget_usd)` (`caliban/src/startup/drivers.rs:525`), and the flag sits under the `Headless / -p mode (ADR 0025)` help heading (`caliban/src/args.rs:150-158`); an interactive session has no spend ceiling. Still ➕: Pi documents no turn or spend cap on either surface |
 | Extension-defined CLI flags (`pi.registerFlag`) | 🔴 | unknown `--flags` are a clap parse error; plugin manifests contribute no CLI flags (`crates/caliban-plugins/src/manifest.rs:16-68`) |
 | Package/extension management subcommands | 🟡 | `caliban plugin {list,info,install,update,remove,enable,disable}` (`caliban/src/plugin_cli.rs:14-35`); no git-URL source and no `pi config`-style enable/disable TUI |
 | Credential inspection (`pi auth check` / `print-api-key`) | 🔴 | no `auth` variant in the `CalibanCommand` enum (`caliban/src/args.rs`); `/status` is a stub (`caliban/src/tui/slash/model.rs:134-156`, issue **#3**) |
@@ -127,8 +164,8 @@ assets` still returns zero assets on every release, and there is still no
 | Per-directory override file (`AGENTS.override.md`) | 🔴 | caliban concatenates ancestry files with no per-directory replace semantics (`project_walk.rs`) |
 | System-prompt replace / append files (`SYSTEM.md`, `APPEND_SYSTEM.md`) | 🟡 | `/output-style` splices a prefix into the prompt (ADR-0031, `compose.rs:1699,1709`), but there is no full-prompt replacement file and no `--system-prompt`/`--append-system-prompt` flag in `caliban/src/args.rs` |
 | Env-var interpolation in config | ✅ | `${VAR}`, `${VAR:-default}`, `${CLAUDE_PROJECT_DIR}` (`crates/caliban-common/src/expand.rs`) |
-| Live config reload | ✅ | `SettingsWatcher` (notify, 250 ms debounce) |
-| Interactive settings editor (`/settings`, `pi config`) | 🟡 | `/config` renders a **read-only** panel — `caliban/src/tui/overlay.rs:479-560`, with zero key handlers in `tui/input.rs` — against ADR-0026's stated tabbed-editor design. Writes go through `caliban config` / `caliban settings`. Issue **#498** tracks related schema drift |
+| Live config reload | 🔴 | **Down-ticked from ✅ 2026-08-16 (#523).** The ✅ cited `SettingsWatcher` as though citing it were sufficient — the exact pattern the production-call-path rule exists to catch. The watcher is real and unit-tested (`crates/caliban-settings/src/watcher.rs:31`, notify + 250 ms debounce) and **never constructed by the binary**: the only `SettingsWatcher::watch` call in the tree is inside its own `#[tokio::test]` (`watcher.rs:149`), and `SettingsWatcher` has zero hits under `caliban/src/`. Settings load **once** into `settings_snapshot` at startup and are read from there for the rest of the process (`caliban/src/startup/compose.rs:570,757,1027,1067`). The `ConfigChange` hook event never fires either — the only `config_change(…)` call sites in the tree are `crates/caliban-agent-core/tests/hooks_events.rs:158,450,924`, all tests; the headless NDJSON sink implements the callback (`caliban/src/headless/hooks_sink.rs:161`) but nothing invokes it. **No key live-reloads today**, so this is 🔴, not 🟡. ⚠ The `claude-code` matrix scores the same code 🟡 on the same evidence — see its §"Config & settings" *"Live config reload"* row; that half is **#522**'s to reconcile |
+| Interactive settings editor (`/settings`, `pi config`) | 🟡 | `/config` renders a **read-only** panel — `caliban/src/tui/overlay.rs:479-560`, with zero key handlers in `tui/input.rs` — against ADR-0026's stated tabbed-editor design. Writes go through `caliban config` / `caliban settings`. Issue **#498** tracks related schema drift. ⚠ **Re-verified and left unchanged 2026-08-16 (#523):** this is the accurate row. The `claude-code` matrix scores the same artefact ✅ *"interactive editor"* while conceding in the same cell that the tabbed write-back editor is deferred — a cell that undercuts its own score. Anchored by section + row label because that file is being rewritten concurrently; correcting it is **#522**'s scope, not this ticket's. Recorded here because it shows the miscalibration ran in **both** directions |
 
 ## E. Auth & subscription reuse — highest-leverage gap
 
@@ -156,8 +193,8 @@ assets` still returns zero assets on every release, and there is still no
 | Local runners (Ollama / LM Studio / vLLM / SGLang / OpenAI-compatible) | ✅ | Ollama is first-class with **dynamic model discovery** (`/api/tags`, `/api/show`, `/api/ps`, XDG-cached); LM Studio and vLLM via `OPENAI_BASE_URL`, probed at [`probes/2026-05-27-lmstudio-probe-findings.md`](../../probes/2026-05-27-lmstudio-probe-findings.md). Dynamic discovery for those two is issues **#318**/**#317** |
 | Declarative custom-model file, hot-reloaded on the model picker | 🟡 | `caliban.toml` declares routes and models with a walk-up discovery and a `caliban router debug` inspector (ADR-0038), but adding a **new provider endpoint** still requires a Rust crate, and the file is not re-read when `/model` opens |
 | llama.cpp router integration (`/llama`: download, HF search, quant selection) | 🔴 | no analogue — caliban can talk to an OpenAI-compatible endpoint but cannot manage local model weights |
-| Fallback chains / hedging / circuit breakers | ➕ | router v2 (ADR-0038): `fallback.rs`, `hedging.rs` (`race_hedged` + cancellation), `breaker.rs` (Closed→Tripped→HalfOpen) in `crates/caliban-model-router/`. Pi has retry settings but no routing layer |
-| Purpose-keyed / fast-model split | ➕ | `RequestPurpose::{MainLoop, Summarization, FastClassifier, SubAgent, Embedding, Other}` + `model_overrides` (ADR-0022). Pi has **no** small/fast-model split — compaction and branch summaries run on the current model |
+| Fallback chains / hedging / circuit breakers | ➕ | **Note-only correction 2026-08-16 (#523); rating unmoved — reachable, but opt-in.** router v2 (ADR-0038) is real and *is* wired into the binary: `main.rs:279-291` calls `router::try_load(...)` and installs the resulting `ModelRouter` as the process `Provider`, with `fallback.rs`, `hedging.rs` (`race_hedged` + cancellation), and `breaker.rs` (Closed→Tripped→HalfOpen) in `crates/caliban-model-router/`. The prior note omitted the **gate**: `try_load` returns `Some` only when a `caliban.toml` declaring `[router]` is found by walk-up discovery or `--config` / `CALIBAN_ROUTER_CONFIG`; otherwise the binary falls back to `startup::build_provider` and **none of the three behaviours engages**. So a default install gets no fallback, no hedging, and no breaker — this is a capability you must opt into, not one that ships on. Still ➕: the path exists in production and Pi has retry settings but no routing layer at all |
+| Purpose-keyed / fast-model split | ➕ | **Note-only correction 2026-08-16 (#523); rating unmoved — one of the two cited mechanisms does not exist.** The purpose enum is real and **populated on production requests**: `RequestPurpose::MainLoop` at `crates/caliban-agent-core/src/stream/mod.rs:1103`, `Summarization` at `compact.rs:611`, `FastClassifier` at `auto_mode.rs:395` and `caliban/src/tui/slash/session.rs:348` (ADR-0022). But **`model_overrides` is dead config**: the key is declared (`crates/caliban-settings/src/settings.rs:298`) and deep-merged (`merge.rs:46,111`), and it is **never read** — zero consumers outside `caliban-settings` itself. Purpose→model *selection* happens only inside `caliban-model-router`, keyed on the route's `purpose` string (`builder.rs:53-99`), which means it engages only under the same opt-in `caliban.toml [router]` gate as the row above. On the default single-provider path the purpose is tagged on the request and consumed for cost attribution (`crates/caliban-telemetry/src/cost.rs:285`) but routes nothing. Still ➕: the split works when configured, and Pi has **no** small/fast-model split at all — compaction and branch summaries run on its current model |
 | Runtime model switching across providers | 🟡 | `/model <id>` swaps in place but **same-provider only** — cross-provider returns `CrossProvider` and needs a restart (issue **#31**). Pi switches freely and cycles scoped models with `Ctrl+P` |
 | Portable reasoning-effort scale | 🟡 | `Effort::{Low,Medium,High,Max,Auto}` + `ThinkingSetting` decoupled (`crates/caliban-provider/src/effort.rs`, ADR-0038, PR #100) — but exposed **only** via `/effort` and `/think`: no CLI flag and no settings key for the base agent. Pi's 7-level scale normalizes **11 distinct wire encodings** and is settable from the flag, the model string (`sonnet:high`), and `Shift+Tab` |
 | Model catalog with cost metadata | ✅ | vendored `crates/caliban-telemetry/rates.yaml` with `effective_from` dates, `CALIBAN_RATES_YAML` override, unknown-model → $0.00 + debounced warning |
@@ -177,7 +214,7 @@ assets` still returns zero assets on every release, and there is still no
 | User-registered tools without recompiling | 🔴 | tools are compiled-in Rust; `plugin.json` has **no `tools` component** (`crates/caliban-plugins/src/manifest.rs:16-68`). MCP is the only path — same posture as Claude Code, but strictly narrower than Pi's `pi.registerTool()` |
 | Overriding a **built-in** tool | 🔴 | no override seam at all: MCP servers can add tools but cannot replace `Read`/`Bash`/`Edit`/`Write` |
 | Pluggable tool backends (route tools into a VM / remote host) | 🔴 | `BashTool` wraps a local `SandboxedShim` (`crates/caliban-tools-builtin/src/shell/bash.rs:10,26,47`); there is no `ReadOperations`/`BashOperations` seam. Pi's Gondolin extension keeps `pi` + auth on the host while routing all seven built-ins into a micro-VM |
-| Image input | 🟡 | **`@path` attachment only** (`caliban/src/tui/attach.rs:151,215-238`). Despite ADR-0039, `caliban-images`' `paste_image_from_clipboard` (`clipboard.rs:38`) and `parse_drag_drop_escape` (`dnd.rs:37`) are **never called from the binary**, and `Read` cannot return an image (`fs/read.rs:98-100` is `read_to_string`). ⚠ **corrects** the ✅ "clipboard, `@path`, DnD" claim in the sibling matrices |
+| Image input | 🟡 | **Note-only correction 2026-08-16 (#523); rating unmoved.** The prior note said *"`@path` attachment only"* — it cited `resolve_image_attachments` without noticing the function is dead code, so it stopped one step short of the truth. **There is no user-reachable image ingest path at all.** `resolve_image_attachments` (`caliban/src/tui/attach.rs:218`) is `#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]` with only its own unit tests as callers (`attach.rs:480,499`), and the text attach path **explicitly skips image files** (`attach.rs:146-152`: *"Image mentions are handled by `resolve_image_attachments`; skip them here"*) — so `@path` on an image drops it on the floor rather than attaching it. `caliban-images`' `paste_image_from_clipboard` (`clipboard.rs`) and `parse_drag_drop_escape` (`dnd.rs`) have no callers outside their own modules; `Read` is text-only (`crates/caliban-tools-builtin/src/fs/read.rs`, `read_to_string`); there is no `--image` flag. The residual 🟡 reflects **only** ADR-0039's provider-side `ImageBlock` wire support, which is real — not an ingest path. This adopts the framing established in [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md) §C ("Interactive TUI"), row *"Image input (`--image` / paste)"*, which corrected this row's earlier characterization under #519. ⚠ The original correction still stands against the ✅ "clipboard, `@path`, DnD" claim in the sibling matrices |
 | In-terminal image rendering (Kitty graphics / iTerm2 inline) | 🔴 | no inline image display in the TUI |
 
 ## H. Extensibility: skills, extensions & packages — highest-leverage overlap
@@ -189,7 +226,7 @@ assets` still returns zero assets on every release, and there is still no
 | Configurable skill-path array / cross-harness reuse | 🔴 | roots are **fixed** to `<ws>/.caliban/skills/`, `$XDG_CONFIG_HOME/caliban/skills/`, and plugin dirs (`crates/caliban-skills/src/loader.rs:11-21`). Pi documents `"skills": ["~/.claude/skills", "~/.codex/skills"]` as a first-class setting — a cheap, high-goodwill win |
 | Bundled skill library | 🔴 | exactly **one** skill ships — `auto-memory` (`crates/caliban-skills/src/builtins/auto_memory.md`); `crates/caliban-skills` is 555 LOC total. Pi points at `anthropics/skills` and `badlogic/pi-skills` |
 | Install a skill from npm / git / a registry | 🔴 | no `caliban skills install`; third-party skills arrive only by manual copy or bundled inside a plugin |
-| Scripted in-process extensions with an event API | 🔴 | caliban's extension seam is **hooks**, not scripts: 18 first-class events with 5 external handler types (`ShellCommandHook`, `HttpHook`, `PromptHook`, `AgentHook`, `McpHook` — `hooks_router.rs`, ADR-0024), which can block or modify tool calls. But there is no in-process API to register tools, renderers, keybindings, commands, or UI, and **9 declared events are reserved and never fired** ([`docs/adr/0024-hook-event-taxonomy.md`](../../../adr/0024-hook-event-taxonomy.md):31-34 — `Setup`, `UserPromptExpansion`, `PostToolBatch`, `InstructionsLoaded`, `WorktreeCreate`, `WorktreeRemove`, `Elicitation`, `ElicitationResult`, `TeammateIdle`). Pi exposes **33 events** and a ~75-member API |
+| Scripted in-process extensions with an event API | 🔴 | **Note-only correction 2026-08-16 (#523); rating unmoved.** The prior note claimed *"5 external handler types"* — **only 2 of the 5 execute.** `build_config_hooks` (`crates/caliban-agent-core/src/hooks_router.rs:300-350`) constructs `ShellCommandHook` for `kind = command` and `HttpHook` for `kind = http`; the `Mcp | Prompt | Agent` arm falls through to `tracing::warn!("config hook kind not yet executable at runtime; skipping")` and pushes nothing (`:343-350`). The three named types exist as **v1 stubs** that log a warning and return `Allow` (`PromptHook` `:885-890`, `AgentHook` `:910-916`, `McpHook` `:938`), and none is constructed anywhere in the tree. Config-file handlers are further gated to `PreToolUse` / `PostToolUse` / `SessionStart` only (`:250-252`), so most of the 18-event taxonomy is unreachable from settings even for the 2 kinds that do run. Corrected reading: caliban's extension seam is **hooks**, not scripts — 18 first-class events, **2 executable external handler types** (`ShellCommandHook`, `HttpHook`) plus 3 declared-but-stubbed (`PromptHook`, `AgentHook`, `McpHook`), ADR-0024 — which can block or modify tool calls. There is no in-process API to register tools, renderers, keybindings, commands, or UI, and **9 declared events are reserved and never fired** ([`docs/adr/0024-hook-event-taxonomy.md`](../../../adr/0024-hook-event-taxonomy.md):31-34 — `Setup`, `UserPromptExpansion`, `PostToolBatch`, `InstructionsLoaded`, `WorktreeCreate`, `WorktreeRemove`, `Elicitation`, `ElicitationResult`, `TeammateIdle`). Pi exposes **33 events** and a ~75-member API |
 | Extension-registered LLM-callable tools | 🔴 | see §G |
 | Extension-registered UI (widgets, overlays, dialogs, autocomplete) | 🔴 | the TUI is compiled-in (`caliban/src/tui/`); no rendering extension point exists |
 | Custom slash commands / prompt templates | 🔴 | all 38 slash commands are compiled-in Rust `impl SlashCommand` (`caliban/src/tui/slash.rs:280-293`). There is **no `.caliban/commands/*.md` loader and no `$ARGUMENTS` substitution** — explicitly out of scope in `docs/superpowers/specs/2026-05-24-slash-command-coverage-design.md:302-303`. Issues **#102**/**#103**. Pi gets `/review` from dropping `review.md` in a directory |
@@ -228,7 +265,7 @@ assets` still returns zero assets on every release, and there is still no
 |---|---|---|
 | In-process sub-agent primitive | ➕ | `AgentTool` with `tool_allowlist`, `model`, `isolation`, `background`, `maxTurns` (ADR-0021/0037). Pi ships **no** sub-agents; its *example extension* spawns a **separate `pi` process** per subagent |
 | Markdown agent definitions with frontmatter | 🔴 | Pi's example reads `~/.pi/agent/agents/*.md` (`name`, `description`, `tools`, `model`, body = system prompt). caliban has **no loader**: `SpawnSpec.frontmatter_path` (`crates/caliban-supervisor/src/proto.rs:95`) is a dead field, set to `None` at every call site (`agents_cli.rs:323,477`, `compose.rs:954`, `tui/events.rs:1005-1009`, `proc.rs:299`, `worker.rs:1075`) and never read. `/agents` is a stub (`dx.rs`). This is also a gap versus Claude Code, Grok Build, and OpenCode |
-| Parallel fan-out with a concurrency cap | 🟡 | in-turn tool dispatch is bounded by `parallel_tool_limit` (`agent.rs:25`, ADR-0016), but there is **no cap on concurrently-running background agents** — no `max_agents` anywhere in `crates/caliban-supervisor`. Pi's example caps at 8 tasks / 4 concurrent with a 50 KB per-task output cap |
+| Parallel fan-out with a concurrency cap | 🟡 | **Re-verified 2026-08-16 (#523); rating unmoved, reconciliation recorded.** Both halves confirmed against `main`: in-turn tool dispatch — `AgentTool` calls included — is bounded by the generic parallel-tool semaphore (`crates/caliban-agent-core/src/stream/mod.rs:2017`), sized `available_parallelism() - 1` (`agent.rs:25-30`, ADR-0016) and tunable via `--parallel-tool-limit`; and there is still **no cap on concurrently-running background agents** — `max_agents`, `max_concurrent`, and `Semaphore` all return zero hits across `crates/caliban-supervisor`. ⚠ **Reconciled with the apparent conflict** flagged in #523: [`../grok-build/parity-gap-matrix.md`](../grok-build/parity-gap-matrix.md) §F ("Agents / subagents"), row *"Parallel subagents (up to 8; research/impl/review)"* scores ✅ on the same code. **Not a contradiction — the two rows score different capabilities.** Grok's row asks *can sub-agents run in parallel* (yes, via the shared semaphore → ✅, and that row's own note already says *"there is **no sub-agent-specific cap**"*). This row asks for parallel fan-out **with a concurrency cap**, which is Pi's framing — foreground dispatch is capped, background agents are not, hence 🟡. Both stand as written. Pi's example caps at 8 tasks / 4 concurrent with a 50 KB per-task output cap |
 | Chained agents with output threading | 🔴 | no chain primitive; Pi's example supports `{chain:[…]}` with a `{previous}` placeholder that stops at first failure |
 | Per-agent worktree isolation | 🟡 | a real libgit2 implementation exists (`crates/caliban-worktrees/src/manager.rs:148-296`) but is consumed **only on the background/daemon path** (`caliban-supervisor/src/server.rs`). `isolation: "worktree"` **without** `background: true` is a silent no-op — `compose.rs:884-927` never reads `input.isolation`. Pi has no worktree isolation at all |
 | Recursion control | ➕ | prevented architecturally — `compose.rs:864-880` snapshots the tool registry *before* registering `AgentTool`, so subagents structurally lack it (ADR-0021) |
@@ -248,7 +285,7 @@ assets` still returns zero assets on every release, and there is still no
 | Split-turn compaction (a single turn over budget) | 🟡 ⚠ | caliban's compactor + `MicroCompact` reduce turn size, but no code path generates the two-summary merge Pi documents for an over-budget single turn. ⚠ not exhaustively traced this pass |
 | Extension-replaceable compaction | 🔴 | compaction is compiled-in; there is no `session_before_compact` equivalent and no exported `convertToLlm()`/`serializeConversation()` seam |
 | Tool-output supersession janitor | ➕ | `MicroCompact` (`compact.rs:141-241`) — an LLM-free pass that supersedes stale `Read`/`Grep`/`Glob`/`WebFetch` results by key while never superseding `Bash`. No Pi analogue |
-| Checkpoint / rewind of **files** as well as conversation | ➕ | content-addressed sha256 checkpoints with verify-all-then-apply and five restore modes (ADR-0028, `crates/caliban-checkpoint/src/restore.rs`). Pi's tree navigation rewinds conversation only, never the working tree. 🟡 caveat: `message_id()` always returns `None` (`restore.rs:244-253`), so granularity falls back to user-message ordinals |
+| Checkpoint / rewind of **files** as well as conversation | 🔴 | **Down-ticked from ➕ 2026-08-16 (#523) — this was the file's flagship differentiator claim against Pi, and it is a false one.** `caliban-checkpoint` is complete and unit-tested (store / recorder / restore / prune / hook, ADR-0028, content-addressed sha256 with verify-all-then-apply and five restore modes) and **entirely unreachable from the shipped binary**. `CheckpointHook` has no construction site outside its own crate's tests (`crates/caliban-checkpoint/src/hook.rs:191`, `tests/disabled_env.rs:30`, `tests/plan_mode_marker.rs:23`), so nothing is ever snapshotted. `App::with_checkpoint_store` (`caliban/src/tui/app.rs:573`) carries `#[allow(dead_code, reason = "wired by main.rs once full /rewind action plumbing lands")]` and has **zero callers**, so `app.checkpoint_store` is always `None` (`app.rs:550`) and `/rewind` short-circuits to *"(checkpointing not enabled for this session)"* (`caliban/src/tui/overlay.rs:826-828`). caliban does **not** rewind the working tree today; Pi's conversation-only tree navigation is strictly more than caliban ships. Machinery, not a shipped path. Matches the treatment already given under #519 in [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md) §B ("CLI subcommands"), row *"`codex fork` (branch a session)"* 🔴; [`../opencode/parity-gap-matrix.md`](../opencode/parity-gap-matrix.md) §H ("Tools"), row *"Snapshot file-tracking + `/undo`/`/redo`"* 🔴 and §M ("TUI ergonomics"), row *"Undo/redo"* 🔴; and [`../antigravity/parity-gap-matrix.md`](../antigravity/parity-gap-matrix.md) §H ("Tools"), row *"Diff-gated edits + revert"* 🟡 (which keeps a 🟡 for the *gating* half and calls the revert half dead). The prior 🟡 caveat about `message_id()` returning `None` (`restore.rs:244-253`) is moot while no path constructs a store at all. Wiring is tracked as issue **#549**, filed from this sweep — six scored rows across six matrices rested on this code and nothing tracked the fix |
 | Prompt caching | 🟡 | **Anthropic only** — `crates/caliban-provider-anthropic/src/ir_convert.rs` maps `CacheControl::Ephemeral`; Google, OpenAI, and Ollama hardcode `cache_control: None` at every conversion site, silently dropping it. No cache-retention tier either (Pi: `none`/`short`/`long` with 1 h / 24 h TTLs and session-affinity headers). Issue **#493** |
 | Live token / cache / cost / context display | ✅ | statusline + `/usage`, `/cost`, `/context` (ADR-0033) with `rust_decimal` math |
 | Export | 🟡 | `/export` writes Markdown or `--format json` (`caliban/src/tui/slash/export.rs:23-74`), but **HTML export is absent** and the clipboard target is an explicit stub (`export.rs:50-55`) |
@@ -395,12 +432,23 @@ matrix row; #515 defers it to a separate ticket.
    sibling competitors — a months-old snapshot is stale.
 3. Keep the **(tk)** rows in §O unscored. If Pi ever ships a real `pi serve` on top
    of `pi-server`, promote row **B-4** out of **n/a** and into a scored row.
-4. Re-check the **➕** rows too: they are the moat, and a Pi release that adds a
-   permission system, MCP, or sub-agents to *core* would be the most significant
-   competitive change this matrix could record.
+4. Re-check the **➕** rows too, in **both** directions:
+   - *Pi side* — they are the moat, and a Pi release that adds a permission
+     system, MCP, or sub-agents to *core* would be the most significant
+     competitive change this matrix could record.
+   - *caliban side* — hold every ➕ to the same
+     [production-call-path rule](../../README.md) as the ✅ rows. A ➕ asserts
+     **more** than a ✅: it claims caliban does something Pi does not, so an
+     unreachable ➕ is a *false differentiator* and the most damaging error this
+     document can contain. #523 found exactly one (checkpoint/rewind, then the
+     file's flagship claim against Pi) plus three ➕ rows citing machinery that
+     was real but gated or dead. A sweep phrased as "re-verify the ✅ rows"
+     walks straight past all four — say **"✅ and ➕"** every time.
 5. Resolve any **⚠** rows against Pi's live docs and caliban `main` when you touch
    them — including the **six** sibling-matrix corrections noted in §A, §D, §F,
    §G, §H, and §L, which should be propagated to those files on their next
-   refresh (tracked as **#519**). They are anchored by section + row label, not
-   line number, so they still resolve after those files are re-flowed.
+   refresh (tracked as **#519**), and the §D *"Interactive settings editor"*
+   cross-link, where the `claude-code` matrix is the file that needs correcting
+   (tracked as **#522**). They are anchored by section + row label, not line
+   number, so they still resolve after those files are re-flowed.
 6. Bump the **Last refreshed** date at the top.
