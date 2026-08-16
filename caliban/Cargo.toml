@@ -34,6 +34,7 @@ caliban-provider-openai    = { workspace = true }
 caliban-provider-ollama    = { workspace = true }
 caliban-provider-google    = { workspace = true }
 caliban-agent-core         = { workspace = true }
+caliban-drive              = { workspace = true }
 caliban-sessions           = { workspace = true }
 caliban-checkpoint         = { workspace = true }
 caliban-tools-builtin      = { workspace = true }

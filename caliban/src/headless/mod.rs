@@ -30,6 +30,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use caliban_agent_core::{Agent, StopCondition, TurnEvent};
+use caliban_drive::{DriveOptions, DriveSession, DriveStatus};
 use caliban_provider::{ContentBlock, Message};
 use futures::StreamExt as _;
 use thiserror::Error;
@@ -828,7 +829,20 @@ impl<W: Write> HeadlessDriver<W> {
         // IDs are unique per run in practice, but clearing here keeps the
         // state machine local. (Run-level mismatch dedup is preserved.)
         self.decoder.clear_tool_inputs();
-        let mut stream = agent.stream_until_done(messages, cancel);
+        // Route the run through the shared drive core (ADR 0055) rather than
+        // driving `stream_until_done` inline. The core owns the run/stream
+        // lifecycle and fans `TurnEvent`s out via `subscribe`, so headless
+        // consumes the very same core the MCP-server / ACP / HTTP-serve adapters
+        // do — there is one agent-lifecycle implementation, not two.
+        //
+        // `DriveOptions::default()` is non-interactive with an empty session id
+        // and a `.` workspace root — byte-for-byte the `RunSettings::default()`
+        // the old `agent.stream_until_done(messages, cancel)` used — so `-p`
+        // behavior is unchanged. Dropping `session` at function exit cancels the
+        // run's (child) token, preserving the old "drop the stream to stop the
+        // run" semantics on every early return below.
+        let session = DriveSession::spawn(agent, messages, DriveOptions::default(), &cancel);
+        let mut stream = session.subscribe();
         // #184 (HL1): the budget can latch `exceeded` when the *final* turn's
         // cost is recorded (TurnEnd), which is yielded just before the natural
         // RunEnd{EndOfTurn}. Returning BudgetExceeded immediately there would
@@ -848,6 +862,12 @@ impl<W: Write> HeadlessDriver<W> {
             if self.config.budget.is_exceeded() {
                 budget_tripped = true;
             }
+        }
+        // The subscriber stream yields only `Ok` events; the drive core reports
+        // a run failure via its status. Surface a failed run as a `Run` error so
+        // the binary exits non-zero, exactly as the old inline `map_err` did.
+        if let DriveStatus::Failed { error } = session.status() {
+            return Err(HeadlessError::Run(error));
         }
         Ok(None)
     }
