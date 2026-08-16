@@ -45,10 +45,13 @@ and theme/keybind customization (§M). Two confirmed defects relayed from PR
 #517 are fixed — `caliban mcp` (§C and §I) and image ingest (§H/§M). The
 recurring pattern is #516's: machinery that compiles and is unit-tested with no
 non-test caller (the whole `caliban-checkpoint` crate, image ingest, four of
-five plugin aggregations, `Settings::additional_directories`). One row is a
-**safety** finding rather than a scoring one: §E's per-command bash patterns —
-the documented-elsewhere `Bash(git *)` form silently never matches, and
-imported Claude Code rules are copied verbatim, so they land dead. Prior
+five plugin aggregations, `Settings::additional_directories`). One row was
+recorded as a **safety** finding rather than a scoring one — §E's per-command
+bash patterns, on the claim that the `Bash(git *)` form silently never matched
+and that imported Claude Code rules therefore landed dead. **That finding was
+retracted 2026-08-16 (#548)**: #518 / PR #521 shipped the paren-form fix the
+day after this sweep, both spellings now match, and the row's residual 🟡 is
+resolution order rather than grammar. See the correction block below. Prior
 refresh 2026-07-27 (primary-source refresh of the OpenCode column — derived
 from [`capability-inventory.md`](capability-inventory.md) snapshot 2026-07-27,
 verified against live `opencode.ai/docs/*` (HTTP 200); caliban state
@@ -65,6 +68,56 @@ mode: not a row scored optimistically, but shipped capability scored as absent �
 Docker is named in the row and the GHCR image ships, and cargo/crates.io is a
 package-manager channel that ships. The sibling *self-update* row below stays
 🔴 and is unaffected.
+
+**Subsequent correction 2026-08-16 (#548):** **0 down-ticks, 0 up-ticks, 8
+note-only corrections** — §E *"Per-command bash patterns, last-match-wins"*, §G
+*"Provider breadth"*, §H *"Snapshot file-tracking + `/undo`/`/redo`"* and
+*"Image input"*, §I *"MCP client (local + remote servers)"*, §L *"Plugins
+(npm-loaded)"*, §M *"Undo/redo"* and *"Image drag-and-drop"*. Same counting
+convention as above; the row count is unchanged at **73**.
+
+The §E correction is the second instance of the #524 failure mode — shipped
+capability scored as absent — and the sharpest, because it was *operator-facing*:
+the cell told a reader that pasting caliban's own printed `--allow 'Bash(git *)'`
+guidance produced a silently dead rule. #518 / PR #521 (`f44d726`) fixed that one
+day after the #519 sweep wrote the cell. The rating did **not** move to match
+[`../grok-build/parity-gap-matrix.md`](../grok-build/parity-gap-matrix.md) §E's
+✅, because the two rows score different capabilities: grok-build's scores the
+rule *grammar* (now correct for both spellings), while this row's second half —
+last-match-wins resolution — is still a real divergence. Up-ticking on the
+strength of the grammar fix alone would have deleted a true finding.
+
+The other seven are a **production-call-path re-verification** of every
+remaining scored row under
+[`../../README.md`](../../README.md#scoring-rule-for-parity-matrices), repeated
+independently rather than inherited from #519. All seven held their rating; the
+value is in re-anchored references (§L), tracking links for work now ticketed
+(§H/§M → #549, §G → #537), and evidence made explicit where a ✅ could otherwise
+be read too broadly (§I: the MCP *client* is production, but elicitation and
+resources have no non-test caller — no `resources/list` RPC is ever issued).
+Two findings are worth naming:
+
+- **§H/§M image ingest.** This matrix's 🔴 on *"Image drag-and-drop"* was right
+  as first written and is retained; §H's *"Image input"* 🟡 is also retained,
+  matching pi and Codex (#523). The two are not in conflict — §M scores one
+  absent ingest mechanism, §H scores image input broadly and keeps 🟡 solely for
+  ADR-0039's provider-side `ImageBlock` wire support.
+- **Live config reload.** `SettingsWatcher::watch`
+  (`crates/caliban-settings/src/watcher.rs:42`) has no caller outside its own
+  test at `:149`, so config hot-reload does not reach the shipped binary. This
+  matrix has **no scored row for it** — the OpenCode inventory's config section
+  (`capability-inventory.md` §5) lists no hot-reload capability — so nothing is
+  scored here rather than a row being invented to hold the finding. On the merits
+  it matches pi's 🔴 (#550) rather than the Claude Code matrix's 🟡, and #550's
+  deliberate flagging of that divergence stands.
+
+Deliberately **not** changed here: §C's checkpoint parenthetical, corrected by
+#551; [`../pi/parity-gap-matrix.md`](../pi/parity-gap-matrix.md) §G *"Image
+input"*, cross-referenced above and owned by #523. One acceptance item from #548
+is **unfinished** — the note-only correction to grok-build §E (its ✅ implies
+`deny > ask > allow` precedence parity, which holds only for the legacy
+three-bucket form) — because that file was being swept concurrently; it is
+recorded here so the finding is not lost.
 
 > **Caveat:** rows tagged **⚠** depend on an OpenCode fact still flagged
 > uncertain in the inventory (§14 there). The "caliban detail inferred from the
@@ -126,7 +179,7 @@ package-manager channel that ships. The sibling *self-update* row below stays
 |---|---|---|
 | `allow` / `ask` / `deny` resolution | ✅ | rule grammar + modes (ADR-0029/0045) |
 | Per-tool + wildcard defaults | ✅ | ordered `[[permissions.rules]]` with globstar |
-| Per-command bash patterns, last-match-wins | 🟡 | **Down-ticked 2026-08-15 (#519) — both halves of the old note were wrong.** Per-command patterns work, but the syntax is **`Bash:git *`, not `Bash(git *)`**: `split_pattern` splits on `:` only (`crates/caliban-agent-core/src/permissions_matcher.rs:30-33`), so a paren form leaves `tool_pat = "Bash(git *)"` and the gate at `:83` runs `glob_match("Bash(git *)", "Bash")` → false. **`Bash(git *)` silently never matches**, and `crates/caliban-settings/src/import.rs:129-143` copies imported Claude-Code-style patterns **verbatim**, so importing a real `settings.json` yields dead rules; `caliban perms lint` (`caliban/src/perms_cli.rs:465`) only dedupes and will not flag it. Resolution is also **first**-match-wins over the ordered v2 `rules` array (`permissions.rs:198-200`), not last-match-wins; deny→ask→allow ordering applies only when flattening the *legacy* three-bucket form (`crates/caliban-settings/src/settings.rs:554-571`) |
+| Per-command bash patterns, last-match-wins | 🟡 | **Note corrected 2026-08-16 (#548); rating unmoved, but for the *other* half of the row.** The **grammar** half of the #519 note was retracted: #518 / PR #521 (`f44d726`) landed the day after that sweep and made `split_pattern` normalize the parenthesised form before the colon split (`crates/caliban-agent-core/src/permissions_matcher.rs:44-53`; `paren_open` at `:113-119` treats a `:` *before* the first `(` as the colon form, leaving those parens as literal glob text). **`Bash(git *)` and `Bash:git *` are interchangeable and both match** — the tool gate (`matches_with_workspace`, `:177-179`) now receives `tool_pat = "Bash"`, pinned by tests at `permissions_matcher.rs:507` and `:531`. Two consequences follow: `perms import` copying Claude-Code patterns **verbatim** (`crates/caliban-settings/src/import.rs:133-140`, `pattern: s.to_owned()`) is now the *correct* behaviour rather than a source of dead rules — imported rule sets are live with no rewriting step (`docs/guide/src/permissions/managing.md:109`) — and `perms lint` no longer only dedupes: `validate_pattern` (`permissions_matcher.rs:66-108`) is wired into rule load at startup (`caliban/src/startup/compose.rs:1130`), `perms add` (`caliban/src/perms_cli.rs:283`) and `perms lint` (`:497`), printing `never matches: …` for a rule that cannot fire. **What holds this row at 🟡 is resolution order, not grammar.** OpenCode is *last*-matching-rule-wins (`capability-inventory.md` §6); caliban is **first**-match-wins, both in the production gate (`PermissionHooks::evaluate_with_rule`, `crates/caliban-agent-core/src/permissions.rs:450-453`) and in the CLI/TUI helper (`evaluate_rules`, `:198-200`), so an OpenCode `permission` block ported rule-for-rule resolves differently. deny→ask→allow precedence exists only as the order used when flattening the *legacy* three-bucket form (`crates/caliban-settings/src/settings.rs:554-571`), not as a property of the v2 `rules` array |
 | Agent-level permission overrides | 🟡 | **Down-ticked 2026-08-15 (#519).** Per-subagent **tool scoping is real** (`tool_allowlist`, `crates/caliban-tools-builtin/src/agent/agent_tool.rs:60` → `caliban/src/startup/compose.rs:886-900`), and background sub-agents inherit a permission slice (`InheritableHookConfig{rules, mode, audit, runtime_rules}`, `caliban/src/hook_inherit.rs:15-31`). But **`permissionMode` does not exist as a per-agent override** — zero hits in any Rust file repo-wide; ADR-0037's frontmatter surface was never built (see §F). Foreground sub-agents get `NoopHooks` outright (`compose.rs:919-926`, admitted at `:855`) |
 | `external_directory` gate | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519).** Neither mechanism in the old note exists. There is **no `--add-dir` flag** anywhere in `caliban/src/args.rs`. `Settings::additional_directories` (`crates/caliban-settings/src/settings.rs:416`) parses and merges but has **no reader in `caliban/src/`**, and the field it would feed, `MemoryConfig::additional_dirs`, is hardwired `Vec::new()` at both production constructors (`crates/caliban-memory/src/config.rs:139,169`) — so the consumer loop at `crates/caliban-memory/src/loader.rs:140-141` always iterates empty. Even fully wired it would only widen the CLAUDE.md walk; it never gated the tool path fence. Dead config surface, tracked against ADR-0036 |
 | `doom_loop` (repeated-identical-call) guard | 🔴 | turn-loop resilience exists, but no dedicated repeated-call guard. OpenCode's `doom_loop` fires specifically when the **same tool call repeats 3 times with identical input** (confirmed `/docs/permissions/`) |
@@ -150,7 +203,7 @@ package-manager channel that ships. The sibling *self-update* row below stays
 
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
-| Provider breadth (75+ via Models.dev) | 🟡 | **Note corrected 2026-08-15 (#519) — the list was wrong; the gap is wider than stated.** The binary can construct **four** providers: Anthropic / OpenAI / Ollama / Google (`ProviderKind`, `caliban/src/args.rs:88-95`; `build_provider`, `caliban/src/startup/compose.rs:161-180`; router arms `caliban/src/router.rs:90-150`). **Bedrock and Vertex are not among them** — `caliban/Cargo.toml` does not depend on `caliban-provider-{bedrock,vertex}`, so no CLI path can construct either; the ADR-0034 crates are library-complete but reachable only from their own integration tests. Four hardcoded providers vs 75+ |
+| Provider breadth (75+ via Models.dev) | 🟡 | **Note corrected 2026-08-15 (#519) — the list was wrong; the gap is wider than stated.** The binary can construct **four** providers: Anthropic / OpenAI / Ollama / Google (`ProviderKind`, `caliban/src/args.rs:88-95`; `build_provider`, `caliban/src/startup/compose.rs:161-180`; router arms `caliban/src/router.rs:90-150`). **Bedrock and Vertex are not among them** — `caliban/Cargo.toml` does not depend on `caliban-provider-{bedrock,vertex}`, so no CLI path can construct either; the ADR-0034 crates are library-complete but reachable only from their own integration tests. Four hardcoded providers vs 75+. **Re-verified 2026-08-16 (#548)** — still exactly four `ProviderKind` variants (`caliban/src/args.rs:88-95`) and still no `caliban-provider-{bedrock,vertex}` dependency in `caliban/Cargo.toml`; now tracked by #537 (wire or archive) |
 | Local runners (Ollama / LM Studio / OpenAI-compatible) | ✅ | ollama + LMStudio probed |
 | Provider-priority routing / fallback | ✅ | **Note corrected 2026-08-15 (#519) — real, but opt-in.** Sequential fallback (`crates/caliban-model-router/src/dispatch.rs:20,98,134`), hedging (`:144-168` → `hedging.rs::race_hedged`) and per-route circuit breakers (`:83-124,182-253`) are on the router's live dispatch path, and the router becomes *the* provider for the run when loaded (`caliban/src/main.rs:281-296`). It loads **only when a `caliban.toml` with a `[router]` table is discovered** (`caliban/src/router.rs:47-50` returns `Ok(None)` otherwise) — with no such file none of this runs. A configured production path, so ✅ stands |
 | `small_model` split for light tasks | ✅ | **Note corrected 2026-08-15 (#519) — real, but doubly gated.** The purpose is stamped in production (`RequestPurpose::FastClassifier` at `crates/caliban-agent-core/src/auto_mode.rs:394`; `MainLoop` at `stream/mod.rs:1103`; `Summarization` at `compact.rs:611`), but purpose→route resolution lives **inside the router** (`crates/caliban-model-router/src/config.rs:363-477`), so an actual fast/heavy split needs a `caliban.toml` route keyed `purpose = "fast_classifier"`. The classifier itself is additionally gated on `permission_mode = auto` (`caliban/src/startup/compose.rs:1157-1168`). On the single-provider path `purpose` is inert — the same model serves both |
@@ -162,17 +215,17 @@ package-manager channel that ships. The sibling *self-update* row below stays
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
 | `read`/`write`/`edit`/`bash`/`glob`/`grep`/`webfetch`/`websearch`/`task`/`skill` | ✅ | **Note filled 2026-08-15 (#519).** All registered in `build_registry` (`caliban/src/startup/compose.rs:592-616`, plus `Skill` :654, `ToolSearch` :847, `AgentTool` :1012), reached from `caliban/src/main.rs:372` and `caliban/src/worker.rs:595`. Also `MultiEdit`, `NotebookEdit`, `BashOutput`, `KillShell`, `TodoWrite`, `EnterPlanMode`/`ExitPlanMode`, memory-topic tools. Naming note: `task` is spelled **`AgentTool`** (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:172`). No stubs in this set |
-| Snapshot file-tracking + `/undo`/`/redo` | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519).** `caliban-checkpoint` is complete and unit-tested (store/recorder/restore/prune/hook, ADR-0028) and **entirely unreachable from the binary**: `CheckpointHook` has no construction site outside the crate's own tests, so nothing is ever snapshotted; `App::with_checkpoint_store` (`caliban/src/tui/app.rs:573`) carries `#[allow(dead_code, reason = "wired by main.rs once full /rewind action plumbing lands")]` and has zero callers, so `app.checkpoint_store` is always `None` (`app.rs:550`) and `/rewind` renders "(checkpointing not enabled for this session)" (`caliban/src/tui/overlay.rs:826`). Even with a store, the advertised `[c]/[v]/[b]/[s]` actions are inert — `Overlay::Rewind` has no entry in the key dispatcher (`caliban/src/tui/events.rs:562-589`). There is no undo, no redo, and no file snapshotting |
+| Snapshot file-tracking + `/undo`/`/redo` | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519); re-verified 2026-08-16 (#548), now tracked by #549.** `caliban-checkpoint` is complete and unit-tested (store/recorder/restore/prune/hook, ADR-0028) and **entirely unreachable from the binary**: `CheckpointHook` has no construction site outside the crate's own tests, so nothing is ever snapshotted; `App::with_checkpoint_store` (`caliban/src/tui/app.rs:573`) carries `#[allow(dead_code, reason = "wired by main.rs once full /rewind action plumbing lands")]` and has zero callers, so `app.checkpoint_store` is always `None` (`app.rs:550`) and `/rewind` renders "(checkpointing not enabled for this session)" (`caliban/src/tui/overlay.rs:826`). Even with a store, the advertised `[c]/[v]/[b]/[s]` actions are inert — `Overlay::Rewind` has no entry in the key dispatcher (`caliban/src/tui/events.rs:562-589`). There is no undo, no redo, and no file snapshotting |
 | LSP integration (diagnostics/symbols to the agent) | 🔴 | no Language-Server integration — an OpenCode-distinctive gap. OpenCode's LSP is **default-off** (`"lsp": true` to enable) but ships **30+ built-in servers** (Python/TS/Rust/Go/PHP…) with auto-install once on |
 | Auto-formatters on edit (`formatter`) | 🔴 | no post-edit formatter hook |
 | User-defined custom tools (`.opencode/tools/`) | 🟡 | **Note narrowed 2026-08-15 (#519).** Extension is via MCP or skills; **plugins cannot contribute tools at all** — `plugin.json`'s component set is skills/hooks/agents/output_styles/mcp_servers/commands (`crates/caliban-plugins/src/manifest.rs`), with no `tools` key, and four of those five aggregations are never consumed anyway (see §L). No `.caliban/tools/` dir concept exists |
-| Image input | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** ADR-0039's provider-side `ImageBlock` wire support is real, but **no production path ingests an image**: `resolve_image_attachments` (`caliban/src/tui/attach.rs:218`) is `#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]` with test-only callers (`:480,499`); `paste_image_from_clipboard` (`crates/caliban-images/src/clipboard.rs`) and `parse_drag_drop_escape` (`dnd.rs`) have no callers outside their own modules; the text attach path *skips* image files (`attach.rs:146`); `Read` is text-only (`crates/caliban-tools-builtin/src/fs/read.rs`); and there is no `--image` flag |
+| Image input | 🟡 | **Down-ticked 2026-08-15 (#519); re-verified 2026-08-16 (#548), rating unmoved.** ADR-0039's provider-side `ImageBlock` wire support is real, but **no production path ingests an image**: `resolve_image_attachments` (`caliban/src/tui/attach.rs:218`) is `#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]` with test-only callers (`:480,499`); `paste_image_from_clipboard` (`crates/caliban-images/src/clipboard.rs`) and `parse_drag_drop_escape` (`dnd.rs`) have no callers outside their own modules; the text attach path *skips* image files (`attach.rs:149-153`, *"Image mentions are handled by `resolve_image_attachments`"* — so `@path` on an image drops it rather than attaching it); `Read` is text-only (`crates/caliban-tools-builtin/src/fs/read.rs`); and there is no `--image` flag. The only non-test `ImageBlock` construction in `caliban/src` is a synthetic `example.invalid` placeholder in `caliban router explain --has-vision` (`caliban/src/router.rs:297-310`), which is capability probing, not ingest. The residual 🟡 reflects **only** the wire support. This matches [`../pi/parity-gap-matrix.md`](../pi/parity-gap-matrix.md) §G, row *"Image input"* (#523), and [`../codex/parity-gap-matrix.md`](../codex/parity-gap-matrix.md) §C, row *"Image input (`--image` / paste)"* (#519) — both 🟡 on the same reasoning; §M's *drag-and-drop* row is 🔴 because it scores a specific ingest mechanism that is wholly absent, which is consistent with — not contradictory to — this row |
 
 ## I. MCP
 
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
-| MCP client (local + remote servers) | ✅ | rmcp client, stdio + HTTP (ADR-0023) |
+| MCP client (local + remote servers) | ✅ | **Note corrected 2026-08-16 (#548); ✅ stands, but scoped.** Connection, tool discovery and tool invocation are genuinely production — stdio + HTTP via rmcp, driven from `crates/caliban-mcp-client/src/manager.rs` (ADR-0023), which is what this row scores. Two advertised sub-surfaces of that client are **not** reachable and must not be inherited as broader MCP parity: (1) **elicitation** — `ElicitationBridge` (`crates/caliban-mcp-client/src/elicitation.rs:95`) is constructed only inside its own `#[cfg(test)] mod tests` (`:233` onward), `elicit_rule_pattern` (`:35`) has no non-test caller, and the CLI surface that would drive it is parsed-and-ignored: `--permission-prompt-tool` (`caliban/src/args.rs:264`) only prints *"will route Ask events to the named MCP elicitation tool (ADR 0023 Phase C)"* (`caliban/src/startup/drivers.rs:450-454`), pinned as inert by `caliban/tests/headless.rs:437`; (2) **resources** — `ResourceCache` and the `@<server>:<resource>` mention grammar (`crates/caliban-mcp-client/src/resource.rs`) have **zero consumers outside the crate**, so no `resources/list` or `resources/read` RPC is ever issued by the shipped binary; the round-trip exists only in `tests/resource_integration.rs` |
 | `mcp add/list/auth/logout` CLI | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** No `caliban mcp` subcommand exists — `CalibanCommand` (`caliban/src/args.rs`) has no `Mcp` variant, so none of `add`/`list`/`auth`/`logout` is available from a shell. OAuth itself is real but runs *implicitly* on connect (`crates/caliban-mcp-client/src/manager.rs:212-217,315-317`; PKCE + loopback + keyring, `oauth.rs`), with no login/logout verb to drive or revoke it. Same evidence as §C |
 | Driven via HTTP server / ACP / SDK | 🔴 | see B — no server/ACP surface for being driven. OpenCode's driving surface is substantial: **OpenAPI 3.1** HTTP API + a typed **`@opencode-ai/sdk`** (JS/TS, `createOpencode()` / `createOpencodeClient()`) + a **Go SDK** + `acp` — the caliban gap here is deeper than "no socket." (Dedicated MCP-*server* mode leaning-refuted upstream — canonical MCP slug 404'd this pass) |
 
@@ -197,7 +250,7 @@ package-manager channel that ships. The sibling *self-update* row below stays
 
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
-| Plugins (npm-loaded) | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** Install/update/remove/enable/disable and the HTTP marketplace (JSON index + `.tar.gz` + sha256) are real (`crates/caliban-plugins/src/{cli,marketplace}.rs`, ADR-0030). But an installed plugin only ever contributes **skills**: of `PluginManager`'s five aggregations, only `skill_roots` has a non-test consumer (`crates/caliban-plugins/src/manager.rs:262` → `caliban/src/main.rs:326` → `caliban/src/startup/compose.rs:632`); `hooks_configs` (:285), `mcp_servers` (:293), `agent_roots` (:276) and `output_style_roots` (:270) are parsed, namespaced, expanded and discarded, and `compose.rs:1527,1679` pass `enabled_plugins: &[]`. No npm loading — sources are HTTP marketplace or local `--dir` sideload (`crates/caliban-plugins/src/discovery.rs:52-61`) |
+| Plugins (npm-loaded) | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** Install/update/remove/enable/disable and the HTTP marketplace (JSON index + `.tar.gz` + sha256) are real (`crates/caliban-plugins/src/{cli,marketplace}.rs`, ADR-0030). But an installed plugin only ever contributes **skills**: of `PluginManager`'s five aggregations, only `skill_roots` has a non-test consumer (`crates/caliban-plugins/src/manager.rs:262` → `caliban/src/main.rs:326` → `caliban/src/startup/compose.rs:632`); `hooks_configs` (:285), `mcp_servers` (:293), `agent_roots` (:276) and `output_style_roots` (:270) are parsed, namespaced, expanded and discarded. **Re-verified 2026-08-16 (#548), references re-anchored:** `skill_roots` remains the only aggregation with a production consumer, and the output-style path still hardcodes an empty plugin set — `caliban/src/startup/compose.rs:1537` and `:1689-1691` (*"v2: enabled_plugins is empty until ADR 0030 plugin system ships"*), previously cited as `:1527,1679`. No npm loading — sources are HTTP marketplace or local `--dir` sideload (`crates/caliban-plugins/src/discovery.rs:52-61`) |
 | SDK / documented Server API | 🔴 | no embedding SDK / HTTP API. OpenCode ships a **generated, type-safe JS/TS SDK** (`@opencode-ai/sdk`), a **Go SDK**, and an **OpenAPI 3.1** server spec (`/doc`) — the 🔴 reflects a genuinely richer competitor surface, not merely a missing endpoint |
 | Managed config + MDM | ✅ | managed settings scope (ADR-0026/0045) |
 | Resource-access policies (`experimental.policies`) | 🟡 | permissions + sandbox cover much of this; no separate policy engine |
@@ -208,8 +261,8 @@ package-manager channel that ships. The sibling *self-update* row below stays
 | Capability (OpenCode) | Caliban | Notes |
 |---|---|---|
 | Plan mode toggle | ✅ | `/plan` + Shift+Tab |
-| Undo/redo | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519).** `/rewind` opens an overlay that is always empty — `checkpoint_store` is never populated (`caliban/src/tui/app.rs:550`; the only setter, `with_checkpoint_store` at `:573`, is `#[allow(dead_code)]` with zero callers), so `caliban/src/tui/overlay.rs:826` short-circuits to "(checkpointing not enabled for this session)". `CheckpointHook` is never constructed either, so nothing is snapshotted in the first place. See §H |
-| Image drag-and-drop | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519).** `parse_drag_drop_escape` / `DragDropPayload` (`crates/caliban-images/src/dnd.rs`) are exported at `lib.rs:24` and have **no callers outside their own module** — the TUI key/paste path never invokes them, and there is no bracketed-paste DnD handler. ADR-0039 describes the design; nothing reaches it. See §H |
+| Undo/redo | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519); re-verified 2026-08-16 (#548), tracked by #549.** `/rewind` opens an overlay that is always empty — `checkpoint_store` is never populated (`caliban/src/tui/app.rs:550`; the only setter, `with_checkpoint_store` at `:573`, is `#[allow(dead_code)]` with zero callers), so `caliban/src/tui/overlay.rs:826` short-circuits to "(checkpointing not enabled for this session)". `CheckpointHook` is never constructed either, so nothing is snapshotted in the first place. See §H |
+| Image drag-and-drop | 🔴 | **Down-ticked from ✅ 2026-08-15 (#519); re-verified 2026-08-16 (#548), rating unmoved.** `parse_drag_drop_escape` / `DragDropPayload` (`crates/caliban-images/src/dnd.rs`) are exported at `lib.rs:24` and have **no callers outside their own module** — the TUI key/paste path never invokes them, and there is no bracketed-paste DnD handler. ADR-0039 describes the design; nothing reaches it. 🔴 rather than §H's 🟡 is deliberate and was correct as first written: this row scores the *drag-and-drop ingest mechanism*, which is wholly absent, while §H scores image input broadly and keeps a 🟡 for the provider-side `ImageBlock` wire support alone. See §H |
 | Theme + keybind customization | 🔴 | **Down-ticked from 🟡 2026-08-15 (#519).** Neither half is partial — both are absent. **No `/theme` command and no colour system**: `grep -rni theme` over `caliban/src` returns nothing; the sole repo hit is a doc comment calling the TUI settings table opaque (`crates/caliban-settings/src/settings.rs:358`). **No keybinding configuration of any kind**: `keybinding`/`key_binding`/`keymap` have zero hits across `caliban/` and `crates/`; every chord is a hardcoded match arm in `caliban/src/tui/events.rs`. The old 🟡 ("keybinds partial") had no basis |
 
 ---
@@ -247,6 +300,10 @@ parity specifically:
    `caliban-checkpoint` (undo/redo, §H/§M), image ingest (§H/§M),
    `Settings::additional_directories` (§E), and four of five plugin
    aggregations (§L). None needs new design; all four are wiring.
+   **Re-verified 2026-08-16 (#548)** — all four still unreached; checkpointing
+   is now tracked by #549. The same pass found two more of the same shape that
+   are *not* scored rows here: MCP elicitation and MCP resources (§I), and
+   `SettingsWatcher::watch` (no row — see the #548 correction block).
 
 Hosted share plane, web UI, and OpenCode Zen are **deliberately out of scope**
 (n/a) — caliban is a local-first terminal agent.
