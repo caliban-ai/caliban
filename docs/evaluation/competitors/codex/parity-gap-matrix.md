@@ -33,10 +33,11 @@ byte-for-byte identical.
 > the rating is a **note-only correction** and is counted separately. This
 > matrix has **75** scored rows.
 
-**Last refreshed:** 2026-08-15 (**caliban-side scoring sweep, #519** — no
-upstream re-baselining; the Codex inventory snapshot stays 2026-07-27, #505).
-Every ✅ row was re-verified against `main` at v0.8.0 under the rule now
-written down in [`../../README.md`](../../README.md#scoring-rule-for-parity-matrices):
+**Last refreshed:** 2026-08-16 (**production-call-path re-sweep, #555** — see
+the correction block below; the Codex inventory snapshot stays 2026-07-27, #505).
+Prior refresh 2026-08-15 (**caliban-side scoring sweep, #519** — no
+upstream re-baselining). Every ✅ row was re-verified against `main` at v0.8.0
+under the rule now written down in [`../../README.md`](../../README.md#scoring-rule-for-parity-matrices):
 a row is ✅ only when a **production call path from the shipped binary**
 reaches it. **15 down-ticks, 1 up-tick, 5 note-only corrections** across 21 of
 75 rows. The dominant pattern is the one #516 found on the Claude Code matrix —
@@ -54,6 +55,54 @@ caliban state cross-referenced from the [Claude Code parity
 matrix](../claude-code/parity-gap-matrix.md) as of its 2026-06-17 refresh;
 #485). That pass corrected Codex-side facts and notes only — caliban ratings
 were not re-verified against `main`.
+
+**Subsequent sweep 2026-08-16 (#555):** **2 down-ticks, 0 up-ticks, 2 note-only
+corrections** — a re-application of the production-call-path rule to all 75 rows,
+prompted by the sibling sweeps in #550/#551. Every **✅** row was re-traced to a
+named production call site this time, not just spot-checked; the row count is
+unchanged at **75** (28 ✅ / 26 🟡 / 18 🔴 / 3 n/a). The first down-tick is §C, row
+*"`/compact`, `/status` (context + rate limits)"* (✅ → 🟡) — an **internal
+contradiction** #519 left behind: §L already scores the same capability 🟡 on the
+finding that `/status` is a stub and no rate-limit surface exists. The second is
+§J, row *"Worktree isolation"* (✅ → 🟡), a **cross-matrix** reconciliation:
+`caliban_worktrees::WorktreeManager` does have a live caller
+(`crates/caliban-supervisor/src/server.rs:678-684`), but only on the **background**
+path, and the tool schema advertises `isolation: "worktree"` without saying that
+`background: true` is also required — so the documented default call is a silent
+no-op. The [Antigravity](../antigravity/parity-gap-matrix.md) (#554/#559) and
+[Grok Build](../grok-build/parity-gap-matrix.md) (#560) matrices reached 🟡 on this
+same code; tracked as **#557**. The note-only
+corrections are §A, row *"Windows support"*, where the note overstated confidence
+in an untested platform, and §C, row *"Image input"*, whose bare line anchor for
+the text-attach skip had drifted (`:146` → `:151`) — the defect class #551 named,
+now re-anchored to the guard's symbol. The other 72 rows held: the ✅ rows named in this file's
+prior sweeps were each re-confirmed to have a live caller (`merge_with_global` →
+`caliban/src/startup/compose.rs:1138`; `caliban_memory::load` →
+`compose.rs:1718`; `WebSearchTool` → `compose.rs:611`; `router::try_load` →
+`caliban/src/main.rs:281`). The dead capabilities
+confirmed on `main` by #550/#551 — `CheckpointHook` (#549), `ElicitationBridge`
+and `--permission-prompt-tool`, MCP resources, `SettingsWatcher::watch`, four of
+five plugin aggregations, Bedrock/Vertex (#537), `resolve_image_attachments` —
+were each re-verified here and **no additional row rests on any of them**: §B
+*"`codex fork`"* and §I *"Plugin marketplace"* already carry them, §G's note
+already retired the Bedrock/Vertex claim, and this matrix has no live-config-reload
+or MCP-resources row at all. §F *"Per-server enable / tool allow-deny / approval
+mode"* was checked specifically against the elicitation finding and is **not**
+built on it — it rests on `ServerPermissions{allow,deny,ask}` compiled by
+`merge_with_global`, which is production.
+
+> **Open convention question, deliberately not settled by this sweep.** §C row
+> *"Image input"* is arguably **🔴** under a strict reading of the
+> production-call-path rule: no reachable path lets a user supply an image at
+> all, so nothing about the capability is user-reachable. It is scored **🟡**
+> here only on the convention that ADR-0039's provider-side `ImageBlock` wire
+> support earns yellow — the same convention every sibling matrix applies
+> ([opencode](../opencode/parity-gap-matrix.md) §H, [grok-build](../grok-build/parity-gap-matrix.md) §*"Image input"*,
+> [antigravity](../antigravity/parity-gap-matrix.md) §*"Image input"*, [pi](../pi/parity-gap-matrix.md) §G).
+> Changing it is a **cross-matrix convention decision for the repo owner**, not a
+> per-file call: it would move five rows across five files at once. Flagged here
+> so the inconsistency between the rule as written and the convention as
+> practiced is on the record rather than silently resolved in one direction.
 
 **Subsequent correction 2026-08-16 (#524):** **0 down-ticks, 0 up-ticks, 1
 note-only correction** — §A, row *"npm (`@openai/codex`) / Homebrew cask / shell
@@ -79,7 +128,7 @@ genuinely do not exist.
 |---|---|---|
 | npm (`@openai/codex`) / Homebrew cask / shell + PowerShell installers | 🔴 | None of the four channels this row names ship, so the rating stands. **Note corrected 2026-08-16 (#524):** the old note said caliban "builds from source via `cargo`; no published npm/brew/installer channel yet", which understated distribution — caliban **is** published to crates.io on every `v*` tag (`.github/workflows/publish.yml`, `scripts/publish.sh`), all 8 versions through 0.8.0 are live and unyanked, and the published `caliban` crate carries `[[bin]] name = "caliban"` (`caliban/Cargo.toml`), so `cargo install caliban` yields a working binary. That is a package-manager channel — just not one Codex offers, so it closes no cell in *this* row. **Note corrected 2026-08-15 (#519):** the parenthetical claim that the container image is "not yet shipped" was stale — `ghcr.io/caliban-ai/caliban` is published multi-arch on every `v*` tag (`.github/workflows/release-image.yml`, `docs/container.md`, PR #298). The image does not close *this* row either, but it is shipped |
 | Prebuilt binaries macOS (arm64+x86_64) / Linux (x86_64+arm64) | 🔴 | release-binary distribution not yet stood up |
-| Windows support | 🟡 | caliban runs on Windows/WSL for most paths; OS sandbox on Windows is deferred (see E) |
+| Windows support | 🟡 | caliban carries a handful of Windows-conditional arms and runs under WSL; OS sandbox on Windows is deferred (see E — `detect` returns `Backend::Unavailable` and warns, `crates/caliban-sandbox/src/detect.rs:71-81`). **Note corrected 2026-08-16 (#555):** the old note said caliban "runs on Windows/WSL for most paths", which overstated confidence on two counts. First, coverage: repo-wide there are **12** `cfg` lines whose predicate mentions Windows — only **5 positive arms in production code** (`caliban-plugins/src/manager.rs:113`, `manifest.rs:292`, `caliban-settings/src/scope.rs:118`, `caliban-worktrees/src/symlinks.rs:61`, `caliban-sandbox/src/detect.rs:71`), plus 3 inside `#[cfg(test)]` modules and 4 `not(…)` exclusions. (The "~53 `cfg` sites" figure in the #555 issue body is an **overcount** — 53 is every `.rs` line matching *windows*, 41 of which are prose, doc comments and log strings.) Second, verification: `.github/workflows/ci.yml` runs `ubuntu-latest` on all three jobs (`:27`, `:89`, `:154`), so caliban is **never built or tested on Windows or macOS in CI**. The rating stands — "runs on Windows" is untested, not disproven |
 
 ## B. CLI subcommands
 
@@ -106,10 +155,10 @@ genuinely do not exist.
 | `/` command menu + `@` file mention/search | ✅ | slash-menu typeahead (#15) + `@file` autocomplete (ADR-0027) |
 | `/permissions` presets (Auto / Read Only / Full Access) | ✅ | permission modes + Shift+Tab cycle + status chip (ADR-0029) |
 | `/reasoning` (adjust effort) | ✅ | `/effort` + `/think` runtime controls (ADR-0038, #100) |
-| `/compact`, `/status` (context + rate limits) | ✅ | `/compact`, `/context`, `/usage` (ADR-0033) |
+| `/compact`, `/status` (context + rate limits) | 🟡 | **Down-ticked 2026-08-16 (#555).** The context half is real and production: `/compact`, `/context` and `/usage` are registered by `observe::register` (`caliban/src/tui/slash/observe.rs:409-411`), reached from `caliban/src/tui/slash.rs:284` (ADR-0033). The **rate-limit half does not exist**: `/status` is a stub that prints the provider name plus "(full provider/auth/subscription status arrives with the Auth spec)" (`caliban/src/tui/slash/model.rs:148-155`), and no adapter reads `anthropic-ratelimit-*` / `x-ratelimit-*` response headers — the sole `rate_limit` occurrence outside `caliban-model-router`'s tests is an error-category bucket on the headless event stream (`caliban/src/headless/events.rs:132`). The ✅ was an **internal contradiction**: §L row *"In-session context + rate-limit status (`/status`)"* scores the same capability and was already down-ticked to 🟡 for exactly this reason by #519, which did not reach this row |
 | `/review` (code-review mode) | 🔴 | skill-level, deferred |
 | Raw-output copy (`Ctrl+O` / `Alt+R`, `tui.raw_output_mode`) | 🟡 | `Ctrl+O` transcript viewer + `[` dump-to-scrollback exists; single-response raw-copy chord not a direct match |
-| Image input (`--image` / paste) | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** The claimed "clipboard, `@path`, DnD" ingest is **all dead code**. `resolve_image_attachments` (`caliban/src/tui/attach.rs:218`) is marked `#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]` and its only callers are its own unit tests (`attach.rs:480,499`); `caliban-images`' `paste_image_from_clipboard` (`clipboard.rs`) and `parse_drag_drop_escape` (`dnd.rs`) have no callers outside their own modules; the text attach path *skips* image files (`attach.rs:146`); `Read` is text-only (`crates/caliban-tools-builtin/src/fs/read.rs`); there is no `--image` flag. 🟡 reflects the ADR-0039 provider-side `ImageBlock` wire support, which is real — **not** a user-reachable ingest path. ⚠ This also **corrects Pi's §F characterization** ("`@path` attachment only"): `@path` image attachment does not work either |
+| Image input (`--image` / paste) | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** The claimed "clipboard, `@path`, DnD" ingest is **all dead code**. `resolve_image_attachments` (`caliban/src/tui/attach.rs:218`) is marked `#[allow(dead_code, reason = "wired into a follow-up TUI input slice")]` and its only callers are its own unit tests (`attach.rs:480,499`); `caliban-images`' `paste_image_from_clipboard` (`clipboard.rs`) and `parse_drag_drop_escape` (`dnd.rs`) have no callers outside their own modules; the text attach path *skips* image files (the `path_is_image_like` guard inside `resolve_attachments`, `attach.rs:151` — **line anchor corrected 2026-08-16 (#555)**, the note said `:146`); `Read` is text-only (`crates/caliban-tools-builtin/src/fs/read.rs`); there is no `--image` flag. 🟡 reflects the ADR-0039 provider-side `ImageBlock` wire support, which is real — **not** a user-reachable ingest path. ⚠ This also **corrects Pi's §F characterization** ("`@path` attachment only"): `@path` image attachment does not work either |
 
 ## D. Config system
 
@@ -181,7 +230,7 @@ genuinely do not exist.
 | Custom subagent definitions with per-agent model/sandbox/MCP overrides | 🟡 | **Down-ticked 2026-08-15 (#519).** Per-spawn overrides are real, but they come from the `AgentTool` **JSON tool input**, not from any definition file, and the advertised field list was wrong. Honored: `model` (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:63` → `caliban/src/startup/compose.rs:885`), `tool_allowlist` (`:60` → `compose.rs:886-900`), `isolation: worktree` (background path only, `compose.rs:959-962` → `crates/caliban-supervisor/src/server.rs:465-479`), `inherit_hooks`, `inherit_active_mcp`. **Absent entirely: `permissionMode`** (zero Rust hits repo-wide) and **`mcpServers`** (nearest is the boolean `inherit_active_mcp`). No sandbox override either. `maxTurns` is not an input — it is hardcoded `20` (`compose.rs:914`), and `SUB_AGENT_MAX_TURNS` (`agent_tool.rs:21`) is a dead const |
 | Subagent file format | 🔴 | **Down-ticked 2026-08-15 (#519) — the old note was factually wrong.** caliban has **no** sub-agent definition file format at all: there is no `.caliban/agents/` or `.claude/agents/` discovery in any Rust code, and `SpawnSpec.frontmatter_path` (`crates/caliban-supervisor/src/proto.rs:95`) is hardcoded `None` at every production construction site (`compose.rs:954`, `caliban/src/agents_cli.rs:323,465`, `caliban/src/tui/events.rs:1008`, `caliban/src/worker.rs:1075`). Codex's canonical TOML (`name`/`description`/`developer_instructions`) is confirmed; the divergence is not Markdown-vs-TOML, it is file-format-vs-none |
 | Auto-parallelized delegation, orchestration auto-managed | 🟡 | `AgentTool` + background fleet exist, but fan-out is agent-driven, not an automatic orchestrator |
-| Worktree isolation | ✅ | `caliban-worktrees`, `isolation: worktree` (ADR-0037) |
+| Worktree isolation | 🟡 | **Down-ticked from ✅ 2026-08-16 (#555), reconciling with the [Antigravity](../antigravity/parity-gap-matrix.md) §*"Per-agent isolated workspace"* (#554/#559) and [Grok Build](../grok-build/parity-gap-matrix.md) §*"Per-subagent git-worktree isolation"* (#560) matrices, which reached 🟡 on the same code.** The mechanism is real and production-reachable on the **background** path: `isolation: worktree` → `SpawnSpec.isolation_worktree` (`caliban/src/startup/compose.rs:959-962`) → `crates/caliban-supervisor/src/server.rs:465-479` → `worktree_for_agent` → `WorktreeManager` (ADR-0037/0052). **But the documented call gets nothing.** The `AgentTool` schema offers `isolation: "none"\|"worktree"` described as materializing "a dedicated git worktree under .caliban/worktrees/<name>", and **never says `background: true` is also required** (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:201-204`); `background` is a separate key defaulting to **false** (`:67-70`). On the foreground path the factory contains no reference to `isolation`, `worktree` or cwd at all (`compose.rs:884-927`), so a model setting exactly what the schema documents gets a **silent no-op** — the sub-agent runs in the parent's tree believing it is isolated. `caliban agents spawn` hardcodes `isolation_worktree: false` (`caliban/src/agents_cli.rs:474`, also `:328`), so the CLI cannot request one either. And `WorktreeOptions{base_ref, sparse_paths, symlink_directories}` has **no consumer outside its own parse test** (`crates/caliban-tools-builtin/tests/agent_tool.rs:252`): `worktree_for_agent` builds `WorktreeSpec::new(agent_name)` and drops all three (`server.rs:678-684`). Real on one undocumented path, inert on both documented ones — 🟡. Tracked by **#557** |
 | Background fleet + supervisor daemon | ✅ | `caliban-supervisor` + `caliband` (ADR-0037) |
 
 ## K. Headless / CI

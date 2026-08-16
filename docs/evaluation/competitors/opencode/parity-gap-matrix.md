@@ -111,6 +111,22 @@ Two findings are worth naming:
   it matches pi's 🔴 (#550) rather than the Claude Code matrix's 🟡, and #550's
   deliberate flagging of that divergence stands.
 
+**Subsequent correction 2026-08-16 (#555/#557):** **1 down-tick, 0 up-ticks, 0
+note-only corrections** — §F, row *"Worktree isolation"* (✅ → 🟡). Same counting
+convention as above; the row count is unchanged at **73** (20 ✅ / 26 🟡 / 26 🔴 /
+1 n/a). This is a **cross-matrix reconciliation**, not a new finding: the
+[Antigravity](../antigravity/parity-gap-matrix.md) (#554/#559),
+[Grok Build](../grok-build/parity-gap-matrix.md) (#560) and
+[Codex](../codex/parity-gap-matrix.md) (#555) matrices all rate the same
+`AgentTool` mechanism 🟡, and this row was the last ✅ holdout. The facts in the
+cell were already correct and unchanged — what moved is the conclusion drawn from
+them. "Reachable in production, so the ✅ stands" understated the defect: the
+schema advertises `isolation: "worktree"` without saying `background: true` is
+also required (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:201-204`;
+`background` defaults to false at `:67-70`), so the **documented default call is a
+silent no-op**, and `WorktreeOptions` has no consumer outside its own parse test.
+Tracked by **#557**.
+
 Deliberately **not** changed here: §C's checkpoint parenthetical, corrected by
 #551; [`../pi/parity-gap-matrix.md`](../pi/parity-gap-matrix.md) §G *"Image
 input"*, cross-referenced above and owned by #523. One acceptance item from #548
@@ -197,7 +213,7 @@ recorded here so the finding is not lost.
 | `@`-mention manual subagent invocation | 🟡 | invoked via `AgentTool`/Task; `@agent` mention not a direct match |
 | Primary-agent switching (Build/Plan via Tab) | 🟡 | plan mode + Shift+Tab cycle overlap, but not "swap the primary agent" |
 | Plan mode | ✅ | `/plan` + plan permission mode |
-| Worktree isolation | ✅ | **Note corrected 2026-08-15 (#519).** Real on the **background** path only: `isolation: worktree` → `caliban/src/startup/compose.rs:959-962` → `crates/caliban-supervisor/src/server.rs:465-479` → `WorktreeManager` (ADR-0037). On the **foreground** path the factory never reads `input.isolation` and never changes cwd (`compose.rs:884-927`), so the flag is a silent no-op there; `caliban agents spawn` hardcodes it false (`caliban/src/agents_cli.rs:474`); and `WorktreeOptions{base_ref, sparse_paths, symlink_directories}` are accepted by the tool schema and dropped before `WorktreeSpec::new` (`server.rs:683`). Reachable in production, so the ✅ stands. OpenCode has no first-class worktree isolation |
+| Worktree isolation | 🟡 | **Down-ticked from ✅ 2026-08-16 (#555/#557), reconciling with the [Antigravity](../antigravity/parity-gap-matrix.md) (#554/#559), [Grok Build](../grok-build/parity-gap-matrix.md) (#560) and [Codex](../codex/parity-gap-matrix.md) (#555) matrices, which all reached 🟡 on this same code. Note corrected 2026-08-15 (#519); the facts below are unchanged, the conclusion drawn from them is not.** Real on the **background** path only: `isolation: worktree` → `caliban/src/startup/compose.rs:959-962` → `crates/caliban-supervisor/src/server.rs:465-479` → `WorktreeManager` (ADR-0037). On the **foreground** path the factory never reads `input.isolation` and never changes cwd (`compose.rs:884-927`), so the flag is a silent no-op there; `caliban agents spawn` hardcodes it false (`caliban/src/agents_cli.rs:474`); and `WorktreeOptions{base_ref, sparse_paths, symlink_directories}` are accepted by the tool schema and dropped before `WorktreeSpec::new` (`server.rs:678-684`) — no consumer outside its own parse test (`crates/caliban-tools-builtin/tests/agent_tool.rs:252`). The prior ✅ rested on "reachable in production", which understated the defect: the schema advertises `isolation: "none"\|"worktree"` and **never says `background: true` is also required** (`crates/caliban-tools-builtin/src/agent/agent_tool.rs:201-204`), while `background` defaults to **false** (`:67-70`) — so the *documented default call* silently gets no isolation. Real on one undocumented path, inert on both documented ones — 🟡. Tracked by **#557**. OpenCode has no first-class worktree isolation |
 
 ## G. Models & providers
 
