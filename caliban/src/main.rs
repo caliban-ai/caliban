@@ -126,6 +126,14 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // `caliban mcp serve` — expose caliban as an MCP server over stdio so other
+    // agents can drive it (ADR 0055 / #526).
+    if let Some(CalibanCommand::Mcp { inner }) = &args.command {
+        let crate::args::McpCommand::Serve = inner;
+        let code = serve::mcp::run_serve(&args).await?;
+        std::process::exit(code);
+    }
+
     // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed
     // and don't require a provider, so route them first.
     if let Some(cmd) = &args.command
