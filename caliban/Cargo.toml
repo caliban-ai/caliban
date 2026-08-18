@@ -43,6 +43,10 @@ caliban-memory             = { workspace = true }
 caliban-output-styles      = { workspace = true }
 caliban-skills             = { workspace = true }
 caliban-mcp-client         = { workspace = true }
+# MCP *server* surface (`caliban mcp serve`, ADR 0055 / #526). The workspace
+# rmcp dep carries client features; we add the server side here (features union).
+rmcp                       = { workspace = true, features = ["server", "macros", "transport-io"] }
+schemars                   = { workspace = true }
 caliban-model-router       = { workspace = true }
 caliban-plugins            = { workspace = true }
 # Enable the real OTLP span exporter (both transports) so the shipped binary

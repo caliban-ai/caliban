@@ -764,6 +764,11 @@ pub(crate) enum CalibanCommand {
         #[command(subcommand)]
         cmd: SettingsCommand,
     },
+    /// Serve caliban as an MCP server so other agents can drive it (ADR 0055).
+    Mcp {
+        #[command(subcommand)]
+        inner: McpCommand,
+    },
     /// Internal: run a single background sub-agent worker. Hidden from
     /// `--help`; invoked only by the `caliband` supervisor (ADR 0037, #71).
     #[command(name = "__agent-worker", hide = true)]
@@ -784,6 +789,13 @@ pub(crate) enum CalibanCommand {
         #[arg(long)]
         control_socket: Option<PathBuf>,
     },
+}
+
+/// `caliban mcp <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum McpCommand {
+    /// Serve caliban as an MCP server over stdio (poll-based tools; ADR 0055).
+    Serve,
 }
 
 /// `caliban perms <verb>` verbs.
