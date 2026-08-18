@@ -430,32 +430,16 @@ impl AgentFactory for ProdAgentFactory {
 /// Propagates provider/settings construction and transport errors.
 pub(crate) async fn run_serve(args: &crate::args::Args) -> anyhow::Result<i32> {
     use anyhow::Context as _;
-    use caliban_tools_builtin::WorkspaceRoot;
 
-    let workspace = WorkspaceRoot::current_dir().context("could not get current directory")?;
-    let workspace_root = workspace.root().to_path_buf();
-    let settings = crate::startup::load_layered_settings(args, workspace.root())
+    let settings = crate::startup::load_layered_settings(args, &std::env::current_dir()?)
         .map_err(|e| anyhow::anyhow!("failed to load settings: {e}"))?
         .settings;
     let helper_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(
         settings.api_key_helper.as_ref(),
     ));
     let provider = crate::startup::build_provider(args, &helper_pool)?;
-    let model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| crate::default_model_for(crate::resolved_provider(args)).to_string());
-    let max_tokens = args.max_tokens;
 
-    let factory = Arc::new(ProdAgentFactory {
-        args: args.clone(),
-        settings,
-        provider,
-        model,
-        max_tokens,
-        workspace_root,
-    });
-
+    let factory = Arc::new(build_prod_factory(args, settings, provider)?);
     let server = McpServer::new(factory, AuthGate::from_env());
     let running = server
         .serve(rmcp::transport::io::stdio())
@@ -466,6 +450,40 @@ pub(crate) async fn run_serve(args: &crate::args::Args) -> anyhow::Result<i32> {
         .await
         .context("MCP server terminated with error")?;
     Ok(0)
+}
+
+/// Assemble the production [`ProdAgentFactory`] from parsed args, a loaded
+/// settings snapshot, and an already-built provider.
+///
+/// Factored out of [`run_serve`] so the non-I/O assembly (workspace resolution,
+/// model defaulting, struct wiring) is unit-testable with a `MockProvider`,
+/// leaving only the genuine entrypoint I/O (settings load, provider build,
+/// stdio serve loop) in `run_serve`.
+///
+/// # Errors
+///
+/// Fails if the current working directory cannot be resolved.
+fn build_prod_factory(
+    args: &crate::args::Args,
+    settings: caliban_settings::Settings,
+    provider: Arc<dyn caliban_provider::Provider + Send + Sync>,
+) -> anyhow::Result<ProdAgentFactory> {
+    use anyhow::Context as _;
+    use caliban_tools_builtin::WorkspaceRoot;
+
+    let workspace = WorkspaceRoot::current_dir().context("could not get current directory")?;
+    let model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| crate::default_model_for(crate::resolved_provider(args)).to_string());
+    Ok(ProdAgentFactory {
+        args: args.clone(),
+        settings,
+        provider,
+        model,
+        max_tokens: args.max_tokens,
+        workspace_root: workspace.root().to_path_buf(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +504,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        AgentFactory, AuthGate, BuiltRun, DriveAskHandler, McpServer, PollArgs, RunArgs, RunSpec,
-        SendInputArgs,
+        AgentFactory, AuthGate, BuiltRun, DriveAskHandler, McpServer, PermitArgs, PollArgs,
+        RunArgs, RunSpec, SendInputArgs, StatusArgs,
     };
 
     fn text_turn(text: &str) -> Vec<caliban_provider::error::Result<StreamEvent>> {
@@ -772,5 +790,112 @@ mod tests {
             matches!(decision, caliban_agent_core::HookDecision::Allow),
             "{decision:?}"
         );
+    }
+
+    #[test]
+    fn prod_factory_assembles_and_builds_a_real_agent() {
+        // Covers the production path end to end without a network: build the
+        // factory from parsed args + default settings + an injected
+        // `MockProvider` (build_prod_factory), then build a run from it (real
+        // builtin tool registry + permissions hook + agent build).
+        use clap::Parser as _;
+        let args = crate::args::Args::parse_from(["caliban"]);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let factory =
+            super::build_prod_factory(&args, caliban_settings::Settings::default(), provider)
+                .expect("factory assembles");
+        let built = factory
+            .build_run(&RunSpec {
+                prompt: "hello".into(),
+                interactive: true,
+            })
+            .expect("build_run succeeds");
+        assert_eq!(built.messages.len(), 1);
+        assert!(built.interactive);
+        drop(built);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_run_id_is_rejected_by_every_tool() {
+        let srv = server(0);
+        let poll = srv
+            .caliban_poll(Parameters(PollArgs {
+                run_id: "nope".into(),
+                cursor: 0,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(poll.is_error, Some(true));
+        let status = srv
+            .caliban_status(Parameters(StatusArgs {
+                run_id: "nope".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(status.is_error, Some(true));
+        let send = srv
+            .caliban_send_input(Parameters(SendInputArgs {
+                run_id: "nope".into(),
+                text: Some("x".into()),
+                end: false,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(send.is_error, Some(true));
+        let permit = srv
+            .caliban_permit(Parameters(PermitArgs {
+                run_id: "nope".into(),
+                tool_use_id: "x".into(),
+                allow: true,
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(permit.is_error, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_input_requires_text_or_end() {
+        let srv = server(1);
+        let r = srv
+            .caliban_run(Parameters(RunArgs {
+                prompt: "hi".into(),
+                interactive: true,
+            }))
+            .await
+            .unwrap();
+        let run_id = body(&r)["run_id"].as_str().unwrap().to_string();
+        let e = srv
+            .caliban_send_input(Parameters(SendInputArgs {
+                run_id,
+                text: None,
+                end: false,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(e.is_error, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permit_without_a_pending_prompt_errors() {
+        let srv = server(1);
+        let r = srv
+            .caliban_run(Parameters(RunArgs {
+                prompt: "hi".into(),
+                interactive: false,
+            }))
+            .await
+            .unwrap();
+        let run_id = body(&r)["run_id"].as_str().unwrap().to_string();
+        let e = srv
+            .caliban_permit(Parameters(PermitArgs {
+                run_id,
+                tool_use_id: "x".into(),
+                allow: true,
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(e.is_error, Some(true));
     }
 }
