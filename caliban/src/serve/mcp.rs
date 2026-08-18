@@ -898,4 +898,126 @@ mod tests {
             .unwrap();
         assert_eq!(e.is_error, Some(true));
     }
+
+    // -----------------------------------------------------------------------
+    // End-to-end (#529): drive the server through a real rmcp client over an
+    // in-process bidirectional transport (a `tokio::io::duplex` pair standing
+    // in for stdio) — no TUI, no hand-called handlers. Exercises the actual MCP
+    // initialize handshake, tool listing, and `call_tool` dispatch/serialization.
+    // -----------------------------------------------------------------------
+
+    /// Call a tool through the rmcp client and return the parsed JSON body.
+    macro_rules! call_tool {
+        ($client:expr, $name:expr, $args:expr) => {{
+            let mut req = rmcp::model::CallToolRequestParams::new($name);
+            req.arguments = $args.as_object().cloned();
+            let res = $client.call_tool(req).await.expect($name);
+            body(&res)
+        }};
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn e2e_client_drives_run_stream_status_input_over_mcp() {
+        use rmcp::ServiceExt as _;
+
+        // In-process bidirectional transport standing in for stdio.
+        let (server_end, client_end) = tokio::io::duplex(64 * 1024);
+
+        // Serve the mock-backed server on one end.
+        let server = McpServer::new(Arc::new(MockAgentFactory::new(2)), AuthGate::new(None));
+        let server_task = tokio::spawn(async move {
+            if let Ok(running) = server.serve(server_end).await {
+                let _ = running.waiting().await;
+            }
+        });
+
+        // Connect a bare rmcp client on the other end (performs the handshake).
+        let client = ().serve(client_end).await.expect("client initializes");
+
+        // The server advertises its tools.
+        let tools = client.list_all_tools().await.expect("list_all_tools");
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        for expected in [
+            "caliban_run",
+            "caliban_poll",
+            "caliban_status",
+            "caliban_send_input",
+            "caliban_permit",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+
+        // run — interactive so we can exercise send_input.
+        let run = call_tool!(
+            client,
+            "caliban_run",
+            json!({ "prompt": "hi", "interactive": true })
+        );
+        let run_id = run["run_id"].as_str().unwrap().to_string();
+
+        // Poll (stream) + status until the run parks awaiting input.
+        let mut cursor = 0u64;
+        let mut types: Vec<String> = Vec::new();
+        let mut awaited = false;
+        for _ in 0..500 {
+            let b = call_tool!(
+                client,
+                "caliban_poll",
+                json!({ "run_id": run_id, "cursor": cursor })
+            );
+            for ev in b["events"].as_array().unwrap() {
+                assert_eq!(ev["v"], 1);
+                types.push(ev["event"]["type"].as_str().unwrap().to_string());
+            }
+            cursor = b["next_cursor"].as_u64().unwrap();
+            if b["status"]["state"] == "awaiting_input" {
+                awaited = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        assert!(awaited, "run never awaited input; saw {types:?}");
+        assert!(types.iter().any(|t| t == "TurnStart"), "{types:?}");
+
+        // input — end the conversation.
+        let sent = call_tool!(
+            client,
+            "caliban_send_input",
+            json!({ "run_id": run_id, "end": true })
+        );
+        assert_eq!(sent["ok"], true);
+
+        // Poll to completion.
+        let mut terminal_seen = false;
+        for _ in 0..500 {
+            let b = call_tool!(
+                client,
+                "caliban_poll",
+                json!({ "run_id": run_id, "cursor": cursor })
+            );
+            let batch = b["events"].as_array().unwrap();
+            for ev in batch {
+                types.push(ev["event"]["type"].as_str().unwrap().to_string());
+            }
+            cursor = b["next_cursor"].as_u64().unwrap();
+            let terminal = b["status"]["state"] == "done";
+            if terminal && terminal_seen && batch.is_empty() {
+                break;
+            }
+            terminal_seen |= terminal;
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        assert_eq!(
+            types.last().map(String::as_str),
+            Some("RunEnd"),
+            "{types:?}"
+        );
+
+        // status reads done.
+        let s = call_tool!(client, "caliban_status", json!({ "run_id": run_id }));
+        assert_eq!(s["status"]["state"], "done");
+
+        let _ = client.cancel().await;
+        server_task.abort();
+    }
 }
