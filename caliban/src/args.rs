@@ -769,6 +769,11 @@ pub(crate) enum CalibanCommand {
         #[command(subcommand)]
         inner: McpCommand,
     },
+    /// Serve caliban over HTTP so scripts/curl can drive it (ADR 0055).
+    Http {
+        #[command(subcommand)]
+        inner: HttpCommand,
+    },
     /// Internal: run a single background sub-agent worker. Hidden from
     /// `--help`; invoked only by the `caliband` supervisor (ADR 0037, #71).
     #[command(name = "__agent-worker", hide = true)]
@@ -796,6 +801,18 @@ pub(crate) enum CalibanCommand {
 pub(crate) enum McpCommand {
     /// Serve caliban as an MCP server over stdio (poll-based tools; ADR 0055).
     Serve,
+}
+
+/// `caliban http <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum HttpCommand {
+    /// Serve caliban over HTTP (poll-based JSON; ADR 0055).
+    Serve {
+        /// Bind address, e.g. `127.0.0.1:8730`. A non-loopback bind requires
+        /// `CALIBAN_DRIVE_TOKEN` (fail closed).
+        #[arg(long, default_value = crate::serve::http::DEFAULT_ADDR)]
+        addr: String,
+    },
 }
 
 /// `caliban perms <verb>` verbs.

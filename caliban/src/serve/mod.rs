@@ -16,5 +16,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod auth;
+pub(crate) mod http;
 pub(crate) mod mcp;
 pub(crate) mod permissions;
+pub(crate) mod registry;
