@@ -133,7 +133,7 @@ matrix](../claude-code/parity-gap-matrix.md) and the
 |---|---|---|
 | Interactive fullscreen TUI (mouse, subagent view) | 🟡 | **Down-ticked 2026-08-15 (#519); the ⚠ is now resolved.** The TUI and mouse-wheel scroll are real (`caliban/src/tui/mouse_select.rs`, transcript scroll). There is **no subagent view**: `/agents` is a pure stub that prints "full sub-agent fleet overlay arrives with the Sub-agent isolation spec … use `caliban agents list` from a shell for now" (`caliban/src/tui/slash/config.rs:184`). Nor is caliban's a *fullscreen* renderer — no alt-screen app mode (`/tui` is also a stub, `caliban/src/tui/slash/dx.rs:151-155`; **anchor re-pointed 2026-08-16** — the stub string is at `:153`, the cited `:151` had drifted) |
 | Headless / non-interactive (`grok -p/--single`) | ✅ | `-p` + `--output-format json/stream-json` (ADR-0025) |
-| ACP agent over JSON-RPC (`grok agent stdio`; driven by editors) | 🔴 | no editor-driving protocol server. Grok's is concrete: JSON-RPC over stdin/stdout with `initialize`/`authenticate`/`session/new` (declares `cwd` + `mcpServers`)/`session/prompt`/`session/update`. **Shared gap** with OpenCode `serve`/ACP + Codex `mcp-server`/`app-server` — tracked as epic **#503** |
+| ACP agent over JSON-RPC (`grok agent stdio`; driven by editors) | 🟡 | **Up-ticked 2026-08-22 (#530).** `caliban acp serve` — an ACP agent over newline-delimited JSON-RPC on stdin/stdout implementing `initialize`/`authenticate`/`session/new` (accepts `cwd` + `mcpServers`)/`session/prompt`/`session/cancel` and streaming `session/update`, with permission prompts surfaced via `session/request_permission`, over the shared drive core (ADR 0055). Partial: v1 covers the core session lifecycle; the `mcpServers` declared at `session/new` are accepted but not yet wired, and `loadSession`/`fs/*`/`terminal/*` are unimplemented. Was a **shared gap** with OpenCode `serve`/ACP + Codex `mcp-server`/`app-server` — epic **#503** |
 
 ## C. CLI subcommands
 
@@ -226,7 +226,7 @@ matrix](../claude-code/parity-gap-matrix.md) and the
 |---|---|---|
 | MCP client (local + remote) | ✅ | rmcp client, stdio + HTTP (ADR-0023) |
 | `mcp add/list/remove` + `/mcps` | 🟡 | **Down-ticked 2026-08-15 (#519), correcting a confirmed defect.** No `caliban mcp` subcommand exists (`CalibanCommand` in `caliban/src/args.rs` has no `Mcp` variant) and therefore no `add`/`list`/`remove` verbs. `/mcp` lists servers with live status glyphs but its per-server actions are toast stubs (`caliban/src/tui/events.rs:1139-1173`). Same evidence as §C |
-| ACP agent (`grok agent stdio`, JSON-RPC, being driven) | 🔴 | no ACP/editor-driving surface. Grok wires MCP servers in at `session/new`. **Shared with OpenCode `serve`/ACP + Codex `mcp-server`/`app-server` + Antigravity SDK** — one driveable surface serves all; epic **#503** |
+| ACP agent (`grok agent stdio`, JSON-RPC, being driven) | 🟡 | **Up-ticked 2026-08-22 (#530).** `caliban acp serve` is an ACP/editor-driving surface over JSON-RPC (session lifecycle + streaming `session/update` + `session/request_permission`, ADR 0055). Partial: the `mcpServers` Grok wires in at `session/new` are accepted but not yet applied to the run. Was **shared with OpenCode `serve`/ACP + Codex `mcp-server`/`app-server` + Antigravity SDK** — one driveable surface serves all; epic **#503** |
 | Headless streaming-json for CI/GitHub Actions | ✅ | `--output-format stream-json`; GitHub Action itself deferred |
 | First-party GitHub Action / PR bot | 🔴 | GitHub Actions deferred sub-project ⚠ verify Grok's first-party offering |
 

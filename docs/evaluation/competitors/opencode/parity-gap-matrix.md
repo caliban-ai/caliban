@@ -158,7 +158,7 @@ recorded here so the finding is not lost.
 | Headless HTTP server (`opencode serve`) | 🔴 | no API server surface. Gap is **more pronounced** than a bare "no server": OpenCode publishes an **OpenAPI 3.1** spec at `/doc` with HTTP basic auth (`OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`) — a fully specified, driveable API, not just a socket |
 | Attach a client to a running backend (`opencode attach`) | 🔴 | no attach model |
 | Web UI (`opencode web`) | 🔴 | terminal-first (shared with the Claude Code long-tail) |
-| ACP (Agent Client Protocol) server (`opencode acp`) | 🔴 | no editor-driving protocol server |
+| ACP (Agent Client Protocol) server (`opencode acp`) | 🟡 | `caliban acp serve` — an editor-driving ACP agent over newline-delimited JSON-RPC (`initialize`/`authenticate`/`session/new`/`session/prompt`/`session/cancel`, streaming `session/update`, permission prompts surfaced via `session/request_permission`) over the shared drive core (#530, ADR 0055). Partial: v1 is stdio-only and covers the core session lifecycle; `loadSession`, `fs/*`, and `terminal/*` methods are not yet implemented |
 
 ## C. CLI subcommands
 
