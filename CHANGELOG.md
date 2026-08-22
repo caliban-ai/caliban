@@ -9,8 +9,53 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-22
+
+This release makes caliban **driveable**. Until now caliban was a first-class MCP
+*client* but exposed no server surface, so nothing could steer it
+programmatically. Now an external program can start an agent run, stream its turn
+events, read its status, feed it follow-up input, and answer the permission
+prompts it raises — with no TUI in the loop — through **three protocol surfaces
+built over one shared, transport-agnostic drive core** (ADR 0055): an MCP server
+for another agent, ACP for an editor, and plain HTTP for a script. Every surface
+inherits the same auth model and Permissions v2 enforcement by construction.
+
+### Added
+
+- **Driveable server surface — MCP server, ACP, and HTTP serve over one core**
+  (#503): caliban can now be driven as a backend. A transport-agnostic **drive
+  core** exposes a `run` / `stream` / `status` / `input` contract factored out of
+  the headless and attach internals (#525, #552), and three thin protocol
+  adapters ride it — each holding no agent logic:
+  - **MCP server** (`caliban mcp serve`): drive caliban as an MCP *server* from
+    another agent, over stdio with poll-based tools (`caliban_run` →
+    `caliban_poll` → …) and a versioned `{v, event}` envelope around each turn
+    event (#526, #565).
+  - **ACP** (`caliban acp serve`): an Agent Client Protocol agent over
+    newline-delimited JSON-RPC for editor drive-in (Zed / OpenCode / Grok Build).
+    Push/streaming — a `session/prompt` call streams `session/update`
+    notifications for one turn, and tool-permission prompts surface into the
+    editor's own UI via `session/request_permission` (#530, #570).
+  - **HTTP serve** (`caliban http serve`): drive caliban over plain HTTP/JSON
+    from a script or `curl` — `POST /runs`, `GET /runs/:id/events?cursor=N`,
+    `/status`, `/input`, `/permit` (#531, #569).
+  - **Shared auth gate** across all three (#527, #563): loopback is open;
+    a non-loopback peer must present a bearer token matching `CALIBAN_DRIVE_TOKEN`
+    (constant-time compared), and binding a surface to a non-loopback address
+    with no token configured is refused — caliban never serves unauthenticated on
+    the network.
+  - **Permission-elicitation bridge** (#528, #564): a driven run still enforces
+    Permissions v2 — a tool call that would prompt is surfaced back over each
+    surface's own channel and its decision routed into the run, so a headless run
+    never deadlocks or fails open. Covered end-to-end by a no-TUI test that drives
+    a run start-to-finish over MCP (#529, #567, #568).
+
 ### Fixed
 
+- **Prompt-cache tokens are no longer double-counted in telemetry** (#553):
+  cache-read and cache-creation tokens were being added into
+  `gen_ai.usage.input_tokens` on top of their own dedicated fields, inflating the
+  reported input-token count on cached turns. They are now counted once.
 - **Permission patterns accept the `Tool(<glob>)` form** (#518): the matcher
   split rule patterns on `:` only, so the rule caliban itself prints on a
   headless denial — ``--allow 'Bash(git *)'`` — parsed as a tool literally named
@@ -23,6 +68,23 @@ the patch version for fixes.
   unclosed `Bash(git *`, an empty `Bash()`, a malformed glob) are now reported at
   startup, by `caliban perms lint`, and by `caliban perms add`, instead of
   failing closed and silently.
+
+### Changed
+
+- **New "Driving Caliban" guide section** (#532): an overview of the
+  run/stream/status/input contract, the auth model, and how permission prompts
+  surface, plus one how-to page per surface with a copy-pasteable example (an MCP
+  client config, an ACP handshake, a `curl` session).
+- **ADR 0055** records the driveable-server-surface design — three adapters over
+  one core, the sequencing, and the auth/permission model (#533).
+- **`cargo install caliban` is taught as the primary install path** in the guide
+  (#524, #534).
+- **Competitor parity matrices swept under a production-call-path rule** (#519,
+  #557): a row is scored only against a real call path in the shipped binary.
+  Applied across the Claude Code (#516, #522), Codex (#555), Grok Build (#548),
+  OpenCode (#548), Antigravity (#554), and Pi (#515, #523) readouts, correcting
+  overclaimed and duplicate-scored rows; the driveable-server-surface work ticks
+  the MCP/ACP/HTTP rows those matrices had tracked as gaps.
 
 ## [0.8.0] - 2026-08-02
 
@@ -620,7 +682,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/caliban-ai/caliban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/caliban-ai/caliban/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/caliban-ai/caliban/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/caliban-ai/caliban/compare/v0.5.0...v0.6.0
