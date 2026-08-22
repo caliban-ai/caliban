@@ -80,6 +80,13 @@
 - [Structured Output](./automation/structured-output.md)
 - [CI Patterns](./automation/ci.md)
 
+# Driving Caliban
+
+- [Overview](./driving/overview.md)
+- [MCP Server](./driving/mcp-server.md)
+- [ACP](./driving/acp.md)
+- [HTTP Serve](./driving/http-serve.md)
+
 # Observability
 
 - [Telemetry & Cost](./observability/telemetry.md)
