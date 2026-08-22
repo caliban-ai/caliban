@@ -134,6 +134,14 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // `caliban http serve` — expose caliban over HTTP so scripts/curl can drive
+    // it (ADR 0055 / #531).
+    if let Some(CalibanCommand::Http { inner }) = &args.command {
+        let crate::args::HttpCommand::Serve { addr } = inner;
+        let code = serve::http::run_serve(&args, addr).await?;
+        std::process::exit(code);
+    }
+
     // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed
     // and don't require a provider, so route them first.
     if let Some(cmd) = &args.command

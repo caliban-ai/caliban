@@ -88,8 +88,12 @@ chrono                   = { workspace = true }
 tempfile                 = { workspace = true }
 uuid                     = { workspace = true }
 arc-swap                 = { workspace = true }
+# HTTP serve surface (`caliban http serve`, ADR 0055 / #531). The workspace axum
+# dep carries tokio/http1/query; we add `json` here (features union).
+axum                     = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
+tower            = { version = "0.5", default-features = false, features = ["util"] }
 gonzalo-store-fs = { version = "0.3" }
 caliban-provider = { workspace = true, features = ["mock"] }
 tokio-util       = { workspace = true }

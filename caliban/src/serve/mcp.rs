@@ -20,13 +20,9 @@
 //! bridge: a driven run's `Ask` is surfaced in the `caliban_poll` response and
 //! answered by `caliban_permit`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
-use caliban_agent_core::{Agent, TurnEvent};
-use caliban_drive::{DriveInbound, DriveOptions, DriveSession};
-use caliban_provider::Message;
-use futures::StreamExt as _;
+use caliban_drive::DriveInbound;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
@@ -34,73 +30,14 @@ use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::serve::auth::{AuthGate, Peer};
-use crate::serve::permissions::{DriveAskHandler, DrivePermissionRequest};
+use crate::serve::permissions::PermissionDecision;
+use crate::serve::registry::{AgentFactory, DriveRegistry, PermitOutcome, RunSpec, SendInputError};
 
 /// Wire schema version for the event envelope. Bump when `TurnEvent`'s
 /// serialized shape changes in a way clients must notice.
 const ENVELOPE_VERSION: u8 = 1;
-
-// ---------------------------------------------------------------------------
-// Agent-factory seam — lets the server be tested with a MockProvider agent
-// and driven with a real one in production.
-// ---------------------------------------------------------------------------
-
-/// What a client asked to run.
-pub(crate) struct RunSpec {
-    /// The initial user prompt.
-    pub(crate) prompt: String,
-    /// Whether the run pauses awaiting further input at each turn boundary.
-    pub(crate) interactive: bool,
-}
-
-/// A freshly-built run: the agent, its initial messages, and the receiver end
-/// of its permission-elicitation channel.
-pub(crate) struct BuiltRun {
-    /// The agent to drive.
-    pub(crate) agent: Arc<Agent>,
-    /// Initial messages (the user prompt).
-    pub(crate) messages: Vec<Message>,
-    /// Receiver for permission prompts raised by this run's `AskHandler`.
-    pub(crate) perm_rx: mpsc::UnboundedReceiver<DrivePermissionRequest>,
-    /// Whether the run is interactive.
-    pub(crate) interactive: bool,
-}
-
-/// Builds a runnable agent per driven run. The production impl wires the real
-/// provider + tools; tests supply a `MockProvider`-backed one.
-pub(crate) trait AgentFactory: Send + Sync {
-    /// Build a run from `spec`.
-    ///
-    /// # Errors
-    ///
-    /// Propagates provider / agent construction failures.
-    fn build_run(&self, spec: &RunSpec) -> anyhow::Result<BuiltRun>;
-}
-
-// ---------------------------------------------------------------------------
-// Run registry
-// ---------------------------------------------------------------------------
-
-/// Server-side state for one active run.
-struct RunEntry {
-    session: DriveSession,
-    /// Events accumulated by the per-run drainer task, read by `caliban_poll`.
-    events: Arc<Mutex<Vec<TurnEvent>>>,
-    /// Permission prompts raised by the run, drained on poll/permit.
-    perm_rx: mpsc::UnboundedReceiver<DrivePermissionRequest>,
-    /// The currently-surfaced permission prompt awaiting a client decision.
-    pending: Option<DrivePermissionRequest>,
-    /// Kept alive so the run's parent cancellation scope outlives the run.
-    _cancel: CancellationToken,
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 // ---------------------------------------------------------------------------
 // Tool argument structs (input schemas)
@@ -163,7 +100,7 @@ struct PermitArgs {
 pub(crate) struct McpServer {
     factory: Arc<dyn AgentFactory>,
     auth: AuthGate,
-    runs: Arc<Mutex<HashMap<String, RunEntry>>>,
+    registry: DriveRegistry,
     tool_router: ToolRouter<Self>,
 }
 
@@ -173,7 +110,7 @@ impl McpServer {
         Self {
             factory,
             auth,
-            runs: Arc::new(Mutex::new(HashMap::new())),
+            registry: DriveRegistry::new(),
             tool_router: Self::tool_router(),
         }
     }
@@ -207,36 +144,7 @@ impl McpServer {
             Err(e) => return Ok(Self::err(format!("failed to build run: {e}"))),
         };
 
-        let cancel = CancellationToken::new();
-        let opts = DriveOptions {
-            interactive: built.interactive,
-            ..DriveOptions::default()
-        };
-        let session = DriveSession::spawn(built.agent, built.messages, opts, &cancel);
-        let run_id = session.id().to_string();
-
-        // Drain the event stream into a buffer the poll tool reads by index.
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut stream = session.subscribe();
-        let buf = Arc::clone(&events);
-        tokio::spawn(async move {
-            while let Some(item) = stream.next().await {
-                if let Ok(event) = item {
-                    lock(&buf).push(event);
-                }
-            }
-        });
-
-        lock(&self.runs).insert(
-            run_id.clone(),
-            RunEntry {
-                session,
-                events,
-                perm_rx: built.perm_rx,
-                pending: None,
-                _cancel: cancel,
-            },
-        );
+        let run_id = self.registry.spawn(built);
         Self::ok(json!({ "run_id": run_id }))
     }
 
@@ -247,38 +155,25 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<PollArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut runs = lock(&self.runs);
-        let Some(entry) = runs.get_mut(&args.run_id) else {
+        let Some(view) = self.registry.poll(&args.run_id, args.cursor) else {
             return Ok(Self::err(format!("unknown run_id: {}", args.run_id)));
         };
-
-        let (events_json, next_cursor) = {
-            let buf = lock(&entry.events);
-            let total = buf.len();
-            let start = args.cursor.min(total);
-            let events: Vec<Value> = buf[start..]
-                .iter()
-                .map(|e| json!({ "v": ENVELOPE_VERSION, "event": e }))
-                .collect();
-            (events, total)
-        };
-
-        let status = entry.session.status();
-        if entry.pending.is_none() {
-            entry.pending = entry.perm_rx.try_recv().ok();
-        }
-        let permission = entry.pending.as_ref().map(|p| {
+        let events: Vec<Value> = view
+            .events
+            .iter()
+            .map(|e| json!({ "v": ENVELOPE_VERSION, "event": e }))
+            .collect();
+        let permission = view.pending.as_ref().map(|p| {
             json!({
-                "tool_use_id": p.tool_use_id(),
-                "tool_name": p.tool_name(),
-                "input": p.input(),
+                "tool_use_id": p.tool_use_id,
+                "tool_name": p.tool_name,
+                "input": p.input,
             })
         });
-
         Self::ok(json!({
-            "events": events_json,
-            "next_cursor": next_cursor,
-            "status": status,
+            "events": events,
+            "next_cursor": view.next_cursor,
+            "status": view.status,
             "permission_request": permission,
         }))
     }
@@ -288,11 +183,10 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<StatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let runs = lock(&self.runs);
-        let Some(entry) = runs.get(&args.run_id) else {
+        let Some(status) = self.registry.status(&args.run_id) else {
             return Ok(Self::err(format!("unknown run_id: {}", args.run_id)));
         };
-        Self::ok(json!({ "status": entry.session.status() }))
+        Self::ok(json!({ "status": status }))
     }
 
     #[tool(description = "Send a follow-up message to an interactive run, or end its input.")]
@@ -300,10 +194,6 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<SendInputArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let runs = lock(&self.runs);
-        let Some(entry) = runs.get(&args.run_id) else {
-            return Ok(Self::err(format!("unknown run_id: {}", args.run_id)));
-        };
         let inbound = if args.end {
             DriveInbound::EndInput
         } else if let Some(text) = args.text {
@@ -311,9 +201,12 @@ impl McpServer {
         } else {
             return Ok(Self::err("send_input requires `text` or `end: true`"));
         };
-        match entry.session.send_input(inbound) {
+        match self.registry.send_input(&args.run_id, inbound) {
             Ok(()) => Self::ok(json!({ "ok": true })),
-            Err(e) => Ok(Self::err(format!("cannot send input: {e}"))),
+            Err(SendInputError::UnknownRun) => {
+                Ok(Self::err(format!("unknown run_id: {}", args.run_id)))
+            }
+            Err(SendInputError::Ended(e)) => Ok(Self::err(format!("cannot send input: {e}"))),
         }
     }
 
@@ -322,34 +215,23 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<PermitArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut runs = lock(&self.runs);
-        let Some(entry) = runs.get_mut(&args.run_id) else {
-            return Ok(Self::err(format!("unknown run_id: {}", args.run_id)));
+        let decision = if args.allow {
+            PermissionDecision::Allow
+        } else {
+            PermissionDecision::Deny(args.reason.unwrap_or_else(|| "denied by client".into()))
         };
-        if entry.pending.is_none() {
-            entry.pending = entry.perm_rx.try_recv().ok();
-        }
-        match entry.pending.take() {
-            Some(req) if req.tool_use_id() == args.tool_use_id => {
-                let outcome = if args.allow {
-                    req.allow()
-                } else {
-                    req.deny(args.reason.unwrap_or_else(|| "denied by client".into()))
-                };
-                match outcome {
-                    Ok(()) => Self::ok(json!({ "ok": true })),
-                    Err(_) => Ok(Self::err("run is no longer waiting on that prompt")),
-                }
-            }
-            Some(other) => {
-                let expected = other.tool_use_id().to_string();
-                entry.pending = Some(other);
-                Ok(Self::err(format!(
-                    "no pending permission with tool_use_id {}; current prompt is {expected}",
-                    args.tool_use_id
-                )))
-            }
-            None => Ok(Self::err("no pending permission request for this run")),
+        match self
+            .registry
+            .permit(&args.run_id, &args.tool_use_id, decision)
+        {
+            PermitOutcome::Answered => Self::ok(json!({ "ok": true })),
+            PermitOutcome::UnknownRun => Ok(Self::err(format!("unknown run_id: {}", args.run_id))),
+            PermitOutcome::NoPending => Ok(Self::err("no pending permission request for this run")),
+            PermitOutcome::Mismatch { expected } => Ok(Self::err(format!(
+                "no pending permission with tool_use_id {}; current prompt is {expected}",
+                args.tool_use_id
+            ))),
+            PermitOutcome::RunGone => Ok(Self::err("run is no longer waiting on that prompt")),
         }
     }
 }
@@ -370,59 +252,6 @@ impl ServerHandler for McpServer {
 // Production entry point
 // ---------------------------------------------------------------------------
 
-/// The production [`AgentFactory`]: builds a real agent (real provider + the
-/// full builtin tool registry) with a fresh [`DriveAskHandler`] per run.
-struct ProdAgentFactory {
-    args: crate::args::Args,
-    settings: caliban_settings::Settings,
-    provider: Arc<dyn caliban_provider::Provider + Send + Sync>,
-    model: String,
-    max_tokens: u32,
-    workspace_root: std::path::PathBuf,
-}
-
-impl AgentFactory for ProdAgentFactory {
-    fn build_run(&self, spec: &RunSpec) -> anyhow::Result<BuiltRun> {
-        use caliban_agent_core::{NoopHooks, PermissionsHook, default_rules, new_shared_plan_mode};
-        use caliban_tools_builtin::WorkspaceRoot;
-
-        let workspace = WorkspaceRoot::new(self.workspace_root.clone());
-        let todos = caliban_agent_core::new_shared_todos();
-        let plan_mode = new_shared_plan_mode();
-        let mem_cfg = caliban_memory::MemoryConfig::from_env(&self.workspace_root);
-        let topic_backend: Arc<dyn caliban_memory::TopicBackend> = Arc::new(
-            caliban_memory::FsTopicBackend::new(mem_cfg.auto_memory_dir.clone()),
-        );
-        let registry = crate::startup::build_registry(
-            &self.args,
-            workspace,
-            todos,
-            plan_mode,
-            &[],
-            &self.settings,
-            &topic_backend,
-        );
-
-        let (ask, perm_rx) = DriveAskHandler::pair();
-        let permissions = PermissionsHook::new(default_rules(), Arc::new(ask), Arc::new(NoopHooks));
-
-        let agent = Agent::builder()
-            .provider(Arc::clone(&self.provider))
-            .tools(registry)
-            .model(&self.model)
-            .max_tokens(self.max_tokens)
-            .hooks(Arc::new(permissions))
-            .build()?;
-
-        Ok(BuiltRun {
-            agent: Arc::new(agent),
-            messages: vec![Message::user_text(spec.prompt.clone())],
-            perm_rx,
-            interactive: spec.interactive,
-        })
-    }
-}
-
 /// Serve caliban as an MCP server over stdio (`caliban mcp serve`).
 ///
 /// # Errors
@@ -439,7 +268,9 @@ pub(crate) async fn run_serve(args: &crate::args::Args) -> anyhow::Result<i32> {
     ));
     let provider = crate::startup::build_provider(args, &helper_pool)?;
 
-    let factory = Arc::new(build_prod_factory(args, settings, provider)?);
+    let factory = Arc::new(crate::serve::registry::build_prod_factory(
+        args, settings, provider,
+    )?);
     let server = McpServer::new(factory, AuthGate::from_env());
     let running = server
         .serve(rmcp::transport::io::stdio())
@@ -450,40 +281,6 @@ pub(crate) async fn run_serve(args: &crate::args::Args) -> anyhow::Result<i32> {
         .await
         .context("MCP server terminated with error")?;
     Ok(0)
-}
-
-/// Assemble the production [`ProdAgentFactory`] from parsed args, a loaded
-/// settings snapshot, and an already-built provider.
-///
-/// Factored out of [`run_serve`] so the non-I/O assembly (workspace resolution,
-/// model defaulting, struct wiring) is unit-testable with a `MockProvider`,
-/// leaving only the genuine entrypoint I/O (settings load, provider build,
-/// stdio serve loop) in `run_serve`.
-///
-/// # Errors
-///
-/// Fails if the current working directory cannot be resolved.
-fn build_prod_factory(
-    args: &crate::args::Args,
-    settings: caliban_settings::Settings,
-    provider: Arc<dyn caliban_provider::Provider + Send + Sync>,
-) -> anyhow::Result<ProdAgentFactory> {
-    use anyhow::Context as _;
-    use caliban_tools_builtin::WorkspaceRoot;
-
-    let workspace = WorkspaceRoot::current_dir().context("could not get current directory")?;
-    let model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| crate::default_model_for(crate::resolved_provider(args)).to_string());
-    Ok(ProdAgentFactory {
-        args: args.clone(),
-        settings,
-        provider,
-        model,
-        max_tokens: args.max_tokens,
-        workspace_root: workspace.root().to_path_buf(),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -503,10 +300,9 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
     use serde_json::{Value, json};
 
-    use super::{
-        AgentFactory, AuthGate, BuiltRun, DriveAskHandler, McpServer, PermitArgs, PollArgs,
-        RunArgs, RunSpec, SendInputArgs, StatusArgs,
-    };
+    use super::{AuthGate, McpServer, PermitArgs, PollArgs, RunArgs, SendInputArgs, StatusArgs};
+    use crate::serve::permissions::DriveAskHandler;
+    use crate::serve::registry::{AgentFactory, BuiltRun, RunSpec};
 
     fn text_turn(text: &str) -> Vec<caliban_provider::error::Result<StreamEvent>> {
         vec![
@@ -790,29 +586,6 @@ mod tests {
             matches!(decision, caliban_agent_core::HookDecision::Allow),
             "{decision:?}"
         );
-    }
-
-    #[test]
-    fn prod_factory_assembles_and_builds_a_real_agent() {
-        // Covers the production path end to end without a network: build the
-        // factory from parsed args + default settings + an injected
-        // `MockProvider` (build_prod_factory), then build a run from it (real
-        // builtin tool registry + permissions hook + agent build).
-        use clap::Parser as _;
-        let args = crate::args::Args::parse_from(["caliban"]);
-        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
-        let factory =
-            super::build_prod_factory(&args, caliban_settings::Settings::default(), provider)
-                .expect("factory assembles");
-        let built = factory
-            .build_run(&RunSpec {
-                prompt: "hello".into(),
-                interactive: true,
-            })
-            .expect("build_run succeeds");
-        assert_eq!(built.messages.len(), 1);
-        assert!(built.interactive);
-        drop(built);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
