@@ -774,6 +774,11 @@ pub(crate) enum CalibanCommand {
         #[command(subcommand)]
         inner: HttpCommand,
     },
+    /// Serve caliban as an ACP agent so editors can drive it (ADR 0055).
+    Acp {
+        #[command(subcommand)]
+        inner: AcpCommand,
+    },
     /// Internal: run a single background sub-agent worker. Hidden from
     /// `--help`; invoked only by the `caliband` supervisor (ADR 0037, #71).
     #[command(name = "__agent-worker", hide = true)]
@@ -813,6 +818,13 @@ pub(crate) enum HttpCommand {
         #[arg(long, default_value = crate::serve::http::DEFAULT_ADDR)]
         addr: String,
     },
+}
+
+/// `caliban acp <verb>` verbs.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum AcpCommand {
+    /// Serve caliban as an ACP agent over stdio (JSON-RPC; ADR 0055).
+    Serve,
 }
 
 /// `caliban perms <verb>` verbs.

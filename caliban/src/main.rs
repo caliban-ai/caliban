@@ -142,6 +142,14 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // `caliban acp serve` — expose caliban as an ACP agent over stdio so editors
+    // can drive it turn-by-turn over JSON-RPC (ADR 0055 / #530).
+    if let Some(CalibanCommand::Acp { inner }) = &args.command {
+        let crate::args::AcpCommand::Serve = inner;
+        let code = serve::acp::run_serve(&args).await?;
+        std::process::exit(code);
+    }
+
     // ADR 0037 subcommands. They auto-spawn the supervisor daemon as needed
     // and don't require a provider, so route them first.
     if let Some(cmd) = &args.command

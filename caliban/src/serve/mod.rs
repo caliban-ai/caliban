@@ -15,6 +15,7 @@
 // module-wide so each item need not be individually gated.
 #![allow(dead_code)]
 
+pub(crate) mod acp;
 pub(crate) mod auth;
 pub(crate) mod http;
 pub(crate) mod mcp;
