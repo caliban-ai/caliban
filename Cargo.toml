@@ -7,6 +7,7 @@ members = [
     "crates/caliban-provider-bedrock",
     "crates/caliban-provider-vertex",
     "crates/caliban-provider-openai",
+    "crates/caliban-provider-openrouter",
     "crates/caliban-provider-ollama",
     "crates/caliban-provider-google",
     "crates/caliban-agent-core",
@@ -48,6 +49,7 @@ caliban-provider-anthropic = { path = "crates/caliban-provider-anthropic", versi
 caliban-provider-bedrock   = { path = "crates/caliban-provider-bedrock",   version = "0.9.0" }
 caliban-provider-vertex    = { path = "crates/caliban-provider-vertex",    version = "0.9.0" }
 caliban-provider-openai    = { path = "crates/caliban-provider-openai",    version = "0.9.0" }
+caliban-provider-openrouter = { path = "crates/caliban-provider-openrouter", version = "0.9.0" }
 caliban-provider-ollama    = { path = "crates/caliban-provider-ollama",    version = "0.9.0" }
 caliban-provider-google    = { path = "crates/caliban-provider-google",    version = "0.9.0" }
 caliban-agent-core         = { path = "crates/caliban-agent-core",         version = "0.9.0" }

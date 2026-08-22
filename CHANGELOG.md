@@ -9,6 +9,33 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Added
+
+- **OpenRouter provider** (#573): `provider = "openrouter"` reaches
+  [OpenRouter](https://openrouter.ai)'s OpenAI-compatible gateway, putting 400+
+  models from many vendors behind one API key. The wire format is OpenAI's, so
+  the transport is reused; what is not reused is its static capability table.
+  Capabilities and per-model pricing come from a **vendored catalogue snapshot**
+  (`crates/caliban-provider-openrouter/models.json`, embedded at build time and
+  refreshed by `scripts/refresh-openrouter-models.sh`), which keeps a
+  third-party endpoint off the boot path — the same posture as the telemetry
+  rate card (ADR 0033). `CALIBAN_OPENROUTER_MODELS` points at a newer snapshot;
+  `Provider::refresh_models()` fetches live, on demand only.
+
+### Fixed
+
+- **Stop silently inventing capabilities for gateway models** (#573): routing
+  OpenRouter through the `openai` provider's `base_url` override reached the
+  gateway but mis-described every model — no OpenRouter id is in the OpenAI
+  static table, so all of them fell back to `128k in / 4096 out, no vision, no
+  thinking` while still claiming parallel tool use, JSON mode, and automatic
+  prompt caching. Measured against the catalogue that denied vision to 250
+  models, denied reasoning to 288, claimed tool use for 70 that have none, and
+  understated output limits by up to ~94x. The `openrouter` adapter answers from
+  the catalogue, and an uncatalogued model now gets a minimal capability set
+  plus a warning naming it — never an optimistic guess. The `openai`-as-gateway
+  trap is documented in the provider guide.
+
 ## [0.9.0] - 2026-08-22
 
 This release makes caliban **driveable**. Until now caliban was a first-class MCP

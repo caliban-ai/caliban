@@ -1,0 +1,27 @@
+[package]
+name        = "caliban-provider-openrouter"
+version.workspace = true
+description = "OpenRouter gateway provider for the caliban agent harness — internal crate for the caliban binary; no API stability, pin exact versions"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+rust-version.workspace = true
+
+[dependencies]
+caliban-provider        = { workspace = true }
+caliban-provider-openai = { workspace = true }
+async-trait             = { workspace = true }
+serde                   = { workspace = true }
+serde_json              = { workspace = true }
+thiserror               = { workspace = true }
+secrecy                 = { workspace = true }
+reqwest                 = { workspace = true }
+url                     = { workspace = true }
+tracing                 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -1021,6 +1021,7 @@ dependencies = [
  "caliban-provider-google",
  "caliban-provider-ollama",
  "caliban-provider-openai",
+ "caliban-provider-openrouter",
  "caliban-sandbox",
  "caliban-sessions",
  "caliban-settings",
@@ -1400,6 +1401,23 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "caliban-provider-openrouter"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "caliban-provider",
+ "caliban-provider-openai",
+ "reqwest 0.12.28",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

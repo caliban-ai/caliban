@@ -81,6 +81,41 @@ pub(crate) fn build_provider_handles(
     Ok(out)
 }
 
+/// Construct the `OpenRouter` provider.
+///
+/// Split out of [`build_one`] to keep that match under the workspace's
+/// `too_many_lines` lint; the other arms predate the limit.
+fn build_openrouter(
+    block: &ProviderBlock,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
+    use caliban_provider_openrouter::{OpenRouterProvider, config as or_config};
+    let api_key_env = block
+        .api_key_env
+        .as_deref()
+        .unwrap_or(or_config::DEFAULT_API_KEY_ENV);
+    let base_url = block.base_url.clone();
+    let make_cfg = move |key: secrecy::SecretString| -> Result<or_config::DirectConfig> {
+        let mut cfg = or_config::direct(key);
+        if let Some(url) = base_url.as_ref() {
+            cfg.base_url = url::Url::parse(url)?;
+        }
+        Ok(cfg)
+    };
+    let key = resolve_key("openrouter", api_key_env, pool)?;
+    let inner = OpenRouterProvider::direct(make_cfg(key)?)?;
+    Ok(wrap_with_refresh_if_helper(
+        inner,
+        pool,
+        "openrouter",
+        "openrouter",
+        move |k| {
+            let cfg = make_cfg(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+            OpenRouterProvider::direct(cfg).map_err(caliban_provider::Error::adapter)
+        },
+    ))
+}
+
 fn build_one(
     name: &str,
     block: &ProviderBlock,
@@ -137,6 +172,7 @@ fn build_one(
                 },
             ))
         }
+        "openrouter" => build_openrouter(block, pool),
         "ollama" => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
             let mut cfg = DirectConfig::new();
@@ -167,7 +203,7 @@ fn build_one(
             ))
         }
         other => Err(anyhow!(
-            "unknown provider '{other}' — supported: anthropic, openai, ollama, google"
+            "unknown provider '{other}' — supported: anthropic, openai, openrouter, ollama, google"
         )),
     }
 }
