@@ -500,6 +500,7 @@ async fn main() -> Result<()> {
         &model,
         &permission_mode,
         tui_mode_active,
+        None, // no Ask-handler override: use the TUI/non-interactive default
     );
 
     // Wire AgentTool (sub-agent primitive) — closes over a snapshot of

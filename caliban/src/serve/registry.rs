@@ -280,7 +280,7 @@ pub(crate) struct ProdAgentFactory {
 
 impl AgentFactory for ProdAgentFactory {
     fn build_run(&self, spec: &RunSpec) -> anyhow::Result<BuiltRun> {
-        use caliban_agent_core::{NoopHooks, PermissionsHook, default_rules, new_shared_plan_mode};
+        use caliban_agent_core::new_shared_plan_mode;
         use caliban_tools_builtin::WorkspaceRoot;
 
         let workspace = WorkspaceRoot::new(self.workspace_root.clone());
@@ -300,15 +300,14 @@ impl AgentFactory for ProdAgentFactory {
             &topic_backend,
         );
 
-        let (ask, perm_rx) = DriveAskHandler::pair();
-        let permissions = PermissionsHook::new(default_rules(), Arc::new(ask), Arc::new(NoopHooks));
+        let (permissions, perm_rx) = self.build_run_permissions()?;
 
         let agent = Agent::builder()
             .provider(Arc::clone(&self.provider))
             .tools(registry)
             .model(&self.model)
             .max_tokens(self.max_tokens)
-            .hooks(Arc::new(permissions))
+            .hooks(permissions)
             .build()?;
 
         Ok(BuiltRun {
@@ -317,6 +316,63 @@ impl AgentFactory for ProdAgentFactory {
             perm_rx,
             interactive: spec.interactive,
         })
+    }
+}
+
+impl ProdAgentFactory {
+    /// Build the per-run permission chain — layered rules → `ModeFilter` →
+    /// audit → runtime rules, exactly as an interactive/headless run gets it —
+    /// with this run's [`DriveAskHandler`] injected as the Ask handler.
+    ///
+    /// Previously a driven run hand-rolled `PermissionsHook::new(default_rules(),
+    /// …)`, so it honored neither the user's layered permission rules, the
+    /// permission modes, the runtime-rule overlay, nor the decision audit trail
+    /// (#566). Routing through [`crate::startup::build_permissions`] fixes that.
+    ///
+    /// Returns the hooks chain plus the receiver the drive loop reads pending
+    /// permission requests from.
+    fn build_run_permissions(
+        &self,
+    ) -> anyhow::Result<(
+        Arc<dyn caliban_agent_core::Hooks + Send + Sync>,
+        tokio::sync::mpsc::UnboundedReceiver<DrivePermissionRequest>,
+    )> {
+        let (ask, perm_rx) = DriveAskHandler::pair();
+
+        // Resolve the permission mode the way the interactive/headless
+        // entrypoint does: CLI flag > env > settings default.
+        let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
+        let initial_mode = caliban_agent_core::resolve_startup_mode(
+            self.args.permission_mode.as_deref(),
+            env_perm.as_deref(),
+            self.settings.permissions.default_mode.as_deref(),
+            self.args.allow_dangerously_skip_permissions,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        let permission_mode = caliban_agent_core::SharedPermissionMode::new(initial_mode);
+
+        // Driven runs do not wire MCP servers (build_run calls build_registry
+        // with an empty client list), so there are no per-server permission
+        // blocks to fold.
+        let mcp_server_cfg = std::collections::BTreeMap::new();
+
+        let setup = crate::startup::build_permissions(
+            &self.args,
+            &self.settings,
+            &mcp_server_cfg,
+            &self.provider,
+            &self.model,
+            &permission_mode,
+            false, // a driven run is never the interactive TUI
+            Some(Arc::new(ask) as Arc<dyn caliban_agent_core::AskHandler>),
+        );
+
+        // `permissions_hook` is `None` only under `--no-permissions`; fall back
+        // to a no-op chain so the run is ungated in that case.
+        let hooks = setup
+            .permissions_hook
+            .unwrap_or_else(|| Arc::new(caliban_agent_core::NoopHooks));
+        Ok((hooks, perm_rx))
     }
 }
 
@@ -476,6 +532,40 @@ mod tests {
             reg.permit(&run_id, "x", PermissionDecision::Allow),
             PermitOutcome::NoPending
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn driven_run_enforces_configured_deny_rule() {
+        // A driven run must honor configured permission rules (#566), not just
+        // the built-in defaults. Configure a Deny for "Bash" and assert the
+        // run's permission chain denies it — the old default_rules()-only path
+        // would have fallen through to the catch-all Ask instead.
+        use caliban_agent_core::{HookDecision, ToolCtx};
+        use clap::Parser as _;
+
+        let args = crate::args::Args::parse_from(["caliban", "--deny", "Bash"]);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let factory =
+            super::build_prod_factory(&args, caliban_settings::Settings::default(), provider)
+                .expect("factory assembles");
+        let (hooks, _perm_rx) = factory
+            .build_run_permissions()
+            .expect("permissions chain builds");
+
+        let input = serde_json::json!({ "command": "ls" });
+        let ctx = ToolCtx {
+            session_id: "s",
+            turn_index: 0,
+            tool_use_id: "t1",
+            tool_name: "Bash",
+            input: &input,
+            is_read_only: false,
+        };
+        let decision = hooks.before_tool(&ctx).await.expect("hook runs");
+        assert!(
+            matches!(decision, HookDecision::Deny(_)),
+            "driven run should deny a configured --deny rule, got {decision:?}"
+        );
     }
 
     #[test]

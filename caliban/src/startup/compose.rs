@@ -1061,7 +1061,11 @@ pub(crate) struct PermissionsSetup {
 ///
 /// Returns `PermissionsSetup::default`-equivalent (all-`None`) when
 /// `--no-permissions` is set.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "cohesive permission-assembly seam; splitting the args into a struct would just move the noise"
+)]
 pub(crate) fn build_permissions(
     args: &Args,
     settings_snapshot: &caliban_settings::Settings,
@@ -1070,6 +1074,7 @@ pub(crate) fn build_permissions(
     model: &str,
     permission_mode: &caliban_agent_core::SharedPermissionMode,
     tui_mode_active: bool,
+    ask_override: Option<Arc<dyn caliban_agent_core::AskHandler>>,
 ) -> PermissionsSetup {
     use caliban_agent_core::{
         Action, AutoModeClassifier, AutoModeConfig, DEFAULTS_TOKEN, ModeFilter,
@@ -1139,19 +1144,25 @@ pub(crate) fn build_permissions(
     // Clone the resolved rule list before it is consumed by PermissionsHook::new
     // so background sub-agents can inherit it via InheritableHookConfig (#84).
     let inheritable_rules = rules.clone();
-    // In interactive (TUI) mode, route Ask through the modal bridge. In
-    // headless/single-prompt mode, fall back to the non-interactive handler.
-    let (ask, ask_rx): (Arc<dyn caliban_agent_core::AskHandler>, _) = if tui_mode_active {
-        let (handler, rx) = tui::TuiAskHandler::pair();
-        (Arc::new(handler), Some(rx))
-    } else {
-        (
-            Arc::new(NonInteractiveAskHandler {
-                auto_allow: args.auto_allow,
-            }),
-            None,
-        )
-    };
+    // Pick the Ask handler. A caller-supplied override wins (the drive surfaces
+    // inject a per-run `DriveAskHandler` this way so a driven run enforces the
+    // same layered policy, #566). Otherwise: interactive (TUI) mode routes Ask
+    // through the modal bridge; headless/single-prompt falls back to the
+    // non-interactive handler.
+    let (ask, ask_rx): (Arc<dyn caliban_agent_core::AskHandler>, _) =
+        if let Some(ask) = ask_override {
+            (ask, None)
+        } else if tui_mode_active {
+            let (handler, rx) = tui::TuiAskHandler::pair();
+            (Arc::new(handler), Some(rx))
+        } else {
+            (
+                Arc::new(NonInteractiveAskHandler {
+                    auto_allow: args.auto_allow,
+                }),
+                None,
+            )
+        };
     // Shared runtime-rule store: the gate consults it before the static
     // rule set, and the TUI appends to this same `Arc` from the Ask modal's
     // "Always allow/deny" branches (#55).
