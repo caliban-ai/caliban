@@ -247,7 +247,9 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         {
             continue;
         }
-        if let Some((mut value, source)) = read_scope(scope, &opts.workspace_root, &opts.paths)? {
+        if let Some((mut value, source)) =
+            read_scope(scope, &opts.workspace_root, &opts.paths, &mut warnings)?
+        {
             if matches!(scope, Scope::Project | Scope::Local) {
                 for key in strip_user_managed_only_keys(&mut value) {
                     let msg = format!(
@@ -461,6 +463,7 @@ fn read_scope(
     scope: Scope,
     workspace_root: &Path,
     paths: &ScopePaths,
+    warnings: &mut Vec<String>,
 ) -> Result<Option<(Value, ScopeSource)>, LoadError> {
     let Some((json_path, toml_path)) = scope.canonical_paths(workspace_root, paths) else {
         return Ok(None);
@@ -472,20 +475,28 @@ fn read_scope(
         if json_exists {
             let jp = json_path.display();
             let sl = scope.label();
-            warn_once(format!(
+            // Emit now (if a subscriber is up) AND collect into validation_warnings
+            // so the nudge survives init_tracing running after settings load (#587).
+            let msg = format!(
                 "settings [{sl}]: .json detected at {jp} but .toml takes \
                  precedence; ignoring the .json (run `caliban settings import \
                  --from {jp}` to migrate if you intended to use the .json)",
-            ));
+            );
+            warn_once(msg.clone());
+            warnings.push(msg);
         }
         Some((toml_path.clone(), "toml"))
     } else if json_exists {
         let jp = json_path.display();
         let sl = scope.label();
-        warn_once(format!(
+        // Emit now (if a subscriber is up) AND collect into validation_warnings
+        // so the nudge survives init_tracing running after settings load (#587).
+        let msg = format!(
             "settings [{sl}]: {jp} is a legacy/import path; \
              run `caliban settings import --from {jp}` to migrate to TOML",
-        ));
+        );
+        warn_once(msg.clone());
+        warnings.push(msg);
         Some((json_path.clone(), "json"))
     } else {
         None
@@ -653,6 +664,34 @@ mod tests {
             .find(|s| s.scope == Scope::Project)
             .unwrap();
         assert_eq!(proj.format, Some("toml"));
+    }
+
+    #[test]
+    fn json_only_scope_surfaces_migration_nudge_in_warnings() {
+        // #587: the JSON→TOML migration nudge must reach `validation_warnings`,
+        // not just `warn_once` (tracing). Since #494 moved `init_tracing` after
+        // settings load, a tracing-only warn is dropped; routing it through
+        // `validation_warnings` lets main.rs re-emit it after the subscriber is up.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(
+            &ws.join(".caliban/settings.json"),
+            r#"{"model": "json-model"}"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let outcome = load_settings(&opts).unwrap();
+        assert!(
+            outcome
+                .validation_warnings
+                .iter()
+                .any(|w| w.contains("legacy/import path")),
+            "expected the JSON→TOML migration nudge in validation_warnings, got {:?}",
+            outcome.validation_warnings
+        );
     }
 
     #[test]
