@@ -356,6 +356,15 @@ pub struct TelemetryConfig {
     pub headers_helper: Option<HeadersHelperConfig>,
 }
 
+/// Whether the `enable_telemetry` setting should force telemetry on.
+///
+/// The setting is an *enabler* only — `Some(true)` turns telemetry on, while
+/// `None` / `Some(false)` leave the env-derived decision untouched — and the
+/// privacy opt-out always wins over it (#494).
+fn setting_forces_enable(setting: Option<bool>, opt_out: bool) -> bool {
+    setting == Some(true) && !opt_out
+}
+
 impl TelemetryConfig {
     /// Build from the process env.
     #[must_use]
@@ -508,7 +517,30 @@ impl Telemetry {
     /// Surfaces rate-card parse failures from the embedded YAML — these are
     /// fatal misconfigurations.
     pub fn init_from_env(session_id: &str) -> Result<Self, TelemetryError> {
+        Self::init_from_env_with_override(session_id, None)
+    }
+
+    /// Read the env and construct telemetry, letting the `enable_telemetry`
+    /// setting bridge in when the `CALIBAN_ENABLE_TELEMETRY` env var is unset.
+    ///
+    /// Telemetry is on when the env var **or** the setting opts in; the privacy
+    /// opt-out (`CALIBAN_TELEMETRY_OPT_OUT` / `DO_NOT_TRACK`) always wins. Pass
+    /// `None` for `enable_override` to honor the env var alone (#494).
+    ///
+    /// # Errors
+    /// Surfaces rate-card parse failures from the embedded YAML — these are
+    /// fatal misconfigurations.
+    pub fn init_from_env_with_override(
+        session_id: &str,
+        enable_override: Option<bool>,
+    ) -> Result<Self, TelemetryError> {
         let mut config = TelemetryConfig::from_env();
+        // Bridge the `enable_telemetry` setting: it enables telemetry on its own,
+        // unless the privacy opt-out is active. `from_env` already folded the
+        // opt-out into `config.enabled`, so we only ever flip it on here (#494).
+        if setting_forces_enable(enable_override, privacy_opt_out()) {
+            config.enabled = true;
+        }
         // Apply the headers-helper (if configured) once, at startup, so its
         // dynamic auth headers actually reach the exporter (#426 T3). Previously
         // `refresh_dynamic_headers` had no callers, so the helper's output was
@@ -757,6 +789,19 @@ mod tests {
         assert_eq!(parse_duration("1h"), Some(Duration::from_hours(1)));
         assert_eq!(parse_duration("60"), Some(Duration::from_mins(1)));
         assert_eq!(parse_duration("nope"), None);
+    }
+
+    #[test]
+    fn enable_telemetry_setting_forces_enable_unless_opted_out() {
+        // The `enable_telemetry` setting turns telemetry on on its own (#494) —
+        // previously the setting was inert and only the env var worked.
+        assert!(setting_forces_enable(Some(true), false));
+        // The privacy opt-out always wins over the setting.
+        assert!(!setting_forces_enable(Some(true), true));
+        // An unset or explicitly-false setting never forces enablement; the env
+        // var stays authoritative in that case.
+        assert!(!setting_forces_enable(None, false));
+        assert!(!setting_forces_enable(Some(false), false));
     }
 
     #[test]
