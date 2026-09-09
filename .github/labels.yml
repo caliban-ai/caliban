@@ -75,6 +75,10 @@
   color: 'ffffff'
   description: "Indicates an issue or PR should not be auto-closed for staleness."
   aliases: ['wontfix']
+- name: lifecycle/do-not-merge
+  color: 'b60205'
+  description: "On hold — must not be merged (e.g. pending review/decision)."
+  aliases: ['DO NOT MERGE']
 # contributor (exact strings power GitHub's contribute page — do not rename)
 - name: good first issue
   color: '7057ff'
