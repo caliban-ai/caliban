@@ -164,25 +164,6 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    // Initialize telemetry (cost ledger + optional OTLP span export). The real
-    // exporter pipeline is built here when CALIBAN_ENABLE_TELEMETRY is set and
-    // the OTEL_* contract points at a collector; otherwise this is a cheap,
-    // disabled handle. Held for the life of the process and force-flushed on
-    // exit. Requires the Tokio runtime (batch span processor), which
-    // `#[tokio::main]` provides.
-    let telemetry_session_id = args
-        .session
-        .clone()
-        .or_else(|| args.resume.clone())
-        .unwrap_or_else(caliban_telemetry::Telemetry::new_session_id);
-    let telemetry = caliban_telemetry::Telemetry::init_from_env(&telemetry_session_id)
-        .context("initialize telemetry")?;
-
-    // Install the global tracing subscriber: file-backed fmt layer when --debug
-    // / CALIBAN_DEBUG is set, plus the OTLP span-export layer when telemetry is
-    // enabled. No-op when neither applies.
-    startup::init_tracing(&args, &telemetry).await;
-
     let workspace = match &args.workspace {
         Some(p) => {
             // Fail-fast if the path is bogus rather than deferring to
@@ -203,7 +184,9 @@ async fn main() -> Result<()> {
         None => WorkspaceRoot::current_dir().context("could not get cwd")?,
     };
 
-    // Load layered settings (ADR 0026). `--bare` mode short-circuits.
+    // Load layered settings (ADR 0026) BEFORE telemetry init, so the
+    // `enable_telemetry` setting can turn telemetry on (#494) — telemetry's
+    // `enabled` flag is decided at init time. `--bare` mode short-circuits.
     // Parse / CLI-overlay / unknown-scope failures are fatal with
     // EX_CONFIGURATION_ERROR (78) — see ADR 0025's exit-code table.
     // IO errors on a single scope file still abort; the loader returns
@@ -215,13 +198,39 @@ async fn main() -> Result<()> {
             std::process::exit(78);
         }
     };
-    for w in &settings_outcome.validation_warnings {
-        tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, warning = %w, "settings schema validation");
-    }
     let settings_handle = caliban_settings::SettingsHandle::new(settings_outcome.settings.clone());
     let _settings_sources = settings_outcome.sources.clone();
     let _ = settings_handle.current(); // touch to ensure the handle is connected
     let settings_snapshot = settings_outcome.settings.clone();
+
+    // Initialize telemetry (cost ledger + optional OTLP span export). The real
+    // exporter pipeline is built here when CALIBAN_ENABLE_TELEMETRY is set — or
+    // the `enable_telemetry` setting opts in (#494) — and the OTEL_* contract
+    // points at a collector; otherwise this is a cheap, disabled handle. Held
+    // for the life of the process and force-flushed on exit. Requires the Tokio
+    // runtime (batch span processor), which `#[tokio::main]` provides.
+    let telemetry_session_id = args
+        .session
+        .clone()
+        .or_else(|| args.resume.clone())
+        .unwrap_or_else(caliban_telemetry::Telemetry::new_session_id);
+    let telemetry = caliban_telemetry::Telemetry::init_from_env_with_override(
+        &telemetry_session_id,
+        settings_snapshot.enable_telemetry,
+    )
+    .context("initialize telemetry")?;
+
+    // Install the global tracing subscriber: file-backed fmt layer when --debug
+    // / CALIBAN_DEBUG is set, plus the OTLP span-export layer when telemetry is
+    // enabled. No-op when neither applies.
+    startup::init_tracing(&args, &telemetry).await;
+
+    // Emit settings-validation warnings now that the tracing subscriber is
+    // installed (settings load moved ahead of telemetry init above, so the
+    // emit is deferred here to keep the warnings captured).
+    for w in &settings_outcome.validation_warnings {
+        tracing::warn!(target: caliban_common::tracing_targets::TARGET_SETTINGS, warning = %w, "settings schema validation");
+    }
 
     // Resolve effective (provider, model) from CLI > Settings > builtin
     // default, then mutate `args` so every downstream site that reads
@@ -253,14 +262,6 @@ async fn main() -> Result<()> {
     let helper_pool = std::sync::Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(
         settings_snapshot.api_key_helper.as_ref(),
     ));
-
-    // Honor `enable_telemetry` from settings when the env override is
-    // unset.
-    if settings_snapshot.enable_telemetry == Some(true)
-        && std::env::var("CALIBAN_ENABLE_TELEMETRY").is_err()
-    {
-        tracing::info!(target: caliban_common::tracing_targets::TARGET_SETTINGS, "telemetry enabled via settings.json");
-    }
 
     // Pre-flight (pre-driver) fatal errors — provider construction, a missing
     // API key, model pre-check, etc. — must reach structured consumers as an
