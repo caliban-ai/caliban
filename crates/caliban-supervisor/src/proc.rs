@@ -233,12 +233,37 @@ impl ExecWorkerLauncher {
 impl WorkerLauncher for ExecWorkerLauncher {
     fn launch(&self, record: &AgentRecord) -> std::io::Result<WorkerHandle> {
         let mut cmd = self.build_command(record);
-        let child = cmd.spawn()?;
+        let child = spawn_retrying_etxtbsy(&mut cmd)?;
         let pid = child
             .id()
             .ok_or_else(|| std::io::Error::other("worker child has no pid (already exited?)"))?;
         Ok(WorkerHandle { pid, child })
     }
+}
+
+/// Spawn `cmd`, retrying briefly on `ETXTBSY` ("text file busy").
+///
+/// Exec of a binary that is still open for writing fails spuriously with errno
+/// 26. This bites a *just-written* worker executable — notably the freshly
+/// created stand-in worker in tests, which flaked CI intermittently (#441) — but
+/// it can affect any recently-installed binary, so a spurious exec failure must
+/// not fail a real launch. Retry a few short times before giving up. Mirrors the
+/// userns-probe retry in `caliban-sandbox`'s `detect::probe_userns` (also #441).
+fn spawn_retrying_etxtbsy(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    const ETXTBSY: i32 = 26;
+    const MAX_ATTEMPTS: u32 = 5;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the final attempt returns Ok or propagates its Err");
 }
 
 /// Best-effort `SIGTERM` to `pid`. No-op on non-unix. Returns whether
