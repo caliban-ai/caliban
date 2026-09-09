@@ -1,0 +1,102 @@
+name: release-binary
+
+# Attach a prebuilt macOS arm64 (Apple Silicon) binary to the GitHub Release for a
+# version tag. Tag-triggered ONLY — never on branch pushes or pull requests (#575).
+#
+# Single target for now: aarch64-apple-darwin. Other triples (x86_64 macOS, Linux,
+# Windows) are intentionally out of scope — add entries to a matrix here when they're
+# ticketed. See #279 (container image/publish), #524 (`cargo install` docs), #39
+# (GitHub Action) for the other distribution channels.
+#
+# Cooperation with cai-cut-release: that skill owns creating the GitHub Release and
+# its notes (its step 10, run right after the tag push). This job only *uploads* the
+# asset, so it waits for that Release to exist rather than creating a notes-less one
+# that would clobber the skill's `gh release create`.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-binary-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # upload the built binary as a Release asset
+
+env:
+  TARGET: aarch64-apple-darwin
+  BIN: caliban
+
+jobs:
+  build:
+    name: build + attach caliban-aarch64-apple-darwin
+    # Guard: never run anywhere but the canonical public repo (mirrors publish.yml).
+    if: github.repository == 'caliban-ai/caliban'
+    # macos-14 is Apple Silicon (M-series): a native arm64 build, no cross toolchain.
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Verify tag matches workspace version
+        # Same guard publish.yml uses: tag vX.Y.Z must equal the caliban package
+        # version, so the attached binary's `--version` matches the release tag.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ws="$(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[] | select(.name=="caliban") | .version')"
+          echo "tag=$tag workspace=$ws"
+          if [ "$tag" != "$ws" ]; then
+            echo "::error::tag v$tag does not match workspace version $ws"
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin "$BIN" --target "$TARGET"
+
+      - name: Smoke-test --version
+        # Native arm64 runner, so the arm64 binary runs here. Confirm it reports the
+        # tagged version (AC: `caliban --version` matches the tag).
+        run: |
+          out="$("./target/$TARGET/release/$BIN" --version)"
+          echo "$out"
+          echo "$out" | grep -q "${GITHUB_REF_NAME#v}" \
+            || { echo "::error::--version ('$out') does not contain ${GITHUB_REF_NAME#v}"; exit 1; }
+
+      - name: Package tarball + checksum
+        id: pkg
+        run: |
+          asset="${BIN}-${TARGET}.tar.gz"
+          tar -C "target/$TARGET/release" -czf "$asset" "$BIN"
+          shasum -a 256 "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the GitHub Release to exist
+        # cai-cut-release creates the Release + notes (its step 10). This job only
+        # attaches the asset — it must NOT create a notes-less Release and clobber
+        # that flow. Poll briefly: the Release is created right after the tag push,
+        # and this build takes minutes, so it's normally already there.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 20); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              echo "release $GITHUB_REF_NAME exists"; exit 0
+            fi
+            echo "waiting for release $GITHUB_REF_NAME ($i/20)…"; sleep 30
+          done
+          echo "::error::release $GITHUB_REF_NAME never appeared — create it (cai-cut-release step 10), then re-run this job"
+          exit 1
+
+      - name: Upload binary to the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ steps.pkg.outputs.asset }}" \
+            "${{ steps.pkg.outputs.asset }}.sha256" \
+            --clobber
