@@ -54,6 +54,7 @@ See [Permissions Concepts](../permissions/concepts.md) and [Pattern Grammar](../
 | `allow_managed_hooks_only` | `bool` | `false` | When `true`, restrict firing to managed-scope hooks. Handler provenance is not yet tracked, so caliban currently fires **no** config hooks (with a warning) when this is set — see [Hooks](../extending/hooks.md) |
 | `allowed_http_hook_urls` | `string[]` | `[]` | Glob allowlist for HTTP hook endpoint URLs |
 | `http_hook_allowed_env_vars` | `string[]` | `[]` | Env-var names that HTTP hook handlers are allowed to read |
+| `allow_local_http_hook_targets` | `bool` | `false` | Allow HTTP hook endpoints that resolve to loopback / private (LAN) addresses. Off by default as an SSRF guard; enable only for trusted local collectors |
 
 See [Hooks](../extending/hooks.md) for the full event list and handler shapes.
 
@@ -194,6 +195,9 @@ See [The OS Sandbox](../tools/sandbox.md).
 | `compact_strategy` | `string` | `"summarize"` | Strategy for `/compact` + threshold-autocompact: `"summarize"`, `"drop-oldest"`, or `"noop"` |
 | `tool_result_cap_chars` | `integer` | `50000` | Global per-tool-result character cap. `0` disables |
 | `min_cache_block_tokens` | `integer` | `1024` | Minimum estimated tokens on the last user message to place a conversation-level prompt-cache marker |
+| `max_tokens_recovery` | `bool` | `true` | Automatically retry once with a raised token budget when a turn stops on `max_tokens` |
+| `stream_idle_timeout_ms` | `integer` | provider default | Abort a turn if the model stream is idle (no bytes) for this long |
+| `stream_prefill_timeout_ms` | `integer` | provider default | Abort a turn if the first stream byte does not arrive within this long |
 
 See [Context & Compaction](../memory/context-compaction.md).
 

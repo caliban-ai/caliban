@@ -73,6 +73,31 @@ mod tests {
     }
 
     #[test]
+    fn previously_unschematized_keys_are_now_type_checked() {
+        // #588: keys honored by code but previously absent from schema.json are
+        // now constrained. Before, a wrong-typed value passed silently (top-level
+        // additionalProperties:true); now it warns, and correct values are clean.
+        let bad: Value = serde_json::from_str(
+            r#"{"stream_idle_timeout_ms": "nope", "compact_strategy": "bogus", "allow_local_http_hook_targets": "yes"}"#,
+        )
+        .unwrap();
+        assert!(
+            !validate_value(&bad).is_empty(),
+            "wrong-typed / bad-enum values for the newly-schematized keys should warn"
+        );
+
+        let good: Value = serde_json::from_str(
+            r#"{"compact_strategy": "drop-oldest", "stream_idle_timeout_ms": 5000, "stream_prefill_timeout_ms": 1000, "allow_local_http_hook_targets": true}"#,
+        )
+        .unwrap();
+        let errs = validate_value(&good);
+        assert!(
+            errs.is_empty(),
+            "valid config should be clean, got {errs:?}"
+        );
+    }
+
+    #[test]
     fn tools_skill_guidance_is_a_valid_key() {
         // #498/1: `tools.skill_guidance` is a real, honored serde field, but the
         // `tools` schema had additionalProperties:false and omitted it, so a
