@@ -134,7 +134,6 @@
     "output_style":  { "type": "string" },
     "editor_mode":   { "type": "string" },
     "view_mode":     { "type": "string" },
-    "tui":           { "type": "object", "additionalProperties": true },
     "api_key_helper": {
       "oneOf": [
         { "type": "string" },
@@ -176,13 +175,10 @@
       "type": "object",
       "properties": {
         "lazy_mcp":           { "type": "boolean", "default": false },
-        "max_active_schemas": { "type": "integer", "minimum": 0, "default": 24 }
+        "max_active_schemas": { "type": "integer", "minimum": 0, "default": 24 },
+        "skill_guidance":     { "type": "boolean" }
       },
       "additionalProperties": false
-    },
-    "effort": {
-      "type": "string",
-      "enum": ["low", "medium", "high", "max", "auto"]
     },
     "statusLine": {
       "type": "object",

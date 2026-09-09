@@ -71,4 +71,14 @@ mod tests {
         let errs = validate_value(&v);
         assert!(!errs.is_empty(), "expected error for wrong type");
     }
+
+    #[test]
+    fn tools_skill_guidance_is_a_valid_key() {
+        // #498/1: `tools.skill_guidance` is a real, honored serde field, but the
+        // `tools` schema had additionalProperties:false and omitted it, so a
+        // valid config emitted a spurious validation warning.
+        let v: Value = serde_json::from_str(r#"{"tools": {"skill_guidance": false}}"#).unwrap();
+        let errs = validate_value(&v);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
 }

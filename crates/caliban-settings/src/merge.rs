@@ -233,11 +233,26 @@ pub fn diff_settings(old: &Settings, new: &Settings) -> Vec<ChangedKey> {
                 let op = o.get(key).unwrap_or(&empty);
                 let np = n.get(key).unwrap_or(&empty);
                 if let (Value::Object(om), Value::Object(nm)) = (op, np) {
-                    for sub in ["allow", "ask", "deny"] {
+                    // Live permission-rule arrays: consulted per tool call, so a
+                    // change takes effect immediately. `rules` is the v2 ordered
+                    // array (#410) and was previously omitted here, so an edit to
+                    // it alone produced no ChangedKey at all (#498/3).
+                    for sub in ["allow", "ask", "deny", "rules"] {
                         if om.get(sub) != nm.get(sub) {
                             out.push(ChangedKey {
                                 key: format!("permissions.{sub}"),
                                 impact: RestartImpact::Hot,
+                            });
+                        }
+                    }
+                    // Startup-applied permission scalars: surfaced so the change
+                    // isn't swallowed, but held until restart because the gate /
+                    // initial mode / audit recorder are wired once at launch.
+                    for sub in ["enforce", "default_mode", "audit_log"] {
+                        if om.get(sub) != nm.get(sub) {
+                            out.push(ChangedKey {
+                                key: format!("permissions.{sub}"),
+                                impact: RestartImpact::Restart,
                             });
                         }
                     }
@@ -363,6 +378,45 @@ mod tests {
         };
         let d = diff_settings(&old, &new);
         assert!(d.iter().any(|c| c.key == "permissions.allow"));
+        assert!(d.iter().all(|c| c.key != "permissions"));
+    }
+
+    #[test]
+    fn diff_surfaces_permissions_rules_and_scalars() {
+        // #498/3: a hot-reload that changes only `permissions.rules` (or
+        // enforce/default_mode/audit_log) previously produced NO ChangedKey —
+        // the delta was swallowed by the allow/ask/deny-only decomposition.
+        let old = Settings::default();
+        let new = Settings {
+            permissions: crate::Permissions {
+                rules: vec![crate::RuleSpec {
+                    pattern: "Bash:rm *".into(),
+                    action: "deny".into(),
+                    comment: None,
+                    reason: None,
+                    expires_at: None,
+                    tool: None,
+                }],
+                enforce: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let d = diff_settings(&old, &new);
+        // `rules` is a live permission-rule change, like allow/ask/deny.
+        let rules = d
+            .iter()
+            .find(|c| c.key == "permissions.rules")
+            .expect("permissions.rules surfaced");
+        assert_eq!(rules.impact, RestartImpact::Hot);
+        // `enforce` is applied at startup, so it is held until restart — but it
+        // must still be surfaced, not swallowed.
+        let enforce = d
+            .iter()
+            .find(|c| c.key == "permissions.enforce")
+            .expect("permissions.enforce surfaced");
+        assert_eq!(enforce.impact, RestartImpact::Restart);
+        // Never emit the bare parent key.
         assert!(d.iter().all(|c| c.key != "permissions"));
     }
 }
