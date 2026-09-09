@@ -328,6 +328,17 @@ fn require_network_credentials(token: Option<&str>, tls_present: bool) -> Result
     Ok(())
 }
 
+/// Whether attaching `token` to a dial with `tls_present == false` would leak
+/// the bearer token over plaintext.
+///
+/// A non-empty token with no TLS is a leak (an on-path observer could steal it);
+/// an absent/empty token, or any token when TLS is present, is fine. Pure so the
+/// client-dial guard is unit-testable without env (#495-A).
+fn token_leaks_over_plaintext(tls_present: bool, token: Option<&str>) -> bool {
+    let has_token = token.map(str::trim).is_some_and(|t| !t.is_empty());
+    has_token && !tls_present
+}
+
 /// Build the client the worker uses to report Idle/Running back to the daemon.
 ///
 /// Network mode (#280 Task 7): when `CALIBAN_CONTROL_ENDPOINT` (`host:port`)
@@ -370,6 +381,18 @@ fn build_status_client(
                 Some(client)
             }
         };
+        // Fail closed rather than write the bearer token on a raw TCP stream:
+        // CALIBAN_CONTROL_TLS_CA unset means no TLS, and the status sink is
+        // non-critical, so disable it instead of leaking the token (#495-A).
+        // (The CA-set-but-unreadable case is already handled as an Err above.)
+        if token_leaks_over_plaintext(tls.is_some(), token.as_deref()) {
+            return Err(
+                "CALIBAN_CONTROL_ENDPOINT is set with a bearer token but no \
+                 CALIBAN_CONTROL_TLS_CA; refusing to send the token over plaintext. \
+                 The status sink is disabled — set CALIBAN_CONTROL_TLS_CA to enable it."
+                    .to_owned(),
+            );
+        }
         return Ok(Some(caliban_supervisor::SupervisorClient::new_tcp(
             endpoint, tls, token,
         )));
@@ -810,6 +833,11 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
     rules
 }
 
+/// Max time a per-agent session-plane peer may take to complete the TLS
+/// handshake + bearer-token preamble before it is dropped. Matches the control
+/// plane's `HANDSHAKE_TIMEOUT` (#401) so a pre-auth slowloris can't hold a slot.
+const AGENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Per-agent accept loop: spawns [`serve_attach_client`] for every accepted
 /// connection, forever.
 ///
@@ -828,17 +856,34 @@ async fn run_agent_accept_loop(
     has_clients: Arc<AtomicUsize>,
 ) {
     loop {
-        match listener.accept().await {
-            Ok(conn) => {
+        match listener.accept_raw().await {
+            Ok(incoming) => {
                 let conn_hub = Arc::clone(&hub);
                 let conn_inbox = inbox.clone();
                 let conn_clients = Arc::clone(&has_clients);
-                tokio::spawn(serve_attach_client(
-                    conn,
-                    conn_hub,
-                    conn_inbox,
-                    conn_clients,
-                ));
+                // Run the TLS handshake + token check in the spawned task, under a
+                // timeout — never on the accept loop — so a slow/silent pre-auth
+                // peer can't wedge acceptance for every other client (#495-B;
+                // mirrors the control plane's #401 hardening).
+                tokio::spawn(async move {
+                    let conn = match tokio::time::timeout(
+                        AGENT_HANDSHAKE_TIMEOUT,
+                        incoming.authenticate(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "per-agent handshake/auth failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!("per-agent handshake/auth timed out");
+                            return;
+                        }
+                    };
+                    serve_attach_client(conn, conn_hub, conn_inbox, conn_clients).await;
+                });
             }
             Err(e) => {
                 tracing::warn!(error = %e, "per-agent accept failed");
@@ -919,6 +964,102 @@ mod tests {
     use caliban_agent_core::{Action, default_rules};
 
     // --- require_network_credentials: fail-closed TCP session-plane auth (#288) ---
+
+    // --- token_leaks_over_plaintext: client-dial guard (#495-A) ---
+
+    #[test]
+    fn plaintext_dial_with_token_is_a_leak() {
+        // A non-empty bearer token with no TLS would be written on a raw TCP
+        // stream — an on-path observer could steal it.
+        assert!(token_leaks_over_plaintext(false, Some("secret")));
+        // TLS protects the token.
+        assert!(!token_leaks_over_plaintext(true, Some("secret")));
+        // No token → nothing to leak (best-effort plaintext status dial is fine).
+        assert!(!token_leaks_over_plaintext(false, None));
+        // Empty / whitespace-only tokens count as absent.
+        assert!(!token_leaks_over_plaintext(false, Some("")));
+        assert!(!token_leaks_over_plaintext(false, Some("   ")));
+    }
+
+    #[tokio::test]
+    async fn stalled_preauth_peer_does_not_wedge_the_accept_loop() {
+        // #495-B: a peer that connects but never completes the TLS handshake must
+        // not block other clients. With the old inline `accept()` (handshake on
+        // the loop) client B would hang; with accept_raw + spawn-under-timeout it
+        // is served regardless of the stalled peer.
+        use caliban_supervisor::transport::{
+            BindSpec, ConnectSpec, Endpoint, Listener, connect, tls_client_from_pem,
+            tls_server_from_pem,
+        };
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+        let token = "wedge-tok".to_string();
+
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let listener = Listener::bind(&BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: Some(token.clone()),
+        })
+        .await
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let hub = EventHub::new();
+        let end = caliban_agent_core::TurnEvent::RunEnd {
+            final_messages: vec![],
+            total_usage: caliban_agent_core::Usage::default(),
+            turn_count: 1,
+            stopped_for: caliban_agent_core::StopCondition::EndOfTurn,
+            turns_without_edit: 0,
+            no_edit_nudge_emitted: false,
+        };
+        hub.publish(Arc::from(serde_json::to_string(&end).unwrap().as_str()));
+
+        let has_clients = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(run_agent_accept_loop(
+            listener,
+            hub,
+            None,
+            Arc::clone(&has_clients),
+        ));
+
+        // Client A: connect but send nothing — its TLS handshake stalls forever.
+        let _stalled = tokio::net::TcpStream::connect(addr.clone()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client B: full TLS + token. Must be served despite A stalling — else
+        // the accept loop is wedged. A generous 5s bound (well under the 10s
+        // handshake timeout) fails loudly if B is blocked.
+        let line = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+            let conn = connect(&ConnectSpec {
+                endpoint: Endpoint::Tcp { addr },
+                tls: Some(tls_client),
+                token: Some(token.clone()),
+            })
+            .await
+            .unwrap();
+            let (read_half, _wh) = tokio::io::split(conn);
+            let mut lines = BufReader::new(read_half).lines();
+            lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("client B must receive the replayed event line")
+        })
+        .await
+        .expect("client B was wedged by the stalled pre-auth peer");
+        assert!(
+            !line.is_empty(),
+            "client B should receive a real NDJSON line"
+        );
+    }
 
     #[test]
     fn network_creds_rejects_missing_token() {
