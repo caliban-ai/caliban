@@ -137,7 +137,7 @@ jobs:
           path: coverage-comment.md
       - name: Upload coverage reports
         if: ${{ !cancelled() && needs.check.outputs.code == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-reports
           path: |
