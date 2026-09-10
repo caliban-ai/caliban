@@ -278,6 +278,9 @@ impl WorktreeManager {
   (`git worktree remove --force`). Operators can opt out via env var
   `CALIBAN_KEEP_WORKTREES=1` (debugging) or per-call frontmatter
   `keep_on_exit: true`.
+  > **As shipped (#585):** only `CALIBAN_KEEP_WORKTREES=1` is implemented;
+  > the per-call `keep_on_exit` route was not built (the env var covers the
+  > debug use case). ADR 0037 is the authoritative record.
 - **Background:** the supervisor owns the handle. The worktree is removed
   on `caliban agents rm <id>` (and on supervisor startup pruning — see
   "Crash recovery" below).

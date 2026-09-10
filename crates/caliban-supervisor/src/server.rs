@@ -675,12 +675,49 @@ impl Supervisor {
     }
 }
 
+/// The env var an operator sets to keep sub-agent worktrees on disk for
+/// debugging instead of having the supervisor remove them on worker exit or
+/// launch failure (#585).
+pub const KEEP_WORKTREES_ENV: &str = "CALIBAN_KEEP_WORKTREES";
+
+/// Whether `raw` — the value of [`KEEP_WORKTREES_ENV`] — requests keeping
+/// worktrees. A set, truthy value (`1`/`true`/`yes`/`on`, case-insensitive,
+/// surrounding whitespace ignored) keeps them; unset, empty, or an explicitly
+/// falsey value removes as usual, so `CALIBAN_KEEP_WORKTREES=0` is not a footgun.
+fn keep_worktrees_requested(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Best-effort remove a just-created worktree, so a later failure (a launch
 /// failure, an exhausted port counter, a lock-ordering race that loses) never
 /// leaks it. Mirrors the terminal-worker cleanup in `launch_and_monitor`;
 /// shared so `Spawn` and `Respawn` can call it from their own late-failure
 /// paths too (#281 task-4 review).
+///
+/// Honors [`KEEP_WORKTREES_ENV`]: when set, the worktree is left on disk for
+/// debugging (#585).
 fn cleanup_worktree(cleanup: Option<(PathBuf, String)>) {
+    let keep = keep_worktrees_requested(std::env::var(KEEP_WORKTREES_ENV).ok().as_deref());
+    cleanup_worktree_inner(cleanup, keep);
+}
+
+/// Env-free core of [`cleanup_worktree`], so the keep-vs-remove decision is
+/// unit-testable without mutating process-global env state.
+fn cleanup_worktree_inner(cleanup: Option<(PathBuf, String)>, keep: bool) {
+    if keep {
+        if let Some((_, wt_name)) = &cleanup {
+            tracing::info!(
+                target: "caliban_supervisor",
+                worktree = %wt_name,
+                env = KEEP_WORKTREES_ENV,
+                "keeping sub-agent worktree on disk for debugging",
+            );
+        }
+        return;
+    }
     if let Some((source_dir, wt_name)) = cleanup
         && let Ok(mgr) = caliban_worktrees::WorktreeManager::new(&source_dir)
     {
@@ -816,6 +853,82 @@ mod tests {
             handle
                 .path
                 .starts_with(repo.path().join(".caliban").join("worktrees"))
+        );
+    }
+
+    #[test]
+    fn keep_worktrees_env_parses_truthy_and_falsey_values() {
+        // #585: a set, truthy value keeps worktrees; unset/empty/falsey removes.
+        for truthy in ["1", "true", "TRUE", "yes", "on", " on ", "On"] {
+            assert!(
+                keep_worktrees_requested(Some(truthy)),
+                "{truthy:?} should request keep"
+            );
+        }
+        for falsey in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+        ] {
+            assert!(
+                !keep_worktrees_requested(falsey),
+                "{falsey:?} should not request keep"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_worktree_inner_removes_by_default_but_keeps_when_requested() {
+        // Build a real repo + a materialized worktree, then check both branches
+        // of the keep decision without touching process-global env state.
+        fn repo_with_worktree() -> (tempfile::TempDir, PathBuf, String) {
+            let repo = tempfile::tempdir().unwrap();
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "init",
+                ])
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            let handle = worktree_for_agent(repo.path(), "agent0001").unwrap();
+            let name = handle
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (repo, handle.path, name)
+        }
+
+        // keep = true: the worktree survives.
+        let (repo_keep, kept_path, kept_name) = repo_with_worktree();
+        cleanup_worktree_inner(Some((repo_keep.path().to_path_buf(), kept_name)), true);
+        assert!(
+            kept_path.exists(),
+            "CALIBAN_KEEP_WORKTREES must leave the worktree on disk"
+        );
+
+        // keep = false: the worktree is removed.
+        let (repo_rm, rm_path, rm_name) = repo_with_worktree();
+        cleanup_worktree_inner(Some((repo_rm.path().to_path_buf(), rm_name)), false);
+        assert!(
+            !rm_path.exists(),
+            "default cleanup must remove the worktree"
         );
     }
 }

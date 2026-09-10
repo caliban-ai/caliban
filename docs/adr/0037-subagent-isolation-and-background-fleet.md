@@ -93,8 +93,8 @@ hooks are config-expressible.
 ### Worktree cleanup defaults to `true`
 
 Foreground worktrees are removed when the sub-agent's `WorktreeHandle`
-drops. `CALIBAN_KEEP_WORKTREES=1` (and per-call `keep_on_exit: true`)
-disable removal for debugging. Background worktrees are owned by the
+drops. `CALIBAN_KEEP_WORKTREES=1` disables removal for debugging (any
+truthy value — `1`/`true`/`yes`/`on`). Background worktrees are owned by the
 supervisor and removed on `caliban agents rm <id>` (and on daemon
 startup, for orphans, when configured). This is deliberately aggressive:
 worktrees are cheap to recreate and expensive to leak.
