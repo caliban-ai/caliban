@@ -119,6 +119,7 @@ worktrees are cheap to recreate and expensive to leak.
 - **Revisit if:** Disk pressure from worktrees becomes a recurring
   operator complaint — promote a "shared object store" layout
   (`git worktree --no-checkout` + targeted materialization). If
-  background-agent IPC outgrows length-prefixed bincode, swap to gRPC
-  over the same socket. If the no-closure-hook-inheritance compromise
+  background-agent IPC outgrows NDJSON framing (the wire format the
+  transport lift settled on — see [0051](0051-caliband-network-transport.md)),
+  swap to gRPC over the same socket. If the no-closure-hook-inheritance compromise
   for background mode bites real users, sketch a serializable-hook IR.

@@ -215,20 +215,77 @@ impl InputProvider for SocketInputProvider {
     }
 }
 
+/// Max length (bytes) of a single inbound session-plane NDJSON line. A line
+/// that reaches this budget without a terminating newline is dropped, bounding
+/// the memory a post-auth client can force a worker to buffer with one
+/// newline-less line (#593). Mirrors the control plane's `MAX_CTL_LINE` (#401),
+/// but the session reader *drops the oversized frame and keeps reading* rather
+/// than closing the connection, so a long-lived interactive session survives
+/// one bad frame — a total `Take` over the whole stream would instead sever the
+/// session at the first cap.
+const MAX_SESSION_LINE: usize = 1 << 20; // 1 MiB
+
 /// Read inbound `AttachInbound` NDJSON frames from `reader` and forward them
 /// to `inbox`. Malformed lines are skipped. Returns on EOF or inbox closed.
 async fn read_inbound_frames<R>(reader: R, inbox: mpsc::Sender<AttachInbound>)
 where
     R: tokio::io::AsyncRead + Unpin + Send,
 {
+    read_inbound_frames_capped(reader, inbox, MAX_SESSION_LINE).await;
+}
+
+/// [`read_inbound_frames`] with an explicit per-line byte cap (so tests can use
+/// a small one). A line that reaches `max_line` bytes without a newline is
+/// over-long: the remainder up to the next newline is drained in bounded chunks
+/// (the drain itself never buffers unboundedly), the frame is dropped, and
+/// reading continues.
+async fn read_inbound_frames_capped<R>(
+    reader: R,
+    inbox: mpsc::Sender<AttachInbound>,
+    max_line: usize,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncReadExt as _;
     use tokio::sync::mpsc::error::TrySendError;
-    let mut lines = tokio::io::BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() {
+    // `Take` bounds how many bytes a single `read_until` can buffer; `set_limit`
+    // resets that budget each line — the control plane's pattern (server.rs).
+    let mut reader = tokio::io::BufReader::new(reader).take(max_line as u64);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        reader.set_limit(max_line as u64);
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf).await else {
+            break; // I/O error → stop reading
+        };
+        if n == 0 {
+            break; // EOF
+        }
+        // Budget exhausted without a terminating newline → the line is
+        // over-long. Drain its remainder (bounded), drop it, and keep reading.
+        if reader.limit() == 0 && !buf.ends_with(b"\n") {
+            loop {
+                reader.set_limit(max_line as u64);
+                buf.clear();
+                // Stop on the terminating newline, on EOF, or on an I/O error;
+                // otherwise a full chunk without a newline means keep draining.
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(n) if n > 0 && !buf.ends_with(b"\n") => {} // more to drain
+                    _ => break,
+                }
+            }
+            tracing::warn!("inbound session line exceeds cap — dropping frame");
             continue;
         }
-        if let Ok(frame) = serde_json::from_str::<AttachInbound>(&line) {
+        let line = match std::str::from_utf8(&buf) {
+            Ok(s) => s.trim(),
+            Err(_) => continue, // non-UTF-8 → skip, like a malformed frame
+        };
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(frame) = serde_json::from_str::<AttachInbound>(line) {
             // Non-blocking forward: the receiver only drains between runs, so a
             // blocking `send().await` would let an operator flooding frames
             // while the agent is busy wedge this reader task indefinitely.
@@ -1411,6 +1468,59 @@ mod tests {
         assert_eq!(delivered, 64, "should buffer exactly the channel capacity");
     }
 
+    #[tokio::test]
+    async fn read_inbound_frames_drops_oversized_line_and_survives() {
+        // #593: a post-auth client must not be able to OOM the worker with one
+        // newline-less line. An over-cap line is dropped, and — unlike the
+        // control plane (which closes the connection, #401) — the session
+        // reader keeps going, so a following valid frame is still delivered. A
+        // long-lived interactive session must survive one oversized frame.
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, reader) = tokio::io::duplex(1 << 16);
+        let (tx, mut rx) = mpsc::channel::<AttachInbound>(16);
+        let cap = 64usize;
+        let task = tokio::spawn(read_inbound_frames_capped(reader, tx, cap));
+
+        // An oversized frame: syntactically valid JSON, but far longer than the
+        // cap. Then a following normal frame that must still get through.
+        let big = format!(
+            "{{\"type\":\"UserMessage\",\"text\":\"{}\"}}\n",
+            "x".repeat(cap * 3)
+        );
+        writer.write_all(big.as_bytes()).await.unwrap();
+        writer
+            .write_all(b"{\"type\":\"EndInput\"}\n")
+            .await
+            .unwrap();
+        drop(writer); // EOF → reader returns
+
+        task.await.unwrap();
+
+        // The oversized frame was dropped; the following frame still arrived.
+        let got = rx.recv().await.expect("frame after oversized line");
+        assert_eq!(got, AttachInbound::EndInput);
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_inbound_frames_accepts_line_at_exactly_cap() {
+        // A line whose bytes-including-newline fit exactly within the cap is a
+        // valid frame, not an oversized one (boundary check on the limit).
+        use tokio::io::AsyncWriteExt as _;
+        let frame = b"{\"type\":\"EndInput\"}\n";
+        let cap = frame.len(); // exactly the frame length, newline included
+        let (mut writer, reader) = tokio::io::duplex(1 << 16);
+        let (tx, mut rx) = mpsc::channel::<AttachInbound>(16);
+        let task = tokio::spawn(read_inbound_frames_capped(reader, tx, cap));
+        writer.write_all(frame).await.unwrap();
+        drop(writer);
+        task.await.unwrap();
+        assert_eq!(
+            rx.recv().await.expect("frame at cap"),
+            AttachInbound::EndInput
+        );
+    }
+
     // --- SocketInputProvider ---
 
     #[tokio::test]
@@ -2129,17 +2239,19 @@ mod tests {
     /// where the worker actually uses it.
     #[tokio::test]
     async fn attach_listener_rejects_wrong_token() {
-        use caliban_supervisor::transport::{BindSpec, ConnectSpec, Endpoint, Listener, connect};
+        use caliban_supervisor::transport::{ConnectSpec, Endpoint, Listener, connect};
 
-        let bind = BindSpec {
-            endpoint: Endpoint::Tcp {
-                addr: "127.0.0.1:0".into(),
-            },
+        // A token-only (plaintext) listener, built directly: `Listener::bind`
+        // now refuses a plaintext-token network bind (#593), but the worker
+        // attach token-rejection path is still worth exercising cheaply without
+        // TLS setup. Real binds go through `bind` and get both token + TLS.
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap().to_string();
+        let listener = Listener::Tcp {
+            listener: tcp,
             tls: None,
             token: Some("right-token".into()),
         };
-        let listener = Listener::bind(&bind).await.unwrap();
-        let addr = listener.local_addr().unwrap();
 
         let srv = tokio::spawn(async move { listener.accept().await });
 
