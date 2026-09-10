@@ -2239,17 +2239,19 @@ mod tests {
     /// where the worker actually uses it.
     #[tokio::test]
     async fn attach_listener_rejects_wrong_token() {
-        use caliban_supervisor::transport::{BindSpec, ConnectSpec, Endpoint, Listener, connect};
+        use caliban_supervisor::transport::{ConnectSpec, Endpoint, Listener, connect};
 
-        let bind = BindSpec {
-            endpoint: Endpoint::Tcp {
-                addr: "127.0.0.1:0".into(),
-            },
+        // A token-only (plaintext) listener, built directly: `Listener::bind`
+        // now refuses a plaintext-token network bind (#593), but the worker
+        // attach token-rejection path is still worth exercising cheaply without
+        // TLS setup. Real binds go through `bind` and get both token + TLS.
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap().to_string();
+        let listener = Listener::Tcp {
+            listener: tcp,
             tls: None,
             token: Some("right-token".into()),
         };
-        let listener = Listener::bind(&bind).await.unwrap();
-        let addr = listener.local_addr().unwrap();
 
         let srv = tokio::spawn(async move { listener.accept().await });
 
