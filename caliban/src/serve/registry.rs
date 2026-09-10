@@ -484,21 +484,31 @@ mod tests {
             .unwrap();
         let run_id = reg.spawn(built);
 
+        // Drain until the run is terminal and its event backlog is empty, rather
+        // than a fixed iteration budget. Under llvm-cov instrumentation the run
+        // executes several times slower, so the old 500 × 3ms (~1.5s) budget
+        // could expire before `RunEnd` was ever observed — flaking the
+        // line-coverage gate while the plain test job passed (#599). The
+        // generous outer timeout still fails fast if the run genuinely wedges.
         let mut cursor = 0;
         let mut saw_run_end = false;
-        for _ in 0..500 {
-            let view = reg.poll(&run_id, cursor).expect("known run");
-            for e in &view.events {
-                if matches!(e, caliban_agent_core::TurnEvent::RunEnd { .. }) {
-                    saw_run_end = true;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let view = reg.poll(&run_id, cursor).expect("known run");
+                for e in &view.events {
+                    if matches!(e, caliban_agent_core::TurnEvent::RunEnd { .. }) {
+                        saw_run_end = true;
+                    }
                 }
+                cursor = view.next_cursor;
+                if view.status.is_terminal() && view.events.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(3)).await;
             }
-            cursor = view.next_cursor;
-            if view.status.is_terminal() && view.events.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
-        }
+        })
+        .await
+        .expect("run should reach terminal and drain within 30s");
         assert!(saw_run_end);
         assert_eq!(reg.status(&run_id), Some(caliban_drive::DriveStatus::Done));
     }
