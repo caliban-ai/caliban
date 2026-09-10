@@ -11,7 +11,7 @@ jobs:
   labeler:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EndBug/label-sync@v2.3.3
         with:
           config-file: .github/labels.yml
