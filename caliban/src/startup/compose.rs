@@ -864,6 +864,42 @@ fn sub_agent_config(
     cfg
 }
 
+/// Build a spawned sub-agent's [`Agent`] from already-resolved per-spawn state.
+///
+/// Mirrors the parent agent's construction, including the history **compactor**:
+/// before #619 the sub-agent builder omitted `.compactor(..)`, so it fell back
+/// to the builder default `NoopCompactor` and `auto_compact_threshold` (threaded
+/// in by #584) was inert — a long-running sub-agent could overflow its context.
+/// Now the same `select_compactor` the parent path uses (`compact_strategy`,
+/// default `"summarize"`) is wired in.
+#[allow(clippy::too_many_arguments)]
+fn build_sub_agent(
+    settings: &caliban_settings::Settings,
+    provider: &Arc<dyn Provider + Send + Sync>,
+    model: String,
+    tools: ToolRegistry,
+    mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
+    mcp_eager: Arc<std::collections::HashSet<String>>,
+    max_tokens: u32,
+    lazy_mcp: bool,
+    max_active_schemas: usize,
+) -> caliban_agent_core::Result<Agent> {
+    let compactor = select_compactor(
+        settings.compact_strategy_or_default(),
+        Arc::clone(provider),
+        &model,
+    );
+    let cfg = sub_agent_config(settings, model, max_tokens, lazy_mcp, max_active_schemas);
+    Agent::builder()
+        .provider(Arc::clone(provider))
+        .tools(tools)
+        .config(cfg)
+        .compactor(compactor)
+        .mcp_active(mcp_active)
+        .mcp_eager_servers(mcp_eager)
+        .build()
+}
+
 /// Wire `AgentTool` (the sub-agent primitive) into `registry`.
 ///
 /// The factory closes over a snapshot of the parent registry (which DOES
@@ -932,21 +968,18 @@ pub(crate) fn install_sub_agent(
             caliban_agent_core::mcp_activation::McpActivationSet::new(parent_max_active_schemas)
         };
         let child_active = Arc::new(arc_swap::ArcSwap::from_pointee(child_active_set));
-        let cfg = sub_agent_config(
+        build_sub_agent(
             &settings_for_factory,
+            &provider_for_factory,
             chosen_model,
+            child_registry,
+            child_active,
+            Arc::clone(&parent_mcp_eager),
             parent_max_tokens,
             parent_lazy_mcp,
             parent_max_active_schemas,
-        );
-        Agent::builder()
-            .provider(Arc::clone(&provider_for_factory))
-            .tools(child_registry)
-            .config(cfg)
-            .mcp_active(child_active)
-            .mcp_eager_servers(Arc::clone(&parent_mcp_eager))
-            .build()
-            .expect("sub-agent builder")
+        )
+        .expect("sub-agent builder")
     });
     // Background-handoff spawner (ADR 0037). When the parent invokes
     // AgentTool with `background: true`, the tool calls this closure;
@@ -2252,5 +2285,52 @@ mod tests {
             fenced, unfenced,
             "restrict must not change tool availability"
         );
+    }
+
+    // --- sub-agent compactor wiring (#619) -------------------------------
+
+    fn build_test_sub_agent(strategy: Option<&str>) -> caliban_agent_core::Agent {
+        use caliban_provider::{MockProvider, Provider};
+        use std::sync::Arc;
+        let provider: Arc<dyn Provider + Send + Sync> = Arc::new(MockProvider::new());
+        let settings = caliban_settings::Settings {
+            compact_strategy: strategy.map(str::to_string),
+            ..caliban_settings::Settings::default()
+        };
+        let child_active = Arc::new(arc_swap::ArcSwap::from_pointee(
+            caliban_agent_core::mcp_activation::McpActivationSet::new(0),
+        ));
+        super::build_sub_agent(
+            &settings,
+            &provider,
+            "mock-model".to_string(),
+            caliban_agent_core::ToolRegistry::new(),
+            child_active,
+            Arc::new(std::collections::HashSet::new()),
+            64,
+            false,
+            0,
+        )
+        .expect("sub-agent builds")
+    }
+
+    #[test]
+    fn sub_agent_builder_wires_the_configured_compactor_not_noop() {
+        // #619: a spawned sub-agent must get the configured compactor, not the
+        // builder's default NoopCompactor — otherwise auto_compact_threshold
+        // (#584) is inert and the sub-agent can overflow its context window.
+        let agent = build_test_sub_agent(None); // default strategy = "summarize"
+        assert_eq!(
+            agent.compactor().strategy_name(),
+            "Summarizing",
+            "sub-agent must run with the configured compactor, not NoopCompactor"
+        );
+    }
+
+    #[test]
+    fn sub_agent_builder_honors_configured_strategy() {
+        // Proves the wiring reads settings rather than hardcoding: noop → Noop.
+        let agent = build_test_sub_agent(Some("noop"));
+        assert_eq!(agent.compactor().strategy_name(), "Noop");
     }
 }
