@@ -847,14 +847,46 @@ pub(crate) fn install_tool_search(
     registry.register(Arc::new(tool));
 }
 
+/// Assemble the [`caliban_agent_core::AgentConfig`] for a spawned sub-agent.
+///
+/// Sets the fields the factory passes through from the parent (model, tokens,
+/// MCP knobs) and then applies the same context-management and stream-watchdog
+/// settings the main compose path applies (`apply_context_management` /
+/// `apply_stream_watchdog`, see the `build_agent` main path). Before #584 the
+/// sub-agent factory used bare `..AgentConfig::default()`, so `auto_compact_threshold`,
+/// `micro_compact_enabled`, `tool_result_cap_chars`, `min_cache_block_tokens`,
+/// `stream_idle_timeout_ms`, and `stream_prefill_timeout_ms` from settings were
+/// silently dropped for sub-agents.
+fn sub_agent_config(
+    settings: &caliban_settings::Settings,
+    model: String,
+    max_tokens: u32,
+    lazy_mcp: bool,
+    max_active_schemas: usize,
+) -> caliban_agent_core::AgentConfig {
+    let mut cfg = caliban_agent_core::AgentConfig {
+        model,
+        max_tokens,
+        max_turns: 20,
+        lazy_mcp,
+        max_active_schemas,
+        ..caliban_agent_core::AgentConfig::default()
+    };
+    settings.apply_context_management(&mut cfg);
+    settings.apply_stream_watchdog(&mut cfg);
+    cfg
+}
+
 /// Wire `AgentTool` (the sub-agent primitive) into `registry`.
 ///
 /// The factory closes over a snapshot of the parent registry (which DOES
 /// NOT include `AgentTool`, so sub-agents cannot recurse) + the parent's
-/// provider + chosen model. Hook inheritance is deferred to v2 — sub-agents
-/// currently use `NoopHooks`. The background-handoff spawner asks the
-/// per-repo supervisor daemon (auto-spawned if needed) to register a new
-/// agent and return its socket (ADR 0037).
+/// provider + chosen model + a clone of the settings snapshot (so spawned
+/// sub-agents honor the context-management + stream-watchdog knobs, #584).
+/// Hook inheritance is deferred to v2 — sub-agents currently use `NoopHooks`.
+/// The background-handoff spawner asks the per-repo supervisor daemon
+/// (auto-spawned if needed) to register a new agent and return its socket
+/// (ADR 0037).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn install_sub_agent(
     args: &Args,
@@ -867,6 +899,7 @@ pub(crate) fn install_sub_agent(
     parent_lazy_mcp: bool,
     inheritable_config: Option<crate::hook_inherit::InheritableHookConfig>,
     parent_runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
+    settings: &caliban_settings::Settings,
 ) {
     if args.no_sub_agent || args.no_tools {
         return;
@@ -881,6 +914,10 @@ pub(crate) fn install_sub_agent(
     let provider_for_factory: Arc<dyn Provider + Send + Sync> = Arc::clone(provider);
     let parent_model = model.to_string();
     let parent_max_tokens = args.max_tokens;
+    // Clone the settings snapshot into the factory so each spawned sub-agent
+    // gets the same context-management + stream-watchdog knobs the parent got
+    // (#584); the factory closure outlives this call and runs per-spawn.
+    let settings_for_factory = settings.clone();
     let factory: AgentFactory = Arc::new(move |input: &AgentToolInput| {
         let chosen_model = input.model.clone().unwrap_or_else(|| parent_model.clone());
         let child_registry = match &input.tool_allowlist {
@@ -908,14 +945,13 @@ pub(crate) fn install_sub_agent(
             caliban_agent_core::mcp_activation::McpActivationSet::new(parent_max_active_schemas)
         };
         let child_active = Arc::new(arc_swap::ArcSwap::from_pointee(child_active_set));
-        let cfg = caliban_agent_core::AgentConfig {
-            model: chosen_model,
-            max_tokens: parent_max_tokens,
-            max_turns: 20,
-            lazy_mcp: parent_lazy_mcp,
-            max_active_schemas: parent_max_active_schemas,
-            ..caliban_agent_core::AgentConfig::default()
-        };
+        let cfg = sub_agent_config(
+            &settings_for_factory,
+            chosen_model,
+            parent_max_tokens,
+            parent_lazy_mcp,
+            parent_max_active_schemas,
+        );
         Agent::builder()
             .provider(Arc::clone(&provider_for_factory))
             .tools(child_registry)
@@ -1487,9 +1523,8 @@ pub(crate) fn build_agent(
     // micro_compact_enabled, tool_result_cap_chars, min_cache_block_tokens.
     // Without this call the four fields parse off disk but never reach the
     // agent (PR #60 introduced both the Settings fields and this helper but
-    // the wiring step was missed). Sub-agent inheritance for these knobs is
-    // a separate follow-up — install_sub_agent does not yet thread the same
-    // Settings snapshot into the factory closure.
+    // the wiring step was missed). Spawned sub-agents get the same knobs via
+    // `sub_agent_config` in `install_sub_agent` (#584).
     settings_snapshot.apply_context_management(&mut cfg);
     // Stream-watchdog knobs from Settings — stream_idle_timeout_ms,
     // stream_prefill_timeout_ms (#263 / #254). Same wire-or-it-never-arrives
@@ -1799,7 +1834,7 @@ fn apply_memory_settings(
 mod tests {
     use super::{
         apply_env_ms_override, debug_enabled, default_debug_filter, missing_key_err,
-        resolve_debug_log_path, workspace_fence_policy,
+        resolve_debug_log_path, sub_agent_config, workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
@@ -2065,6 +2100,70 @@ mod tests {
         assert!(
             msg.contains("apiKeyHelper"),
             "should hint at the helper path: {msg}"
+        );
+    }
+
+    #[test]
+    fn sub_agent_config_applies_context_and_watchdog_settings() {
+        // #584: a spawned sub-agent must honor the on-disk context-management
+        // and stream-watchdog settings, not silently fall back to defaults.
+        // Set a non-default value for each of the six knobs and assert every
+        // one reaches the sub-agent's AgentConfig.
+        let settings = caliban_settings::Settings {
+            auto_compact_threshold: Some(0.42),
+            micro_compact_enabled: Some(true),
+            tool_result_cap_chars: Some(4321),
+            min_cache_block_tokens: Some(777),
+            stream_idle_timeout_ms: Some(12_345),
+            stream_prefill_timeout_ms: Some(67_890),
+            ..caliban_settings::Settings::default()
+        };
+        // Sanity: the chosen values differ from AgentConfig's own defaults, so
+        // the assertions below can't pass by coincidence.
+        let default_cfg = caliban_agent_core::AgentConfig::default();
+        assert_ne!(default_cfg.tool_result_cap_chars, 4321);
+        assert_ne!(default_cfg.stream_idle_timeout_ms, 12_345);
+
+        let cfg = sub_agent_config(&settings, "child-model".to_string(), 256, true, 8);
+
+        // The passthrough fields the factory sets directly.
+        assert_eq!(cfg.model, "child-model");
+        assert_eq!(cfg.max_tokens, 256);
+        assert!(cfg.lazy_mcp);
+        assert_eq!(cfg.max_active_schemas, 8);
+        // The six previously-dropped settings.
+        assert_eq!(cfg.auto_compact_threshold, Some(0.42));
+        assert!(cfg.micro_compact_enabled);
+        assert_eq!(cfg.tool_result_cap_chars, 4321);
+        assert_eq!(cfg.min_cache_block_tokens, 777);
+        assert_eq!(cfg.stream_idle_timeout_ms, 12_345);
+        assert_eq!(cfg.stream_prefill_timeout_ms, 67_890);
+    }
+
+    #[test]
+    fn sub_agent_config_leaves_defaults_when_settings_unset() {
+        // Parent-path parity: with an empty settings snapshot the sub-agent
+        // config keeps AgentConfig's own defaults for the six knobs.
+        let settings = caliban_settings::Settings::default();
+        let cfg = sub_agent_config(&settings, "m".to_string(), 64, false, 4);
+        let default_cfg = caliban_agent_core::AgentConfig::default();
+        assert_eq!(
+            cfg.auto_compact_threshold,
+            default_cfg.auto_compact_threshold
+        );
+        assert_eq!(cfg.micro_compact_enabled, default_cfg.micro_compact_enabled);
+        assert_eq!(cfg.tool_result_cap_chars, default_cfg.tool_result_cap_chars);
+        assert_eq!(
+            cfg.min_cache_block_tokens,
+            default_cfg.min_cache_block_tokens
+        );
+        assert_eq!(
+            cfg.stream_idle_timeout_ms,
+            default_cfg.stream_idle_timeout_ms
+        );
+        assert_eq!(
+            cfg.stream_prefill_timeout_ms,
+            default_cfg.stream_prefill_timeout_ms
         );
     }
 }
