@@ -56,12 +56,16 @@ pub struct TlsClient {
     pub server_name: String,
 }
 
-/// Install the `ring` crypto provider as the process default, exactly once.
+/// Install the aws-lc-rs crypto provider as the process default, exactly once.
+///
+/// aws-lc-rs (not `ring`) matches the workspace's rustls 0.23 standardization
+/// — the AWS SDK's rustls-aws-lc connector already pulls it, so we install the
+/// same backend the rest of the process uses rather than a second one (#593).
 fn ensure_crypto_provider() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
 
@@ -291,6 +295,15 @@ impl Listener {
                 Ok(Listener::Unix(UnixListener::bind(path)?))
             }
             Endpoint::Tcp { addr } => {
+                // Bind-layer fail-closed backstop (#593). Every current caller
+                // runs `require_network_credentials` before constructing the
+                // BindSpec, but the guarantee lived only in the callers — a
+                // future caller could silently bind an unauthenticated (or
+                // plaintext-token) network listener. Enforce it here too, so a
+                // network endpoint physically cannot bind without both a
+                // non-empty token and TLS.
+                require_network_credentials(spec.token.as_deref(), spec.tls.is_some())
+                    .map_err(std::io::Error::other)?;
                 let listener = TcpListener::bind(addr).await?;
                 Ok(Listener::Tcp {
                     listener,
@@ -419,6 +432,27 @@ mod tests {
         conn.flush().await.expect("flush");
     }
 
+    /// Build a TCP [`Listener`] directly from a bound socket, **bypassing**
+    /// [`Listener::bind`]'s credential backstop — so the transport primitives
+    /// (raw echo, TLS-only, token-only) can each be exercised in isolation.
+    /// Real callers go through `bind`, which enforces `require_network_credentials`
+    /// (see `bind_refuses_unauthenticated_network_listener`).
+    async fn tcp_listener_unchecked(
+        tls: Option<TlsServer>,
+        token: Option<String>,
+    ) -> (Listener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        (
+            Listener::Tcp {
+                listener,
+                tls,
+                token,
+            },
+            addr,
+        )
+    }
+
     #[tokio::test]
     async fn unix_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -446,15 +480,10 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_roundtrip() {
-        let bind = BindSpec {
-            endpoint: Endpoint::Tcp {
-                addr: "127.0.0.1:0".into(),
-            },
-            tls: None,
-            token: None,
-        };
-        let listener = Listener::bind(&bind).await.unwrap();
-        let addr = listener.local_addr().unwrap(); // real bound "127.0.0.1:PORT"
+        // Raw plaintext TCP echo — a transport primitive exercised directly,
+        // since `bind` (correctly) refuses to bind an unauthenticated TCP
+        // listener (#593).
+        let (listener, addr) = tcp_listener_unchecked(None, None).await;
         let server = tokio::spawn(echo_once(listener));
         let mut c = connect(&ConnectSpec {
             endpoint: Endpoint::Tcp { addr },
@@ -492,15 +521,9 @@ mod tests {
     async fn tcp_tls_roundtrip() {
         let (cert_pem, key_pem) = test_certs();
         let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
-        let bind = BindSpec {
-            endpoint: Endpoint::Tcp {
-                addr: "127.0.0.1:0".into(),
-            },
-            tls: Some(tls_server),
-            token: None,
-        };
-        let listener = Listener::bind(&bind).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        // TLS-only transport primitive, built directly (a tokenless listener
+        // does not satisfy `bind`'s backstop).
+        let (listener, addr) = tcp_listener_unchecked(Some(tls_server), None).await;
         let server = tokio::spawn(echo_once(listener));
         // Client trusts the self-signed cert as its CA, expects name "localhost".
         let tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
@@ -520,15 +543,9 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_token_accept_and_reject() {
-        let bind = BindSpec {
-            endpoint: Endpoint::Tcp {
-                addr: "127.0.0.1:0".into(),
-            },
-            tls: None,
-            token: Some("s3cret".into()),
-        };
-        let listener = Listener::bind(&bind).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        // Token-check transport primitive, built directly (a plaintext-token
+        // listener does not satisfy `bind`'s backstop).
+        let (listener, addr) = tcp_listener_unchecked(None, Some("s3cret".into())).await;
 
         // Server accepts twice: once good, once bad.
         let srv = tokio::spawn(async move {
@@ -561,5 +578,63 @@ mod tests {
         let (good_ok, bad_kind) = srv.await.unwrap();
         assert!(good_ok, "good token should be accepted");
         assert_eq!(bad_kind, Some(std::io::ErrorKind::PermissionDenied));
+    }
+
+    #[tokio::test]
+    async fn bind_refuses_fail_open_network_listener_and_accepts_full_credentials() {
+        // #593: the fail-closed policy is now enforced at the bind layer, not
+        // only in callers, so a future caller physically cannot bind a network
+        // listener that is unauthenticated, tokenless-over-TLS, or a token over
+        // plaintext. A fully-credentialed listener still binds; a Unix listener
+        // (local, filesystem-scoped) is unaffected.
+        let (cert_pem, key_pem) = test_certs();
+        let mk_tls = || tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+
+        // Fail-open cases: refused at bind.
+        let fail_open: [(Option<String>, Option<TlsServer>); 3] = [
+            (None, None),                  // unauthenticated
+            (Some("t".to_string()), None), // token over plaintext
+            (None, Some(mk_tls())),        // TLS but no token
+        ];
+        for (token, tls) in fail_open {
+            let bind = BindSpec {
+                endpoint: Endpoint::Tcp {
+                    addr: "127.0.0.1:0".into(),
+                },
+                tls,
+                token,
+            };
+            assert!(
+                Listener::bind(&bind).await.is_err(),
+                "bind must refuse a fail-open network listener",
+            );
+        }
+
+        // Full credentials (token + TLS): binds successfully.
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(mk_tls()),
+            token: Some("s3cret".into()),
+        };
+        assert!(
+            Listener::bind(&bind).await.is_ok(),
+            "bind must accept a fully-credentialed network listener",
+        );
+
+        // A Unix listener is local + fs-scoped, so the backstop does not apply.
+        let dir = tempfile::tempdir().unwrap();
+        let bind = BindSpec {
+            endpoint: Endpoint::Unix {
+                path: dir.path().join("u.sock"),
+            },
+            tls: None,
+            token: None,
+        };
+        assert!(
+            Listener::bind(&bind).await.is_ok(),
+            "unix bind is unaffected by the network backstop",
+        );
     }
 }
