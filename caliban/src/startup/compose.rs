@@ -18,12 +18,7 @@ use caliban_agent_core::{Agent, ToolRegistry};
 use caliban_provider::{Provider, Usage};
 use caliban_sessions::{PersistedSession, SessionStore};
 use caliban_skills::{SkillTool, load_skills_report, register_builtins};
-use caliban_tools_builtin::{
-    AgentFactory, AgentTool, AgentToolInput, BashOutputTool, BashTool, EditTool, EnterPlanModeTool,
-    ExitPlanModeTool, GlobTool, GrepTool, KillShellTool, MultiEditTool, NotebookEditTool,
-    ReadMemoryTopicTool, ReadTool, TodoWriteTool, WebFetchTool, WebSearchTool, WorkspaceRoot,
-    WriteMemoryTopicTool, WriteTool,
-};
+use caliban_tools_builtin::{AgentFactory, AgentTool, AgentToolInput, WorkspaceRoot};
 
 use crate::agents_cli;
 use crate::args::{Args, ProviderKind, provider_name, resolved_provider};
@@ -588,45 +583,37 @@ pub(crate) fn build_registry(
         }
         workspace
     };
-    let mut r = ToolRegistry::new();
-    r.register(Arc::new(ReadTool::new(root.clone())));
-    r.register(Arc::new(WriteTool::new(root.clone())));
-    r.register(Arc::new(EditTool::new(root.clone())));
-    r.register(Arc::new(MultiEditTool::new(root.clone())));
-    r.register(Arc::new(NotebookEditTool::new(root.clone())));
-    // Bash needs the OS sandbox to be fenced — a path-prefix check can't
-    // contain an arbitrary shell command. When the workspace is restricted,
-    // wrap Bash in a write-fence sandbox (ADR 0032); otherwise leave it
-    // unsandboxed as before (#328).
-    let bash = if crate::args::should_restrict(args) {
+    // Resolve composition-root policy (path fence, OS sandbox backend, gate
+    // flags) into plain data, then let the built-in descriptor table assemble
+    // the tools (#541). Bash needs the OS sandbox to be fenced — a path-prefix
+    // check can't contain an arbitrary shell command — so when the workspace is
+    // restricted we build a write-fence sandbox (ADR 0032, #328); otherwise
+    // Bash runs unfenced (`None`).
+    let bash_sandbox = if crate::args::should_restrict(args) {
         let network = crate::args::sandbox_network(args, settings_snapshot);
-        BashTool::with_sandbox(root.clone(), build_bash_fence(&workspace_root, network))
+        build_bash_fence(&workspace_root, network)
     } else {
-        BashTool::new(root.clone())
+        None
     };
-    r.register(Arc::new(bash));
-    r.register(Arc::new(GlobTool::new(root.clone())));
-    r.register(Arc::new(GrepTool::new(root)));
-    r.register(Arc::new(WebFetchTool::new(web_fetch_client())));
-    r.register(Arc::new(WebSearchTool::new(web_fetch_client())));
-    r.register(Arc::new(BashOutputTool::with_global_registry()));
-    r.register(Arc::new(KillShellTool::with_global_registry()));
-    r.register(Arc::new(TodoWriteTool::new(todos)));
-    r.register(Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode))));
-    r.register(Arc::new(ExitPlanModeTool::new(plan_mode)));
-    // Auto-memory tools — kill switch via env per ADR 0035. The skill body
-    // documents how to use the tools; without the skill, the model has no
-    // protocol manual, so we gate both together. Skipped in bare mode.
-    if !auto_memory_disabled() && !args.bare {
-        let topic_loader = Arc::new(caliban_memory::TopicLoader::with_backend_arc(Arc::clone(
-            topic_backend,
-        )));
-        r.register(Arc::new(ReadMemoryTopicTool::new(Arc::clone(
-            &topic_loader,
-        ))));
-        r.register(Arc::new(WriteMemoryTopicTool::new(topic_loader)));
-    }
+    let ctx = caliban_tools_builtin::ToolBuildCtx {
+        root,
+        todos,
+        plan_mode,
+        web_client: web_fetch_client(),
+        bash_sandbox,
+        topic_backend: Arc::clone(topic_backend),
+        // ADR 0035 kill switch; the skill body documents the memory protocol,
+        // so tools + skill gate together (skills handled just below).
+        auto_memory_enabled: !auto_memory_disabled(),
+        bare: args.bare,
+    };
+    let mut r = caliban_tools_builtin::build_builtin_registry(&ctx);
 
+    // Skills stay a composition-root step: `SkillTool` lives in `caliban-skills`
+    // behind a side-effecting discovery loader (frontmatter validation, stderr
+    // warnings, built-in registration), which is not a simple constructor and
+    // does not belong in the built-in descriptor table. It still lands in the
+    // same registry.
     if !args.no_skills && !args.bare {
         let mut roots = caliban_skills::default_roots(&workspace_root);
         roots.extend(plugin_skill_roots.iter().cloned());
@@ -2164,6 +2151,106 @@ mod tests {
         assert_eq!(
             cfg.stream_prefill_timeout_ms,
             default_cfg.stream_prefill_timeout_ms
+        );
+    }
+
+    // --- build_registry gate characterization (#541) ---------------------
+    // These pin the exact set of tools registered under each gate BEFORE the
+    // registry/factory refactor, and must stay green through it — that is the
+    // "existing tool-availability behavior is unchanged under all four gates"
+    // acceptance criterion.
+
+    fn registry_names(flags: &[&str]) -> std::collections::BTreeSet<String> {
+        let mut cmdline = vec!["caliban"];
+        cmdline.extend_from_slice(flags);
+        let args = Args::parse_from(cmdline);
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = caliban_tools_builtin::WorkspaceRoot::new(dir.path().to_path_buf());
+        let todos = caliban_agent_core::new_shared_todos();
+        let plan_mode = caliban_agent_core::new_shared_plan_mode();
+        let settings = caliban_settings::Settings::default();
+        let topic_backend: std::sync::Arc<dyn caliban_memory::TopicBackend> =
+            std::sync::Arc::new(caliban_memory::FsTopicBackend::new(dir.path().join("mem")));
+        super::build_registry(
+            &args,
+            workspace,
+            todos,
+            plan_mode,
+            &[],
+            &settings,
+            &topic_backend,
+        )
+        .names()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// The always-on core tools present in every non-`--no-tools` run.
+    const CORE_TOOLS: &[&str] = &[
+        "Read",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch",
+        "BashOutput",
+        "KillShell",
+        "TodoWrite",
+        "EnterPlanMode",
+        "ExitPlanMode",
+    ];
+
+    #[test]
+    fn build_registry_default_has_core_plus_memory_and_skills() {
+        let names = registry_names(&[]);
+        for t in CORE_TOOLS {
+            assert!(names.contains(*t), "default run missing {t}: {names:?}");
+        }
+        assert!(names.contains("ReadMemoryTopic"));
+        assert!(names.contains("WriteMemoryTopic"));
+        assert!(names.contains("Skill"));
+    }
+
+    #[test]
+    fn build_registry_no_tools_is_empty() {
+        assert!(registry_names(&["--no-tools"]).is_empty());
+    }
+
+    #[test]
+    fn build_registry_no_skills_drops_only_skill() {
+        let full = registry_names(&[]);
+        let no_skills = registry_names(&["--no-skills"]);
+        let dropped: Vec<_> = full.difference(&no_skills).cloned().collect();
+        assert_eq!(dropped, vec!["Skill".to_string()], "only Skill should drop");
+    }
+
+    #[test]
+    fn build_registry_bare_drops_memory_and_skills_but_keeps_core() {
+        let bare = registry_names(&["--bare"]);
+        assert!(!bare.contains("Skill"));
+        assert!(!bare.contains("ReadMemoryTopic"));
+        assert!(!bare.contains("WriteMemoryTopic"));
+        for t in CORE_TOOLS {
+            assert!(
+                bare.contains(*t),
+                "bare run missing core tool {t}: {bare:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_registry_restrict_does_not_change_the_tool_set() {
+        // should_restrict changes Bash's sandbox and the file-tool root, but not
+        // *which* tools are available — the set must be identical fenced vs not.
+        let fenced = registry_names(&["--workspace", "/tmp"]);
+        let unfenced = registry_names(&["--workspace", "/tmp", "--no-restrict-paths"]);
+        assert_eq!(
+            fenced, unfenced,
+            "restrict must not change tool availability"
         );
     }
 }
