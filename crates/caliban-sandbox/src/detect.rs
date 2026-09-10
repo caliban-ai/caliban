@@ -267,7 +267,28 @@ fn finalize_bwrap(
     version_str: &str,
     policy: &Policy,
 ) -> Result<Backend, SandboxError> {
-    if !policy.enable_weaker_nested_sandbox && !probe_userns(&path) {
+    // Nested-sandbox mode omits `--unshare-user`, so userns availability is
+    // irrelevant and the probe is skipped entirely (no exec). Otherwise probe
+    // the runtime. The resolved decision is handed to the pure core below.
+    let userns_permitted = policy.enable_weaker_nested_sandbox || probe_userns(&path);
+    finalize_bwrap_with_userns(path, version_str, policy, userns_permitted)
+}
+
+/// Probe-free core of [`finalize_bwrap`]: choose the backend from an
+/// already-resolved `userns_permitted`.
+///
+/// Split out so the permitted / denied / strict branches are driven
+/// deterministically in tests with a plain bool, rather than by execing a probe
+/// binary whose result depends on the host's ambient userns policy (#397). The
+/// probe/exec path is exercised separately by `probe_userns_reflects_exit_status`.
+#[cfg(any(target_os = "linux", test))]
+fn finalize_bwrap_with_userns(
+    path: PathBuf,
+    version_str: &str,
+    policy: &Policy,
+    userns_permitted: bool,
+) -> Result<Backend, SandboxError> {
+    if !userns_permitted {
         if policy.fail_if_unavailable {
             return Err(SandboxError::BackendUnavailable {
                 backend: "bwrap",
@@ -519,13 +540,22 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // #397: the finalize_bwrap *branch* tests drive `finalize_bwrap_with_userns`
+    // with an explicit `userns_permitted` bool, so the permitted / denied /
+    // strict outcomes are hermetic — no probe binary is exec'd and the result
+    // no longer depends on whether the CI runner's kernel permits unprivileged
+    // user namespaces (which flaked the coverage gate). The probe/exec path is
+    // covered separately by `probe_userns_reflects_exit_status`.
     #[test]
     fn finalize_bwrap_returns_bwrap_when_userns_permitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fake_bwrap(&dir, 0);
-        let b = finalize_bwrap(path.clone(), "bubblewrap 0.7.0\n", &Policy::default())
-            .expect("userns permitted ⇒ Bwrap");
+        let path = PathBuf::from("/usr/bin/bwrap");
+        let b = finalize_bwrap_with_userns(
+            path.clone(),
+            "bubblewrap 0.7.0\n",
+            &Policy::default(),
+            true,
+        )
+        .expect("userns permitted ⇒ Bwrap");
         assert_eq!(
             b,
             Backend::Bwrap {
@@ -535,29 +565,35 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn finalize_bwrap_falls_back_when_userns_denied() {
-        let dir = tempfile::tempdir().unwrap();
         let p = Policy {
             fail_if_unavailable: false,
             ..Policy::default()
         };
-        let b = finalize_bwrap(fake_bwrap(&dir, 1), "bubblewrap 0.7.0\n", &p)
-            .expect("userns denied without fail_if_unavailable ⇒ unsandboxed");
+        let b = finalize_bwrap_with_userns(
+            PathBuf::from("/usr/bin/bwrap"),
+            "bubblewrap 0.7.0\n",
+            &p,
+            false,
+        )
+        .expect("userns denied without fail_if_unavailable ⇒ unsandboxed");
         assert_eq!(b, Backend::Unavailable);
     }
 
-    #[cfg(unix)]
     #[test]
     fn finalize_bwrap_errors_when_userns_denied_and_strict() {
-        let dir = tempfile::tempdir().unwrap();
         let p = Policy {
             fail_if_unavailable: true,
             ..Policy::default()
         };
-        let err = finalize_bwrap(fake_bwrap(&dir, 1), "bubblewrap 0.7.0\n", &p)
-            .expect_err("userns denied under fail_if_unavailable ⇒ error");
+        let err = finalize_bwrap_with_userns(
+            PathBuf::from("/usr/bin/bwrap"),
+            "bubblewrap 0.7.0\n",
+            &p,
+            false,
+        )
+        .expect_err("userns denied under fail_if_unavailable ⇒ error");
         assert!(matches!(err, SandboxError::BackendUnavailable { .. }));
     }
 
