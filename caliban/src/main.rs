@@ -523,6 +523,7 @@ async fn main() -> Result<()> {
             .unwrap_or(false),
         inheritable_config,
         Arc::clone(&runtime_rules),
+        &settings_snapshot,
     );
 
     // When `--include-hook-events` is set, allocate a buffer so the
