@@ -9,6 +9,73 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-09
+
+A hardening-and-polish release on top of v0.9.0's driveable server surface:
+three security fixes (a plaintext token-leak guard, https-only OAuth endpoints,
+and a symlink-safe checkpoint restore), a batch of config-schema and settings
+corrections, supervisor and OAuth robustness fixes, and the first **prebuilt
+macOS arm64 binary** attached to tagged releases so Apple Silicon users can
+install without a Rust toolchain.
+
+### Added
+
+- **Prebuilt macOS arm64 binary attached to tagged releases** (#575): a
+  version-tagged release (`v*`) now builds and uploads
+  `caliban-aarch64-apple-darwin.tar.gz` (+ a `.sha256`) for Apple Silicon, so
+  M-series users can install a release without a local Rust toolchain. Tag-gated
+  and repo-guarded; it uploads onto the Release the cut-release flow creates. (#576)
+
+### Fixed
+
+- **`enable_telemetry` is honored, not just the env var** (#494): the setting is
+  now respected on its own, matching the documented config surface. (#578)
+- **Worker spawn survives a spurious `ETXTBSY`** (#441): exec of a just-written
+  worker binary no longer fails a real launch (errno 26) — it retries briefly;
+  and that retry now runs on the blocking pool so it can't wedge a tokio runtime
+  worker thread (#590). (#579, #604)
+- **Driven MCP runs get the full layered permission setup** (#566): a
+  programmatically-driven MCP run is routed through the same permission layering
+  as an interactive one, so Permissions v2 is enforced by construction. (#581)
+- **Settings-schema drift corrected; permission-rule reloads surface** (#498):
+  previously-unschematized keys are now type-checked and the reload path is
+  wired through. (#582)
+- **JSON→TOML migration nudges are no longer dropped** (#587): they now surface
+  via `validation_warnings`, so a migration hint survives even before tracing is
+  initialized. (#591)
+- **Four honored settings added to the JSON schema** (#588):
+  `allow_local_http_hook_targets`, `compact_strategy`, `stream_idle_timeout_ms`,
+  and `stream_prefill_timeout_ms` are now schema-checked — a wrong type warns
+  instead of being silently ignored. (#592)
+- **State-less OAuth error redirects surface promptly** (#595): an auth server
+  that returns `?error=…` without echoing `state` (RFC-noncompliant but real) is
+  now reported instead of hanging the callback wait until the 5-minute timeout;
+  the `state`-mismatch injection/DoS guard is preserved. (#603)
+- **Slash-command / overlay descriptions no longer overpromise** (#589):
+  `/login`, `/logout`, and the `/mcp` overlay's disable/reload keys now describe
+  their actual (stubbed) behavior rather than unimplemented features. (#600)
+- **`CALIBAN_KEEP_WORKTREES` is actually honored** (#585): the documented debug
+  escape hatch to keep sub-agent worktrees now prevents removal (it was a silent
+  no-op); the never-built per-call `keep_on_exit` route is retired from the docs. (#605)
+
+### Security
+
+- **Bearer token no longer leaks over plaintext; session accept loop
+  slowloris-hardened** (#495): the per-agent status client refuses to dial when a
+  token would travel without TLS, and the session accept loop bounds a stalled
+  pre-auth peer with a handshake timeout so it can't wedge the loop. (#594)
+- **Manual-mode OAuth endpoints require https** (#496): a non-loopback `http://`
+  `auth_url`/`token_url` is rejected — it would send the code, PKCE verifier, and
+  secret in cleartext — matching the discovery-hop guard; the DCR error body is
+  also truncated. (#596)
+- **Checkpoint restore routed through the confined `O_NOFOLLOW` writer** (#497):
+  restore writes now go through the same symlink-refusing atomic path as
+  Write/Edit, closing a symlink TOCTOU in the restore step. (#598)
+
+Docs & internal: re-rated the Claude Code parity-matrix worktree-isolation row
+(#562); qualified the checkpoint-restore durability wording (#597); added the
+`lifecycle/do-not-merge` label to `labels.yml` (#577).
+
 ## [0.9.0] - 2026-08-22
 
 This release makes caliban **driveable**. Until now caliban was a first-class MCP
@@ -684,7 +751,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/caliban-ai/caliban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/caliban-ai/caliban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/caliban-ai/caliban/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/caliban-ai/caliban/compare/v0.6.0...v0.7.0
