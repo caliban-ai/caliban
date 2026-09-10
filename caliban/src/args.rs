@@ -153,6 +153,7 @@ pub(crate) struct Args {
     #[arg(
         long = "max-budget-usd",
         value_name = "USD",
+        value_parser = parse_non_negative_usd,
         help_heading = "Headless / -p mode (ADR 0025)"
     )]
     pub(crate) max_budget_usd: Option<f64>,
@@ -245,7 +246,11 @@ pub(crate) struct Args {
         num_args = 0..=1,
         default_value_t = false,
         default_missing_value = "true",
-        value_parser = parse_bool_flag
+        value_parser = parse_bool_flag,
+        // --continue and --resume are two different resume modes; `resolve_session`
+        // checks `resume` first and silently ignores `-c`, so make the conflict
+        // explicit rather than letting `-c` be a no-op (#621).
+        conflicts_with = "resume"
     )]
     pub(crate) continue_latest: bool,
 
@@ -1061,6 +1066,19 @@ fn parse_bool_flag(s: &str) -> Result<bool, String> {
     }
 }
 
+/// Parse `--max-budget-usd`: a finite, non-negative USD amount. A negative
+/// ceiling is nonsensical (it latches "exceeded" after the first request), so
+/// reject it at parse rather than fail-fast at runtime (#621).
+fn parse_non_negative_usd(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(format!(
+            "budget `{s}` must be a finite, non-negative number of dollars"
+        ));
+    }
+    Ok(v)
+}
+
 fn parse_temperature(s: &str) -> Result<f32, String> {
     let n: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
     if !n.is_finite() {
@@ -1237,6 +1255,28 @@ mod tests {
         assert!(
             Args::try_parse_from(["caliban", "--restrict-paths", "--no-restrict-paths"]).is_err()
         );
+    }
+
+    #[test]
+    fn continue_and_resume_conflict() {
+        // #621: two different resume modes — passing both must error rather than
+        // silently ignoring -c.
+        assert!(Args::try_parse_from(["caliban", "-c", "--resume", "sess"]).is_err());
+        assert!(Args::try_parse_from(["caliban", "--continue=true", "--resume", "sess"]).is_err());
+        // Each alone still parses.
+        assert!(parse(&["-c"]).continue_latest);
+        assert_eq!(parse(&["--resume", "sess"]).resume.as_deref(), Some("sess"));
+    }
+
+    #[test]
+    fn max_budget_usd_rejects_negative_and_nonfinite() {
+        // #621: a negative ceiling is nonsensical; reject at parse.
+        assert!(Args::try_parse_from(["caliban", "--max-budget-usd=-5"]).is_err());
+        assert!(Args::try_parse_from(["caliban", "--max-budget-usd=nan"]).is_err());
+        assert!(Args::try_parse_from(["caliban", "--max-budget-usd=inf"]).is_err());
+        // Zero and positive are accepted.
+        assert_eq!(parse(&["--max-budget-usd=0"]).max_budget_usd, Some(0.0));
+        assert_eq!(parse(&["--max-budget-usd=2.5"]).max_budget_usd, Some(2.5));
     }
 
     #[test]
