@@ -15,6 +15,7 @@
 //! - [`workspace`] — shared `WorkspaceRoot` path-resolution type.
 
 pub mod agent;
+pub mod assembly;
 pub mod fs;
 pub mod input;
 pub mod memory;
@@ -30,6 +31,7 @@ pub use agent::{
     AgentFactory, AgentTool, AgentToolInput, BackgroundSpawnResult, BackgroundSpawner,
     IsolationMode, TodoWriteTool, WorktreeOptions,
 };
+pub use assembly::{BuiltinToolDescriptor, ToolBuildCtx, build_builtin_registry};
 pub use fs::{EditTool, MultiEditTool, NotebookEditTool, ReadTool, WriteTool};
 pub use input::parse_input;
 pub use memory::{ReadMemoryTopicTool, WriteMemoryTopicTool};
