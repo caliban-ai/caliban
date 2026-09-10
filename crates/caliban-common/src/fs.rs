@@ -142,9 +142,30 @@ pub fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::
 /// symlink.
 // The component walk, mode preservation, temp-create/retry, and cleanup form
 // one linear procedure that reads better whole than split across helpers.
-#[allow(clippy::too_many_lines)]
 #[cfg(unix)]
 pub fn write_atomic_within(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_within_with_mode(root, path, bytes, None)
+}
+
+/// Like [`write_atomic_within`], but when `mode` is `Some(m)` the destination is
+/// created/overwritten with exactly `m & 0o7777` instead of the
+/// preserve-existing-else-umask-default policy.
+///
+/// Checkpoint `/rewind` restore uses this to restore a file's *recorded* mode
+/// through the same `O_NOFOLLOW` confined path Write/Edit use, closing the
+/// check-then-write symlink TOCTOU that `write_atomic`/`write_atomic_with_mode`
+/// left open (#497).
+///
+/// # Errors
+/// As [`write_atomic_within`].
+#[allow(clippy::too_many_lines)]
+#[cfg(unix)]
+pub fn write_atomic_within_with_mode(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> std::io::Result<()> {
     use rustix::fs::{
         AtFlags, CWD, FileType, Mode, OFlags, RawMode, fchmod, mkdirat, openat, renameat, statat,
         unlinkat,
@@ -225,15 +246,18 @@ pub fn write_atomic_within(root: &Path, path: &Path, bytes: &[u8]) -> std::io::R
         dir = next;
     }
 
-    // Destination mode: preserve an existing regular file's bits (an executable
-    // stays executable, setgid survives), else a fresh umask-respecting default.
-    // A symlink at the final name is a planted swap — ignore its mode; it will
-    // be replaced in place.
-    let mode_bits: RawMode = match statat(&dir, *filename, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile => {
-            st.st_mode & 0o7777
-        }
-        _ => RawMode::try_from(umask_respecting_default()).unwrap_or(0o644),
+    // Destination mode: an explicit `mode` (checkpoint restore) wins; otherwise
+    // preserve an existing regular file's bits (an executable stays executable,
+    // setgid survives), else a fresh umask-respecting default. A symlink at the
+    // final name is a planted swap — ignore its mode; it will be replaced in place.
+    let mode_bits: RawMode = match mode {
+        Some(m) => RawMode::try_from(m & 0o7777).unwrap_or(0o644),
+        None => match statat(&dir, *filename, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile => {
+                st.st_mode & 0o7777
+            }
+            _ => RawMode::try_from(umask_respecting_default()).unwrap_or(0o644),
+        },
     };
 
     // Create a uniquely-named temp file *in this pinned directory* (O_EXCL).
@@ -282,6 +306,22 @@ pub fn write_atomic_within(root: &Path, path: &Path, bytes: &[u8]) -> std::io::R
 /// `root`.
 #[cfg(not(unix))]
 pub fn write_atomic_within(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_within_with_mode(root, path, bytes, None)
+}
+
+/// Non-Unix fallback for [`write_atomic_within_with_mode`]. Unix file modes do
+/// not apply here, so `mode` is ignored; confinement is best-effort as above.
+///
+/// # Errors
+/// As [`write_atomic`], plus `PermissionDenied` if the resolved parent escapes
+/// `root`.
+#[cfg(not(unix))]
+pub fn write_atomic_within_with_mode(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    _mode: Option<u32>,
+) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
@@ -444,6 +484,24 @@ mod tests {
         let dest = root.join("a").join("b").join("out.txt");
         write_atomic_within(&root, &dest, b"hello").unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_within_with_mode_applies_given_mode_on_create() {
+        // #497: checkpoint restore needs to restore the *recorded* mode through
+        // the confined writer. The plain `write_atomic_within` defaults a new
+        // file to 0644; the mode-aware variant applies the caller's mode.
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let dest = root.join("exec.sh");
+        write_atomic_within_with_mode(&root, &dest, b"#!/bin/sh\n", Some(0o755)).unwrap();
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "mode-aware confined write must apply the given mode"
+        );
     }
 
     #[test]

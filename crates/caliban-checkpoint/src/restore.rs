@@ -158,8 +158,9 @@ pub fn restore_files_only(store: &CheckpointStore, prompt_index: u32) -> Result<
             }
         }
     }
+    let root = store.workspace_root();
     for (path, bytes, mode) in writes {
-        atomic_overwrite(&path, &bytes, mode)?;
+        atomic_overwrite(root, &path, &bytes, mode)?;
         outcome.files_restored += 1;
     }
     Ok(outcome)
@@ -178,14 +179,18 @@ fn has_symlink_component(path: &Path) -> bool {
     false
 }
 
-/// Atomic write delegating to [`caliban_common::fs::write_atomic_with_mode`].
-fn atomic_overwrite(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    caliban_common::fs::write_atomic_with_mode(path, bytes, mode).map_err(|source| {
-        CheckpointError::AtomicRestore {
+/// Confined atomic write for restore: routes through the `O_NOFOLLOW`
+/// [`caliban_common::fs::write_atomic_within_with_mode`] (the same path
+/// Write/Edit use) so a symlink planted on `path` — or an ancestor — in the
+/// check→write window can't redirect the blob outside `root` (#497). Restores
+/// the recorded `mode`.
+fn atomic_overwrite(root: &Path, path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    caliban_common::fs::write_atomic_within_with_mode(root, path, bytes, Some(mode)).map_err(
+        |source| CheckpointError::AtomicRestore {
             path: path.to_path_buf(),
             source,
-        }
-    })
+        },
+    )
 }
 
 /// Truncate `session.messages` so the last surviving message matches the
@@ -679,11 +684,12 @@ mod tests {
     #[test]
     fn atomic_overwrite_keeps_no_leftover_tempfile() {
         let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("dst.txt");
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let target = root.join("dst.txt");
         std::fs::write(&target, "old").unwrap();
-        atomic_overwrite(&target, b"new", 0o644).unwrap();
+        atomic_overwrite(&root, &target, b"new", 0o644).unwrap();
         // Confirm only the target file remains in the directory.
-        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+        let leftover: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
             .filter_map(std::result::Result::ok)
             .filter(|e| e.path() != target)

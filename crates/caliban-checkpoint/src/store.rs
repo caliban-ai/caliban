@@ -83,6 +83,9 @@ pub fn sanitize_cwd(cwd: &Path) -> String {
 pub struct CheckpointStore {
     /// `<root>/projects/<sanitized-cwd>/checkpoints/<session>/`
     session_dir: PathBuf,
+    /// The workspace root (cwd) this store was opened for, canonicalized when
+    /// possible. Restore confines its writes under this root (#497).
+    cwd: PathBuf,
 }
 
 impl CheckpointStore {
@@ -107,13 +110,23 @@ impl CheckpointStore {
             .join("checkpoints")
             .join(sanitize_session(session_id));
         std::fs::create_dir_all(&session_dir)?;
-        Ok(Self { session_dir })
+        // Retain the workspace root, canonicalized to match the recorder's
+        // canonical entry paths so restore can confine writes under it (#497).
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        Ok(Self { session_dir, cwd })
     }
 
     /// Root path of this store's per-session directory.
     #[must_use]
     pub fn session_dir(&self) -> &Path {
         &self.session_dir
+    }
+
+    /// The workspace root (cwd) this store was opened for. Restore confines its
+    /// writes under this root (#497).
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.cwd
     }
 
     /// Compute the per-prompt directory path (does NOT create it).
