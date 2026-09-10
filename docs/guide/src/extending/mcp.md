@@ -43,7 +43,7 @@ url  = "https://api.example.com/mcp/sse"
 | `args` | stdio | CLI arguments |
 | `env` | stdio | Environment variables; `${VAR}` and `${VAR:-default}` expanded |
 | `cwd` | stdio | Working directory; relative paths resolve from caliban's cwd |
-| `url` | http, sse | Absolute `http://` or `https://` URL |
+| `url` | http, sse | Absolute `http://` or `https://` URL. With `oauth = "auto"` or `"manual"`, a non-loopback `http://` URL is **rejected** — the token/PKCE exchange would travel in cleartext (see #430/#496); use `https://` (loopback `http://` stays allowed for local dev) |
 | `headers` | http, sse | Static request headers; values support `${VAR}` expansion |
 | `oauth` | http, sse | OAuth mode: `"off"` (default), `"auto"`, `"manual"` |
 | `disabled` | all | `true` to skip this server entirely |

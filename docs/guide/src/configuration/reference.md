@@ -82,7 +82,7 @@ headers = { Authorization = "Bearer ${SB_TOKEN}" }
 | `args` | `string[]` | `[]` | Argv after command (stdio only) |
 | `env` | `{ key → value }` | `{}` | Environment variables (stdio only) |
 | `cwd` | `string` | — | Working directory override (stdio only) |
-| `url` | `string` | — | Absolute HTTP/HTTPS URL (http/sse only) |
+| `url` | `string` | — | Absolute HTTP/HTTPS URL (http/sse only). With `oauth = "auto"/"manual"`, non-loopback `http://` is rejected (cleartext token/PKCE exchange, #430/#496) — use `https://` |
 | `headers` | `{ key → value }` | `{}` | Static request headers (http/sse only) |
 | `oauth` | `"off"` \| `"auto"` \| `"manual"` | `"off"` | OAuth mode (http/sse only) |
 | `permissions.allow` | `string[]` | `[]` | Per-server allow list (composed with global rules) |
