@@ -163,7 +163,7 @@ impl SlashCommand for LoginCommand {
     fn meta(&self) -> &SlashCommandMeta {
         &SlashCommandMeta {
             name: "/login",
-            description: "run the active provider's auth flow",
+            description: "(planned) provider auth flow — arrives with the Auth spec",
             args_hint: "",
             hidden: false,
             immediate: true,
@@ -184,7 +184,7 @@ impl SlashCommand for LogoutCommand {
     fn meta(&self) -> &SlashCommandMeta {
         &SlashCommandMeta {
             name: "/logout",
-            description: "clear cached credentials for the active provider",
+            description: "(planned) clear cached credentials — arrives with the Auth spec",
             args_hint: "",
             hidden: false,
             immediate: true,
