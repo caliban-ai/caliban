@@ -308,8 +308,10 @@ the *write* and *egress* fences; they do not make the sandbox a secrets boundary
 - **Large Bash output can no longer deadlock** (#416): stdout/stderr are drained
   past the output cap, so a command producing more than the cap no longer hangs.
   (#439)
-- **Checkpoint durability** (#412): transactional restore, correct eviction
-  ordering, and an atomic index write. (#444)
+- **Checkpoint durability** (#412): restore aborts before any mutation on a
+  blob-integrity or missing-blob failure (the dominant case; a rarer phase-2
+  filesystem write error can still leave a partially-applied tree), correct
+  eviction ordering, and an atomic index write. (#444)
 - **Deferred session-write failures surface; debounce is bounded** (#414): a
   failed deferred write is reported rather than swallowed. (#461)
 - **Extended-thinking signatures survive streaming** (#419): thinking-block
