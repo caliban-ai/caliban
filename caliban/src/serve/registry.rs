@@ -386,7 +386,12 @@ impl ProdAgentFactory {
 ///
 /// # Errors
 ///
-/// Fails if the current working directory cannot be resolved.
+/// Fails if the current working directory cannot be resolved, or if
+/// `permissions.enforce = true` is set together with a bypass flag
+/// (`--no-permissions` / `--auto-allow` / a weakening `--permission-mode`) —
+/// the same enforce gate the interactive/headless entrypoint applies at
+/// `main.rs` (#586). Failing here means every driven serve mode (MCP/ACP/HTTP)
+/// refuses to bind rather than serve an ungated run.
 pub(crate) fn build_prod_factory(
     args: &crate::args::Args,
     settings: caliban_settings::Settings,
@@ -394,6 +399,12 @@ pub(crate) fn build_prod_factory(
 ) -> anyhow::Result<ProdAgentFactory> {
     use anyhow::Context as _;
     use caliban_tools_builtin::WorkspaceRoot;
+
+    // Enforce gate: when permissions.enforce = true, refuse bypass flags —
+    // fail closed before assembling the factory, matching main.rs:326. Without
+    // this, a driven run honored the layered rules (#566) but silently skipped
+    // the enforce check, so a bypass flag was not refused (#586).
+    crate::startup::check_enforce_gate(args, &settings).map_err(|e| anyhow::anyhow!(e))?;
 
     let workspace = WorkspaceRoot::current_dir().context("could not get current directory")?;
     let model = args
@@ -597,5 +608,45 @@ mod tests {
         assert_eq!(built.messages.len(), 1);
         assert!(built.interactive);
         drop(built);
+    }
+
+    #[test]
+    fn enforce_gate_refuses_bypass_flag_in_driven_run() {
+        // #586: a driven serve run (MCP/ACP/HTTP all assemble through
+        // build_prod_factory) with permissions.enforce = true must refuse a
+        // bypass flag, exactly as the interactive/headless entrypoint does via
+        // startup::check_enforce_gate (main.rs). Without the gate,
+        // build_prod_factory would happily assemble an ungated driven run — a
+        // permission bypass.
+        use clap::Parser as _;
+        let args = crate::args::Args::parse_from(["caliban", "--no-permissions"]);
+        let mut settings = caliban_settings::Settings::default();
+        settings.permissions.enforce = Some(true);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let result = super::build_prod_factory(&args, settings, provider);
+        let msg = result
+            .err()
+            .expect("enforce=true + --no-permissions must be refused at factory assembly")
+            .to_string();
+        assert!(
+            msg.contains("enforce") && msg.contains("no-permissions"),
+            "error should explain the enforce refusal, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn enforce_gate_allows_clean_driven_run() {
+        // enforce=true with no bypass flag must still assemble — the gate
+        // refuses only the weakening flags, matching main.rs. Guards against
+        // over-blocking a legitimately enforced driven run.
+        use clap::Parser as _;
+        let args = crate::args::Args::parse_from(["caliban"]);
+        let mut settings = caliban_settings::Settings::default();
+        settings.permissions.enforce = Some(true);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        assert!(
+            super::build_prod_factory(&args, settings, provider).is_ok(),
+            "enforce=true without a bypass flag should assemble cleanly"
+        );
     }
 }
