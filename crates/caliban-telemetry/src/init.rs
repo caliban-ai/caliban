@@ -922,6 +922,29 @@ mod otlp_tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         drop(f);
 
+        // #580: `refresh_dynamic_headers` swallows a failed exec (it logs and
+        // reuses prior headers), so an ETXTBSY on this freshly-written script
+        // would surface only as a wrong-value assertion below, not a signal we
+        // can retry. Clear the transient "text file busy" window up front with a
+        // retried direct invoke — once it execs cleanly the file is no longer
+        // busy, so the real assertion path below cannot ETXTBSY-flake.
+        {
+            let mut attempt = 0;
+            loop {
+                match crate::headers::invoke_helper(&script) {
+                    Ok(_) => break,
+                    Err(crate::error::TelemetryError::HeadersHelper { source, .. })
+                        if crate::headers::is_etxtbsy(&source)
+                            && attempt < crate::headers::ETXTBSY_TEST_RETRIES =>
+                    {
+                        attempt += 1;
+                        std::thread::yield_now();
+                    }
+                    Err(e) => panic!("helper must run: {e}"),
+                }
+            }
+        }
+
         let mut config = test_config("grpc");
         config
             .headers

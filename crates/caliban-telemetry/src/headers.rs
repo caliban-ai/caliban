@@ -101,6 +101,25 @@ pub fn invoke_helper(path: &Path) -> Result<BTreeMap<String, String>, TelemetryE
     Ok(parse_helper_output(&stdout))
 }
 
+/// True iff `err` is `ETXTBSY` ("text file busy", errno 26).
+///
+/// Test-only hardening (#580, follows #441): a freshly written + `chmod +x`
+/// script can transiently fail `execve` with `ETXTBSY` under parallel CI load
+/// while any process still holds a write handle to it. The production helper
+/// execs a *user-provided* binary it never wrote, so it deliberately carries no
+/// retry (retrying a startup helper would add undesirable latency); only the
+/// tests that fabricate an executable and immediately run it need this guard.
+/// Shared with `init.rs`'s `refresh_dynamic_headers` test.
+#[cfg(all(test, unix))]
+pub(crate) fn is_etxtbsy(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(26)
+}
+
+/// Number of times a test may retry a freshly-written script's exec before
+/// giving up on the `ETXTBSY` window. Ample: the busy window is sub-millisecond.
+#[cfg(all(test, unix))]
+pub(crate) const ETXTBSY_TEST_RETRIES: u32 = 50;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +164,17 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn is_etxtbsy_matches_errno_26_only() {
+        assert!(is_etxtbsy(&std::io::Error::from_raw_os_error(26)));
+        // EACCES (13) and a kind-only error must not be mistaken for ETXTBSY.
+        assert!(!is_etxtbsy(&std::io::Error::from_raw_os_error(13)));
+        assert!(!is_etxtbsy(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
+
     #[test]
     fn invoke_helper_runs_real_script_on_unix() {
         // POSIX shell echo via /bin/sh to make this portable. On non-Unix
@@ -160,7 +190,23 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let out = invoke_helper(&script).expect("helper must run");
+            // #580: this test execs the file it just wrote, which can transiently
+            // ETXTBSY under parallel CI load. Retry only that class of failure.
+            let out = {
+                let mut attempt = 0;
+                loop {
+                    match invoke_helper(&script) {
+                        Ok(out) => break out,
+                        Err(TelemetryError::HeadersHelper { source, .. })
+                            if is_etxtbsy(&source) && attempt < ETXTBSY_TEST_RETRIES =>
+                        {
+                            attempt += 1;
+                            std::thread::yield_now();
+                        }
+                        Err(e) => panic!("helper must run: {e}"),
+                    }
+                }
+            };
             assert_eq!(
                 out.get("Authorization").map(String::as_str),
                 Some("Bearer 12345"),
