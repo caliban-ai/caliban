@@ -17,17 +17,24 @@ use caliban_supervisor::proto::{AgentRecord, SpawnSpec};
 use caliban_supervisor::store::AgentStore;
 use caliban_supervisor::{Supervisor, SupervisorClient, WorkerHandle, WorkerLauncher};
 
-/// Minimal fake launcher: runs a trivial, near-instant child process so the
+/// Minimal fake launcher: runs a **long-lived** child process so the
 /// supervisor has a real PID to track. It never touches the per-agent
 /// socket, so status stays whatever the registration set it to — this test
 /// only cares about `working_dir` from `list()`/`spawn()`, not worker
 /// lifecycle.
+///
+/// The child sleeps well past the test's runtime (killed on drop) so that
+/// `child.wait()` in the supervisor's per-worker monitor stays parked: a
+/// fast-exiting worker would let that monitor fire `cleanup_worktree()` and
+/// tear the per-source worktree down before the on-disk assertions below run,
+/// which is exactly the race that flaked this test (#602). Holding the agents
+/// alive is the barrier that makes the worktree state deterministic.
 struct NoopLauncher;
 
 impl WorkerLauncher for NoopLauncher {
     fn launch(&self, _record: &AgentRecord) -> std::io::Result<WorkerHandle> {
         let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 0.1");
+        cmd.arg("-c").arg("sleep 300").kill_on_drop(true);
         let child = cmd.spawn()?;
         let pid = child.id().expect("child pid");
         Ok(WorkerHandle { pid, child })
