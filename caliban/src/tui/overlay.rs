@@ -728,7 +728,7 @@ pub(crate) fn mcp_lines(app: &App) -> Vec<Line<'static>> {
         dim,
     ));
     out.push(Line::styled(
-        "   [d] disable · [r] reload · [a] start OAuth · [s] view stderr · [t] tools",
+        "   [d] disable (restart) · [r] reload (restart) · [a] start OAuth · [s] view stderr · [t] tools",
         dim,
     ));
     out.push(Line::raw(""));
