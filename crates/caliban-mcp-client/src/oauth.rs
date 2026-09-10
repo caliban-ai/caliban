@@ -856,35 +856,89 @@ struct CallbackState {
     server: String,
 }
 
+/// What to do with an incoming callback request, decided purely from the query
+/// params and the expected state — extracted so the branching (which balances
+/// the #431 injection/DoS guard against the #595 state-less-error surfacing) is
+/// unit-testable without an axum server.
+#[derive(Debug, PartialEq, Eq)]
+enum CallbackDecision {
+    /// Not our redirect — ignore *without* consuming the result channel, so a
+    /// stray/griefing hit can't drop the legitimate callback (#431).
+    Ignore,
+    /// Deliver this result to the waiting flow: `Ok(code)` or `Err(message)`.
+    Deliver(Result<String, String>),
+}
+
+/// Classify a callback request against the expected state secret.
+///
+/// - A present-but-*mismatched* `state` is never ours (a stray local request, a
+///   griefing GET, or an injection attempt) → `Ignore`, whether it carries an
+///   error or a code (#431).
+/// - An `error` redirect is surfaced even when the (RFC-noncompliant) auth
+///   server omits `state` — otherwise `await_callback` hangs until
+///   `callback_timeout` (#595). There is no code to inject on the error path.
+/// - A `code` is only trusted with a *matching* `state` (injection/DoS guard);
+///   a state-less code is ignored.
+fn classify_callback(
+    expected_state: &str,
+    state: Option<&str>,
+    error: Option<&str>,
+    error_description: Option<&str>,
+    code: Option<&str>,
+) -> CallbackDecision {
+    let state_matches = state == Some(expected_state);
+    let state_mismatch = state.is_some() && !state_matches;
+
+    // A present-but-*mismatched* state is never ours (#431) — ignore outright,
+    // error or code, so it can't consume the channel.
+    if state_mismatch {
+        return CallbackDecision::Ignore;
+    }
+
+    // State now either matches or is absent. Surface an error even when absent
+    // (#595): a code-less error carries nothing to inject, and swallowing it
+    // hangs await_callback until callback_timeout.
+    if let Some(err) = error {
+        let desc = error_description.unwrap_or_default();
+        return CallbackDecision::Deliver(Err(format!(
+            "auth server returned error '{err}': {desc}"
+        )));
+    }
+
+    // Success path: a code is only trustworthy with a *matching* state
+    // (injection/DoS guard, #431); a state-less code is ignored.
+    if !state_matches {
+        return CallbackDecision::Ignore;
+    }
+    match code {
+        Some(code) => CallbackDecision::Deliver(Ok(code.to_string())),
+        None => CallbackDecision::Deliver(Err("callback missing both code and error".to_string())),
+    }
+}
+
 async fn callback_handler(
     State(state): State<CallbackState>,
     Query(params): Query<CallbackParams>,
 ) -> Html<&'static str> {
-    // #431: a request that doesn't carry the matching state secret is NOT our
-    // redirect — a stray local request, a griefing GET, or a page's `<img>` hit
-    // on the fixed callback port. Ignore it *without* consuming the result
-    // channel, so it can't win the race and drop the legitimate callback that
-    // arrives afterward. (State secrecy already prevents auth-code injection;
-    // this closes the local DoS.)
-    if params.state.as_deref() != Some(state.expected_state.as_str()) {
-        return Html(
-            "<html><body><h1>caliban</h1>\
-             <p>Ignoring an unexpected request.</p></body></html>",
-        );
-    }
-    let result = if let Some(err) = params.error {
-        let desc = params.error_description.unwrap_or_default();
-        Err(McpError::OauthFlow {
+    let decision = classify_callback(
+        &state.expected_state,
+        params.state.as_deref(),
+        params.error.as_deref(),
+        params.error_description.as_deref(),
+        params.code.as_deref(),
+    );
+    let result = match decision {
+        CallbackDecision::Ignore => {
+            return Html(
+                "<html><body><h1>caliban</h1>\
+                 <p>Ignoring an unexpected request.</p></body></html>",
+            );
+        }
+        CallbackDecision::Deliver(Ok(code)) => Ok(code),
+        CallbackDecision::Deliver(Err(message)) => Err(McpError::OauthFlow {
             server: state.server.clone(),
-            message: format!("auth server returned error '{err}': {desc}"),
-        })
-    } else if let Some(code) = params.code {
-        Ok(code)
-    } else {
-        Err(McpError::OauthFlow {
-            server: state.server.clone(),
-            message: "callback missing both code and error".to_string(),
-        })
+            message,
+        }),
     };
     if let Some(tx) = state.tx.lock().await.take() {
         let _ = tx.send(result);
@@ -1689,6 +1743,66 @@ mod tests {
             ..Default::default()
         };
         assert!(endpoints_from_manual("s", &loopback, &server_url).is_ok());
+    }
+
+    #[test]
+    fn stateless_error_redirect_is_surfaced_not_ignored() {
+        // #595: an auth server that returns ?error=... WITHOUT echoing `state`
+        // (RFC-noncompliant but real) must be surfaced, not silently ignored —
+        // otherwise await_callback hangs until callback_timeout (5 min).
+        match classify_callback(
+            "expected",
+            None,
+            Some("access_denied"),
+            Some("user said no"),
+            None,
+        ) {
+            CallbackDecision::Deliver(Err(msg)) => {
+                assert!(msg.contains("access_denied"), "error code surfaced: {msg}");
+                assert!(msg.contains("user said no"), "description surfaced: {msg}");
+            }
+            other => panic!("expected Deliver(Err), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_mismatch_is_ignored_on_both_paths() {
+        // #431: a present-but-wrong state is never ours — ignore it whether it
+        // carries an error (griefing abort) or a code (injection), so it can't
+        // consume the channel and drop the legitimate callback.
+        assert_eq!(
+            classify_callback("expected", Some("wrong"), Some("access_denied"), None, None),
+            CallbackDecision::Ignore,
+        );
+        assert_eq!(
+            classify_callback("expected", Some("wrong"), None, None, Some("stolen_code")),
+            CallbackDecision::Ignore,
+        );
+    }
+
+    #[test]
+    fn stateless_code_is_ignored_but_matching_state_delivers() {
+        // A code is only trusted with a matching state (injection guard): a
+        // state-less code is ignored; a matching-state code is delivered.
+        assert_eq!(
+            classify_callback("expected", None, None, None, Some("code_without_state")),
+            CallbackDecision::Ignore,
+        );
+        match classify_callback("expected", Some("expected"), None, None, Some("good_code")) {
+            CallbackDecision::Deliver(Ok(code)) => assert_eq!(code, "good_code"),
+            other => panic!("expected Deliver(Ok), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_state_with_neither_code_nor_error_reports_missing() {
+        // Preserve the pre-existing "missing both" diagnostic on the happy path.
+        match classify_callback("expected", Some("expected"), None, None, None) {
+            CallbackDecision::Deliver(Err(msg)) => {
+                assert!(msg.contains("missing both"), "diagnostic preserved: {msg}");
+            }
+            other => panic!("expected Deliver(Err), got {other:?}"),
+        }
     }
 
     #[test]
