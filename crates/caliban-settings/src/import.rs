@@ -86,6 +86,31 @@ pub fn import_settings_to_toml(src: &Path, dst: &Path) -> Result<(), ImportError
 // Internal parser
 // ---------------------------------------------------------------------------
 
+/// Translate a Claude Code permission pattern into caliban's rule grammar.
+///
+/// CC's Bash rules use a **command-prefix specifier** `Bash(<prefix>:*)`
+/// (e.g. `Bash(git diff:*)` = "the command `git diff`, with any arguments").
+/// caliban's matcher reads the arg spec as an anchored glob, so the literal
+/// `:` and `*` never match a real command and the rule is inert (#618). Rewrite
+/// the specifier to a caliban glob that matches the bare command *or* the
+/// command followed by a space and arguments — `{<prefix>,<prefix> *}` — so it
+/// fires on `git diff` and `git diff --stat` without over-matching `git difftool`.
+///
+/// Everything else passes through unchanged: CC path rules (`Edit(src/**)`,
+/// `Read(~/.zshrc)`), the exact-command form `Bash(<cmd>)` (no `:*`, already a
+/// literal glob), bare tool names, `mcp__…`, and caliban's own `Bash(git *)`.
+fn translate_cc_pattern(pattern: &str) -> String {
+    if let Some(inner) = pattern
+        .strip_prefix("Bash(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        && let Some(prefix) = inner.strip_suffix(":*")
+        && !prefix.is_empty()
+    {
+        return format!("Bash({{{prefix},{prefix} *}})");
+    }
+    pattern.to_string()
+}
+
 /// Attempt to parse `body` as one of the recognised permissions-source shapes.
 /// Returns an ordered `Vec<RuleSpec>` on success.
 fn parse_any_permissions(body: &str) -> Result<Vec<RuleSpec>, ImportError> {
@@ -131,7 +156,7 @@ fn parse_any_permissions(body: &str) -> Result<Vec<RuleSpec>, ImportError> {
                 for p in arr {
                     if let Some(s) = p.as_str() {
                         out.push(RuleSpec {
-                            pattern: s.to_owned(),
+                            pattern: translate_cc_pattern(s),
                             action: action_str.to_owned(),
                             comment: None,
                             reason: None,
@@ -266,6 +291,58 @@ action = "allow"
                 &bash_ctx(&rm),
                 ws
             )
+        );
+    }
+
+    /// #618: Claude Code's real Bash rule grammar is the **colon specifier**
+    /// `Bash(cmd:*)` (a command-prefix match), not the space-glob `Bash(cmd *)`.
+    /// caliban's matcher reads `cmd:*` literally, so an imported CC config's
+    /// Bash rules were inert — a migrated `deny` blocked nothing. Import must
+    /// translate the specifier to caliban's glob form.
+    #[test]
+    fn imported_claude_code_colon_specifier_rules_actually_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("settings.json");
+        let dst = dir.path().join("permissions.toml");
+        std::fs::write(
+            &src,
+            r#"{"permissions":{"allow":["Bash(git diff:*)"],"deny":["Bash(rm:*)"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(import_permissions_to_toml(&src, &dst).unwrap(), 2);
+
+        let body = std::fs::read_to_string(&dst).unwrap();
+        let settings: crate::Settings = toml::from_str(&body).unwrap();
+        let rules = settings.permission_rules();
+        let ws = std::path::Path::new("/repo");
+        let m = |pat: &str, cmd: &str| {
+            caliban_agent_core::permissions_matcher::matches_with_workspace(
+                pat,
+                &bash_ctx(&serde_json::json!({ "command": cmd })),
+                ws,
+            )
+        };
+        let deny = &rules
+            .iter()
+            .find(|r| r.action == caliban_agent_core::Action::Deny)
+            .expect("deny rule survives import")
+            .tool;
+        let allow = &rules
+            .iter()
+            .find(|r| r.action == caliban_agent_core::Action::Allow)
+            .expect("allow rule survives import")
+            .tool;
+
+        // `Bash(rm:*)` must deny `rm` and `rm <args>`, but NOT over-match `rmdir`.
+        assert!(m(deny, "rm -rf /"), "deny must fire on `rm -rf /`");
+        assert!(m(deny, "rm"), "deny must fire on bare `rm`");
+        assert!(!m(deny, "rmdir /tmp/x"), "deny must not over-match `rmdir`");
+        // `Bash(git diff:*)` must allow `git diff` and `git diff <args>`, not `git difftool`.
+        assert!(m(allow, "git diff"), "allow must fire on `git diff`");
+        assert!(m(allow, "git diff --stat"));
+        assert!(
+            !m(allow, "git difftool"),
+            "allow must not over-match `git difftool`"
         );
     }
 
