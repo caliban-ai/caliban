@@ -186,7 +186,6 @@ impl StatuslineRunner {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -194,9 +193,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let script_path = dir.path().join("hello.sh");
         std::fs::write(&script_path, "#!/bin/sh\necho hello world").unwrap();
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // #580: exec the interpreter (`/bin/sh`), not the freshly-written file
+        // itself. A just-written + `chmod +x` script can transiently ETXTBSY on
+        // exec under parallel CI load; passing it as an argument to a stable
+        // `/bin/sh` makes it plain data, so "text file busy" is impossible while
+        // still exercising the full spawn/stdin/output path. (The `command`
+        // field is whitespace-tokenized: prog = `/bin/sh`, arg = the script.)
         let runner = StatuslineRunner::new(StatuslineConfig {
-            command: script_path.to_string_lossy().to_string(),
+            command: format!("/bin/sh {}", script_path.to_string_lossy()),
             timeout_ms: 1_000,
             padding: 1,
         });
@@ -230,13 +234,14 @@ mod tests {
     async fn runner_returns_cached_on_timeout() {
         // Use a script that actually sleeps so the timeout fires. The
         // `command` field is whitespace-tokenized so we can't pass a
-        // shell-escaped one-liner; write a script to a tempfile.
+        // shell-escaped one-liner; write a script to a tempfile and run it
+        // through `/bin/sh` (#580: the interpreter is the exec target, so the
+        // freshly-written script is plain data and cannot ETXTBSY-flake).
         let dir = tempdir().unwrap();
         let script = dir.path().join("slow.sh");
         std::fs::write(&script, "#!/bin/sh\nsleep 2\necho too-slow\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runner = StatuslineRunner::new(StatuslineConfig {
-            command: script.to_string_lossy().to_string(),
+            command: format!("/bin/sh {}", script.to_string_lossy()),
             timeout_ms: 50,
             padding: 1,
         });
