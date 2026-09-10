@@ -241,6 +241,15 @@ impl WorkerLauncher for ExecWorkerLauncher {
     }
 }
 
+/// Whether a failed `cmd.spawn()` should be retried: only a spurious `ETXTBSY`
+/// ("text file busy", errno 26) — which exec of a still-open-for-writing binary
+/// raises — and only while attempts remain. Any other error is a real failure
+/// and must propagate.
+fn is_retryable_etxtbsy(e: &std::io::Error, attempt: u32, max_attempts: u32) -> bool {
+    const ETXTBSY: i32 = 26;
+    e.raw_os_error() == Some(ETXTBSY) && attempt < max_attempts
+}
+
 /// Spawn `cmd`, retrying briefly on `ETXTBSY` ("text file busy").
 ///
 /// Exec of a binary that is still open for writing fails spuriously with errno
@@ -249,15 +258,18 @@ impl WorkerLauncher for ExecWorkerLauncher {
 /// it can affect any recently-installed binary, so a spurious exec failure must
 /// not fail a real launch. Retry a few short times before giving up. Mirrors the
 /// userns-probe retry in `caliban-sandbox`'s `detect::probe_userns` (also #441).
+///
+/// The retry uses a blocking `std::thread::sleep`, so this is a **blocking**
+/// call — its async caller runs it on `tokio::task::spawn_blocking` rather than
+/// on a runtime worker thread (#590).
 fn spawn_retrying_etxtbsy(
     cmd: &mut tokio::process::Command,
 ) -> std::io::Result<tokio::process::Child> {
-    const ETXTBSY: i32 = 26;
     const MAX_ATTEMPTS: u32 = 5;
     for attempt in 1..=MAX_ATTEMPTS {
         match cmd.spawn() {
             Ok(child) => return Ok(child),
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < MAX_ATTEMPTS => {
+            Err(e) if is_retryable_etxtbsy(&e, attempt, MAX_ATTEMPTS) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(e) => return Err(e),
@@ -309,6 +321,30 @@ mod tests {
     use super::*;
     use crate::proto::{AgentRecord, AgentStatus, SpawnSpec};
     use std::path::PathBuf;
+
+    #[test]
+    fn etxtbsy_before_max_is_retryable() {
+        let e = std::io::Error::from_raw_os_error(26); // ETXTBSY
+        assert!(is_retryable_etxtbsy(&e, 1, 5));
+        assert!(is_retryable_etxtbsy(&e, 4, 5));
+    }
+
+    #[test]
+    fn etxtbsy_at_or_past_max_is_not_retryable() {
+        let e = std::io::Error::from_raw_os_error(26);
+        assert!(
+            !is_retryable_etxtbsy(&e, 5, 5),
+            "the final attempt must propagate, not sleep"
+        );
+    }
+
+    #[test]
+    fn non_etxtbsy_error_is_never_retryable() {
+        let enoent = std::io::Error::from_raw_os_error(2);
+        assert!(!is_retryable_etxtbsy(&enoent, 1, 5));
+        let synthetic = std::io::Error::other("no raw os error");
+        assert!(!is_retryable_etxtbsy(&synthetic, 1, 5));
+    }
 
     fn record(socket: PathBuf, session_dir: PathBuf) -> AgentRecord {
         AgentRecord {

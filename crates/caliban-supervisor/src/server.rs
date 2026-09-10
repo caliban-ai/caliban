@@ -370,7 +370,22 @@ impl Supervisor {
         worktree_cleanup: Option<(PathBuf, String)>,
     ) {
         let id = rec.id.clone();
-        match self.launcher.launch(&rec) {
+        // #590: launch() can block a runtime worker thread — the ETXTBSY retry
+        // sleeps (`std::thread::sleep`) and opening the worker log is synchronous
+        // file I/O. Run it on the blocking pool so a retry storm can't wedge a
+        // tokio worker. `launcher` is already `Arc`; `rec` is cloned in (cheap)
+        // and the original stays available for the bookkeeping below.
+        let launch_result = {
+            let launcher = Arc::clone(&self.launcher);
+            let rec = rec.clone();
+            match tokio::task::spawn_blocking(move || launcher.launch(&rec)).await {
+                Ok(result) => result,
+                Err(join_err) => Err(std::io::Error::other(format!(
+                    "worker launch task panicked: {join_err}"
+                ))),
+            }
+        };
+        match launch_result {
             Ok(handle) => {
                 let pid = handle.pid;
                 let mut child = handle.child;
