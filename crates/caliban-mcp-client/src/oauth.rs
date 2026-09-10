@@ -705,15 +705,23 @@ pub fn endpoints_from_manual(
         u.set_path("");
         u.to_string()
     });
+    let auth_url = Url::parse(auth_url_raw).map_err(|e| McpError::OauthDiscovery {
+        server: server.to_string(),
+        message: format!("invalid manual auth_url: {e}"),
+    })?;
+    let token_url = Url::parse(token_url_raw).map_err(|e| McpError::OauthDiscovery {
+        server: server.to_string(),
+        message: format!("invalid manual token_url: {e}"),
+    })?;
+    // Enforce the same https guard on operator-supplied manual endpoints that the
+    // auto-discovery hops get (#496): an http:// token_url would POST the auth
+    // code + PKCE verifier + client_secret in cleartext. Loopback http stays
+    // exempt (the standard dev/test exception in `require_secure`).
+    require_secure(&auth_url, server, "manual auth_url")?;
+    require_secure(&token_url, server, "manual token_url")?;
     Ok(OauthEndpoints {
-        auth_url: Url::parse(auth_url_raw).map_err(|e| McpError::OauthDiscovery {
-            server: server.to_string(),
-            message: format!("invalid manual auth_url: {e}"),
-        })?,
-        token_url: Url::parse(token_url_raw).map_err(|e| McpError::OauthDiscovery {
-            server: server.to_string(),
-            message: format!("invalid manual token_url: {e}"),
-        })?,
+        auth_url,
+        token_url,
         scopes: cfg.scopes.clone(),
         audience,
         registration_endpoint: None,
@@ -777,10 +785,19 @@ pub async fn register_client(
         })?;
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
+        let raw = response.text().await.unwrap_or_default();
+        // Truncate the server-controlled body before surfacing it, same as the
+        // token-exchange path (#432) — a hostile or non-compliant AS could
+        // reflect credential material or an unbounded payload here (#496).
+        let body: String = raw.chars().take(512).collect();
+        let body = if raw.len() > body.len() {
+            format!("{body}…[truncated]")
+        } else {
+            body
+        };
         return Err(McpError::OauthRegistration {
             server: server.to_string(),
-            message: format!("registration endpoint returned {status}: {text}"),
+            message: format!("registration endpoint returned {status}: {body}"),
         });
     }
     let doc: ClientRegistrationResponse =
@@ -1634,6 +1651,44 @@ mod tests {
             require_secure(&Url::parse("http://attacker.example/as").unwrap(), "s", "k").is_err(),
             "cleartext non-loopback http must be rejected"
         );
+    }
+
+    #[test]
+    fn manual_endpoints_enforce_https_guard() {
+        // #496: manual-mode auth_url/token_url must get the same https guard as
+        // discovery hops — an http:// token_url would POST the code + PKCE
+        // verifier + secret in cleartext. Loopback http stays exempt.
+        let server_url = Url::parse("https://mcp.example/").unwrap();
+
+        // A cleartext non-loopback token_url is rejected.
+        let insecure = ManualOauthConfig {
+            client_id: Some("cid".into()),
+            auth_url: Some("https://auth.example/authorize".into()),
+            token_url: Some("http://auth.example/token".into()),
+            ..Default::default()
+        };
+        assert!(
+            endpoints_from_manual("s", &insecure, &server_url).is_err(),
+            "http:// manual token_url must be rejected"
+        );
+
+        // All-https is accepted.
+        let secure = ManualOauthConfig {
+            client_id: Some("cid".into()),
+            auth_url: Some("https://auth.example/authorize".into()),
+            token_url: Some("https://auth.example/token".into()),
+            ..Default::default()
+        };
+        assert!(endpoints_from_manual("s", &secure, &server_url).is_ok());
+
+        // Loopback http stays exempt (the dev/test exception).
+        let loopback = ManualOauthConfig {
+            client_id: Some("cid".into()),
+            auth_url: Some("http://localhost:9000/authorize".into()),
+            token_url: Some("http://127.0.0.1:9000/token".into()),
+            ..Default::default()
+        };
+        assert!(endpoints_from_manual("s", &loopback, &server_url).is_ok());
     }
 
     #[test]
