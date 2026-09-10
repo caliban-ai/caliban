@@ -207,6 +207,13 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Whether a spawn/bg task prompt is empty (or whitespace-only). Spawn and
+/// `--bg` must reject these like every other prompt entrypoint, rather than
+/// launching a doomed sub-agent that immediately transitions to `failed` (#621).
+fn is_empty_task(prompt: &str) -> bool {
+    prompt.trim().is_empty()
+}
+
 fn map_client_error(e: ClientError) -> i32 {
     match e {
         ClientError::NotRunning(path) => {
@@ -318,6 +325,10 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             interactive,
             provider,
         } => {
+            if is_empty_task(prompt) {
+                eprintln!("caliban: empty prompt — pass non-empty text for the sub-agent's task");
+                return 64;
+            }
             let spec = SpawnSpec {
                 label: label.clone(),
                 frontmatter_path: None,
@@ -453,6 +464,11 @@ async fn run_attach(
 
 /// Handle the top-level `--bg "<task>"` shortcut.
 pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
+    // Reject an empty task before starting a daemon for a doomed sub-agent (#621).
+    if is_empty_task(task) {
+        eprintln!("caliban: empty prompt — pass non-empty text for the sub-agent's task");
+        return 64;
+    }
     let client = match ensure_daemon(repo_root).await {
         Ok(c) => c,
         Err(e) => {
@@ -496,6 +512,16 @@ fn agent_log_path(session_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_empty_task_rejects_blank_prompts() {
+        // #621: spawn/--bg must treat empty/whitespace tasks as invalid.
+        assert!(is_empty_task(""));
+        assert!(is_empty_task("   "));
+        assert!(is_empty_task("\n\t "));
+        assert!(!is_empty_task("do the thing"));
+        assert!(!is_empty_task("  padded but real  "));
+    }
 
     #[test]
     fn agent_log_path_points_at_worker_transcript() {
