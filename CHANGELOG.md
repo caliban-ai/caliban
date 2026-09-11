@@ -9,6 +9,69 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-10
+
+A QA-driven correctness release. A declarative tool-assembly refactor unblocks
+the tool backlog; a full-CLI QA sweep surfaced and fixed a cluster of
+permission and sub-agent gaps (a driven-serve enforce fail-open, sub-agent
+settings that never reached the child, imported Claude Code rules that silently
+matched nothing); the session plane gains inbound-size and fail-closed-bind
+hardening; and the CLI gets argument-validation polish. Plus a test-flake
+cleanup and CI modernization.
+
+### Added
+
+- **Declarative built-in tool registry** (#541): `build_registry`'s hand-wired
+  block is replaced by a descriptor table in `caliban-tools-builtin` — each
+  built-in declares its own availability predicate and factory, so adding one no
+  longer means editing the composition root. Cheapens the whole tool backlog
+  (#16–#22). (#616)
+
+### Changed
+
+- **CLI argument validation hardened** (#621): `agents spawn` / `--bg` reject an
+  empty prompt instead of launching a doomed sub-agent; `--continue` and
+  `--resume` now conflict rather than silently ignoring `-c`; `--max-budget-usd`
+  rejects negative / non-finite values at parse. (#623)
+
+### Fixed
+
+- **Permissions enforce gate applies to driven serve runs** (#586): the MCP /
+  ACP / HTTP serve modes now refuse `--no-permissions`, `--auto-allow`, and
+  weakening `--permission-mode` flags when `permissions.enforce = true`, matching
+  the interactive path — closing a fail-open on the driven surface. (#613)
+- **Spawned sub-agents honor context-management + stream-watchdog settings**
+  (#584): `auto_compact_threshold`, `micro_compact_enabled`,
+  `tool_result_cap_chars`, `min_cache_block_tokens`, `stream_idle_timeout_ms`,
+  and `stream_prefill_timeout_ms` now reach spawned sub-agents instead of
+  silently falling back to defaults. (#615)
+- **Spawned sub-agents actually auto-compact** (#619): sub-agents were built with
+  a no-op compactor, so `auto_compact_threshold` never fired and a long-running
+  sub-agent could overflow its context window; they now get the configured
+  compactor. (#622)
+- **Imported Claude Code Bash rules actually match** (#618): `settings import` /
+  `perms import` now translate Claude Code's `Bash(cmd:*)` command-prefix
+  specifier to caliban's glob form, so a migrated allow/deny list is no longer
+  silently inert — an imported `deny` now blocks. (#624)
+- **`config print` / `settings import` accuracy** (#620): `config print` no
+  longer shows default allow/ask rules a rules-only config never set, now emits
+  per-key `_provenance`, and `settings import --dry-run` validates its source
+  instead of reporting success for a missing file. (#625)
+
+### Security
+
+- **Session-plane hardening** (#593): the per-agent inbound reader now bounds
+  line length (a post-auth client can no longer OOM a worker with one
+  newline-less line), `Listener::bind` fail-closes a network bind that lacks a
+  token + TLS, and TLS uses the workspace-standard aws-lc-rs provider. (#614)
+
+Testing: hardened flaky test sites — ETXTBSY-safe write-then-exec in
+telemetry/settings (#580, #609), a deterministic registry-poll drain in serve
+(#599, #610), race-free worktree-cleanup assertions in the supervisor (#602,
+#611), and host-independent `finalize_bwrap` branch coverage via an injected
+userns bool (#397, #612). Internal: GitHub Actions bumped off the deprecated
+Node.js 20 runtime to Node 24-native majors (#607, #608).
+
 ## [0.10.0] - 2026-09-09
 
 A hardening-and-polish release on top of v0.9.0's driveable server surface:
@@ -751,7 +814,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/caliban-ai/caliban/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/caliban-ai/caliban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/caliban-ai/caliban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/caliban-ai/caliban/compare/v0.7.0...v0.8.0
