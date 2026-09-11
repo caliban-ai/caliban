@@ -71,15 +71,26 @@ pub fn import_permissions_to_toml(src: &Path, dst: &Path) -> Result<usize, Impor
 /// # Errors
 /// Returns [`ImportError`] on IO failure or JSON/TOML parse error.
 pub fn import_settings_to_toml(src: &Path, dst: &Path) -> Result<(), ImportError> {
+    let toml_body = render_settings_import(src)?;
+    write_toml_atomic(dst, &toml_body)?;
+    Ok(())
+}
+
+/// Read + parse a settings-import source and render it to canonical TOML
+/// **without writing**. Shared by [`import_settings_to_toml`] and the
+/// `settings import --dry-run` path, so the dry-run actually validates the
+/// source (and can preview the result) rather than blindly reporting success
+/// for a missing/invalid file (#620).
+///
+/// # Errors
+/// [`ImportError`] on IO failure or JSON/TOML parse error.
+pub fn render_settings_import(src: &Path) -> Result<String, ImportError> {
     let body = std::fs::read_to_string(src)?;
     let json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| ImportError::Parse(e.to_string()))?;
     let settings: crate::Settings =
         serde_json::from_value(json).map_err(|e| ImportError::Parse(e.to_string()))?;
-    let toml_body =
-        toml::to_string_pretty(&settings).map_err(|e| ImportError::Parse(e.to_string()))?;
-    write_toml_atomic(dst, &toml_body)?;
-    Ok(())
+    toml::to_string_pretty(&settings).map_err(|e| ImportError::Parse(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +355,24 @@ action = "allow"
             !m(allow, "git difftool"),
             "allow must not over-match `git difftool`"
         );
+    }
+
+    #[test]
+    fn render_settings_import_validates_source() {
+        // #620: dry-run uses this; it must error on a missing or invalid source
+        // rather than silently succeed.
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file → IO error.
+        assert!(render_settings_import(&dir.path().join("nope.json")).is_err());
+        // Invalid JSON → parse error.
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{not json").unwrap();
+        assert!(render_settings_import(&bad).is_err());
+        // Valid source → renders TOML (no write).
+        let good = dir.path().join("good.json");
+        std::fs::write(&good, r#"{"model":"claude-opus-4-7"}"#).unwrap();
+        let rendered = render_settings_import(&good).expect("valid source renders");
+        assert!(rendered.contains("claude-opus-4-7"));
     }
 
     #[test]

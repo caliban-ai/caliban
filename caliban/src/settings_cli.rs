@@ -35,8 +35,19 @@ fn cmd_import(from: &std::path::Path, scope: Option<&str>, dry_run: bool) -> i32
         return 1;
     };
     if dry_run {
-        println!("would import {} -> {}", from.display(), dst.display());
-        return 0;
+        // Validate the source before claiming success — a missing/invalid file
+        // must fail here just as the real import would, not report "would
+        // import" (#620).
+        match caliban_settings::import::render_settings_import(from) {
+            Ok(_) => {
+                println!("would import {} -> {}", from.display(), dst.display());
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("[caliban settings] import failed: {e}");
+                return 1;
+            }
+        }
     }
     match caliban_settings::import::import_settings_to_toml(from, &dst) {
         Ok(()) => {
