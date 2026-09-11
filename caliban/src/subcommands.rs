@@ -104,6 +104,41 @@ pub(crate) async fn run_bg_shortcut(task: &str) -> Result<i32> {
     Ok(agents_cli::run_bg(task, &repo).await)
 }
 
+/// Build the `caliban config print` JSON envelope: the merged settings, the
+/// per-scope `_sources`, and the per-key `_provenance` map. The loader computes
+/// true per-key provenance (#411) and its own doc says `config print` uses it,
+/// but Print previously discarded it and emitted only the flat `_sources` list
+/// (#620).
+fn config_print_envelope(outcome: &caliban_settings::LoadOutcome) -> Result<serde_json::Value> {
+    let settings_json = serde_json::to_value(&outcome.settings).context("serialize Settings")?;
+    let sources_json: Vec<_> = outcome
+        .sources
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "scope": s.scope.label(),
+                "path": s.path,
+                "format": s.format,
+            })
+        })
+        .collect();
+    let provenance_json: serde_json::Map<String, serde_json::Value> = outcome
+        .provenance
+        .iter()
+        .map(|(k, scope)| {
+            (
+                k.clone(),
+                serde_json::Value::String(scope.label().to_string()),
+            )
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "settings": settings_json,
+        "_sources": sources_json,
+        "_provenance": provenance_json,
+    }))
+}
+
 /// Handle `caliban config <verb>` (ADR 0026). Reads the layered
 /// settings, then either prints them or migrates legacy per-feature
 /// TOMLs into the project-scope `settings.json`.
@@ -118,26 +153,7 @@ pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
         .context("load layered settings")?;
     match cmd {
         ConfigCommand::Print => {
-            // Emit the merged Settings as pretty JSON plus a comment-
-            // free `_sources` array recording where each scope file
-            // lived.
-            let settings_json =
-                serde_json::to_value(&outcome.settings).context("serialize Settings")?;
-            let sources_json: Vec<_> = outcome
-                .sources
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "scope": s.scope.label(),
-                        "path": s.path,
-                        "format": s.format,
-                    })
-                })
-                .collect();
-            let envelope = serde_json::json!({
-                "settings": settings_json,
-                "_sources": sources_json,
-            });
+            let envelope = config_print_envelope(&outcome).context("serialize Settings")?;
             println!("{}", serde_json::to_string_pretty(&envelope)?);
             Ok(0)
         }
@@ -186,5 +202,42 @@ pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
             println!("migrated to {}: {}", dest.display(), touched.join(", "));
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn config_print_envelope_surfaces_per_key_provenance() {
+        // #620: Print must include the per-key `_provenance` the loader computes,
+        // not just the flat `_sources` list.
+        let outcome = caliban_settings::LoadOutcome {
+            settings: caliban_settings::Settings::default(),
+            sources: Vec::new(),
+            provenance: BTreeMap::from([
+                ("model".to_string(), caliban_settings::Scope::User),
+                ("max_tokens".to_string(), caliban_settings::Scope::Project),
+            ]),
+            validation_warnings: Vec::new(),
+        };
+        let env = config_print_envelope(&outcome).expect("envelope builds");
+        let prov = env
+            .get("_provenance")
+            .and_then(|v| v.as_object())
+            .expect("_provenance object present");
+        assert_eq!(
+            prov.get("model").and_then(|v| v.as_str()),
+            Some(caliban_settings::Scope::User.label())
+        );
+        assert_eq!(
+            prov.get("max_tokens").and_then(|v| v.as_str()),
+            Some(caliban_settings::Scope::Project.label())
+        );
+        // The existing surfaces are still present.
+        assert!(env.get("settings").is_some());
+        assert!(env.get("_sources").is_some());
     }
 }

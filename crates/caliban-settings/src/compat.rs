@@ -97,9 +97,14 @@ pub fn legacy_permissions_present(workspace_root: &Path) -> bool {
 /// `settings.permissions` **only when** the unified settings did not
 /// already define any permission rules.
 pub fn maybe_load_legacy_permissions(settings: &mut Settings, workspace_root: &Path) -> bool {
+    // "Already configured" must include the v2 `rules` array — otherwise a
+    // config that uses only `[[permissions.rules]]` (empty allow/ask/deny) falls
+    // through and folds `default_rules()` into the buckets, so `config print` /
+    // `settings print` show allow/ask entries the operator never set (#620).
     let any = !settings.permissions.allow.is_empty()
         || !settings.permissions.ask.is_empty()
-        || !settings.permissions.deny.is_empty();
+        || !settings.permissions.deny.is_empty()
+        || !settings.permissions.rules.is_empty();
     if any {
         return false;
     }
@@ -199,6 +204,35 @@ pub fn maybe_load_legacy_hooks(settings: &mut Settings, workspace_root: &Path) -
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn rules_only_config_does_not_fold_default_rules_into_buckets() {
+        // #620: a config that uses only the v2 `[[permissions.rules]]` array
+        // (empty allow/ask/deny) must count as "already configured", so the
+        // legacy shim doesn't inject `default_rules()` into the buckets and make
+        // `config print` show allow/ask entries the operator never set.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut settings = Settings::default();
+        settings.permissions.rules.push(crate::RuleSpec {
+            pattern: "Bash:cargo *".into(),
+            action: "allow".into(),
+            comment: None,
+            reason: None,
+            expires_at: None,
+            tool: None,
+        });
+        let folded = maybe_load_legacy_permissions(&mut settings, tmp.path());
+        assert!(!folded, "must not fold when v2 rules are already present");
+        assert!(
+            settings.permissions.allow.is_empty()
+                && settings.permissions.ask.is_empty()
+                && settings.permissions.deny.is_empty(),
+            "buckets must stay empty; got allow={:?} ask={:?} deny={:?}",
+            settings.permissions.allow,
+            settings.permissions.ask,
+            settings.permissions.deny,
+        );
+    }
 
     #[test]
     fn legacy_project_hooks_toml_cannot_contribute_http_allowlists() {
