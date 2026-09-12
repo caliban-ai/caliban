@@ -15,6 +15,7 @@ pub mod models;
 pub mod schema;
 pub mod transport;
 
+mod discover;
 mod stream_parse; // populated in Task 5
 
 use async_trait::async_trait;
@@ -118,6 +119,24 @@ impl<T: Transport> Provider for OpenAIProvider<T> {
 
     fn list_models(&self) -> Vec<ModelInfo> {
         models::models()
+    }
+
+    async fn refresh_models(&self) -> caliban_provider::Result<Vec<ModelInfo>> {
+        // Discover live models (and llama.cpp's loaded context window) from the
+        // server's /v1/models (ADR 0056). Best-effort: any failure, an
+        // unsupported endpoint, or an empty result falls back to the static
+        // table so a cloud OpenAI endpoint and an offline run both still work.
+        match self.transport.discover_models_json().await {
+            Ok(Some(json)) => {
+                let discovered = discover::parse_models(&json);
+                if discovered.is_empty() {
+                    Ok(self.list_models())
+                } else {
+                    Ok(discovered)
+                }
+            }
+            Ok(None) | Err(_) => Ok(self.list_models()),
+        }
     }
 
     fn name(&self) -> &'static str {

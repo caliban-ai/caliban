@@ -34,6 +34,18 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Apply any transport-specific mutations to the request before sending.
     fn finalize_request(&self, _body: &mut NativeRequest) {}
+
+    /// Fetch the server's `/v1/models` listing as raw JSON, for model discovery
+    /// (ADR 0056). Best-effort: `Ok(None)` means the transport does not support
+    /// discovery or the endpoint was unavailable; callers fall back to the
+    /// static model table. `Ok(Some(json))` carries the parsed body.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OpenAIError)` on a network failure while fetching.
+    async fn discover_models_json(&self) -> Result<Option<serde_json::Value>, OpenAIError> {
+        Ok(None)
+    }
 }
 
 pub mod direct;
