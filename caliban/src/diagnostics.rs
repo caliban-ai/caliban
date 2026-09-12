@@ -290,6 +290,17 @@ fn check_workspace(workspace: &Path) -> DiagCheck {
 /// - Unset + `deep=true` → ping `http://localhost:11434/api/tags` and
 ///   report the result there too.
 async fn check_ollama(deep: bool) -> DiagCheck {
+    // Append the deprecation note to every ollama result path (ADR 0056): the
+    // built-in provider is going away in favor of the OpenAI adapter + base_url.
+    let mut c = check_ollama_inner(deep).await;
+    c.hint = format!(
+        "{} [deprecated (ADR 0056): prefer the OpenAI provider + OPENAI_BASE_URL]",
+        c.hint
+    );
+    c
+}
+
+async fn check_ollama_inner(deep: bool) -> DiagCheck {
     use caliban_provider_ollama::config::DirectConfig;
 
     let env_set = std::env::var("OLLAMA_BASE_URL").is_ok();
@@ -819,6 +830,27 @@ mod tests {
         assert!(
             r.checks.iter().any(|c| c.name == "ollama"),
             "expected an `ollama` check row in doctor output"
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_check_hint_notes_deprecation() {
+        // ADR 0056: every ollama doctor row carries the deprecation note so the
+        // migration path is visible wherever the provider still appears.
+        let r = Diagnostics::run(DiagOpts {
+            deep: false,
+            model: None,
+        })
+        .await;
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.name == "ollama")
+            .expect("ollama row present");
+        assert!(
+            c.hint.contains("deprecated"),
+            "ollama doctor hint should note deprecation, got: {}",
+            c.hint
         );
     }
 
