@@ -28,6 +28,7 @@
 - [Configuring Providers & API Keys](./providers/configuration.md)
 - [Model Selection](./providers/models.md)
 - [The Model Router](./providers/router.md)
+- [Local Inference (llama.cpp / MLX)](./providers/local-inference.md)
 
 # Configuration
 

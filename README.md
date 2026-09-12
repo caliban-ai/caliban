@@ -243,7 +243,7 @@ Set `ANTHROPIC_API_KEY` before running. Each provider crate has its own
 | Anthropic Claude | ✅ default | ✅ `bedrock` feature | ✅ `vertex` feature | — |
 | OpenAI | ✅ default | — | — | ✅ `azure` feature |
 | Gemini | ✅ default (AI Studio) | — | ✅ `vertex` feature | — |
-| Ollama (native `/api/chat`, local) | ✅ default | — | — | — |
+| Ollama (native `/api/chat`, local) — **deprecated, ADR 0056** | ✅ default | — | — | — |
 
 Cargo feature flags gate cloud transports per-crate. To enable
 Bedrock-Claude + Vertex-Gemini + Azure-OpenAI in one build:
@@ -525,9 +525,11 @@ limitation and recommend an engine switch instead.
 
 **Workarounds (any one of):**
 
-1. **Switch to Ollama** (recommended on Apple Silicon and elsewhere)
-   — `--provider ollama --model qwen3.5:9b` etc.; set `OLLAMA_BASE_URL`
-   for a remote host. End-to-end validated in the 2026-05-28 probe.
+1. **Run a local OpenAI-compatible server** (recommended) — point the
+   OpenAI provider at llama.cpp (`llama serve`), `mlx_lm.server`, or
+   `llama-swap` via `OPENAI_BASE_URL` / a router `base_url`. See
+   `docs/guide/src/providers/local-inference.md`. (The bespoke `ollama`
+   provider is deprecated — ADR 0056.)
 2. **Use Apple's `mlx_lm.server` with explicit parser flags** —
    e.g. `mlx_lm.server --reasoning-parser qwen3_moe --tool-call-parser
    qwen3_coder ...` — keeps the MLX speed edge while parsing the

@@ -58,7 +58,11 @@ provider = "ollama"
 model = "llama3.2:3b"
 ```
 
-Valid `provider` values: `anthropic`, `openai`, `google`, `ollama`.
+Valid `provider` values: `anthropic`, `openai`, `google`, `ollama` *(deprecated)*.
+
+```admonish tip title="Local models: use `openai` + base_url, not `ollama`"
+The `ollama` provider is deprecated ([ADR 0056](../adr/README.md)). For a local model, use `provider = "openai"` with a `[provider.openai] base_url` pointing at your engine's `/v1` endpoint. The route's `model` is sent to the server verbatim, so it must be a name the backend accepts — for `mlx_lm.server` that means the exact Hugging Face repo id. See [Local Inference](./local-inference.md).
+```
 
 ## Provider blocks
 
