@@ -76,6 +76,7 @@ conventions.
 | [0053](0053-otel-genai-semconv-only.md) | OpenTelemetry GenAI semantic conventions for LLM tracing: emit `gen_ai.*` only, no vendor-specific or cost attributes (builds on 0033) | accepted |
 | [0054](0054-sandbox-confinement-posture.md) | Sandbox confinement posture: keep filesystem reads open, close network egress by default under `--workspace` (refines 0032) | accepted |
 | [0055](0055-driveable-server-surface.md) | Driveable server surface — MCP-server + ACP + headless HTTP serve as thin adapters over one core (MCP-server leads v1) | accepted |
+| [0056](0056-deprecate-ollama-provider.md) | Deprecate the bespoke Ollama provider — reach local models through the OpenAI-compatible surface + per-host `base_url` (will amend 0007/0033/0038 on removal, Phase 2) | accepted |
 
 ## Adding a new ADR
 
