@@ -41,7 +41,11 @@ pub struct NativeResponseMessage {
     /// variants, DeepSeek-R1, etc.). Captured so the field doesn't get
     /// silently dropped on non-streaming responses; consumers may surface it
     /// as a Thinking block in future.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// The `reasoning` alias captures MLX-based servers (`mlx_lm.server`, and
+    /// Ollama's Apple-Silicon MLX engine), which use `reasoning` rather than the
+    /// `reasoning_content` field llama.cpp uses (see ADR 0056).
+    #[serde(default, alias = "reasoning", skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Tool calls issued by the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,4 +91,24 @@ pub struct NativeUsage {
 pub struct NativePromptTokensDetails {
     /// Tokens served from the prompt cache.
     pub cached_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeResponseMessage;
+
+    #[test]
+    fn response_message_accepts_reasoning_alias() {
+        // MLX servers return the trace under `reasoning`; the serde alias must
+        // map it onto reasoning_content, matching the streaming path (ADR 0056).
+        let j = r#"{"role":"assistant","reasoning":"pondering","content":"hi"}"#;
+        let m: NativeResponseMessage = serde_json::from_str(j).unwrap();
+        assert_eq!(m.reasoning_content.as_deref(), Some("pondering"));
+        assert_eq!(m.content.as_deref(), Some("hi"));
+
+        // The canonical field name still deserializes unchanged.
+        let j2 = r#"{"role":"assistant","reasoning_content":"pondering"}"#;
+        let m2: NativeResponseMessage = serde_json::from_str(j2).unwrap();
+        assert_eq!(m2.reasoning_content.as_deref(), Some("pondering"));
+    }
 }
