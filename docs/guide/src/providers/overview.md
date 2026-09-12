@@ -30,8 +30,8 @@ Bedrock, Vertex, and Azure transports are enabled by **Cargo feature flags** at 
 | Google Vertex | Parallel | Yes | No | None |
 | Ollama | Basic | Model-dependent | Model-dependent | None |
 
-```admonish note title="Ollama is local"
-Ollama runs models on your own machine. No API key, no network traffic, no per-token cost. Ideal for fast-classifier routes, offline use, or privacy-sensitive workloads. Capability varies by the specific model you pull.
+```admonish warning title="The `ollama` provider is deprecated"
+The bespoke `ollama` provider is deprecated ([ADR 0056](../adr/README.md)) and will be removed in a future release. Run local models through the OpenAI provider pointed at a local server's `/v1` endpoint instead — see [Local Inference](./local-inference.md). Local inference keeps all its advantages (no API key, no network egress, no per-token cost); you just reach it through the OpenAI-compatible seam, which works with llama.cpp, mlx-lm, LM Studio, and llama-swap.
 ```
 
 ```admonish tip title="Multiple providers at once"
