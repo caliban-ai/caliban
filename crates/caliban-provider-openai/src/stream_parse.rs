@@ -617,6 +617,53 @@ mod tests {
         assert!(!back.contains("reasoning_content"));
     }
 
+    #[test]
+    fn native_delta_deserializes_reasoning_alias() {
+        // MLX servers (mlx_lm.server, Ollama's Apple-Silicon MLX engine) stream
+        // the trace as `reasoning`, not `reasoning_content`. The serde alias must
+        // capture it so caliban does not drop MLX thinking (ADR 0056).
+        let j = r#"{"reasoning":"Let me think..."}"#;
+        let d: NativeDelta = serde_json::from_str(j).unwrap();
+        assert_eq!(d.reasoning_content.as_deref(), Some("Let me think..."));
+
+        // Serialization still emits the canonical field, never the alias.
+        let back = serde_json::to_string(&d).unwrap();
+        assert!(back.contains("reasoning_content"));
+        assert!(!back.contains("\"reasoning\":"));
+    }
+
+    #[tokio::test]
+    async fn mlx_reasoning_alias_stream_emits_thinking_block() {
+        // End-to-end: a stream using the MLX `reasoning` field (not
+        // `reasoning_content`) must still open a Thinking block, proving the
+        // alias flows through parsing into the IR (ADR 0056 conformance fix).
+        let events = [
+            chunk(r#"{"role":"assistant"}"#, None),
+            chunk(r#"{"reasoning":"Thinking via MLX..."}"#, None),
+            chunk("{}", Some("stop")),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let got = collect_events_from_chunks(events).await;
+
+        assert!(
+            got.iter().any(|e| matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    content_type: StreamingContentType::Thinking,
+                    ..
+                }
+            )),
+            "expected a Thinking block from the `reasoning` alias, got {got:?}"
+        );
+        assert!(
+            got.iter().any(|e| matches!(
+                e,
+                StreamEvent::Delta { delta: StreamingDelta::Thinking(t), .. } if t.contains("MLX")
+            )),
+            "expected a Thinking delta carrying the reasoning text, got {got:?}"
+        );
+    }
+
     #[tokio::test]
     async fn reasoning_only_stream_emits_thinking_block() {
         // A stream with only reasoning_content (no content) should produce:

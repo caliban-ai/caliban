@@ -43,7 +43,13 @@ pub struct NativeDelta {
     /// Incremental reasoning trace from reasoning-family models (Qwen3.x
     /// reasoning variants, DeepSeek-R1, etc.). Emitted alongside or before
     /// `content` and routed to the `Thinking` IR channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// The `reasoning` alias captures MLX-based servers (`mlx_lm.server`, and
+    /// Ollama's Apple-Silicon MLX engine), which stream the trace under
+    /// `reasoning` rather than the `reasoning_content` field llama.cpp uses.
+    /// Without the alias caliban silently drops their thinking (confirmed by
+    /// scripts/conformance-local-inference.sh; see ADR 0056).
+    #[serde(default, alias = "reasoning", skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Incremental tool-call deltas.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
