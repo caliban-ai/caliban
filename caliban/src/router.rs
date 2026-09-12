@@ -139,6 +139,7 @@ fn build_one(
         }
         "ollama" => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
+            crate::startup::compose::warn_ollama_deprecated();
             let mut cfg = DirectConfig::new();
             if let Some(url) = block.base_url.as_ref() {
                 cfg.base_url = url::Url::parse(url)?;

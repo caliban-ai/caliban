@@ -153,6 +153,25 @@ pub(crate) async fn init_tracing(args: &Args, telemetry: &caliban_telemetry::Tel
     }
 }
 
+/// The user-facing deprecation notice for the built-in Ollama provider (ADR 0056).
+///
+/// The provider is deprecated in favor of reaching local models through the
+/// OpenAI-compatible provider + per-host `base_url`; it is slated for removal in
+/// a following release (Phase 2, epic #629).
+pub(crate) fn ollama_deprecation_message() -> &'static str {
+    "the built-in `ollama` provider is deprecated (ADR 0056) and will be removed in a \
+     future release. Reach local models through the OpenAI-compatible provider instead: \
+     point OPENAI_BASE_URL (or a router `[provider.openai].base_url`) at your engine's /v1 \
+     endpoint — llama.cpp (`llama serve`), mlx-lm, LM Studio, or llama-swap."
+}
+
+/// Emit the Ollama deprecation notice at most once per process, so selecting the
+/// provider warns the operator without spamming every turn.
+pub(crate) fn warn_ollama_deprecated() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| tracing::warn!("{}", ollama_deprecation_message()));
+}
+
 pub(crate) fn build_provider(
     args: &Args,
     pool: &Arc<caliban_settings::ApiKeyHelperPool>,
@@ -163,6 +182,7 @@ pub(crate) fn build_provider(
         Openai => build_openai(pool)?,
         Ollama => {
             use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
+            warn_ollama_deprecated();
             // `from_env` already returns the local default when
             // `OLLAMA_BASE_URL` is unset. Only the case where the env var is
             // set but unparseable yields `Err`, and that should reach the
@@ -1854,10 +1874,27 @@ fn apply_memory_settings(
 mod tests {
     use super::{
         apply_env_ms_override, debug_enabled, default_debug_filter, missing_key_err,
-        resolve_debug_log_path, sub_agent_config, workspace_fence_policy,
+        ollama_deprecation_message, resolve_debug_log_path, sub_agent_config,
+        workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
+
+    #[test]
+    fn ollama_deprecation_message_points_to_the_openai_replacement() {
+        // ADR 0056: the notice must name the deprecation and the concrete
+        // migration path so operators know what to do.
+        let m = ollama_deprecation_message();
+        assert!(m.contains("deprecated"), "should say deprecated: {m}");
+        assert!(
+            m.contains("OPENAI_BASE_URL"),
+            "should name the replacement env: {m}"
+        );
+        assert!(
+            m.to_lowercase().contains("ollama"),
+            "should name ollama: {m}"
+        );
+    }
 
     #[test]
     fn workspace_fence_policy_confines_writes_but_keeps_reads_and_net() {
