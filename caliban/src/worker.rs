@@ -415,10 +415,23 @@ fn token_leaks_over_plaintext(tls_present: bool, token: Option<&str>) -> bool {
 ///
 /// NOTE (QA): the TCP status path is wired but not exercised by the Task 7
 /// deliverable test (which uses a fake launcher). It needs end-to-end QA.
+/// Env-bleed guard (#319): a network control endpoint is honored only when the
+/// worker is itself in network mode (`--listen`). A Unix-mode worker that merely
+/// *inherited* a stray `CALIBAN_CONTROL_ENDPOINT` — e.g. a daemon started with
+/// that var set in its own environment — must NOT dial TCP for status; it uses
+/// its `--control-socket` (or reports nothing). Pure so the gate is testable
+/// without touching process env.
+fn network_control_endpoint(network_mode: bool, raw: Option<String>) -> Option<String> {
+    raw.filter(|_| network_mode)
+}
+
 fn build_status_client(
+    network_mode: bool,
     control_socket: Option<&Path>,
 ) -> Result<Option<caliban_supervisor::SupervisorClient>, String> {
-    if let Ok(endpoint) = std::env::var("CALIBAN_CONTROL_ENDPOINT") {
+    if let Some(endpoint) =
+        network_control_endpoint(network_mode, std::env::var("CALIBAN_CONTROL_ENDPOINT").ok())
+    {
         let token = std::env::var("CALIBAN_CONTROL_TOKEN")
             .or_else(|_| std::env::var("CALIBAN_AGENT_TOKEN"))
             .ok();
@@ -549,29 +562,31 @@ pub(crate) async fn run(
         Option<Arc<dyn InputProvider>>,
     ) = if record.spec.interactive {
         let (tx, rx) = mpsc::channel::<AttachInbound>(64);
-        // Build a status sink from the daemon control plane, if reachable:
-        // the network endpoint (`CALIBAN_CONTROL_ENDPOINT`, #280 Task 7) takes
-        // precedence over the Unix `--control-socket`. A misconfigured
-        // control-TLS CA (set but unreadable/unparseable) is a hard `Err`
-        // from `build_status_client` — never a plaintext dial carrying the
-        // bearer token. Status reporting is non-critical, so we just log and
-        // disable the sink rather than failing the whole run.
-        let status_sink: Option<Arc<dyn StatusSink>> = match build_status_client(control_socket) {
-            Ok(client_opt) => client_opt.map(|client| -> Arc<dyn StatusSink> {
-                Arc::new(ControlSocketStatus {
-                    client,
-                    id: record.id.clone(),
-                    warned: AtomicBool::new(false),
-                })
-            }),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "control-plane status client misconfigured; disabling status reporting"
-                );
-                None
-            }
-        };
+        // Build a status sink from the daemon control plane, if reachable. In
+        // network mode (`--listen`) the network endpoint (`CALIBAN_CONTROL_ENDPOINT`,
+        // #280 Task 7) is used; in Unix mode a stray inherited endpoint is
+        // ignored and the `--control-socket` is used (env-bleed guard, #319). A
+        // misconfigured control-TLS CA (set but unreadable/unparseable) is a
+        // hard `Err` from `build_status_client` — never a plaintext dial
+        // carrying the bearer token. Status reporting is non-critical, so we
+        // just log and disable the sink rather than failing the whole run.
+        let status_sink: Option<Arc<dyn StatusSink>> =
+            match build_status_client(listen.is_some(), control_socket) {
+                Ok(client_opt) => client_opt.map(|client| -> Arc<dyn StatusSink> {
+                    Arc::new(ControlSocketStatus {
+                        client,
+                        id: record.id.clone(),
+                        warned: AtomicBool::new(false),
+                    })
+                }),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "control-plane status client misconfigured; disabling status reporting"
+                    );
+                    None
+                }
+            };
         let provider: Arc<dyn InputProvider> = Arc::new(SocketInputProvider {
             inbox: AsyncMutex::new(rx),
             status: status_sink,
@@ -1036,6 +1051,26 @@ mod tests {
         // Empty / whitespace-only tokens count as absent.
         assert!(!token_leaks_over_plaintext(false, Some("")));
         assert!(!token_leaks_over_plaintext(false, Some("   ")));
+    }
+
+    // --- network_control_endpoint: env-bleed guard (#319) ---
+
+    #[test]
+    fn network_control_endpoint_honored_only_in_network_mode() {
+        // Unix mode: a stray inherited CALIBAN_CONTROL_ENDPOINT is dropped, so
+        // the worker won't try to report status over TCP.
+        assert_eq!(
+            network_control_endpoint(false, Some("caliband:9000".into())),
+            None,
+        );
+        // Network mode: the endpoint is used.
+        assert_eq!(
+            network_control_endpoint(true, Some("caliband:9000".into())),
+            Some("caliband:9000".into()),
+        );
+        // No endpoint set at all: None regardless of mode.
+        assert_eq!(network_control_endpoint(true, None), None);
+        assert_eq!(network_control_endpoint(false, None), None);
     }
 
     #[tokio::test]
