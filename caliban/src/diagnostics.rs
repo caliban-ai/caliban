@@ -65,13 +65,11 @@ impl Diagnostics {
         out.checks.push(check_skills(&workspace));
         out.checks.push(check_claudemd(&workspace));
         out.checks.push(check_workspace(&workspace));
-        // Provider reachability probes (F3 — generalized from the original
-        // ollama-only check). Each runs unconditionally so the row always
-        // appears; the env-var-set vs unset branching happens inside each
-        // probe so operators can see at a glance which providers are
+        // Provider reachability probes (F3). Each runs unconditionally so the
+        // row always appears; the env-var-set vs unset branching happens inside
+        // each probe so operators can see at a glance which providers are
         // configured. Pre-flight model verification piggy-backs on the
         // `/v1/models` listing when `opts.model` is set and `--deep` is on.
-        out.checks.push(check_ollama(opts.deep).await);
         out.checks
             .push(check_openai(opts.deep, opts.model.as_deref()).await);
         out.checks
@@ -277,111 +275,10 @@ fn check_workspace(workspace: &Path) -> DiagCheck {
     }
 }
 
-/// Probe Ollama for reachability + installed-model list.
-///
-/// Behavior:
-/// - `OLLAMA_BASE_URL` set but unparseable → `Fail` (matches the binary's
-///   behavior at provider construction).
-/// - `OLLAMA_BASE_URL` set and reachable → `Pass`, hint lists URL + model count.
-/// - `OLLAMA_BASE_URL` set and unreachable → `Warn` (might just not be
-///   running yet; we don't want to fail the whole `doctor` run for it).
-/// - Unset + `deep=false` → `Pass`, "no override; deep probe will check
-///   localhost".
-/// - Unset + `deep=true` → ping `http://localhost:11434/api/tags` and
-///   report the result there too.
-async fn check_ollama(deep: bool) -> DiagCheck {
-    // Append the deprecation note to every ollama result path (ADR 0056): the
-    // built-in provider is going away in favor of the OpenAI adapter + base_url.
-    let mut c = check_ollama_inner(deep).await;
-    c.hint = format!(
-        "{} [deprecated (ADR 0056): prefer the OpenAI provider + OPENAI_BASE_URL]",
-        c.hint
-    );
-    c
-}
-
-async fn check_ollama_inner(deep: bool) -> DiagCheck {
-    use caliban_provider_ollama::config::DirectConfig;
-
-    let env_set = std::env::var("OLLAMA_BASE_URL").is_ok();
-    let cfg = match DirectConfig::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            return DiagCheck {
-                name: "ollama",
-                status: CheckStatus::Fail,
-                hint: format!("invalid OLLAMA_BASE_URL: {e}"),
-            };
-        }
-    };
-
-    if !env_set && !deep {
-        return DiagCheck {
-            name: "ollama",
-            status: CheckStatus::Pass,
-            hint: "OLLAMA_BASE_URL unset (no probe attempted; use --deep to ping localhost)".into(),
-        };
-    }
-
-    // Build a `/api/tags` URL by joining onto the configured base.
-    let tags_url = match cfg.base_url.join("api/tags") {
-        Ok(u) => u,
-        Err(e) => {
-            return DiagCheck {
-                name: "ollama",
-                status: CheckStatus::Fail,
-                hint: format!("could not build /api/tags URL: {e}"),
-            };
-        }
-    };
-
-    // Short timeout — the doctor should never block a long-running model
-    // load. Just a reachability check.
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return DiagCheck {
-                name: "ollama",
-                status: CheckStatus::Fail,
-                hint: format!("could not build http client: {e}"),
-            };
-        }
-    };
-
-    match client.get(tags_url.clone()).send().await {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
-            let models = body
-                .get("models")
-                .and_then(|v| v.as_array())
-                .map_or(0, std::vec::Vec::len);
-            DiagCheck {
-                name: "ollama",
-                status: CheckStatus::Pass,
-                hint: format!("{} ({} model(s) reachable)", cfg.base_url, models),
-            }
-        }
-        Ok(r) => DiagCheck {
-            name: "ollama",
-            status: CheckStatus::Warn,
-            hint: format!("{tags_url} returned HTTP {}", r.status().as_u16()),
-        },
-        Err(e) => DiagCheck {
-            name: "ollama",
-            status: CheckStatus::Warn,
-            hint: format!("{tags_url} unreachable: {e}"),
-        },
-    }
-}
-
 /// Probe an OpenAI-compatible endpoint (the same code path used for
 /// `api.openai.com` and self-hosted servers like LM Studio, vLLM, llama.cpp
-/// server). Mirrors `check_ollama`'s structure; the only differences are
-/// the env-var name, the `/v1/models` endpoint, and the pre-flight model
-/// check that piggy-backs on the listing (F4).
+/// server). The env-var name is `OPENAI_BASE_URL`, the listing endpoint is
+/// `/v1/models`, and a pre-flight model check piggy-backs on the listing (F4).
 ///
 /// Behavior:
 /// - `OPENAI_BASE_URL` set but unparseable → `Fail` (matches the binary's
@@ -400,7 +297,7 @@ async fn check_openai(deep: bool, requested_model: Option<&str>) -> DiagCheck {
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
 
     // Validate the URL up front so a typo surfaces here even when --deep
-    // is off — mirrors the ollama probe.
+    // is off.
     let parsed = match url::Url::parse(&base) {
         Ok(u) => u,
         Err(e) => {
@@ -817,54 +714,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ollama_check_is_always_present() {
-        // Regression: previously `doctor` exposed no provider-side check
-        // at all, so operators couldn't tell whether their configured
-        // OLLAMA_BASE_URL was reachable. The `ollama` row should always
-        // appear, even when the env var is unset.
-        let r = Diagnostics::run(DiagOpts {
-            deep: false,
-            model: None,
-        })
-        .await;
-        assert!(
-            r.checks.iter().any(|c| c.name == "ollama"),
-            "expected an `ollama` check row in doctor output"
-        );
-    }
-
-    #[tokio::test]
-    async fn ollama_check_hint_notes_deprecation() {
-        // ADR 0056: every ollama doctor row carries the deprecation note so the
-        // migration path is visible wherever the provider still appears.
-        let r = Diagnostics::run(DiagOpts {
-            deep: false,
-            model: None,
-        })
-        .await;
-        let c = r
-            .checks
-            .iter()
-            .find(|c| c.name == "ollama")
-            .expect("ollama row present");
-        assert!(
-            c.hint.contains("deprecated"),
-            "ollama doctor hint should note deprecation, got: {}",
-            c.hint
-        );
-    }
-
-    #[tokio::test]
     async fn provider_checks_are_always_present() {
-        // F3: `doctor` previously only probed Ollama. Now every provider
-        // gets a row so operators can see at a glance whether their
-        // configured endpoint is reachable.
+        // F3: doctor probes every configured provider so operators can see at a
+        // glance whether their configured endpoint is reachable.
         let r = Diagnostics::run(DiagOpts {
             deep: false,
             model: None,
         })
         .await;
-        for expected in ["ollama", "openai", "anthropic", "google"] {
+        for expected in ["openai", "anthropic", "google"] {
             assert!(
                 r.checks.iter().any(|c| c.name == expected),
                 "expected a `{expected}` check row in doctor output"

@@ -107,7 +107,7 @@ args     = ["-c", "printf sk-wildcard"]
     let settings = load(dir.path());
 
     let pool = ApiKeyHelperPool::from_raw(settings.api_key_helper.as_ref());
-    for p in ["anthropic", "openai", "google", "ollama"] {
+    for p in ["anthropic", "openai", "google"] {
         assert!(pool.has_spec_for(p), "wildcard must match {p}");
     }
     assert_eq!(pool.key_for("openai").expect("ok").key, "sk-wildcard");

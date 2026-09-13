@@ -1,6 +1,6 @@
 //! Shared HTTP-error-body classification for provider adapters.
 //!
-//! Every HTTP adapter (anthropic, openai, google, ollama) maps a non-2xx
+//! Every HTTP adapter (anthropic, openai, google) maps a non-2xx
 //! `BadStatus { status, body }` — and an in-band SSE/`UpstreamError` body — onto
 //! [`crate::Error`]. The status arms (401/403 → auth, 429 → rate limit, 404 →
 //! model-unavailable, 5xx → server error) and the body-sniffing helpers

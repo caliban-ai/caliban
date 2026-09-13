@@ -547,7 +547,6 @@ pub(crate) fn render_status(app: &App) -> Line<'static> {
     let provider = match crate::resolved_provider(&app.args) {
         crate::ProviderKind::Anthropic => "anthropic",
         crate::ProviderKind::Openai => "openai",
-        crate::ProviderKind::Ollama => "ollama",
         crate::ProviderKind::Google => "google",
     };
     let model = app.agent.active_model().as_ref().clone();

@@ -20,7 +20,6 @@ use crate::router;
 pub(crate) enum ProviderKind {
     Anthropic,
     Openai,
-    Ollama,
     Google,
 }
 
@@ -53,7 +52,6 @@ pub(crate) fn default_model_for(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "claude-sonnet-4-6",
         ProviderKind::Openai => "gpt-5.5",
-        ProviderKind::Ollama => "llama3.1",
         ProviderKind::Google => "gemini-2.0-flash",
     }
 }
@@ -89,7 +87,6 @@ pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Openai => "openai",
-        ProviderKind::Ollama => "ollama",
         ProviderKind::Google => "google",
     }
 }
@@ -1592,7 +1589,6 @@ mod tests {
             "claude-sonnet-4-6"
         );
         assert_eq!(default_model_for(ProviderKind::Openai), "gpt-5.5");
-        assert_eq!(default_model_for(ProviderKind::Ollama), "llama3.1");
         assert_eq!(default_model_for(ProviderKind::Google), "gemini-2.0-flash");
     }
 
@@ -1600,7 +1596,6 @@ mod tests {
     fn provider_name_covers_every_provider() {
         assert_eq!(provider_name(ProviderKind::Anthropic), "anthropic");
         assert_eq!(provider_name(ProviderKind::Openai), "openai");
-        assert_eq!(provider_name(ProviderKind::Ollama), "ollama");
         assert_eq!(provider_name(ProviderKind::Google), "google");
     }
 

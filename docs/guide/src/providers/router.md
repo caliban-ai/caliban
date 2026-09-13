@@ -11,7 +11,7 @@ The model router is a purpose-keyed dispatcher that sits between the agent loop 
 The agent makes provider calls for several distinct purposes: the main conversational loop, summarization for compaction, fast classification for permission decisions, sub-agent loops, and more. The router lets you express policies like:
 
 - Use Claude Opus for main-loop turns, Claude Haiku for summarization.
-- Route fast classification to a local Ollama model (zero API cost, low latency).
+- Route fast classification to a local model via the OpenAI provider + `base_url` (zero API cost, low latency).
 - Fall back from Anthropic to OpenAI if Anthropic returns a rate-limit error.
 
 ## Request purposes
@@ -54,14 +54,14 @@ model = "claude-opus-4-7"
 
 [[router.route]]
 purpose = "fast_classifier"
-provider = "ollama"
-model = "llama3.2:3b"
+provider = "openai"
+model = "mlx-community/Qwen3.6-27B-4bit"
 ```
 
-Valid `provider` values: `anthropic`, `openai`, `google`, `ollama` *(deprecated)*.
+Valid `provider` values: `anthropic`, `openai`, `google`.
 
-```admonish tip title="Local models: use `openai` + base_url, not `ollama`"
-The `ollama` provider is deprecated ([ADR 0056](../adr/README.md)). For a local model, use `provider = "openai"` with a `[provider.openai] base_url` pointing at your engine's `/v1` endpoint. The route's `model` is sent to the server verbatim, so it must be a name the backend accepts — for `mlx_lm.server` that means the exact Hugging Face repo id. See [Local Inference](./local-inference.md).
+```admonish tip title="Local models: use `openai` + base_url"
+For a local model, use `provider = "openai"` with a `[provider.openai] base_url` pointing at your engine's `/v1` endpoint. The route's `model` is sent to the server verbatim, so it must be a name the backend accepts — for `mlx_lm.server` that means the exact Hugging Face repo id. See [Local Inference](./local-inference.md). (The bespoke `ollama` provider was removed in [ADR 0056](../adr/README.md).)
 ```
 
 ## Provider blocks

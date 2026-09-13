@@ -27,7 +27,7 @@ conventions.
 | [0004](0004-naming-conventions.md) | Naming → `caliban-*` libraries, `caliban` binary | accepted |
 | [0005](0005-workspace-layout.md) | Workspace layout → `crates/` for libs, binaries at root | accepted (binaries-at-root rule amended by [0042](0042-caliband-binary-placement.md)) |
 | [0006](0006-message-schema-ir.md) | Message schema → provider-neutral IR | accepted |
-| [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted |
+| [0007](0007-transport-trait-pattern.md) | Schema/transport factoring via Transport trait | accepted (schema-family crate set amended by [0056](0056-deprecate-ollama-provider.md)) |
 | [0008](0008-system-role-positional.md) | `Role::System` is positional (leading-only) | accepted |
 | [0009](0009-agent-core-design.md) | Agent-core design (stream-as-primitive, sequential tools, opt-in compaction) | accepted (sequential-tools clause superseded by [0016](0016-parallel-tool-dispatch.md)) |
 | [0010](0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted (restricted-mode default amended by [0048](0048-workspace-default-restricted.md)) |
@@ -53,12 +53,12 @@ conventions.
 | [0030](0030-plugin-packaging.md) | Plugin packaging (skills + hooks + agents + MCP + output-styles bundles) | accepted |
 | [0031](0031-output-styles.md) | Output styles (Default / Proactive / Explanatory / Learning + custom) | accepted |
 | [0032](0032-os-sandbox.md) | OS-level sandbox (macOS Seatbelt + Linux bubblewrap) | accepted |
-| [0033](0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | accepted |
+| [0033](0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | accepted (provider rate-card set amended by [0056](0056-deprecate-ollama-provider.md)) |
 | [0034](0034-bedrock-and-vertex-providers.md) | Bedrock + Vertex providers | accepted |
 | [0035](0035-auto-memory.md) | Auto-memory (model-written notes per project) | accepted |
 | [0036](0036-claudemd-ancestry-and-imports.md) | CLAUDE.md ancestor walk + `@`-imports | accepted |
 | [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by [0047](0047-interactive-background-subagents.md); per-repo identity amended + worktree isolation wired by [0052](0052-workspace-scoped-caliband.md)) |
-| [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted |
+| [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted (provider set amended by [0056](0056-deprecate-ollama-provider.md)) |
 | [0039](0039-image-and-vision-input.md) | Image / vision input | accepted |
 | [0040](0040-slash-command-registry.md) | Slash command registry (extensible `SlashCommand` trait) | accepted |
 | [0041](0041-tui-redraw-tick-closeout.md) | TUI redraw tick — close-out (resolves 0014 open question) | accepted |
@@ -76,7 +76,7 @@ conventions.
 | [0053](0053-otel-genai-semconv-only.md) | OpenTelemetry GenAI semantic conventions for LLM tracing: emit `gen_ai.*` only, no vendor-specific or cost attributes (builds on 0033) | accepted |
 | [0054](0054-sandbox-confinement-posture.md) | Sandbox confinement posture: keep filesystem reads open, close network egress by default under `--workspace` (refines 0032) | accepted |
 | [0055](0055-driveable-server-surface.md) | Driveable server surface — MCP-server + ACP + headless HTTP serve as thin adapters over one core (MCP-server leads v1) | accepted |
-| [0056](0056-deprecate-ollama-provider.md) | Deprecate the bespoke Ollama provider — reach local models through the OpenAI-compatible surface + per-host `base_url` (will amend 0007/0033/0038 on removal, Phase 2) | accepted |
+| [0056](0056-deprecate-ollama-provider.md) | Deprecate + remove the bespoke Ollama provider — reach local models through the OpenAI-compatible surface + per-host `base_url` (amends 0007/0033/0038) | accepted |
 
 ## Adding a new ADR
 

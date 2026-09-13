@@ -10,8 +10,10 @@ Pass `--provider` to select the backend for a session:
 caliban --provider anthropic   # default
 caliban --provider openai
 caliban --provider google
-caliban --provider ollama      # no API key needed
 ```
+
+For a local model, use `--provider openai` with `OPENAI_BASE_URL` pointed at your
+engine's `/v1` endpoint — see [Local Inference](./local-inference.md).
 
 When `--provider` is omitted, caliban resolves the provider from `settings.model` (see [Model Selection](./models.md)), falling back to `anthropic`.
 
@@ -24,7 +26,6 @@ Each provider reads its key from a well-known environment variable:
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION` |
 | OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT` |
 | Google | `GEMINI_API_KEY` | `GOOGLE_GEMINI_API_KEY` (alias), `GEMINI_BASE_URL`, `GEMINI_API_VERSION` |
-| Ollama *(deprecated — see [Local Inference](./local-inference.md))* | *(none)* | `OLLAMA_BASE_URL` (default: `http://localhost:11434`) |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_RESOURCE` | `AZURE_OPENAI_API_VERSION` (default: `2024-10-21`) |
 
 Set the variable in your shell profile or pass it inline:

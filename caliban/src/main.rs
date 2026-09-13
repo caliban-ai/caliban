@@ -459,7 +459,7 @@ async fn main() -> Result<()> {
     // loop fires its first request. Local servers silently substitute
     // the first loaded model for unknown IDs, so a typo runs the wrong
     // model with no visible signal. The check is a no-op for canonical
-    // OpenAI / Anthropic / Google / Ollama.
+    // OpenAI / Anthropic / Google.
     preflight!(startup::preflight_model_check(&args, &model).await);
 
     // Project hooks config out of the layered Settings snapshot (ADR 0026).

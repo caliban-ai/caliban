@@ -29,7 +29,8 @@ pub trait Provider: Send + Sync {
 
     /// Discover this provider's model list, hitting the backend when the real
     /// set or its limits are only knowable at runtime (e.g. Vertex's live
-    /// publisher list, Ollama's server-detected context windows).
+    /// publisher list, or a local OpenAI-compatible server's detected context
+    /// window via `/v1/models`).
     ///
     /// The default returns the static [`Provider::list_models`] catalog, so
     /// providers with a fixed model set need not override it. Live providers

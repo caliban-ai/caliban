@@ -59,8 +59,3 @@ providers:
       effective_from: 2026-04-01
       input_per_mtok: 15.00
       output_per_mtok: 75.00
-  ollama:
-    - model_glob: "*"
-      effective_from: 2026-01-01
-      input_per_mtok: 0.00
-      output_per_mtok: 0.00

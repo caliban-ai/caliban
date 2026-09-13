@@ -1019,7 +1019,6 @@ dependencies = [
  "caliban-provider",
  "caliban-provider-anthropic",
  "caliban-provider-google",
- "caliban-provider-ollama",
  "caliban-provider-openai",
  "caliban-sandbox",
  "caliban-sessions",
@@ -1352,27 +1351,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "caliban-provider-ollama"
-version = "0.11.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "bytes",
- "caliban-common",
- "caliban-provider",
- "futures",
- "http 1.4.0",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "url",

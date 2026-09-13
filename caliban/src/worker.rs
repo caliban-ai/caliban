@@ -1161,10 +1161,6 @@ mod tests {
     #[test]
     fn parse_provider_recognizes_lowercase() {
         assert_eq!(
-            parse_provider("ollama"),
-            Some(crate::args::ProviderKind::Ollama)
-        );
-        assert_eq!(
             parse_provider("anthropic"),
             Some(crate::args::ProviderKind::Anthropic)
         );
@@ -1181,8 +1177,8 @@ mod tests {
     #[test]
     fn parse_provider_is_case_insensitive() {
         assert_eq!(
-            parse_provider("OLLAMA"),
-            Some(crate::args::ProviderKind::Ollama)
+            parse_provider("OPENAI"),
+            Some(crate::args::ProviderKind::Openai)
         );
         assert_eq!(
             parse_provider("Anthropic"),

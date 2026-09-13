@@ -153,44 +153,14 @@ pub(crate) async fn init_tracing(args: &Args, telemetry: &caliban_telemetry::Tel
     }
 }
 
-/// The user-facing deprecation notice for the built-in Ollama provider (ADR 0056).
-///
-/// The provider is deprecated in favor of reaching local models through the
-/// OpenAI-compatible provider + per-host `base_url`; it is slated for removal in
-/// a following release (Phase 2, epic #629).
-pub(crate) fn ollama_deprecation_message() -> &'static str {
-    "the built-in `ollama` provider is deprecated (ADR 0056) and will be removed in a \
-     future release. Reach local models through the OpenAI-compatible provider instead: \
-     point OPENAI_BASE_URL (or a router `[provider.openai].base_url`) at your engine's /v1 \
-     endpoint — llama.cpp (`llama serve`), mlx-lm, LM Studio, or llama-swap."
-}
-
-/// Emit the Ollama deprecation notice at most once per process, so selecting the
-/// provider warns the operator without spamming every turn.
-pub(crate) fn warn_ollama_deprecated() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| tracing::warn!("{}", ollama_deprecation_message()));
-}
-
 pub(crate) fn build_provider(
     args: &Args,
     pool: &Arc<caliban_settings::ApiKeyHelperPool>,
 ) -> Result<Arc<dyn Provider + Send + Sync>> {
-    use ProviderKind::{Anthropic, Google, Ollama, Openai};
+    use ProviderKind::{Anthropic, Google, Openai};
     Ok(match resolved_provider(args) {
         Anthropic => build_anthropic(pool)?,
         Openai => build_openai(pool)?,
-        Ollama => {
-            use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
-            warn_ollama_deprecated();
-            // `from_env` already returns the local default when
-            // `OLLAMA_BASE_URL` is unset. Only the case where the env var is
-            // set but unparseable yields `Err`, and that should reach the
-            // operator instead of silently retargeting localhost.
-            Arc::new(OllamaProvider::direct(
-                DirectConfig::from_env().context("invalid OLLAMA_BASE_URL")?,
-            )?)
-        }
         Google => build_google(pool)?,
     })
 }
@@ -355,7 +325,7 @@ fn missing_key_err(env_var: &str) -> anyhow::Error {
 /// 05-27 lmstudio probe).
 ///
 /// Skipped for:
-/// - Non-`OpenAI` providers (Anthropic / Google / Ollama have their own
+/// - Non-`OpenAI` providers (Anthropic / Google have their own
 ///   handling; Anthropic + Google 404 unknown IDs cleanly).
 /// - Canonical `api.openai.com` (already 404s on unknown IDs).
 /// - When `OPENAI_BASE_URL` is unset (defaults to api.openai.com — same).
@@ -1464,25 +1434,6 @@ pub(crate) async fn fire_session_end(
     }
 }
 
-/// Overlay an env override onto a watchdog budget field. Reads `raw`; on a
-/// valid `u32` it overwrites `*slot`; on a malformed value it warns and leaves
-/// `*slot` unchanged. Returns whether an override was applied (for tests).
-fn apply_env_ms_override(var: &str, raw: Option<&str>, slot: &mut u32) -> bool {
-    let Some(s) = raw else { return false };
-    if let Ok(v) = s.parse::<u32>() {
-        *slot = v;
-        true
-    } else {
-        tracing::warn!(
-            target: caliban_common::tracing_targets::TARGET_SETTINGS,
-            var = var,
-            value = s,
-            "ignoring malformed stream-timeout env override (expected integer ms)",
-        );
-        false
-    }
-}
-
 /// Select the history [`Compactor`] for the main agent from the configured
 /// strategy name. `"noop"` disables compaction; `"drop-oldest"` is the
 /// LLM-free tail-preserving strategy; anything else (including `"summarize"`,
@@ -1570,27 +1521,6 @@ pub(crate) fn build_agent(
     // stream_prefill_timeout_ms (#263 / #254). Same wire-or-it-never-arrives
     // caveat as apply_context_management above.
     settings_snapshot.apply_stream_watchdog(&mut cfg);
-    // #263: ollama-only env override for the watchdog budgets so eval /
-    // emulated runs widen the window without a rebuild. Scoped to ollama
-    // because the watchdog is global (provider-agnostic) but this knob exists
-    // for the slow-local-model case; applying it to a frontier provider would
-    // be surprising. Precedence: env > settings > default.
-    if crate::args::provider_name(crate::args::resolved_provider(args)) == "ollama" {
-        apply_env_ms_override(
-            "OLLAMA_STREAM_IDLE_TIMEOUT_MS",
-            std::env::var("OLLAMA_STREAM_IDLE_TIMEOUT_MS")
-                .ok()
-                .as_deref(),
-            &mut cfg.stream_idle_timeout_ms,
-        );
-        apply_env_ms_override(
-            "OLLAMA_STREAM_PREFILL_TIMEOUT_MS",
-            std::env::var("OLLAMA_STREAM_PREFILL_TIMEOUT_MS")
-                .ok()
-                .as_deref(),
-            &mut cfg.stream_prefill_timeout_ms,
-        );
-    }
     // #292: wire a real history compactor. Without this the builder default
     // (`NoopCompactor`) leaves `/compact` and threshold-autocompact as no-ops.
     // The `SummarizingCompactor` needs the provider, so clone before the Arc
@@ -1873,28 +1803,11 @@ fn apply_memory_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_env_ms_override, debug_enabled, default_debug_filter, missing_key_err,
-        ollama_deprecation_message, resolve_debug_log_path, sub_agent_config,
-        workspace_fence_policy,
+        debug_enabled, default_debug_filter, missing_key_err, resolve_debug_log_path,
+        sub_agent_config, workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
-
-    #[test]
-    fn ollama_deprecation_message_points_to_the_openai_replacement() {
-        // ADR 0056: the notice must name the deprecation and the concrete
-        // migration path so operators know what to do.
-        let m = ollama_deprecation_message();
-        assert!(m.contains("deprecated"), "should say deprecated: {m}");
-        assert!(
-            m.contains("OPENAI_BASE_URL"),
-            "should name the replacement env: {m}"
-        );
-        assert!(
-            m.to_lowercase().contains("ollama"),
-            "should name ollama: {m}"
-        );
-    }
 
     #[test]
     fn workspace_fence_policy_confines_writes_but_keeps_reads_and_net() {
@@ -1981,17 +1894,6 @@ mod tests {
             "canonical workspace root {canon:?} missing from allow_write: {:?}",
             p.filesystem.allow_write
         );
-    }
-
-    #[test]
-    fn env_ms_override_applies_valid_and_ignores_garbage() {
-        let mut slot = 90_000_u32;
-        assert!(apply_env_ms_override("X", Some("120000"), &mut slot));
-        assert_eq!(slot, 120_000);
-        assert!(!apply_env_ms_override("X", Some("abc"), &mut slot));
-        assert_eq!(slot, 120_000, "garbage leaves the prior value");
-        assert!(!apply_env_ms_override("X", None, &mut slot));
-        assert_eq!(slot, 120_000, "unset leaves the prior value");
     }
 
     /// #292: the strategy name maps to a real compactor, and the default

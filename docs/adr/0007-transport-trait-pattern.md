@@ -1,7 +1,11 @@
 # ADR 0007 · Schema/transport factoring via Transport trait
 
-- **Status:** accepted
+- **Status:** accepted (schema-family crate set amended by [0056](0056-deprecate-ollama-provider.md))
 - **Date:** 2026-05-22
+
+> **Amended by [0056](0056-deprecate-ollama-provider.md) (2026-09-12):** the
+> `caliban-provider-ollama` schema-family crate was removed; local models are now
+> reached through the OpenAI adapter pointed at a local server's `/v1` endpoint.
 
 ## Context
 
@@ -9,7 +13,7 @@ A naïve "one crate per concrete provider endpoint" plan duplicates the Anthropi
 
 ## Decision
 
-Each schema-family crate (`caliban-provider-anthropic`, `caliban-provider-openai`, `caliban-provider-google`, `caliban-provider-ollama`) defines its own `Transport` trait. A schema-family-generic `XxxProvider<T: Transport>` owns the IR conversion. Transport variants (DirectTransport, BedrockTransport, VertexTransport, AzureTransport, AIStudioTransport) are concrete `Transport` impls within their schema family, gated behind cargo features when they pull heavy deps (`aws-sdk-bedrockruntime`, `gcp_auth`).
+Each schema-family crate (`caliban-provider-anthropic`, `caliban-provider-openai`, `caliban-provider-google`) defines its own `Transport` trait. A schema-family-generic `XxxProvider<T: Transport>` owns the IR conversion. Transport variants (DirectTransport, BedrockTransport, VertexTransport, AzureTransport, AIStudioTransport) are concrete `Transport` impls within their schema family, gated behind cargo features when they pull heavy deps (`aws-sdk-bedrockruntime`, `gcp_auth`).
 
 ## Consequences
 

@@ -1,8 +1,12 @@
 # ADR 0033 · OpenTelemetry export + cost tracking
 
-- **Status:** accepted
+- **Status:** accepted (provider rate-card set amended by [0056](0056-deprecate-ollama-provider.md))
 - **Date:** 2026-05-24
 - **Author:** john.ford2002@gmail.com
+
+> **Amended by [0056](0056-deprecate-ollama-provider.md) (2026-09-12):** the Ollama
+> zero-cost rate card was removed with the provider; the shipped set is now
+> Anthropic, OpenAI, Google, Bedrock, Vertex.
 - **Spec:** `docs/superpowers/specs/2026-05-24-otel-and-cost-design.md`
 
 ## Context
@@ -58,8 +62,7 @@ that consumes the same `CostAccumulator`.
 ### Rate cards are vendored YAML, updated in lockstep with releases
 
 `crates/caliban-telemetry/rates.yaml` ships with known rates for
-Anthropic, OpenAI, Google, Bedrock, Vertex, and Ollama (the last being
-a `$0.00` row for completeness). Unknown `(provider, model)` pairs
+Anthropic, OpenAI, Google, Bedrock, and Vertex. Unknown `(provider, model)` pairs
 match no entry, cost `$0.00`, and emit a single debounced warning per
 session. Operators can override via `CALIBAN_RATES_YAML=/path`. We do
 *not* fetch rate cards from any third-party API at runtime — the
