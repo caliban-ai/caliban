@@ -535,6 +535,40 @@ async fn main() -> Result<()> {
         None
     };
 
+    // #549: wire per-session file checkpointing for the interactive TUI. It is
+    // enabled by default when this run will enter the TUI (no prompt, stdin is a
+    // TTY, not headless) and is not disabled via `CALIBAN_CHECKPOINT_DISABLED`.
+    // The store is shared: `build_agent` installs a `CheckpointHook` that writes
+    // to it, and `tui::run` hands the same store to the `App` so `/rewind` reads
+    // and restores from it. The cwd matches `App::cwd` (`current_dir`) so the
+    // hook and the overlay resolve to the same session directory.
+    let checkpoint_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let checkpoint_store = {
+        use std::io::IsTerminal as _;
+        let stdin_tty = std::io::stdin().is_terminal();
+        let stdout_tty = std::io::stdout().is_terminal();
+        let will_be_tui = !args::is_headless_active(&args, stdin_tty, stdout_tty)
+            && args.prompt.is_none()
+            && args.prompt_flag.is_none()
+            && stdin_tty;
+        let disabled = std::env::var("CALIBAN_CHECKPOINT_DISABLED").is_ok_and(|v| !v.is_empty());
+        if will_be_tui && !disabled {
+            let session_id = args
+                .session
+                .clone()
+                .unwrap_or_else(|| "tui-ephemeral".to_string());
+            match caliban_checkpoint::CheckpointStore::open(&checkpoint_cwd, &session_id) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "checkpoint store unavailable; /rewind disabled this session");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let agent = preflight!(startup::build_agent(
         &args,
         provider,
@@ -547,6 +581,8 @@ async fn main() -> Result<()> {
         &hooks_cfg,
         Arc::clone(&mcp_active),
         Arc::clone(&mcp_eager_servers),
+        checkpoint_store.as_ref(),
+        &checkpoint_cwd,
     ));
 
     // Fire SessionStart hook (best-effort); collect any hook-supplied context
@@ -718,6 +754,7 @@ async fn main() -> Result<()> {
                 settings_sources_view,
                 runtime_rules,
                 topic_backend,
+                checkpoint_store,
             )
             .await;
             // Force-flush batched OTLP spans + session-end metric before exit.

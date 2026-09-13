@@ -1493,6 +1493,11 @@ pub(crate) fn build_agent(
     hooks_cfg: &caliban_agent_core::HooksConfig,
     mcp_active: Arc<arc_swap::ArcSwap<caliban_agent_core::mcp_activation::McpActivationSet>>,
     mcp_eager_servers: Arc<std::collections::HashSet<String>>,
+    // #549: when checkpointing is enabled (interactive TUI, not disabled), the
+    // caller passes the per-session store + the workspace root so the agent's
+    // hook chain gets a `CheckpointHook` that snapshots tracked-tool writes.
+    checkpoint_store: Option<&caliban_checkpoint::CheckpointStore>,
+    checkpoint_workspace_root: &std::path::Path,
 ) -> Result<Arc<Agent>> {
     // ADR-0046: resolve lazy_mcp / max_active_schemas from settings.
     // Builder defaults match the spec (off / 24) when absent.
@@ -1586,6 +1591,23 @@ pub(crate) fn build_agent(
             // `Arc<dyn Hooks>` (the trait bound is `Send + Sync` on the
             // supertrait), so coerce.
             layers.push(p as Arc<dyn caliban_agent_core::Hooks>);
+        }
+        // #549: the checkpoint hook goes LAST so its `before_tool` pre-image
+        // capture runs only for writes that pass the permission gate — CompositeHooks
+        // short-circuits `before_tool` on the first Deny, so a denied write (which
+        // never touches disk) is not needlessly snapshotted. `before_run`/`after_run`
+        // (open/close the prompt manifest) fire for every layer regardless of order.
+        if let Some(store) = checkpoint_store {
+            let recorder = caliban_checkpoint::CheckpointRecorder::new(
+                store.clone(),
+                checkpoint_workspace_root.to_path_buf(),
+            );
+            let hook = caliban_checkpoint::CheckpointHook::new(
+                recorder,
+                checkpoint_workspace_root.to_path_buf(),
+            )
+            .with_plan_mode(Arc::clone(plan_mode));
+            layers.push(Arc::new(hook));
         }
         if !layers.is_empty() {
             let composite: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =

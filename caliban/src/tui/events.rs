@@ -584,6 +584,9 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             Overlay::Permissions if handle_permissions_overlay_key(key, app) => {
                 return;
             }
+            Overlay::Rewind if handle_rewind_overlay_key(key, app) => {
+                return;
+            }
             _ => {}
         }
         match (key.code, key.modifiers) {
@@ -725,6 +728,7 @@ pub(crate) fn handle_key(key: KeyEvent, app: &mut App, agent_stream: &mut Option
             } else {
                 let now = std::time::Instant::now();
                 if is_esc_chord(app.last_esc_at, now) {
+                    app.rewind_cursor = 0;
                     app.view = ViewState::Overlay(Overlay::Rewind);
                     app.last_esc_at = None;
                 } else {
@@ -1267,6 +1271,57 @@ pub(crate) fn handle_ask_modal_key(key: KeyEvent, app: &mut App) {
             perform_ask_choice(app, AskChoice::DenyOnce);
         }
         _ => {}
+    }
+}
+
+/// Key dispatch for the `/rewind` overlay (#549): cursor navigation plus the
+/// advertised `[c]/[v]/[b]/[s]/[S]` actions. Returns `true` when the key was
+/// consumed; `false` (Esc/q, Ctrl+C, or no checkpoints to act on) falls through
+/// to the generic overlay-close handling.
+pub(crate) fn handle_rewind_overlay_key(key: KeyEvent, app: &mut App) -> bool {
+    use crate::tui::rewind::{RewindRequest, action_for_key, resolve_prompt_index};
+    let Some(store) = app.checkpoint_store.as_ref() else {
+        return false;
+    };
+    let Ok(prompts) = store.list_prompts() else {
+        return false;
+    };
+    if prompts.is_empty() {
+        return false;
+    }
+    // Clamp the cursor to the live list before navigating or acting.
+    app.rewind_cursor = app.rewind_cursor.min(prompts.len() - 1);
+    match (key.code, key.modifiers) {
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+            app.rewind_cursor = app.rewind_cursor.saturating_sub(1);
+            true
+        }
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+            app.rewind_cursor = (app.rewind_cursor + 1).min(prompts.len() - 1);
+            true
+        }
+        // Action keys: `[c] [v] [b] [s]` (unshifted) and `[S]` (shift). `j`/`k`
+        // are navigation (handled above); `action_for_key` returns `None` for
+        // them, so this arm binds only the five real actions. Ctrl+C carries
+        // CONTROL and falls through to the generic cancel/close handler.
+        (KeyCode::Char(c), m)
+            if (m == KeyModifiers::NONE || m == KeyModifiers::SHIFT)
+                && action_for_key(c).is_some() =>
+        {
+            if let (Some(action), Some(prompt_index)) = (
+                action_for_key(c),
+                resolve_prompt_index(&prompts, app.rewind_cursor),
+            ) {
+                app.pending_rewind = Some(RewindRequest {
+                    prompt_index,
+                    action,
+                });
+                // Close the overlay; the async loop drains `pending_rewind`.
+                app.view = ViewState::Main;
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1916,6 +1971,96 @@ mod tests {
     #[test]
     fn end_of_turn_is_silent() {
         assert!(stopped_for_surface(&StopCondition::EndOfTurn).is_none());
+    }
+
+    /// #549: with a wired store holding real checkpoints, an action key in the
+    /// `/rewind` overlay resolves the cursor to a prompt index, queues the
+    /// matching action, and closes the overlay for the async loop to execute.
+    #[tokio::test]
+    async fn rewind_overlay_action_key_queues_request_for_selected_checkpoint() {
+        use caliban_checkpoint::{CheckpointRecorder, CheckpointStore, ManifestKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let root = tmp.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = CheckpointStore::open_in(&root, &ws, "sess-1").unwrap();
+
+        // Record two prompts so the overlay has a list to navigate.
+        let rec = CheckpointRecorder::new(store.clone(), ws.clone());
+        for i in 1..=2u32 {
+            let idx = store.claim_prompt_index(i).unwrap();
+            rec.open_prompt(idx, ManifestKind::Files, format!("p{i}"))
+                .await
+                .unwrap();
+            rec.close_prompt().await.unwrap();
+        }
+
+        let mut app = crate::tui::App::for_tests().with_checkpoint_store(store);
+        app.view = ViewState::Overlay(Overlay::Rewind);
+        app.rewind_cursor = 0; // newest-first → checkpoint #2
+
+        // `[b]` = Both (files + conversation) against the selected checkpoint.
+        let consumed = handle_rewind_overlay_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(consumed, "an action key must be consumed by the handler");
+        let req = app
+            .pending_rewind
+            .expect("action key must queue a pending rewind");
+        assert_eq!(
+            req.prompt_index, 2,
+            "cursor 0 selects the newest checkpoint"
+        );
+        assert_eq!(req.action, crate::tui::rewind::RewindAction::Both);
+        assert!(
+            matches!(app.view, ViewState::Main),
+            "overlay closes so the async loop can execute the request"
+        );
+    }
+
+    /// Down-arrow moves the cursor to the older checkpoint; the action then
+    /// targets it (proving cursor→index resolution through the newest-first list).
+    #[tokio::test]
+    async fn rewind_overlay_down_selects_older_checkpoint() {
+        use caliban_checkpoint::{CheckpointRecorder, CheckpointStore, ManifestKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let root = tmp.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = CheckpointStore::open_in(&root, &ws, "sess-1").unwrap();
+        let rec = CheckpointRecorder::new(store.clone(), ws.clone());
+        for i in 1..=2u32 {
+            let idx = store.claim_prompt_index(i).unwrap();
+            rec.open_prompt(idx, ManifestKind::Files, format!("p{i}"))
+                .await
+                .unwrap();
+            rec.close_prompt().await.unwrap();
+        }
+
+        let mut app = crate::tui::App::for_tests().with_checkpoint_store(store);
+        app.view = ViewState::Overlay(Overlay::Rewind);
+        app.rewind_cursor = 0;
+
+        // Down → cursor 1 (the older checkpoint, #1).
+        assert!(handle_rewind_overlay_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert_eq!(app.rewind_cursor, 1);
+        assert!(app.pending_rewind.is_none(), "navigation is not an action");
+
+        assert!(handle_rewind_overlay_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert_eq!(app.pending_rewind.unwrap().prompt_index, 1);
     }
 
     #[test]

@@ -23,7 +23,9 @@ impl SlashCommand for RewindCommand {
             immediate: false,
         }
     }
-    async fn execute(&self, _args: &str, _ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
+    async fn execute(&self, _args: &str, ctx: &mut SlashCtx<'_>) -> Result<SlashOutcome> {
+        // Start the picker at the newest checkpoint each time it opens (#549).
+        ctx.app.rewind_cursor = 0;
         Ok(SlashOutcome::Overlay(Overlay::Rewind))
     }
 }
