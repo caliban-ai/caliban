@@ -682,6 +682,46 @@ impl Supervisor {
                 })
             }
             CtlRequest::Shutdown => CtlReply::ShutdownAck,
+            CtlRequest::Drain { grace_secs } => {
+                // Gracefully checkpoint every live agent (#650, ADR 0057):
+                // SIGTERM each (so the worker flushes and exits within
+                // grace_secs — no forced SIGKILL here), mark it Drained, and
+                // return its session dir as a resume reference. Terminal agents
+                // (Killed/Done/Failed/Crashed/already Drained) are skipped.
+                // Signalling and the status update share one registry critical
+                // section, matching Kill's atomicity guarantee (#115/#140).
+                let mut r = self.registry.lock().await;
+                let live: Vec<crate::proto::AgentRecord> = r
+                    .list()
+                    .into_iter()
+                    .filter(|rec| {
+                        matches!(
+                            rec.status,
+                            crate::proto::AgentStatus::Spawning
+                                | crate::proto::AgentStatus::Running
+                                | crate::proto::AgentStatus::Idle
+                        )
+                    })
+                    .collect();
+                let mut agents = Vec::with_capacity(live.len());
+                for rec in live {
+                    self.signal_worker(&r, &rec.id);
+                    // Best-effort: a concurrent Kill/exit that already moved the
+                    // agent out of a live state is fine — skip it silently.
+                    let _ = r.set_status(&rec.id, crate::proto::AgentStatus::Drained);
+                    agents.push(crate::proto::DrainedAgent {
+                        id: rec.id,
+                        session_dir: rec.session_dir,
+                    });
+                }
+                tracing::info!(
+                    target: "caliban_supervisor",
+                    drained = agents.len(),
+                    grace_secs,
+                    "drained live agents on request"
+                );
+                CtlReply::Drained { agents }
+            }
             CtlRequest::ReportStatus { id, status } => {
                 let mut r = self.registry.lock().await;
                 r.report_status(&id, status);
@@ -793,6 +833,113 @@ mod tests {
         // test without needing to thread a guard through the return type.
         std::mem::forget(dir);
         Supervisor::with_bind(bind, Some(network), store, agent_dir, Arc::new(NopLauncher))
+    }
+
+    /// A [`Signaller`] that records the pids it was asked to SIGTERM, so a
+    /// dispatch test can assert exactly which workers were signalled.
+    #[derive(Default)]
+    struct RecordingSignaller {
+        signalled: std::sync::Mutex<Vec<u32>>,
+    }
+    impl Signaller for RecordingSignaller {
+        fn signal_term(&self, pid: u32) -> bool {
+            self.signalled.lock().unwrap().push(pid);
+            true
+        }
+    }
+
+    fn spawn_spec(label: &str) -> crate::proto::SpawnSpec {
+        crate::proto::SpawnSpec {
+            label: Some(label.into()),
+            frontmatter_path: None,
+            initial_prompt: "hi".into(),
+            model: None,
+            provider: None,
+            tool_allowlist: None,
+            isolation_worktree: false,
+            inherit_hooks: true,
+            interactive: false,
+            inherited_hooks_config: None,
+            source: None,
+        }
+    }
+
+    /// #650: `Drain` SIGTERMs every *live* agent (Spawning/Running/Idle),
+    /// transitions each to `Drained`, and returns its session dir as a resume
+    /// reference. Terminal agents are left untouched and not signalled.
+    #[tokio::test]
+    async fn drain_signals_only_live_agents_and_returns_resume_refs() {
+        use crate::proto::{AgentStatus, CtlReply, CtlRequest};
+        use std::path::PathBuf;
+
+        let network = NetworkConfig {
+            advertise_host: "localhost".into(),
+            agent_port_base: 7100,
+            agent_tls: None,
+            agent_token: None,
+        };
+        let rec_sig = Arc::new(RecordingSignaller::default());
+        let sup = test_supervisor(network).with_signaller(rec_sig.clone() as Arc<dyn Signaller>);
+
+        // Seed three agents: two live (Running + Idle) with pids, one terminal (Done).
+        let (running_id, running_dir, idle_id, idle_dir) = {
+            let mut r = sup.registry.lock().await;
+            let running = r.register(
+                spawn_spec("run"),
+                Endpoint::Unix { path: "/x".into() },
+                PathBuf::new(),
+            );
+            r.track_pid(&running.id, 111);
+            r.set_status(&running.id, AgentStatus::Running).unwrap();
+            let idle = r.register(
+                spawn_spec("idle"),
+                Endpoint::Unix { path: "/y".into() },
+                PathBuf::new(),
+            );
+            r.track_pid(&idle.id, 222);
+            r.set_status(&idle.id, AgentStatus::Idle).unwrap();
+            let done = r.register(
+                spawn_spec("done"),
+                Endpoint::Unix { path: "/z".into() },
+                PathBuf::new(),
+            );
+            r.track_pid(&done.id, 333);
+            r.set_status(&done.id, AgentStatus::Done).unwrap();
+            (
+                running.id.clone(),
+                running.session_dir.clone(),
+                idle.id.clone(),
+                idle.session_dir.clone(),
+            )
+        };
+
+        let agents = match sup.dispatch(CtlRequest::Drain { grace_secs: 5 }).await {
+            CtlReply::Drained { agents } => agents,
+            other => panic!("expected Drained, got {other:?}"),
+        };
+
+        // Only the two live agents drained; resume refs are their session dirs.
+        assert_eq!(agents.len(), 2, "only live agents are drained");
+        let by_id: std::collections::HashMap<_, _> = agents
+            .iter()
+            .map(|a| (a.id.clone(), a.session_dir.clone()))
+            .collect();
+        assert_eq!(by_id.get(&running_id), Some(&running_dir));
+        assert_eq!(by_id.get(&idle_id), Some(&idle_dir));
+
+        // Both live workers were SIGTERM'd; the terminal one (pid 333) was not.
+        let mut signalled = rec_sig.signalled.lock().unwrap().clone();
+        signalled.sort_unstable();
+        assert_eq!(
+            signalled,
+            vec![111, 222],
+            "only live pids signalled, not the terminal agent's",
+        );
+
+        // Statuses are now Drained; the terminal agent is untouched.
+        let r = sup.registry.lock().await;
+        assert_eq!(r.get(&running_id).unwrap().status, AgentStatus::Drained);
+        assert_eq!(r.get(&idle_id).unwrap().status, AgentStatus::Drained);
     }
 
     /// Regression for the fix-before-merge finding: `next_agent_port` used to

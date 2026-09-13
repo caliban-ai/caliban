@@ -162,6 +162,7 @@ fn fmt_status(s: AgentStatus) -> &'static str {
         AgentStatus::Running => "running",
         AgentStatus::Idle => "idle",
         AgentStatus::Killed => "killed",
+        AgentStatus::Drained => "drained",
         AgentStatus::Done => "done",
         AgentStatus::Failed => "failed",
         AgentStatus::Crashed => "crashed",

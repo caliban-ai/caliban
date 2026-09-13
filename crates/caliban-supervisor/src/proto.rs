@@ -28,6 +28,10 @@ pub enum AgentStatus {
     Idle,
     /// Stopped via `kill`.
     Killed,
+    /// Gracefully drained + checkpointed (#650, ADR 0057): stopped with its
+    /// session directory left durable for resume. Distinct from `Killed`
+    /// (abrupt) — a drained agent is resumable.
+    Drained,
     /// Finished successfully.
     Done,
     /// Finished with an error.
@@ -47,7 +51,8 @@ pub struct AgentRecord {
     pub status: AgentStatus,
     /// RFC-3339 timestamp of when the agent was registered.
     pub started_at: String,
-    /// Path to the agent's session directory (where `session.json` etc. live).
+    /// Path to the agent's durable session directory (the transcript, and — once
+    /// #651 lands — the resumable session; the resume reference a `Drain` returns).
     pub session_dir: PathBuf,
     /// Endpoint for the agent's per-agent socket (for `attach`).
     pub endpoint: Endpoint,
@@ -153,6 +158,17 @@ mod tests {
     }
 }
 
+/// One agent drained by a [`CtlRequest::Drain`] — its id plus the resume
+/// reference (session directory) the caller records to bring it back (#650,
+/// ADR 0057).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainedAgent {
+    /// The drained agent.
+    pub id: AgentId,
+    /// Resume reference: the agent's durable session directory.
+    pub session_dir: PathBuf,
+}
+
 /// Control-plane requests from the CLI / parent agent to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -194,6 +210,16 @@ pub enum CtlRequest {
     /// Ask the daemon to mark itself for shutdown after the current
     /// in-flight requests complete.
     Shutdown,
+    /// Gracefully drain + checkpoint every live agent before teardown/pause
+    /// (#650, ADR 0057): each live worker is SIGTERM'd (not SIGKILL'd) so it
+    /// flushes and exits cleanly within `grace_secs`, and its session directory
+    /// is returned as a resume reference. Distinct from `Kill` (abrupt, one
+    /// agent). Used by the operator drain finalizer + idle-pause reconcile.
+    Drain {
+        /// Budget, in seconds, within which a worker is expected to flush and
+        /// exit after SIGTERM (the graceful window; no forced SIGKILL here).
+        grace_secs: u64,
+    },
     /// A worker reports a lifecycle transition (Running <-> Idle) for itself.
     ReportStatus {
         /// Reporting agent.
@@ -238,6 +264,13 @@ pub enum CtlReply {
     Status(DaemonStatus),
     /// Daemon will shut down once it's drained.
     ShutdownAck,
+    /// Result of a `Drain`: the agents that were signalled to checkpoint, each
+    /// with a resume reference (its session directory). Already-terminal agents
+    /// are not included.
+    Drained {
+        /// One entry per agent drained by this request.
+        agents: Vec<DrainedAgent>,
+    },
     /// Acknowledged a status report.
     StatusReported,
     /// An error occurred.

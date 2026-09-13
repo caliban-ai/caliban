@@ -40,9 +40,14 @@ graceful-drain or resume path:
 
 What *does* exist to build on:
 
-- Each agent's **session directory** already persists `session.json` (the
-  caliban-sessions conversation format, written by the worker runtime) and
-  `stdout.ndjson` (`crates/caliban-supervisor/src/store.rs`).
+- Each agent has a durable **session directory** on disk
+  (`crates/caliban-supervisor/src/store.rs`). Today the daemon worker writes
+  only an append-flushed `stdout.ndjson` (`TurnEvent` transcript) there — it
+  does **not** yet persist a resumable `session.json` (caliban-sessions format).
+  That resumable-session persistence is introduced with resume-from-session
+  (#651); it is the state a `Drain` checkpoint flushes. (A pre-existing doc
+  comment claimed the runtime already wrote `session.json`; it does not — this
+  ADR corrects the record and #651 makes it true.)
 - The `Sandbox` mounts a **retained workspace PVC** that survives pod restarts
   (`caliban-operator/src/resources.rs`), and the `Sandbox` already models a
   `Suspended` state (`sandbox.rs`).
@@ -74,11 +79,14 @@ Adopt **Option A**. Concretely, across two repos:
 **caliband (`caliban-supervisor`):**
 
 1. **`Drain` control command.** A new `CtlRequest::Drain { grace }` gracefully
-   stops every managed agent, **guaranteeing each worker flushes its session
-   state to disk before exit**, and replies with a per-agent **resume reference**
-   (the session-directory path). `Drain` is semantically distinct from `Kill`:
-   `Kill` is abrupt termination; `Drain` is "checkpoint, then stop." Draining an
-   already-idle agent is cheap (state is already flushed).
+   stops every managed agent — SIGTERM (not SIGKILL) so the worker flushes its
+   durable outputs and exits cleanly within `grace` — and replies with a
+   per-agent **resume reference** (the session-directory path). `Drain` is
+   semantically distinct from `Kill`: `Kill` is abrupt termination; `Drain` is
+   "checkpoint, then stop." The resumable `session.json` that a drain flushes is
+   written by the worker as part of resume-from-session (#651); until that lands
+   the drained session dir carries only the transcript, so #650 delivers the
+   graceful-stop + resume-ref protocol and #651 fills in the resumable state.
 2. **Resume from a persisted session.** A daemon agent can be re-spawned
    *continuing* a persisted session rather than starting fresh — via a resume
    reference on the spawn path (`SpawnSpec` gains a `resume_session` pointer, or
