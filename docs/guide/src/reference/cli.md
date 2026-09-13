@@ -85,7 +85,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider <PROVIDER>` | Resolved from settings, then `anthropic` | Provider to use. Values: `anthropic`, `openai`, `ollama`, `google`. |
+| `--provider <PROVIDER>` | Resolved from settings, then `anthropic` | Provider to use. Values: `anthropic`, `openai`, `google`. (For local models, use `openai` with a `base_url` — see [Local Inference](../providers/local-inference.md).) |
 | `--model <MODEL>` | Provider default (see table below) | Model name. |
 | `--fallback-model <MODEL>` | From settings | Fallback model when the primary errors (ADR 0038). |
 | `--max-tokens <N>` | `8192` | Per-turn output token limit (must be ≥ 1). |
@@ -98,7 +98,6 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 |----------|--------------|
 | `anthropic` | `claude-sonnet-4-6` |
 | `openai` | `gpt-5.5` |
-| `ollama` | `llama3.1` |
 | `google` | `gemini-2.0-flash` |
 
 ---

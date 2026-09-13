@@ -47,47 +47,37 @@ When running a **Qwen3 reasoning model via LM Studio** (MLX engine), you may see
 - 2-step tool chains (e.g. Glob → Read) usually complete correctly.
 - Chains of 3 or more steps stall: the model re-emits the first tool call across multiple turns and hits `--max-turns` without progressing.
 
-This is an **LM Studio MLX engine limitation**, not a caliban defect. The same Qwen3 model on **Ollama (GGUF)** parses tool calls correctly — the leak does not reproduce there.
+This is an **LM Studio MLX engine limitation**, not a caliban defect. The same Qwen3 model on a **llama.cpp (GGUF)** backend parses tool calls correctly — the leak does not reproduce there.
 
 ```admonish warning title="LM Studio + Qwen3 reasoning models"
-Multi-step agentic tasks (3+ tool calls) are unreliable when using Qwen3 reasoning models through LM Studio's MLX path. For agentic work, switch to Ollama or another server that handles Qwen-native `<tool_call>` XML parsing server-side.
+Multi-step agentic tasks (3+ tool calls) are unreliable when using Qwen3 reasoning models through LM Studio's MLX path. For agentic work, switch to a llama.cpp (GGUF) backend or another server that handles Qwen-native `<tool_call>` XML parsing server-side.
 ```
 
 **Workarounds:**
 
 | Situation | Workaround |
 |---|---|
-| Need Qwen3 specifically | Switch to Ollama: `--provider ollama --model qwen3.5:9b` |
+| Need Qwen3 specifically | Switch to a llama.cpp (GGUF) backend: `--provider openai` with a `base_url` |
 | Must use LM Studio | Limit chains to at most 2 tool calls; use `--max-turns` to prevent runaway loops |
 | Reasoning is optional | Use a non-reasoning Qwen model (e.g. `qwen2.5-coder-7b-instruct`) |
 
 ---
 
-## Ollama: `tool_call_id` not round-tripped
+## Parallel sub-agents slow on a self-hosted backend
 
-Caliban's Ollama provider does not correlate `tool_call_id` across the request/response boundary — it is set on the outgoing tool result but is not echoed back by the Ollama server. This is a known limitation of the Ollama API and does not affect tool dispatch correctness in practice.
+If you run parallel sub-agents (`AgentTool`) against a self-hosted local server and they are slower than expected, the backend may be serialising requests because it is configured with a single model slot (the common default).
 
-```admonish note
-If you are building a custom consumer of the `stream-json` output and need to correlate `tool_use` and `tool_result` frames, use the `id` field on the `tool_use` frame and the `tool_use_id` field on `tool_result` as emitted by caliban — they match correctly on the client side regardless of provider.
-```
-
----
-
-## Parallel sub-agents slow on self-hosted Ollama
-
-If you run parallel sub-agents (`AgentTool`) against a self-hosted Ollama instance and they are slower than expected, the backend may be serialising requests due to `OLLAMA_NUM_PARALLEL=1` (the default on most hardware).
-
-On a `NUM_PARALLEL=1` backend, parallel sub-agents do **not** increase throughput — every inference still queues at the single model slot, and the per-sub-agent overhead (a full reasoning + summary loop per agent) makes total wall time significantly longer than the parent doing the same work inline.
+On a single-slot backend, parallel sub-agents do **not** increase throughput — every inference still queues at the one model slot, and the per-sub-agent overhead (a full reasoning + summary loop per agent) makes total wall time significantly longer than the parent doing the same work inline.
 
 **Options:**
 
-- Raise `OLLAMA_NUM_PARALLEL` on the server if your GPU has enough VRAM for multiple KV-cache allocations.
+- Raise the backend's parallel-request setting if your GPU has enough VRAM for multiple KV-cache allocations (e.g. llama.cpp's `--parallel`).
 - Use `--no-sub-agent` and let the parent model read files inline.
 - Switch to a hosted provider (Anthropic, OpenAI) where each sub-agent gets independent fleet capacity.
 - Cap dispatch with `--parallel-tool-limit N` to limit concurrent sub-agent calls.
 
 ```admonish tip title="Sub-agents on a serialising backend"
-Parallel sub-agents still provide **context isolation** (each sub-agent gets a fresh context window) even when `NUM_PARALLEL=1`. That can be worth the wall-time cost for long independent tasks, but not for latency-sensitive pipelines.
+Parallel sub-agents still provide **context isolation** (each sub-agent gets a fresh context window) even on a single-slot backend. That can be worth the wall-time cost for long independent tasks, but not for latency-sensitive pipelines.
 ```
 
 ---

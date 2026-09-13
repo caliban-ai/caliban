@@ -63,7 +63,7 @@ This is overridden by the CLI flag and env var as shown above.
 
 ## Auto-mode and `--disable-auto-mode`
 
-When the mode is `auto`, the classifier is consulted for each tool call whose rule verdict is `ask`. The classifier dispatches via the router's `FastClassifier` purpose — configure it to use a small, fast model (e.g., Haiku, GPT-4o-mini, a local Ollama model). Results are cached for the session by `(tool_name, sha256(input))`.
+When the mode is `auto`, the classifier is consulted for each tool call whose rule verdict is `ask`. The classifier dispatches via the router's `FastClassifier` purpose — configure it to use a small, fast model (e.g., Haiku, GPT-4o-mini, or a small local model via the OpenAI adapter). Results are cached for the session by `(tool_name, sha256(input))`.
 
 To disable the classifier (all `ask` verdicts stay as-is, routing to the modal), pass:
 

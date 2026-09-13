@@ -42,7 +42,7 @@ Config validation, real spawn/handshake, stdio + HTTP/SSE + streamable-HTTP tran
 
 ### I — Model router & providers ✅
 
-Purpose-keyed routing, fallback chains, hedging, circuit breakers, capability filtering, Anthropic/OpenAI/Ollama/Google/Bedrock/Vertex providers, effort levels, and the extended-thinking toggle (`/think` runtime control, decoupled from `/effort`) are shipped. Azure Foundry is 🔴.
+Purpose-keyed routing, fallback chains, hedging, circuit breakers, capability filtering, Anthropic/OpenAI/Google/Bedrock/Vertex providers (plus local OpenAI-compatible servers via `base_url`), effort levels, and the extended-thinking toggle (`/think` runtime control, decoupled from `/effort`) are shipped. Azure Foundry is 🔴.
 
 ### J — Headless / CI ✅
 

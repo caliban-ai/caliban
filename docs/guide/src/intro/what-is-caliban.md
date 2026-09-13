@@ -4,7 +4,7 @@ Caliban is an AI agent harness: a CLI that drives one or more language models th
 structured loop of prompts, tool calls, and responses while managing sessions, permissions,
 memory, and extensibility around that loop. It is provider-agnostic — the same harness works
 with Anthropic Claude (direct, Bedrock, Vertex), OpenAI (direct, Azure), Google Gemini (AI
-Studio, Vertex), and local Ollama, all through a common internal representation.
+Studio, Vertex), and local OpenAI-compatible servers (llama.cpp, mlx-lm), all through a common internal representation.
 
 ## Capabilities at a glance
 

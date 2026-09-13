@@ -26,7 +26,6 @@ One adapter per model API. Each translates caliban's message IR to the provider'
 | `caliban-provider` | Provider trait definition and shared provider types |
 | `caliban-provider-anthropic` | Anthropic (Claude) adapter via Anthropic Messages API |
 | `caliban-provider-openai` | OpenAI adapter; also used for LM Studio, vLLM, and other OpenAI-compatible servers |
-| `caliban-provider-ollama` | Ollama adapter (native `/api/chat` endpoint, GGUF tool-call parsing) |
 | `caliban-provider-google` | Google AI Studio / Gemini adapter |
 | `caliban-provider-bedrock` | AWS Bedrock adapter (ADR 0034) |
 | `caliban-provider-vertex` | Google Cloud Vertex AI adapter (ADR 0034) |

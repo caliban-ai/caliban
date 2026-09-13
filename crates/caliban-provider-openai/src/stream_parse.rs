@@ -89,8 +89,8 @@ pub(crate) fn map_openai_sse_to_events(
                 Ok(c) => c,
                 Err(e) => {
                     // Fallback: some OpenAI-compatible servers (notably LM
-                    // Studio for context-overflow, also seen on Ollama and
-                    // vLLM for some failure modes) return HTTP 200 with an
+                    // Studio for context-overflow, also seen on vLLM and other
+                    // local engines for some failure modes) return HTTP 200 with an
                     // `{"error": {"message": "..."}}` JSON object inside
                     // the SSE body rather than a non-2xx status. If the
                     // chunk fails NativeChunk deserialization, try parsing
@@ -351,7 +351,7 @@ fn map_finish_reason(r: NativeFinishReason) -> StopReason {
 ///
 /// Returns the inner `message` string when the shape matches, `None`
 /// otherwise. Used by the SSE parser to surface upstream-side problems
-/// (LM Studio context overflow, Ollama / vLLM error payloads, etc.) as a
+/// (LM Studio context overflow, vLLM error payloads, etc.) as a
 /// readable [`OpenAIError::UpstreamError`] instead of a nested chunk-parse
 /// error.
 fn extract_upstream_error(data: &str) -> Option<String> {
@@ -619,8 +619,8 @@ mod tests {
 
     #[test]
     fn native_delta_deserializes_reasoning_alias() {
-        // MLX servers (mlx_lm.server, Ollama's Apple-Silicon MLX engine) stream
-        // the trace as `reasoning`, not `reasoning_content`. The serde alias must
+        // MLX servers (e.g. mlx_lm.server) stream the trace as `reasoning`,
+        // not `reasoning_content`. The serde alias must
         // capture it so caliban does not drop MLX thinking (ADR 0056).
         let j = r#"{"reasoning":"Let me think..."}"#;
         let d: NativeDelta = serde_json::from_str(j).unwrap();

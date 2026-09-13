@@ -44,9 +44,9 @@ pub struct NativeDelta {
     /// reasoning variants, DeepSeek-R1, etc.). Emitted alongside or before
     /// `content` and routed to the `Thinking` IR channel.
     ///
-    /// The `reasoning` alias captures MLX-based servers (`mlx_lm.server`, and
-    /// Ollama's Apple-Silicon MLX engine), which stream the trace under
-    /// `reasoning` rather than the `reasoning_content` field llama.cpp uses.
+    /// The `reasoning` alias captures MLX-based servers (e.g. `mlx_lm.server`),
+    /// which stream the trace under `reasoning` rather than the
+    /// `reasoning_content` field llama.cpp uses.
     /// Without the alias caliban silently drops their thinking (confirmed by
     /// scripts/conformance-local-inference.sh; see ADR 0056).
     #[serde(default, alias = "reasoning", skip_serializing_if = "Option::is_none")]

@@ -4,7 +4,7 @@ caliban tracks token usage and USD cost for every session using `caliban-telemet
 
 ## Cost accounting
 
-After each provider response, `caliban-telemetry` multiplies token counts by per-model rates from a vendored YAML rate card. The card ships with known rates for Anthropic, OpenAI, Google, Bedrock, Vertex, and Ollama (Ollama rows are `$0.00`).
+After each provider response, `caliban-telemetry` multiplies token counts by per-model rates from a vendored YAML rate card. The card ships with known rates for Anthropic, OpenAI, Google, Bedrock, and Vertex. Local models served through the OpenAI adapter have no rate entry, so they contribute `$0.00`.
 
 Unknown `(provider, model)` pairs contribute `$0.00` and emit a single debounced warning per session. Rates are updated in-tree; operators can override the card with `CALIBAN_RATES_YAML=/path/to/rates.yaml`.
 

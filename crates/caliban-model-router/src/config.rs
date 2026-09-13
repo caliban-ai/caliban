@@ -674,13 +674,13 @@ model = "claude-3-5-haiku"
 
 [[router.route]]
 purpose = "fast_classifier"
-provider = "ollama"
-model = "llama3.2:3b"
+provider = "openai"
+model = "qwen2.5-coder"
 "#;
         let cfg = parse_router_config(body).unwrap().unwrap();
         assert_eq!(cfg.routes.len(), 3);
         assert_eq!(cfg.routes[1].purpose, RequestPurpose::Summarization);
-        assert_eq!(cfg.routes[2].provider, "ollama");
+        assert_eq!(cfg.routes[2].provider, "openai");
     }
 
     #[test]
@@ -853,8 +853,8 @@ model = "gpt"
 api_key_env = "OPENAI_API_KEY_DEV"
 base_url = "https://oai.example.test"
 
-[provider.ollama]
-base_url = "http://localhost:11434"
+[provider.google]
+base_url = "https://gemini.example.test/v1beta"
 "#;
         let cfg = parse_caliban_config(body).unwrap();
         assert_eq!(cfg.providers.len(), 2);
@@ -863,8 +863,8 @@ base_url = "http://localhost:11434"
             Some("OPENAI_API_KEY_DEV")
         );
         assert_eq!(
-            cfg.providers["ollama"].base_url.as_deref(),
-            Some("http://localhost:11434")
+            cfg.providers["google"].base_url.as_deref(),
+            Some("https://gemini.example.test/v1beta")
         );
     }
 

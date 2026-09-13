@@ -10,8 +10,10 @@ Use `--model` to name the model you want:
 caliban --model claude-opus-4-7 "write a haiku"
 caliban --provider openai --model gpt-5.5 "explain monads"
 caliban --provider google --model gemini-2.0-flash "summarize this"
-caliban --provider ollama --model qwen3.5:9b "local inference"
 ```
+
+For local inference, use `--provider openai` with a `base_url` pointing at a
+local server's `/v1` endpoint — see [Local Inference](./local-inference.md).
 
 ## Per-provider defaults
 
@@ -22,27 +24,10 @@ When `--model` is omitted and no model is set in settings, caliban uses a built-
 | `anthropic` | `claude-sonnet-4-6` |
 | `openai` | `gpt-5.5` |
 | `google` | `gemini-2.0-flash` |
-| `ollama` | `llama3.1` |
 
-## Ollama: dynamic model discovery
+## Local models: dynamic discovery
 
-Unlike the hosted providers (Anthropic, OpenAI, Google), Ollama's available models are inherently dynamic — you pull, remove, and load them on the server at will. Caliban therefore treats **the Ollama server as the source of truth** and has **no static model table** for it: the model list and each model's capabilities (context window, vision, tools, reasoning) are discovered at runtime from the server's own API:
-
-- `GET /api/tags` — the models you have pulled.
-- `POST /api/show` — per-model `capabilities` and maximum `context_length`.
-- `GET /api/ps` — the live context window of a currently-loaded model (honors a server-side `num_ctx`).
-
-This means the context window shown in the status bar reflects what the server actually reports — e.g. a 256K-context model shows 256K, not a hardcoded guess.
-
-**When discovery happens:**
-
-- **At startup** — a background refresh updates capabilities shortly after launch.
-- **On `/model`** — opening the model list re-queries the server, so a model pulled or loaded after startup appears immediately.
-- **Warm start** — the last successful discovery is cached to `$XDG_CACHE_HOME/caliban/discovery/ollama-<host>.json` (per server) and loaded at startup, so correct values are available instantly and offline.
-
-If the server is unreachable and no cache exists yet, caliban shows a conservative default and marks capabilities as not-yet-known rather than asserting a wrong value. Point caliban at a specific server with `OLLAMA_BASE_URL` (each server caches independently).
-
-> The same pattern will extend to other locally-served, OpenAI-compatible back ends (vLLM, LM Studio) — see the provider roadmap.
+A local server's models are inherently dynamic — you load, swap, and unload them at will — so the OpenAI adapter discovers them at runtime rather than relying on a static table. When pointed at a local `/v1` endpoint (via `base_url`), it queries `GET /v1/models` and reads each model's loaded context window from the entry's `meta.n_ctx`, so the window shown in the status bar reflects what the server actually reports — e.g. a 256K-context model shows 256K, not a hardcoded guess. This is the same capability the removed bespoke provider offered, now on the OpenAI-compatible seam ([ADR 0056](../adr/README.md)). See [Local Inference](./local-inference.md) for setup.
 
 ## Setting a model in settings
 

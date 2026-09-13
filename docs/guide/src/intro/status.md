@@ -21,7 +21,7 @@ The table below summarizes the major shipped areas. All items marked ✅ are ava
 | Memory tiers: `CLAUDE.md` ancestry, `@`-imports, auto-memory | ✅ |
 | Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ |
 | Model router v2 (declarative routes, fallback chains, circuit breakers, capability filters) | ✅ |
-| Providers: Anthropic, OpenAI, Google Gemini, Ollama, Bedrock, Vertex | ✅ |
+| Providers: Anthropic, OpenAI, Google Gemini, Bedrock, Vertex (+ local OpenAI-compatible servers) | ✅ |
 | Checkpoints + `/rewind` | ✅ |
 | Plugins, hooks, skills | ✅ |
 | OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ |

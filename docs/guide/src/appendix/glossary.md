@@ -41,7 +41,7 @@ A named preset that sets the default disposition for tool-call permission checks
 A self-contained bundle of skills, hooks, agents, MCP server configs, and output styles distributed as a directory with a `plugin.json` manifest. See [Plugins](../extending/plugins.md).
 
 **provider**
-An adapter that translates caliban's message IR to and from a specific model API (Anthropic, OpenAI, Ollama, Google, Bedrock, Vertex). See [Supported Providers](../providers/overview.md).
+An adapter that translates caliban's message IR to and from a specific model API (Anthropic, OpenAI, Google, Bedrock, Vertex; local OpenAI-compatible servers reuse the OpenAI adapter via `base_url`). See [Supported Providers](../providers/overview.md).
 
 **router**
 The `caliban-model-router` layer that selects a provider+model for each request based on configured rules, purpose keys, fallback chains, circuit breakers, and capability requirements. See [The Model Router](../providers/router.md).

@@ -1,7 +1,7 @@
 //! Integration tests for the empty/degenerate-turn guard (#249).
 //!
-//! Some Ollama reasoning models (gemma-family, via the native `/api/chat`
-//! endpoint) intermittently end a turn after emitting only a `thinking` block —
+//! Some local reasoning models (gemma-family) intermittently end a turn after
+//! emitting only a `thinking` block —
 //! no tool call, no final text — while still consuming output tokens. Without a
 //! guard the agent loop treats that natural `EndTurn` as a clean completion and
 //! ends the run as a silent "success" with no work done (the bug behind #249).
