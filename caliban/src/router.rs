@@ -17,7 +17,7 @@ use caliban_model_router::{
 };
 use caliban_provider::{Provider, RequestPurpose};
 
-use crate::provider_wiring::{resolve_key, wrap_with_refresh_if_helper};
+use crate::provider_wiring::{resolve_key, resolve_key_optional, wrap_with_refresh_if_helper};
 
 /// Result of attempting to wire the router from `caliban.toml`.
 #[derive(Debug)]
@@ -116,6 +116,7 @@ fn build_one(
             use caliban_provider_openai::{OpenAIProvider, config::DirectConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
             let base_url = block.base_url.clone();
+            let base_url_overridden = base_url.is_some();
             let make_cfg = move |key: secrecy::SecretString| -> Result<DirectConfig> {
                 let mut cfg = DirectConfig::new(key);
                 if let Some(url) = base_url.as_ref() {
@@ -123,7 +124,9 @@ fn build_one(
                 }
                 Ok(cfg)
             };
-            let key = resolve_key("openai", api_key_env, pool)?;
+            // A local `base_url` override (llama.cpp, mlx-lm, …) needs no key —
+            // tolerate an absent one there; canonical OpenAI still requires it (#641).
+            let key = resolve_key_optional("openai", api_key_env, pool, base_url_overridden)?;
             let inner = OpenAIProvider::direct(make_cfg(key)?)?;
             Ok(wrap_with_refresh_if_helper(
                 inner,
@@ -382,17 +385,8 @@ base_url = "http://localhost:8080/v1"
 
     #[test]
     fn debug_prints_candidate_list() {
-        // `run_debug` uses an empty helper pool by design, so provider
-        // construction reads the API key from the environment. Provide a dummy
-        // one — debug never makes a network call, so any value works.
-        // SAFETY: `std::env::set_var` is `unsafe` in Rust 2024 (concurrent
-        // env access is UB). This sets a fixed dummy value once and never
-        // clears it; no test in this binary writes the environment, and none
-        // asserts on `OPENAI_API_KEY` being unset, so a leaked value is benign.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-test");
-        }
+        // The route points at a local `base_url`, so provider construction needs
+        // no API key (#641) — no env setup required.
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("caliban.toml"), MINIMAL_ROUTE).unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
