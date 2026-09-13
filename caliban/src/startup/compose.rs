@@ -22,7 +22,7 @@ use caliban_tools_builtin::{AgentFactory, AgentTool, AgentToolInput, WorkspaceRo
 
 use crate::agents_cli;
 use crate::args::{Args, ProviderKind, provider_name, resolved_provider};
-use crate::provider_wiring::{resolve_key, wrap_with_refresh_if_helper};
+use crate::provider_wiring::{resolve_key, resolve_key_optional, wrap_with_refresh_if_helper};
 use crate::{headless, system_prompt, tui};
 
 /// Returns `true` when file-backed debug logging should be installed:
@@ -226,6 +226,7 @@ fn build_openai(
 
     let provider_id = "openai";
     let base_url = std::env::var("OPENAI_BASE_URL").ok();
+    let base_url_overridden = base_url.is_some();
     let organization = std::env::var("OPENAI_ORG_ID").ok();
     let project = std::env::var("OPENAI_PROJECT").ok();
 
@@ -259,6 +260,12 @@ fn build_openai(
             "openai",
             rebuild,
         ))
+    } else if base_url_overridden {
+        // Local/custom endpoint via OPENAI_BASE_URL: a missing key is fine — a
+        // local server ignores the bearer, a keyed proxy rejects at request
+        // time. Canonical OpenAI (below) still requires a key (#641).
+        let key = resolve_key_optional("openai", "OPENAI_API_KEY", pool, true)?;
+        Ok(Arc::new(OpenAIProvider::direct(make_cfg(key)?)?))
     } else {
         let cfg = DirectConfig::from_env().map_err(|e| match e {
             OpenAIError::MissingConfig(name) => missing_key_err(name.as_str()),

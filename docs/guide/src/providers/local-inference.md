@@ -25,14 +25,15 @@ on Apple Silicon, and all three engines drive caliban's agent loop correctly.
 
 ## Wiring caliban to a local server
 
-Point the OpenAI provider at the server's `/v1` endpoint. Any non-empty API key
-satisfies the client; local servers ignore it.
+Point the OpenAI provider at the server's `/v1` endpoint. When `OPENAI_BASE_URL`
+is set, **no API key is required** — caliban sends an empty bearer and the local
+server ignores it (a keyed proxy would reject the request itself). Set
+`OPENAI_API_KEY` only if your endpoint actually enforces auth.
 
 **Env override (quickest):**
 
 ```bash
 export OPENAI_BASE_URL="http://192.168.1.240:9292/v1"
-export OPENAI_API_KEY="sk-local"
 caliban --provider openai --model <model-name> "…"
 ```
 
