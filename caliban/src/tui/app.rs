@@ -338,6 +338,13 @@ pub(crate) struct App {
     /// for this session — used by `/rewind` (ADR 0028) to list per-prompt
     /// checkpoints.
     pub(crate) checkpoint_store: Option<caliban_checkpoint::CheckpointStore>,
+    /// Row cursor into the `/rewind` overlay's newest-first checkpoint list
+    /// (#549). Reset to 0 whenever the overlay opens.
+    pub(crate) rewind_cursor: usize,
+    /// A `/rewind` action selected in the overlay, awaiting execution by the
+    /// async main loop (the summarize modes await the compactor, so the key
+    /// handler can't run them inline). `None` when nothing is pending.
+    pub(crate) pending_rewind: Option<crate::tui::rewind::RewindRequest>,
     /// Timestamp of the most recent Esc keypress; used to detect Esc-Esc
     /// chords for `/rewind` (ADR 0028). The chord is only accepted when
     /// (a) the buffer is empty, (b) no overlay is open, and (c) both
@@ -548,6 +555,8 @@ impl App {
             reverse_history: None,
             input_history_path,
             checkpoint_store: None,
+            rewind_cursor: 0,
+            pending_rewind: None,
             last_esc_at: None,
             settings_handle,
             statusline_runner,
@@ -565,11 +574,7 @@ impl App {
     }
 
     /// Attach a [`caliban_checkpoint::CheckpointStore`] for the current
-    /// session (enables `/rewind`).
-    #[allow(
-        dead_code,
-        reason = "wired by main.rs once full /rewind action plumbing lands"
-    )]
+    /// session (enables `/rewind`). Wired from `tui::run` (#549).
     pub(crate) fn with_checkpoint_store(
         mut self,
         store: caliban_checkpoint::CheckpointStore,

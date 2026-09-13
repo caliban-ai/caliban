@@ -853,7 +853,10 @@ pub(crate) fn rewind_lines(app: &App) -> Vec<Line<'static>> {
         ));
         return out;
     }
-    for p in &prompts {
+    // Clamp the cursor to the current list so the marker never points past the
+    // end after prompts change (#549).
+    let selected = app.rewind_cursor.min(prompts.len() - 1);
+    for (i, p) in prompts.iter().enumerate() {
         let ts = p.created_at.format("%H:%M").to_string();
         let kind_tag = match p.kind {
             caliban_checkpoint::ManifestKind::Plan => "plan".to_string(),
@@ -865,19 +868,26 @@ pub(crate) fn rewind_lines(app: &App) -> Vec<Line<'static>> {
         } else {
             p.title.clone()
         };
-        let prefix = if p.partial { "⚠ " } else { "   " };
+        // `>` marks the selected row; `⚠` flags a partial/cleared checkpoint.
+        let cursor_mark = if i == selected { "> " } else { "  " };
+        let partial_mark = if p.partial { "⚠" } else { " " };
+        let mut row_style = Style::default();
+        if i == selected {
+            row_style = row_style.add_modifier(Modifier::BOLD);
+        }
         out.push(Line::from(vec![
-            Span::raw(prefix.to_string()),
+            Span::styled(format!("{cursor_mark}{partial_mark} "), row_style),
             Span::styled(
                 format!("#{:>3}  ", p.prompt_index),
                 Style::default().fg(Color::Cyan),
             ),
-            Span::raw(format!("{title:<40} {ts}  {kind_tag}")),
+            Span::styled(format!("{title:<40} {ts}  {kind_tag}"), row_style),
         ]));
     }
     out.push(Line::raw(""));
     out.push(Line::styled(
-        "  Actions: [c] code  [v] conversation  [b] both  [s] summarize→  [S] summarize←",
+        "  ↑/↓ (or j/k) select   Actions: [c] code  [v] conversation  [b] both  \
+         [s] summarize→  [S] summarize←",
         Style::default().add_modifier(Modifier::DIM),
     ));
     out.push(Line::styled(

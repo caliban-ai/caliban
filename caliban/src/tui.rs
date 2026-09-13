@@ -26,6 +26,7 @@ mod mouse_select;
 mod overlay;
 mod render;
 mod reverse_history;
+mod rewind;
 mod shell_escape;
 pub(crate) mod slash;
 mod toast;
@@ -181,6 +182,7 @@ pub(crate) async fn run(
     settings_sources: Vec<(String, Option<PathBuf>, Option<String>)>,
     runtime_rules: Arc<caliban_agent_core::RuntimeRuleStore>,
     topic_backend: Arc<dyn caliban_memory::TopicBackend>,
+    checkpoint_store: Option<caliban_checkpoint::CheckpointStore>,
 ) -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(
@@ -207,6 +209,12 @@ pub(crate) async fn run(
     // auto-memory tools / system-prompt splice, so `/memory` reads through
     // the same substrate (#473).
     app.topic_backend = topic_backend;
+    // Wire the per-session checkpoint store so `/rewind` lists real prompts and
+    // its actions can restore (#549). `None` in the disabled/opt-out case, which
+    // the overlay renders as "checkpointing not enabled".
+    if let Some(cs) = checkpoint_store {
+        app = app.with_checkpoint_store(cs);
+    }
     let mut term_events = EventStream::new();
     let mut agent_stream: Option<TurnEventStream> = None;
     let (statusline_tx, mut statusline_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -326,6 +334,13 @@ pub(crate) async fn run(
             _ = tick.tick() => {
                 // No-op; the loop will redraw on next iteration.
             }
+        }
+
+        // Drain a pending `/rewind` action (#549). The overlay key handler is
+        // synchronous, but the summarize modes await the compactor, so the
+        // request is executed here in the async loop.
+        if let Some(req) = app.pending_rewind.take() {
+            rewind::execute_rewind(&mut app, req).await;
         }
 
         tokio::task::yield_now().await;
