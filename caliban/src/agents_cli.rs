@@ -353,27 +353,66 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
     }
 }
 
+/// What `caliban daemon status`/`stop` should dial, resolved from the network
+/// env + repo state (#319). Pure so the network-parity selection is testable.
+enum DaemonTarget {
+    /// A reachable daemon (TCP in network mode, or an existing Unix socket).
+    Client(SupervisorClient),
+    /// Unix mode with no socket present — a valid "not running" steady state.
+    NotRunning(PathBuf),
+}
+
+/// Choose the daemon endpoint for `status`/`stop`, giving those two verbs the
+/// same `CALIBAN_DAEMON_LISTEN` parity that list/attach/spawn already have via
+/// [`ensure_daemon`] (#319). In network mode a daemon has no local Unix socket
+/// to probe, so dial it directly; only Unix mode short-circuits on an absent
+/// socket. Takes the already-resolved network env so it stays env-free.
+fn resolve_daemon_target(net: Option<DaemonNetworkEnv>, repo_root: &Path) -> DaemonTarget {
+    if let Some(net) = net {
+        return DaemonTarget::Client(SupervisorClient::new_tcp(net.listen, net.tls, net.token));
+    }
+    let socket_path = workspace_socket_path(repo_root);
+    if socket_path.exists() {
+        DaemonTarget::Client(SupervisorClient::new(socket_path))
+    } else {
+        DaemonTarget::NotRunning(socket_path)
+    }
+}
+
 /// Handle `caliban daemon <verb>`.
 ///
 /// Neither `status` nor `stop` auto-spawn the daemon — querying state
 /// or asking it to shut down shouldn't side-effect-start a fresh one.
-/// When the socket is absent we report "not running" and exit cleanly
-/// (status: 0 with a "not running" line, stop: 0 with a "no daemon"
-/// line — both are valid steady states).
+/// In the default Unix mode, when the socket is absent we report "not running"
+/// and exit cleanly (status: 0 with a "not running" line, stop: 0 with a "no
+/// daemon" line — both are valid steady states). In network mode
+/// (`CALIBAN_DAEMON_LISTEN` set, #319) we dial the daemon over TCP instead —
+/// matching list/attach/spawn, which already honor it.
 pub(crate) async fn run_daemon(cmd: &crate::DaemonCommand, repo_root: &Path) -> i32 {
-    let socket_path = caliban_supervisor::workspace_socket_path(repo_root);
-    if !socket_path.exists() {
-        match cmd {
-            crate::DaemonCommand::Status => {
-                println!("daemon not running (socket={})", socket_path.display());
-            }
-            crate::DaemonCommand::Stop => {
-                println!("no daemon to stop (socket={})", socket_path.display());
-            }
+    let net = match daemon_network_env() {
+        Ok(net) => net,
+        // A CALIBAN_DAEMON_TLS_CA that's set but unreadable/unparseable is a
+        // hard config error — never a silent downgrade to a plaintext dial
+        // carrying the bearer token.
+        Err(e) => {
+            eprintln!("[caliban] {e}");
+            return 78; // EX_CONFIG
         }
-        return 0;
-    }
-    let client = caliban_supervisor::SupervisorClient::new(socket_path);
+    };
+    let client = match resolve_daemon_target(net, repo_root) {
+        DaemonTarget::Client(client) => client,
+        DaemonTarget::NotRunning(socket_path) => {
+            match cmd {
+                crate::DaemonCommand::Status => {
+                    println!("daemon not running (socket={})", socket_path.display());
+                }
+                crate::DaemonCommand::Stop => {
+                    println!("no daemon to stop (socket={})", socket_path.display());
+                }
+            }
+            return 0;
+        }
+    };
     match cmd {
         crate::DaemonCommand::Status => match client.status().await {
             Ok(s) => {
@@ -561,6 +600,44 @@ mod tests {
     }
 
     // --- resolve_daemon_network_env (#280 Task 8) ---
+
+    // --- resolve_daemon_target: status/stop network parity (#319) ---
+
+    #[test]
+    fn resolve_daemon_target_dials_tcp_in_network_mode() {
+        // #319: with CALIBAN_DAEMON_LISTEN resolved, `status`/`stop` must dial
+        // TCP directly — NOT short-circuit on a missing local Unix socket, which
+        // is the pre-#319 bug that left those two verbs Unix-only.
+        let net = DaemonNetworkEnv {
+            listen: "caliband.pod:9000".into(),
+            tls: None,
+            token: Some("tok".into()),
+        };
+        let dir = tempfile::tempdir().unwrap(); // no daemon socket present
+        match resolve_daemon_target(Some(net), dir.path()) {
+            DaemonTarget::Client(client) => assert_eq!(
+                client.endpoint(),
+                &Endpoint::Tcp {
+                    addr: "caliband.pod:9000".into()
+                },
+                "network mode must dial the TCP endpoint, not the Unix socket",
+            ),
+            DaemonTarget::NotRunning(_) => {
+                panic!("network mode must not report not-running on a missing Unix socket")
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_daemon_target_reports_not_running_when_unix_socket_absent() {
+        // Unix mode (no CALIBAN_DAEMON_LISTEN) with no socket file → the
+        // unchanged "not running" steady state.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            resolve_daemon_target(None, dir.path()),
+            DaemonTarget::NotRunning(_)
+        ));
+    }
 
     #[test]
     fn daemon_network_env_none_when_listen_absent() {

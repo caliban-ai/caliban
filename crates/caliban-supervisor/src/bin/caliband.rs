@@ -129,6 +129,26 @@ fn host_of(addr: &str) -> &str {
     addr.rsplit_once(':').map_or(addr, |(host, _)| host)
 }
 
+/// Whether `host` is a wildcard / unspecified bind address that clients cannot
+/// dial (#319). `--listen 0.0.0.0:P` with no `--advertise-host` derives such a
+/// host (via [`host_of`]), which then names undialable agent endpoints and a
+/// `0.0.0.0` control endpoint reported in `daemon status`. Detects the IPv4
+/// (`0.0.0.0`) and IPv6 (`::`, `[::]`) unspecified addresses plus the empty
+/// string and `*`.
+fn is_wildcard_host(host: &str) -> bool {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return true;
+    }
+    // Strip optional IPv6 literal brackets (`[::]` → `::`).
+    let bare = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    bare.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified())
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     // Minimal tracing setup so log lines reach stderr.
@@ -236,6 +256,18 @@ fn build_supervisor(
         .advertise_host
         .clone()
         .unwrap_or_else(|| host_of(&listen).to_string());
+    // #319: a wildcard advertise host (e.g. derived from `--listen 0.0.0.0:P`
+    // with no `--advertise-host`) yields agent endpoints and a control endpoint
+    // no client can dial. Flag it at startup so it is observable before a
+    // stranded agent, not after.
+    if is_wildcard_host(&advertise_host) {
+        tracing::warn!(
+            advertise_host = %advertise_host,
+            "advertise host is a wildcard/unspecified address; agent endpoints and the \
+             control endpoint reported in `daemon status` will be undialable by clients. \
+             Set --advertise-host to a routable name (e.g. the daemon's Service/pod DNS name)."
+        );
+    }
     let agent_port_base = args.agent_port_base.unwrap_or(7100);
 
     // Fail-closed: never bind the control plane unauthenticated or in plaintext.
@@ -424,5 +456,24 @@ mod tests {
             !warn,
             "without control TLS there is no verification to misconfigure"
         );
+    }
+
+    /// #319: a wildcard/unspecified advertise host (the value `--listen
+    /// 0.0.0.0:P` derives with no `--advertise-host`) is undialable and must be
+    /// flagged; a real hostname or routable IP must not be.
+    #[test]
+    fn is_wildcard_host_flags_only_unspecified_addresses() {
+        for wildcard in ["0.0.0.0", "::", "[::]", "*", "", "  0.0.0.0  "] {
+            assert!(is_wildcard_host(wildcard), "should flag {wildcard:?}");
+        }
+        for routable in [
+            "caliband",
+            "caliband.caliban.svc.cluster.local",
+            "10.0.0.5",
+            "127.0.0.1",
+            "::1",
+        ] {
+            assert!(!is_wildcard_host(routable), "should not flag {routable:?}");
+        }
     }
 }

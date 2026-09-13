@@ -111,8 +111,21 @@ impl AgentStore {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if let Some(record) = self.load_manifest(&name)? {
-                out.push(record);
+            // Skip-and-warn per record (#319): a single un-deserializable
+            // manifest — e.g. a pre-upgrade record from before the
+            // `socket_path`→`endpoint` format change — must not abort the whole
+            // enumeration (which `Registry::new` swallowed, starting the daemon
+            // with zero agents). The store is XDG scratch, so a stale record is
+            // recoverable; drop it and keep the rest.
+            match self.load_manifest(&name) {
+                Ok(Some(record)) => out.push(record),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    target: "caliban_supervisor",
+                    agent = %name,
+                    error = %e,
+                    "skipping un-loadable agent manifest; the rest of the registry is unaffected",
+                ),
             }
         }
         Ok(out)
@@ -171,6 +184,29 @@ mod tests {
         store.write_manifest(&fake_record("b")).unwrap();
         let listed = store.list().unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    #[test]
+    fn list_skips_undeserializable_manifests_and_keeps_the_rest() {
+        // #319: `list()` used to abort on the first un-deserializable manifest
+        // (e.g. a pre-upgrade `socket_path`→`endpoint` record), and
+        // `Registry::new` swallowed the error, so ONE stale manifest made the
+        // daemon start with zero agents. It must skip-and-warn per record so a
+        // single bad manifest never drops the whole registry.
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::new(dir.path().join("agents"));
+        store.write_manifest(&fake_record("good")).unwrap();
+        // A session dir whose manifest.json cannot be deserialized (old format).
+        let bad = store.ensure_dir("bad").unwrap();
+        fs::write(bad.join("manifest.json"), br#"{"socket_path":"/legacy"}"#).unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "one un-loadable manifest must not drop the whole registry",
+        );
+        assert_eq!(listed[0].id, "good");
     }
 
     #[test]
