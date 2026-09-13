@@ -3,10 +3,14 @@
 //! Layout (per `<base>/agents/<id>/`):
 //! - `manifest.json` — JSON copy of `AgentRecord` (frontmatter + state +
 //!   spawn time). Atomically written via tempfile + rename.
-//! - `session.json` — caliban-sessions format (created by the sub-agent
-//!   runtime itself, not by us).
-//! - `stdout.ndjson` — append-only `TurnEvent` stream.
+//! - `stdout.ndjson` — append-only `TurnEvent` stream (the only conversation
+//!   artifact the daemon worker writes today).
 //! - `agent.sock` — per-agent Unix socket (managed by the daemon).
+//!
+//! Note: daemon-managed workers do **not** yet persist a resumable
+//! `session.json` (caliban-sessions format) — that is introduced with
+//! resume-from-session (#651), the state a `Drain` checkpoint (#650, ADR 0057)
+//! will flush for resume.
 //!
 //! The `<base>` defaults to `$XDG_DATA_HOME/caliban/projects/<sanitized-cwd>`
 //! (matches the user's auto-memory layout); see [`AgentStore::default_for`].

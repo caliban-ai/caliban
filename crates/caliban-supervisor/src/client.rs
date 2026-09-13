@@ -179,6 +179,20 @@ impl SupervisorClient {
         }
     }
 
+    /// Convenience: gracefully drain + checkpoint every live agent, returning
+    /// the per-agent resume references (session dirs) the caller records — e.g.
+    /// the operator drain finalizer into `status.checkpointRef` (#650, ADR 0057).
+    pub async fn drain(
+        &self,
+        grace_secs: u64,
+    ) -> Result<Vec<crate::proto::DrainedAgent>, ClientError> {
+        match self.request(&CtlRequest::Drain { grace_secs }).await? {
+            CtlReply::Drained { agents } => Ok(agents),
+            CtlReply::Error { error } => Err(error.into()),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
     /// Convenience: report a Running<->Idle transition for an agent.
     pub async fn report_status(
         &self,
