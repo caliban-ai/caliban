@@ -1,8 +1,12 @@
 # ADR 0038 · Model router v2 — fallback, hedging, breakers, capabilities, binary wiring
 
-- **Status:** accepted
+- **Status:** accepted (provider set amended by [0056](0056-deprecate-ollama-provider.md))
 - **Date:** 2026-05-24
 - **Spec:** `docs/superpowers/specs/2026-05-24-model-router-v2-design.md`
+
+> **Amended by [0056](0056-deprecate-ollama-provider.md) (2026-09-12):** the `ollama`
+> provider was removed; the router's supported providers are `anthropic`, `openai`,
+> `google`. Local models are reached via `openai` + a per-route `base_url`.
 - **Supersedes scope of:** ADR 0022 deferred items
 - **Author:** john.ford2002@gmail.com
 
@@ -89,8 +93,7 @@ providers fail loudly at startup, not lazily on first call.
 `RequestMetadata.effort: Option<EffortLevel>` is plumbed through to each
 adapter. Each adapter owns the mapping to its native effort knob
 (`reasoning_effort` / `extended_thinking.budget` / `thinkingConfig`).
-Ollama's mapping is a no-op for now. Operators see the table via
-`caliban router debug --effort-table`.
+Operators see the table via `caliban router debug --effort-table`.
 
 ### Prompt-cache markers are cleared on cross-route hops
 

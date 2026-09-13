@@ -1,9 +1,0 @@
-{
-  "model": "llama3.1",
-  "messages": [
-    {"role": "system", "content": "Be brief."},
-    {"role": "user", "content": "Hi!"}
-  ],
-  "stream": false,
-  "options": {"num_predict": 64}
-}

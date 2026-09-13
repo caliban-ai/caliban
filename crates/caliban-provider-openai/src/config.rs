@@ -74,7 +74,7 @@ impl DirectConfig {
 
     /// Build a `DirectConfig` from explicit parts. Exposed so the env-
     /// reading and URL-parsing branches can be exercised independently
-    /// in tests (mirrors `caliban_provider_ollama::config::from_env_value`).
+    /// in tests.
     ///
     /// `base_url == None` selects the default; a `Some(value)` that does
     /// not parse as a URL returns `Err(OpenAIError::InvalidBaseUrl { … })`

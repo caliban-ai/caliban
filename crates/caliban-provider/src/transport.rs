@@ -1,6 +1,6 @@
 //! Shared classification of `reqwest` transport failures.
 //!
-//! Every HTTP adapter (`anthropic`, `google`, `openai`, `ollama`, …) wraps a
+//! Every HTTP adapter (`anthropic`, `google`, `openai`, …) wraps a
 //! `reqwest::Error` in its own `Http` variant and must decide which
 //! [`crate::Error`] it maps to. That decision is identical across adapters, so
 //! it lives here once:

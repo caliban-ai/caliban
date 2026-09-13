@@ -127,7 +127,6 @@ fn parse_provider(s: &str) -> Result<ProviderKind> {
     match s {
         "anthropic" => Ok(ProviderKind::Anthropic),
         "openai" => Ok(ProviderKind::Openai),
-        "ollama" => Ok(ProviderKind::Ollama),
         "google" => Ok(ProviderKind::Google),
         other => anyhow::bail!("unknown provider in settings: {other}"),
     }
@@ -147,7 +146,6 @@ mod tests {
                 match p {
                     ProviderKind::Anthropic => "anthropic",
                     ProviderKind::Openai => "openai",
-                    ProviderKind::Ollama => "ollama",
                     ProviderKind::Google => "google",
                 }
                 .into(),

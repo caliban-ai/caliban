@@ -1,7 +1,15 @@
 # ADR 0056 · Deprecate the bespoke Ollama provider — reach local models through the OpenAI-compatible surface
 
-- **Status:** accepted
+- **Status:** accepted (both phases shipped)
 - **Date:** 2026-09-12
+
+> **Update (2026-09-12):** Phase 1 (soft-deprecate) and Phase 2 (removal) were
+> both executed in the same cycle rather than across two releases — the project
+> owner elected to compress the migration window (pre-1.0). The
+> `caliban-provider-ollama` crate and `ProviderKind::Ollama` are removed; ADRs
+> 0007 / 0033 / 0038 are amended accordingly. The phasing text below is the
+> original plan, retained as the record.
+
 - **Source:** local-inference landscape review (this session). Community rationale drawn from [*Stop Using Ollama*](https://sleepingrobots.com/dreams/stop-using-ollama/) (sleepingrobots.com), folded into Context below as dependency-free historical reference. Engine choice is grounded in a head-to-head benchmark on Apple M5 Pro via `scripts/bench-local-inference.sh`, and validated for correctness via `scripts/conformance-local-inference.sh` (summarized under *Benchmark evidence* and *Conformance evidence*). Relates to [0007](0007-transport-trait-pattern.md) (schema-family provider crates — this drops one), [0022](0022-model-routing-architecture.md) / [0038](0038-model-router-v2.md) (routing + per-route `base_url`), [0033](0033-opentelemetry-and-cost.md) (provider list), and the operator runbook for standing up the replacement stack.
 
 ## Context

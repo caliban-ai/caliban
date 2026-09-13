@@ -137,17 +137,6 @@ fn build_one(
                 },
             ))
         }
-        "ollama" => {
-            use caliban_provider_ollama::{OllamaProvider, config::DirectConfig};
-            crate::startup::compose::warn_ollama_deprecated();
-            let mut cfg = DirectConfig::new();
-            if let Some(url) = block.base_url.as_ref() {
-                cfg.base_url = url::Url::parse(url)?;
-            } else if let Ok(c) = DirectConfig::from_env() {
-                cfg = c;
-            }
-            Ok(Arc::new(OllamaProvider::direct(cfg)?))
-        }
         "google" => {
             use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("GEMINI_API_KEY");
@@ -168,7 +157,7 @@ fn build_one(
             ))
         }
         other => Err(anyhow!(
-            "unknown provider '{other}' — supported: anthropic, openai, ollama, google"
+            "unknown provider '{other}' — supported: anthropic, openai, google"
         )),
     }
 }
@@ -351,18 +340,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    const MINIMAL_OLLAMA: &str = r#"
+    const MINIMAL_ROUTE: &str = r#"
 [router]
 default_purpose = "main_loop"
 
 [[router.route]]
 purpose = "main_loop"
-provider = "ollama"
-model = "llama3.2:3b"
+provider = "openai"
+model = "gpt-5.5"
 fallback = []
 
-[provider.ollama]
-base_url = "http://localhost:11434"
+[provider.openai]
+base_url = "http://localhost:8080/v1"
 "#;
 
     #[test]
@@ -393,8 +382,19 @@ base_url = "http://localhost:11434"
 
     #[test]
     fn debug_prints_candidate_list() {
+        // `run_debug` uses an empty helper pool by design, so provider
+        // construction reads the API key from the environment. Provide a dummy
+        // one — debug never makes a network call, so any value works.
+        // SAFETY: `std::env::set_var` is `unsafe` in Rust 2024 (concurrent
+        // env access is UB). This sets a fixed dummy value once and never
+        // clears it; no test in this binary writes the environment, and none
+        // asserts on `OPENAI_API_KEY` being unset, so a leaked value is benign.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-test");
+        }
         let tmp = tempdir().unwrap();
-        std::fs::write(tmp.path().join("caliban.toml"), MINIMAL_OLLAMA).unwrap();
+        std::fs::write(tmp.path().join("caliban.toml"), MINIMAL_ROUTE).unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
         let args = RouterDebugArgs {
             purpose: "main_loop".into(),
@@ -404,7 +404,7 @@ base_url = "http://localhost:11434"
             effort: Some("high".into()),
         };
         let out = run_debug(&args, Some(&tmp.path().join("caliban.toml")), tmp.path()).unwrap();
-        assert!(out.contains("ollama:llama3.2:3b:main_loop"), "got:\n{out}");
+        assert!(out.contains("openai:gpt-5.5:main_loop"), "got:\n{out}");
         assert!(out.contains("effort_map.high"), "got:\n{out}");
     }
 

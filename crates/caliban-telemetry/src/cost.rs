@@ -425,11 +425,11 @@ mod tests {
     #[test]
     fn embedded_rate_card_parses() {
         let card = RateCard::embedded().expect("embedded rates.yaml must parse");
-        // Anthropic + OpenAI + Google + Bedrock + Vertex + Ollama = 6.
+        // Anthropic + OpenAI + Google + Bedrock + Vertex = 5.
         assert_eq!(
             card.provider_count(),
-            6,
-            "all six shipped providers present"
+            5,
+            "all five shipped providers present"
         );
     }
 
@@ -528,15 +528,6 @@ mod tests {
             .resolve("vertex", "claude-opus-4-7@20260423", today)
             .unwrap();
         assert!((rule.input_per_mtok - 15.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn ollama_pricing_is_zero() {
-        let card = RateCard::embedded().unwrap();
-        let today = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
-        let rule = card.resolve("ollama", "llama3.1:70b", today).unwrap();
-        assert!(rule.input_per_mtok.abs() < f64::EPSILON);
-        assert!(rule.output_per_mtok.abs() < f64::EPSILON);
     }
 
     #[test]

@@ -480,7 +480,6 @@ pub(crate) fn config_lines(app: &App) -> Vec<Line<'_>> {
     let provider = match crate::resolved_provider(&app.args) {
         crate::ProviderKind::Anthropic => "anthropic",
         crate::ProviderKind::Openai => "openai",
-        crate::ProviderKind::Ollama => "ollama",
         crate::ProviderKind::Google => "google",
     };
     let model = app.args.model.clone().unwrap_or_else(|| {
