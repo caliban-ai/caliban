@@ -9,6 +9,50 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-13
+
+The Ollama release. caliban's bespoke `ollama` provider is **removed** in favor
+of reaching local inference engines through the OpenAI-compatible provider
+pointed at a `base_url` — the same seam that reaches OpenAI itself. This is
+governance-motivated (see [ADR 0056](docs/adr/0056-deprecate-ollama-provider.md))
+and architecturally cheap: the OpenAI adapter already speaks to any local engine
+(llama.cpp, mlx-lm, LM Studio, llama-swap), and the one genuine loss —
+context-window discovery — is recovered by a `/v1/models` shim. Benchmark and
+conformance evidence gathered on Apple M5 Pro back the decision.
+
+### Removed
+
+- **The `caliban-provider-ollama` provider** (#634, #635), per
+  [ADR 0056](docs/adr/0056-deprecate-ollama-provider.md). `--provider ollama` is
+  no longer valid — a run configured with it fails loudly at startup
+  (`unknown provider 'ollama' — supported: anthropic, openai, google`). Reach
+  local models through `--provider openai` with a `base_url`; see
+  [Local Inference](docs/guide/src/providers/local-inference.md). **BREAKING.** (#640)
+
+### Added
+
+- **`/v1/models` discovery shim for the OpenAI adapter** (#632): when pointed at
+  a local `/v1` endpoint, the adapter discovers the served models and reads each
+  one's loaded context window from `meta.n_ctx` — recovering the dynamic
+  capability discovery the removed provider offered, now on the OpenAI seam. (#639)
+- **Keyless OpenAI adapter for local endpoints** (#641): when a `base_url` is
+  set, no API key is required, so local inference is as frictionless as the
+  removed provider was — no throwaway key. (#642)
+
+### Fixed
+
+- **MLX reasoning traces are captured** (#627): MLX-based servers (e.g.
+  `mlx_lm.server`) stream the thinking trace under `reasoning` rather than
+  `reasoning_content`; a serde alias now accepts both, so their thinking is no
+  longer silently dropped. (#628)
+
+Docs: ADR 0056 accepted with benchmark + conformance eval harnesses (#629, #636);
+the local-model path reframed around the OpenAI adapter + `base_url` (#631, #633,
+#638); a full sweep of stale Ollama references from the user guide and code
+comments, keeping the decision history in the ADRs (#643, #644). A one-time
+deprecation notice + `doctor` hint shipped mid-cycle (#630, #637) and is
+superseded by the removal above.
+
 ## [0.11.0] - 2026-09-10
 
 A QA-driven correctness release. A declarative tool-assembly refactor unblocks
@@ -814,7 +858,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/caliban-ai/caliban/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/caliban-ai/caliban/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/caliban-ai/caliban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/caliban-ai/caliban/compare/v0.8.0...v0.9.0
