@@ -77,6 +77,7 @@ conventions.
 | [0054](0054-sandbox-confinement-posture.md) | Sandbox confinement posture: keep filesystem reads open, close network egress by default under `--workspace` (refines 0032) | accepted |
 | [0055](0055-driveable-server-surface.md) | Driveable server surface — MCP-server + ACP + headless HTTP serve as thin adapters over one core (MCP-server leads v1) | accepted |
 | [0056](0056-deprecate-ollama-provider.md) | Deprecate + remove the bespoke Ollama provider — reach local models through the OpenAI-compatible surface + per-host `base_url` (amends 0007/0033/0038) | accepted |
+| [0057](0057-agent-drain-checkpoint-resume.md) | Graceful drain / checkpoint / resume for daemon-managed agents — flushed session dir on the retained PVC is the checkpoint; operator finalizer + `idleTimeout`→suspend (builds on 0028/0037/0047/0051/0052) | accepted |
 
 ## Adding a new ADR
 
