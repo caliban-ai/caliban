@@ -7,7 +7,7 @@
 //! lifecycle can be tested with a fake worker (a trivial child process)
 //! that never touches an LLM.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::proto::AgentRecord;
 
@@ -64,6 +64,25 @@ pub struct ExecWorkerLauncher {
 /// stderr are captured to (#507). Public so an orchestrator or an operator
 /// debugging a `failed` agent knows where to look without guessing.
 pub const WORKER_LOG_FILENAME: &str = "worker.log";
+
+/// Read up to the last `max_bytes` of a worker's captured log in `session_dir`
+/// (#646). Used to surface the cause when a worker exits non-zero at/after
+/// spawn — otherwise its failure leaves nothing in caliband's own log, the log
+/// prospero tells operators to check. Best-effort: `None` if the log is
+/// missing, empty, or unreadable (diagnostics must never fail on their own).
+#[must_use]
+pub fn worker_log_tail(session_dir: &Path, max_bytes: usize) -> Option<String> {
+    let data = std::fs::read(session_dir.join(WORKER_LOG_FILENAME)).ok()?;
+    if data.is_empty() {
+        return None;
+    }
+    // Tail the raw bytes, then lossily decode — a mid-char split renders as the
+    // replacement char rather than dropping the line.
+    let start = data.len().saturating_sub(max_bytes);
+    let tail = String::from_utf8_lossy(&data[start..]);
+    let trimmed = tail.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
 
 impl ExecWorkerLauncher {
     /// Build a launcher that execs `caliban_exe`.
@@ -523,6 +542,32 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         exe
+    }
+
+    /// #646: the tail helper returns the last bytes of the worker log, and
+    /// degrades to `None` (never panics) when the log is missing or empty.
+    #[test]
+    fn worker_log_tail_reads_the_end_and_degrades_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path();
+
+        // Missing log → None.
+        assert_eq!(worker_log_tail(session, 4096), None);
+
+        // Empty log → None.
+        std::fs::write(session.join(WORKER_LOG_FILENAME), "").unwrap();
+        assert_eq!(worker_log_tail(session, 4096), None);
+
+        // Full content when it fits, trimmed.
+        std::fs::write(session.join(WORKER_LOG_FILENAME), "boom: bad config\n").unwrap();
+        assert_eq!(
+            worker_log_tail(session, 4096).as_deref(),
+            Some("boom: bad config")
+        );
+
+        // Only the tail when it exceeds max_bytes.
+        std::fs::write(session.join(WORKER_LOG_FILENAME), "0123456789tail").unwrap();
+        assert_eq!(worker_log_tail(session, 4).as_deref(), Some("tail"));
     }
 
     /// #507: the worker's stdout/stderr went to `Stdio::null()`, so a worker
