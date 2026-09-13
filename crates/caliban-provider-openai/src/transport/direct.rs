@@ -52,6 +52,15 @@ impl DirectTransport {
         base.into()
     }
 
+    /// The `/v1/models` discovery endpoint, derived from the configured base URL
+    /// the same way [`Self::endpoint`] derives `/chat/completions`.
+    fn models_endpoint(&self) -> String {
+        let mut base = self.config.base_url.clone();
+        let path = format!("{}/models", base.path().trim_end_matches('/'));
+        base.set_path(&path);
+        base.into()
+    }
+
     fn auth_headers(&self) -> Result<reqwest::header::HeaderMap, OpenAIError> {
         use reqwest::header::{HeaderMap, HeaderValue};
         let mut h = HeaderMap::new();
@@ -119,5 +128,21 @@ impl Transport for DirectTransport {
             .into_iter()
             .find(|m| m.id == canonical)
             .map_or_else(|| canonical.to_string(), |m| m.native_id)
+    }
+
+    async fn discover_models_json(&self) -> Result<Option<serde_json::Value>, OpenAIError> {
+        let headers = self.auth_headers()?;
+        let resp = self
+            .client
+            .get(self.models_endpoint())
+            .headers(headers)
+            .send()
+            .await?;
+        // Endpoint unavailable (e.g. a server without /v1/models) is not an
+        // error — the caller falls back to the static table.
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        Ok(Some(resp.json::<serde_json::Value>().await?))
     }
 }
