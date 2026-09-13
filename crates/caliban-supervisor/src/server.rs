@@ -402,12 +402,28 @@ impl Supervisor {
                 // Only Unix endpoints have a filesystem path to unlink; a TCP
                 // endpoint (#280 Task 7) has nothing to clean up here.
                 let socket_path = rec.unix_socket_path().map(std::path::Path::to_path_buf);
+                // #646: the worker's captured-log dir, so an abnormal exit can
+                // surface a tail of its stderr to caliband's own log.
+                let session_dir = rec.session_dir.clone();
                 tokio::spawn(async move {
                     // The wait MUST stay outside the registry lock — holding it
                     // across the child's lifetime would serialize the daemon.
                     let terminal = match child.wait().await {
                         Ok(s) if s.success() => crate::proto::AgentStatus::Done,
-                        Ok(_) => crate::proto::AgentStatus::Failed,
+                        Ok(s) => {
+                            // #646: a worker that exits non-zero (e.g. a provider
+                            // preflight/first-request failure) otherwise leaves
+                            // nothing in caliband's own log — the log prospero
+                            // tells operators to check. Surface the exit and a
+                            // tail of the worker's captured stderr here.
+                            let tail = crate::proc::worker_log_tail(&session_dir, 2048)
+                                .unwrap_or_else(|| "(worker log empty or unavailable)".to_string());
+                            tracing::error!(
+                                target: "caliban_supervisor", agent = %id, status = %s,
+                                "worker exited non-zero at/after spawn; last output:\n{tail}"
+                            );
+                            crate::proto::AgentStatus::Failed
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, agent = %id, "worker wait failed");
                             crate::proto::AgentStatus::Failed
