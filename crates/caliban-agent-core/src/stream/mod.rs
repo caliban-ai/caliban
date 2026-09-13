@@ -1441,7 +1441,7 @@ impl Agent {
 
             // #249 — empty/degenerate-turn guard (per-run): counts *consecutive*
             // degenerate turns nudged so far (a turn that consumed output tokens
-            // yet produced no tool call and no actionable text — e.g. an Ollama
+            // yet produced no tool call and no actionable text — e.g. a local
             // reasoning model that emits only a thinking block and then stops).
             // Resets to 0 the moment a productive turn occurs. Bounded by
             // `config.empty_turn_nudge_max` so a perpetually-stalling model

@@ -34,13 +34,13 @@ impl SlashCommand for ModelCommand {
         let provider = ctx.app.agent.provider();
         if trimmed.is_empty() || trimmed == "--picker" {
             // Refresh-on-open (#316): re-discover the provider's models so the
-            // list reflects the server right now (e.g. an Ollama model pulled
-            // or loaded since startup). Best-effort — on error we still show the
+            // list reflects the server right now (e.g. a local model loaded
+            // since startup). Best-effort — on error we still show the
             // last-known list. For providers with a static catalog this is a
             // cheap no-op (the trait default returns `list_models()`).
             let _ = provider.refresh_models().await;
             // The active model's capacity may have just been resolved (e.g. a
-            // now-loaded Ollama model reporting its real context window) — keep
+            // now-loaded local model reporting its real context window) — keep
             // the status bar honest.
             let active = ctx.app.agent.active_model();
             ctx.app

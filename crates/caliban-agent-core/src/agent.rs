@@ -106,7 +106,7 @@ pub struct AgentConfig {
     /// Maximum number of consecutive **degenerate** turns the loop will nudge
     /// before letting the run end. A degenerate turn is one that consumed
     /// output tokens yet produced no tool call and no actionable text — e.g.
-    /// an Ollama reasoning model (gemma-family) that emits only a thinking
+    /// a local reasoning model (gemma-family) that emits only a thinking
     /// block and then stops, which would otherwise end the run as a silent
     /// "success" with no work done. On such a turn the loop injects one neutral
     /// nudge and takes another turn; the streak counter resets the moment a

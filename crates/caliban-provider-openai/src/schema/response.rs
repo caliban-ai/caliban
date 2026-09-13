@@ -42,9 +42,9 @@ pub struct NativeResponseMessage {
     /// silently dropped on non-streaming responses; consumers may surface it
     /// as a Thinking block in future.
     ///
-    /// The `reasoning` alias captures MLX-based servers (`mlx_lm.server`, and
-    /// Ollama's Apple-Silicon MLX engine), which use `reasoning` rather than the
-    /// `reasoning_content` field llama.cpp uses (see ADR 0056).
+    /// The `reasoning` alias captures MLX-based servers (e.g. `mlx_lm.server`),
+    /// which use `reasoning` rather than the `reasoning_content` field llama.cpp
+    /// uses (see ADR 0056).
     #[serde(default, alias = "reasoning", skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Tool calls issued by the model.

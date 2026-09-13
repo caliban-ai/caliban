@@ -73,9 +73,13 @@ Override the API key env var or base URL for a provider in `caliban.toml`:
 api_key_env = "OPENAI_API_KEY_STAGING"
 base_url = "https://oai-staging.example.com/v1"
 
-[provider.ollama]
-base_url = "http://gpu-server.local:11434"
+[provider.google]
+base_url = "https://gemini-proxy.example.com/v1beta"
 ```
+
+For a local model, point `[provider.openai].base_url` at your engine's `/v1`
+endpoint (e.g. `http://gpu-server.local:9292/v1`) — no API key required. See
+[Local Inference](./local-inference.md).
 
 ## Fallback chains
 

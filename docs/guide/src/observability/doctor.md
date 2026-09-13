@@ -23,7 +23,6 @@ caliban doctor — 11 check(s):
   ✓ skills — 3 skill(s) loaded (scanned: /home/user/.claude/skills, ./.claude/skills)
   ✓ claudemd — 2 CLAUDE.md ancestor(s) found
   ✓ workspace — /home/user/repo (writable)
-  ! ollama — OLLAMA_BASE_URL unset (no probe attempted; use --deep to ping localhost)
   ✓ openai — OPENAI_BASE_URL unset (no probe attempted; use --deep to ping api.openai.com)
   ✓ anthropic — https://api.anthropic.com reachable (45 model(s))
   ✓ google — GEMINI_BASE_URL unset (no probe attempted; use --deep to ping generativelanguage.googleapis.com)
@@ -40,8 +39,7 @@ caliban doctor — 11 check(s):
 | `skills` | Skill roots are scanned and skills load without errors |
 | `claudemd` | At least one `CLAUDE.md` file is found in the workspace ancestry |
 | `workspace` | The current working directory is accessible and writable |
-| `ollama` | Ollama endpoint reachability (see below) |
-| `openai` | OpenAI / OpenAI-compatible endpoint reachability |
+| `openai` | OpenAI / OpenAI-compatible endpoint reachability (incl. local `base_url` servers) |
 | `anthropic` | Anthropic endpoint reachability |
 | `google` | Google Gemini endpoint reachability |
 
@@ -50,15 +48,15 @@ caliban doctor — 11 check(s):
 Provider rows always appear in the output so you can see at a glance which providers are configured. The behavior depends on whether `--deep` is passed:
 
 **Without `--deep`:**
-- If the provider's base-URL env var is set, caliban probes the endpoint (Ollama: `/api/tags`; others: `/v1/models`).
+- If the provider's base-URL env var is set, caliban probes the endpoint (`/v1/models`).
 - If the env var is unset, the row passes with a note that no probe was attempted. Use `--deep` to ping the default endpoint.
 
 **With `--deep`:**
 - Caliban pings the configured (or default) endpoint unconditionally. This costs one real API call per provider that has an API key configured.
 - If `--model <MODEL>` was passed on the same invocation and a provider's model listing is available, the requested model is verified to be present. A missing model is reported as a `Fail` row.
 
-```admonish note title="Ollama without an API key"
-Ollama does not require an API key. With `--deep`, caliban always probes `http://localhost:11434` (or `OLLAMA_BASE_URL` if set) regardless of key configuration.
+```admonish note title="Local endpoints without an API key"
+A local OpenAI-compatible server needs no API key ([ADR 0056](../adr/README.md)). Set `OPENAI_BASE_URL` to your endpoint; with `--deep`, caliban probes it regardless of key configuration.
 ```
 
 ## Exit codes

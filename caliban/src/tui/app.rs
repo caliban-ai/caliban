@@ -487,7 +487,7 @@ impl App {
         // The sync `capabilities` read above uses the discovery cache seed (or
         // the bootstrap default on a cold cache). Kick a one-shot background
         // discovery refresh so the capacity reflects the server's real context
-        // window even on first launch (#316) — e.g. an Ollama model reporting
+        // window even on first launch (#316) — e.g. a local model reporting
         // 256K instead of the conservative default. Cheap no-op for providers
         // with a static catalog. Guarded so non-async test contexts don't try
         // to spawn without a runtime.

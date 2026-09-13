@@ -247,7 +247,7 @@ async fn stage_c_surrenders_after_cap() {
 // ---------------------------------------------------------------------------
 // Default-off halt: with recovery disabled (the default), a `MaxTokens` turn
 // must end the run in exactly one turn and surface `StopCondition::MaxTokensExhausted`.
-// This is the regression test for the LMStudio + Ollama probe finding F6.
+// This is the regression test for probe finding F6 (see docs/evaluation/probes).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

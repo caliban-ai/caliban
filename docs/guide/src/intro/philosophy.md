@@ -13,7 +13,7 @@ first-class and auditable. Nothing is hardwired to a service the operator does n
 
 ## Provider-agnostic
 
-No SDK lock-in. Anthropic Claude, OpenAI, Google Gemini, and local Ollama all speak the same
+No SDK lock-in. Anthropic Claude, OpenAI, Google Gemini, and local OpenAI-compatible servers all speak the same
 internal representation inside Caliban. Cloud transports (AWS Bedrock, Google Vertex, Azure
 OpenAI) are cargo-feature-gated and additive — the core binary has no mandatory cloud
 dependency. Switching providers is a flag, not a rewrite.

@@ -1,7 +1,7 @@
 //! Model discovery from an `OpenAI`-compatible server's `/v1/models` response.
 //!
 //! Recovers the model list and (where the server exposes it) the loaded context
-//! window that the removed Ollama provider used to detect — but through the
+//! window that the removed bespoke local provider used to detect — but through the
 //! `OpenAI` adapter, so it works for any `OpenAI`-compatible local engine (ADR 0056).
 //!
 //! Observed shapes (`scripts/probe-discovery-endpoints.sh`, 2026-09-12):

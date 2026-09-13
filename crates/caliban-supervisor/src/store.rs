@@ -375,10 +375,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AgentStore::new(dir.path().join("agents"));
         let mut rec = fake_record("prov");
-        rec.spec.provider = Some("ollama".into());
+        rec.spec.provider = Some("openai".into());
         store.write_manifest(&rec).unwrap();
         let loaded = store.load_manifest("prov").unwrap().unwrap();
-        assert_eq!(loaded.spec.provider.as_deref(), Some("ollama"));
+        assert_eq!(loaded.spec.provider.as_deref(), Some("openai"));
     }
 
     #[test]

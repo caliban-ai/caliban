@@ -224,10 +224,6 @@ stall).
 | `stream_idle_timeout_ms` | `integer` (≥ 0) | `90000` | Silence (ms) tolerated **after** the first output token before aborting a stalled stream. `0` disables the watchdog entirely. |
 | `stream_prefill_timeout_ms` | `integer` (≥ 0) | `300000` | Silence (ms) tolerated **before** the first output token (slow local-model prefill). `0` falls back to the idle window. Frontier models prefill in milliseconds and never approach this. |
 
-For ollama, both budgets can also be overridden per-run via environment
-variables (see the [environment variables reference](env-vars.md)) so eval and
-emulated runs can widen the window without editing settings.
-
 ---
 
 ## Enterprise (Managed Scope)

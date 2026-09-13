@@ -5,13 +5,12 @@ local inference server — not through a dedicated integration. Any server that
 speaks the OpenAI `/v1/chat/completions` API works: llama.cpp's `llama serve`,
 `mlx_lm.server`, LM Studio, `llama-swap`, vLLM, and others.
 
-```admonish warning title="The built-in `ollama` provider is deprecated"
-The bespoke `ollama` provider is deprecated ([ADR 0056](../adr/README.md)) and
-will be removed in a future release. Reach local models through the OpenAI
-provider + a `base_url` instead, as described below. This is the same seam that
-reaches OpenAI itself — no dedicated provider, so any OpenAI-compatible local
-engine is one config line away. Selecting `--provider ollama` now prints a
-one-time deprecation notice; `caliban doctor` flags it too.
+```admonish info title="The built-in `ollama` provider was removed"
+The bespoke `ollama` provider was removed ([ADR 0056](../adr/README.md)). Reach
+local models through the OpenAI provider + a `base_url` instead, as described
+below. This is the same seam that reaches OpenAI itself — no dedicated provider,
+so any OpenAI-compatible local engine is one config line away. `--provider
+ollama` is no longer valid; use `--provider openai` with a `base_url`.
 ```
 
 ## Why this instead of a dedicated provider
