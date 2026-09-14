@@ -20,6 +20,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod error;
+pub mod fork;
 pub mod hook;
 pub mod manifest;
 pub mod prune;
@@ -28,6 +29,7 @@ pub mod restore;
 pub mod store;
 
 pub use error::{CheckpointError, Result};
+pub use fork::fork_session;
 pub use hook::CheckpointHook;
 pub use manifest::{Manifest, ManifestEntry, ManifestKind, PromptSummary};
 pub use recorder::CheckpointRecorder;

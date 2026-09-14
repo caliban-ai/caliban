@@ -887,7 +887,11 @@ pub(crate) fn rewind_lines(app: &App) -> Vec<Line<'static>> {
     out.push(Line::raw(""));
     out.push(Line::styled(
         "  ↑/↓ (or j/k) select   Actions: [c] code  [v] conversation  [b] both  \
-         [s] summarize→  [S] summarize←",
+         [s] summarize→  [S] summarize←  [f] fork",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out.push(Line::styled(
+        "  ℹ [f] fork branches a NEW session at the checkpoint (current one untouched).",
         Style::default().add_modifier(Modifier::DIM),
     ));
     out.push(Line::styled(
