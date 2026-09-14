@@ -1,8 +1,9 @@
 # Project Status
 
-Caliban v0.7.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
+Caliban v0.12.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
 core agent loop, TUI, headless mode, sessions, permissions, tools, MCP, sub-agents, memory,
-sandbox, and telemetry are all shipped. A number of parity gaps with Claude Code remain.
+sandbox, telemetry, and the driveable server surfaces are all shipped. A number of parity
+gaps with Claude Code remain. Per-release detail is in the [Changelog](../changelog.md).
 
 ## What is shipped
 
@@ -15,14 +16,18 @@ The table below summarizes the major shipped areas. All items marked ✅ are ava
 | Headless `--print` / `stream-json` I/O protocol | ✅ |
 | Persistent named sessions (`--session`, `--resume`, `--continue`) | ✅ |
 | Permissions: rule grammar, six modes, `caliban perms` CLI, audit log | ✅ |
-| Built-in tools (Read, Write, Edit, MultiEdit, Glob, Grep, Bash, BashBg, WebFetch, WebSearch, NotebookEdit, TodoWrite, AgentTool, Memory, Plan) | ✅ |
+| Built-in tools (Read, Write, Edit, MultiEdit, Glob, Grep, Bash, BashOutput, KillShell, WebFetch, WebSearch, NotebookEdit, TodoWrite, AgentTool, Enter/ExitPlanMode, Read/WriteMemoryTopic, ToolSearch, Skill) | ✅ |
+| Image / vision input (engine built in `caliban-images`; not yet wired into the binary) | 🟡 |
 | MCP client (stdio + HTTP, OAuth, elicitation, per-server permissions) | ✅ |
 | Sub-agents (in-process, background fleet via `caliband`, worktree isolation) | ✅ |
 | Memory tiers: `CLAUDE.md` ancestry, `@`-imports, auto-memory | ✅ |
 | Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ |
 | Model router v2 (declarative routes, fallback chains, circuit breakers, capability filters) | ✅ |
-| Providers: Anthropic, OpenAI, Google Gemini, Bedrock, Vertex (+ local OpenAI-compatible servers) | ✅ |
-| Checkpoints + `/rewind` | ✅ |
+| Providers in the binary: Anthropic, OpenAI, Google Gemini (+ local OpenAI-compatible servers); Bedrock/Vertex/Azure adapters are library-only | ✅ |
+| Checkpoints + `/rewind`, including forking a new session from a checkpoint | ✅ |
+| Driveable server surfaces: `caliban mcp serve`, `caliban acp serve`, `caliban http serve` | ✅ |
+| `caliband` graceful drain + resume of daemon agents from a persisted session (a supervisor control-protocol command for orchestrators; there is no `caliban agents` subcommand for it) | ✅ |
+| Prebuilt macOS arm64 (`aarch64-apple-darwin`) binary on tagged releases | ✅ |
 | Plugins, hooks, skills | ✅ |
 | OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ |
 | OpenTelemetry + per-request cost tracking | ✅ |

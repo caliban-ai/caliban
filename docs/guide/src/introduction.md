@@ -28,10 +28,11 @@ and configure it for a team or homelab; it describes behavior and workflows, not
 | **Providers & Models** | [Supported providers](./providers/overview.md), API key setup, model selection, and the [model router](./providers/router.md) |
 | **Configuration** | [Settings layering](./configuration/settings-layering.md) across four scopes, file locations, and the full settings reference |
 | **Permissions** | [Core concepts](./permissions/concepts.md), the pattern grammar, permission modes, and rule management |
+| **Driving Caliban** | Steering caliban from another program over the [MCP server, ACP, or HTTP](./driving/overview.md) surfaces |
 | **Reference** | [CLI flags](./reference/cli.md), settings schema, slash command index, environment variables, and file paths |
 
 ```admonish note title="Project status"
-Caliban v0.7.0 is a pre-1.0 release. The core feature set is daily-usable on `main` under
+Caliban v0.12.0 is a pre-1.0 release. The core feature set is daily-usable on `main` under
 [AGPL-3.0](./intro/status.md). See [Project Status](./intro/status.md) for what is
 shipped versus planned.
 ```
