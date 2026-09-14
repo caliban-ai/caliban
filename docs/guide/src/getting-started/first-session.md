@@ -57,8 +57,14 @@ Every conversation can be saved to a named session and resumed later:
 # First run — creates a session called "research"
 caliban --session research "Read README.md and summarise it"
 
-# Later — resume the same conversation
-caliban --resume research
+# Later — continue the same conversation interactively
+caliban --session research
+
+# Or ask a one-shot follow-up in the same session
+caliban --resume research -p "What did we conclude?"
 ```
+
+In the interactive TUI, open a saved session with `--session <name>`. `--resume` and
+`--continue` apply to prompt runs (`-p` or a prompt argument), not the TUI.
 
 Sessions are stored on disk under the platform's data directory (for example `~/.local/share/caliban/sessions/` on Linux). See [Sessions & Persistence](../interactive/sessions.md) for details.

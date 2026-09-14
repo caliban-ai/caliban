@@ -37,7 +37,8 @@ A custom prefix segment can be prepended by configuring a shell script in settin
 | `Ctrl+S` | Cycle history scope → project → all projects |
 | `Ctrl+G` | Open prompt in `$VISUAL` / `$EDITOR` / `vi` |
 | `Ctrl+O` | Open transcript viewer overlay |
-| `Ctrl+B` | Launch or follow a background bash process |
+| `Ctrl+B` | While a turn is running: hand it off to the `caliband` supervisor as a background agent and cancel the foreground turn |
+| `Ctrl+Shift+B` | Drop the bypass latch set by `--allow-dangerously-skip-permissions` (reverts `bypassPermissions` to `default`) |
 | `Shift+Tab` | Cycle permission mode chip |
 | `Esc` | Close overlay / cancel input |
 | `Esc Esc` | Open checkpoint rewind overlay (on empty input) |
@@ -82,9 +83,11 @@ Vim editing mode is listed as a gap in the [parity matrix](../appendix/parity.md
 | `q` / `Esc` | Close the viewer |
 | `?` | Show key reference |
 
-## Following background bash (Ctrl+B)
+## Backgrounding a running turn (Ctrl+B)
 
-Background bash lets caliban run a shell command in the background while you continue interacting with the agent. Press `Ctrl+B` inside the TUI to open or follow the background bash output panel. The agent can launch background bash tasks via `Bash{background:true}`; the TUI surfaces their output through the same panel.
+Press `Ctrl+B` while a turn is in flight to hand that work to the `caliband` supervisor daemon (ADR 0037). The foreground turn is cancelled and the work continues as a background agent, so you can keep using the TUI. Manage it with `caliban agents list` / `caliban agents attach <id>`. See [The Background Fleet](../subagents/background-fleet.md). `Ctrl+B` does nothing when no turn is running.
+
+Background shell commands started by the model (`Bash` with `background: true`) are a separate mechanism. There is no TUI panel for them: the model reads their output with the `BashOutput` tool and stops them with `KillShell`. See [Built-in Tools](../tools/builtin.md).
 
 ## Reverse history search
 

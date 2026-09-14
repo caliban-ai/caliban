@@ -8,7 +8,7 @@ Invoking `caliban` with no prompt on a TTY launches the ratatui-based terminal i
 caliban
 ```
 
-Caliban detects that stdin is a TTY and enters the TUI. If you prefer to start from a specific session, pass `--resume <name>` or `--continue` (resumes the most recently updated session).
+Caliban detects that stdin is a TTY and enters the TUI. To start from a saved session, pass `--session <name>`. It loads the session if it exists and creates it if not. `--resume` and `--continue` apply only to prompt runs (`-p` or a prompt argument). The TUI does not read them yet.
 
 ## Basic flow
 
@@ -51,12 +51,14 @@ When the model wants to invoke a tool (read a file, run a shell command, etc.) c
   ┌─ Permission required ────────────────────────────────┐
   │  Bash: git commit -am "fix typo"                     │
   │                                                      │
-  │  [y] Allow once   [Y] Always allow                   │
-  │  [n] Deny once    [N] Always deny                    │
+  │  [y] Allow once                                      │
+  │  [n] Deny once                                       │
+  │  [a] Always allow (opens scope picker)               │
+  │  [d] Always deny  (opens scope picker)               │
   └──────────────────────────────────────────────────────┘
 ```
 
-Pressing **y** or **n** handles the call once. Pressing **Y** or **N** opens a sub-prompt that lets you write a permanent allow or deny rule to a config scope, so you are not asked again for the same pattern.
+Pressing **y** or **n** handles the call once. **Esc** also denies once. Pressing **a** or **d** opens a sub-prompt that writes a permanent allow or deny rule to a config scope, so you are not asked again for the same pattern. You can also move between the rows with **↑/↓** and confirm with **Enter**.
 
 ## Cycling permission modes
 
