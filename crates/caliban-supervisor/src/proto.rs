@@ -131,6 +131,12 @@ pub struct SpawnSpec {
     /// means the workspace root (single-source back-compat). (#281)
     #[serde(default)]
     pub source: Option<String>,
+    /// Resume from a prior agent's persisted session (#651, ADR 0057). When
+    /// `Some`, the worker loads `session.json` from this directory (a resume
+    /// reference returned by a `Drain`) and continues that conversation instead
+    /// of replaying `initial_prompt`. `None` starts fresh (the default).
+    #[serde(default)]
+    pub resume_session: Option<PathBuf>,
 }
 
 fn true_default() -> bool {
@@ -148,6 +154,7 @@ mod tests {
         assert_eq!(spec.source, None);
         let with_src = SpawnSpec {
             source: Some("gonzalo".into()),
+            resume_session: None,
             ..spec
         };
         let json = serde_json::to_string(&with_src).unwrap();

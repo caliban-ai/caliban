@@ -29,6 +29,7 @@ async fn worker_runs_and_writes_ndjson() {
             interactive: false,
             inherited_hooks_config: None,
             source: None,
+            resume_session: None,
         },
     };
     store.write_manifest(&rec).unwrap();
@@ -82,6 +83,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
             interactive: false,
             inherited_hooks_config: None,
             source: None,
+            resume_session: None,
         },
     };
     store.write_manifest(&rec).unwrap();

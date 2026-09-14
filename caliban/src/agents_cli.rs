@@ -342,6 +342,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 interactive: *interactive,
                 inherited_hooks_config: None,
                 source: None,
+                resume_session: None,
             };
             match client.spawn(spec).await {
                 Ok((id, endpoint)) => {
@@ -532,6 +533,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         interactive: false,
         inherited_hooks_config: None,
         source: None,
+        resume_session: None,
     };
     match client.spawn(spec).await {
         Ok((id, endpoint)) => {
