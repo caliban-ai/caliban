@@ -22,13 +22,13 @@ between releases, where every commit on `main` otherwise reports the same
 semver:
 
 ```text
-caliban 0.7.0 (d364def, 2026-07-03)
+caliban 0.12.0 (a97054d, 2026-09-13)
 ```
 
 The parentheses carry the short commit SHA and that commit's date; an
-uncommitted working tree appends `-dirty` (`d364def-dirty`). Builds with no git
+uncommitted working tree appends `-dirty` (`a97054d-dirty`). Builds with no git
 metadata (release tarballs, `cargo install` from crates.io) report just the
-bare semver, `caliban 0.7.0`.
+bare semver, `caliban 0.12.0`.
 
 ```admonish note title="Boolean flags accept an optional `=BOOL`"
 Every boolean flag below can be written bare (`--no-mcp`) or with an explicit
@@ -55,7 +55,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-p`, `--print [PROMPT]` | — | Headless mode. Drives the agent non-interactively. Accepts an optional prompt; otherwise reads from `--prompt`, the positional `PROMPT`, or stdin (capped at 10 MiB). |
-| `--output-format <FMT>` | `text` | Stream output format. Values: `text`, `json`, `stream-json`. |
+| `--output-format <FMT>` | — (`text` when headless) | Stream output format. Values: `text`, `json`, `stream-json`. Passing it at all selects headless mode. |
 | `--input-format <FMT>` | `text` | Stdin format. Values: `text`, `stream-json`. |
 | `--no-auto-print` | `false` | Suppress the automatic headless dispatch when stdout is piped or stdin is non-TTY. Explicit `--print` / `--output-format` always override this. |
 | `--max-budget-usd <USD>` | — | Abort the run (exit 137) once cumulative cost exceeds this value in USD. Unknown model/provider pairs contribute $0 and emit a warning. |
@@ -73,9 +73,9 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-c`, `--continue` | `false` | Resume the most recently updated session. |
-| `-r`, `--resume <NAME>` | — | Resume a named session. |
-| `--session <NAME>` | — | Load or create a named session; persists to the configured sessions directory. |
+| `-c`, `--continue` | `false` | Resume the most recently updated session. Prompt runs only (`-p` or a prompt argument); the TUI ignores it. Conflicts with `--resume`. |
+| `-r`, `--resume <NAME>` | — | Resume an existing named session (exit 66 if missing). Prompt runs only; the TUI ignores it. |
+| `--session <NAME>` | — | Load or create a named session; persists to the configured sessions directory. Works in the TUI and prompt runs. |
 | `--no-save` | `false` | Don't write the session back to disk after the run. |
 | `--sessions-dir <DIR>` | platform default | Override the sessions directory. |
 
@@ -91,6 +91,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | `--max-tokens <N>` | `8192` | Per-turn output token limit (must be ≥ 1). |
 | `--max-turns <N>` | `50` | Maximum agent loop iterations. |
 | `--temperature <F>` | — | Sampling temperature in `[0.0, 2.0]`. |
+| `--max-tokens-recovery[=BOOL]` | `true` | Recover from a `max_tokens` stop by continuing the turn. Precedence: this flag, then the `max_tokens_recovery` setting, then the default. |
 
 **Provider defaults:**
 
@@ -193,7 +194,7 @@ See [Permission Modes](../permissions/modes.md) and [Managing Rules](../permissi
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--bg <TASK>` | — | Spawn a background sub-agent with the given task and return immediately. Equivalent to `caliban agents spawn --bg --prompt <TASK>` (ADR 0037). |
+| `--bg <TASK>` | — | Spawn a background sub-agent with the given task and return immediately. Equivalent to `caliban agents spawn --prompt <TASK>` (ADR 0037). |
 
 ---
 
@@ -220,6 +221,18 @@ Inspect and migrate settings (ADR 0026).
 
 ---
 
+### `caliban mcp serve` · `caliban acp serve` · `caliban http serve`
+
+Expose caliban as a driveable server (ADR 0055). See [Driving Caliban](../driving/overview.md).
+
+| Subcommand | Description |
+|------------|-------------|
+| `mcp serve` | Serve caliban as an MCP server over stdio (poll-based tools). See [MCP Server](../driving/mcp-server.md). |
+| `acp serve` | Serve caliban as an Agent Client Protocol agent over stdio (JSON-RPC) for editors. See [ACP](../driving/acp.md). |
+| `http serve [--addr <ADDR>]` | Serve caliban over HTTP/JSON. A non-loopback `--addr` requires `CALIBAN_DRIVE_TOKEN` (fail closed). See [HTTP Serve](../driving/http-serve.md). |
+
+---
+
 ### `caliban settings`
 
 Import and print settings files.
@@ -241,7 +254,7 @@ Manage permission rules across all config scopes. See [Managing Rules](../permis
 | `perms test <TOOL> [INPUT_JSON]` | Test whether a tool call would be allowed, denied, or asked. |
 | `perms explain <TOOL> [INPUT_JSON]` | Show which rule first matches a tool call. |
 | `perms add <PATTERN> <ACTION> [--scope <SCOPE>] [--comment <TEXT>] [--reason <TEXT>]` | Add a permission rule. Action: `allow`, `ask`, or `deny`. Default scope: `project`. |
-| `perms remove [--index <N>] [--pattern <PAT>] [--scope <SCOPE>]` | Remove a permission rule by ordinal or pattern. Default scope: `project`. |
+| `perms remove --pattern <PAT> [--scope <SCOPE>]` | Remove a permission rule by pattern (`--index` is rejected in Permissions v2). Default scope: `project`. |
 | `perms import --from <PATH> [--scope <SCOPE>] [--dry-run]` | Import rules from a foreign config (Claude Code JSON, legacy caliban TOML). Default scope: `user`. |
 | `perms export [--scope <SCOPE>] [--format toml\|json]` | Export permission rules to stdout. Default format: `toml`. |
 | `perms audit [--since <ISO>] [--tool <NAME>] [--action <ACTION>] [--head <N>]` | Show the permission-decision audit log. |
@@ -256,10 +269,10 @@ List, attach, and manage background sub-agents (ADR 0037).
 | Sub-subcommand | Description |
 |----------------|-------------|
 | `agents list` | List registered background agents. |
-| `agents spawn --prompt <TEXT> [--label <LABEL>]` | Spawn a new background agent. |
-| `agents attach <ID>` | Stream a running agent's transcript live (Ctrl+D detaches). |
-| `agents logs <ID>` | Print the agent's session log. |
-| `agents kill <ID>` | Terminate an agent (SIGTERM → SIGKILL after grace period). |
+| `agents spawn --prompt <TEXT> [--label <LABEL>] [--interactive] [--provider <P>]` | Spawn a new background agent. `--interactive` keeps it waiting for operator input. |
+| `agents attach <ID>` | Stream a running agent's transcript live and forward typed input (Ctrl+C detaches). |
+| `agents logs <ID>` | Print the agent's `stdout.ndjson` transcript. |
+| `agents kill <ID>` | Terminate an agent (SIGTERM). |
 | `agents respawn <ID>` | Restart an agent with the same spawn spec. |
 | `agents rm <ID> [--force]` | Remove an agent from the registry (must be stopped unless `--force`). |
 
@@ -293,7 +306,7 @@ Router diagnostics (ADR 0038).
 
 | Sub-subcommand | Description |
 |----------------|-------------|
-| `router debug` | Print the candidate list the router would resolve for a synthetic request, plus breaker state and effort knobs. |
+| `router debug [--purpose <P>] [--has-vision] [--has-tools] [--has-thinking] [--effort <E>]` | Print the candidate list the router would resolve for a synthetic request, plus breaker state and effort knobs. `--purpose` defaults to `main_loop`; the `--has-*` flags pretend the request carries images, tools, or a thinking budget. |
 
 ---
 

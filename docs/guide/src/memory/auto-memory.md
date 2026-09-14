@@ -92,30 +92,27 @@ classifier — the model is best positioned to judge what to save.
 Both tools are sandboxed to the memory directory — path traversal attempts are
 rejected at the tool level.
 
-`WriteMemoryTopic` performs an atomic write:
-
-1. Write topic body + frontmatter to `<slug>.md.tmp`.
-2. Rename to `<slug>.md` (atomic on the same filesystem).
-3. Rewrite `MEMORY.md` with an updated index line for the slug (same
-   tmp-then-rename approach).
-
-A crash between steps 2 and 3 leaves an orphan topic file. Run
-`/memory rebuild-index` to repair it.
+`WriteMemoryTopic` writes the topic file atomically (tmp file, then rename).
+The filesystem backend then regenerates `MEMORY.md` from the topic files on
+disk, on every write and every delete. The index therefore cannot drift from
+the topic files, and no manual rebuild step exists.
 
 ## Managing memory
 
-| Command                      | Effect                                              |
-|------------------------------|-----------------------------------------------------|
-| `/memory`                    | Show active tiers, paths, and token counts          |
-| `/memory rm <slug>`          | Delete a topic file and remove its index line       |
-| `/memory rebuild-index`      | Rebuild `MEMORY.md` from the topic files on disk    |
+| Command                          | Effect                                              |
+|----------------------------------|-----------------------------------------------------|
+| `/memory`                        | Show active tiers and token counts against the budget |
+| `/memory list`                   | List auto-memory topics                             |
+| `/memory show <slug>`            | Print a topic                                       |
+| `/memory edit <slug>`            | Open a topic in your editor                         |
+| `/memory delete <slug> --force`  | Delete a topic (the index is regenerated). Without `--force` it only previews. `rm` is an alias. |
 
 There is no automatic pruning. Memories persist until manually removed.
 
 ```admonish warning title="MEMORY.md growth"
-The index grows without bound on long-running projects. Periodically review
-it with `/memory` and remove stale topics with `/memory rm <slug>` to keep it
-under the 200-line / 25 KB splice limit.
+The index grows with every topic on long-running projects. Periodically review
+it with `/memory list` and remove stale topics with `/memory delete <slug> --force`
+to keep it under the 200-line / 25 KB splice limit.
 ```
 
 ## Cross-references between topics
@@ -128,6 +125,6 @@ with the referenced slug.
 ## Disable for CI
 
 Set `CALIBAN_DISABLE_AUTO_MEMORY=1` to drop the auto-memory tier from the
-splice and suppress the auto-memory skill. This guarantees identical system
-prompts regardless of on-disk memory state. `--bare` sets the same flag
-automatically.
+splice and suppress the auto-memory skill and tools. The system prompt then no
+longer depends on on-disk memory state. `--bare` skips the entire memory prefix,
+including `CLAUDE.md`.

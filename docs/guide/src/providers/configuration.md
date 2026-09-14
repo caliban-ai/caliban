@@ -26,7 +26,7 @@ Each provider reads its key from a well-known environment variable:
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION` |
 | OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT` |
 | Google | `GEMINI_API_KEY` | `GOOGLE_GEMINI_API_KEY` (alias), `GEMINI_BASE_URL`, `GEMINI_API_VERSION` |
-| Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_RESOURCE` | `AZURE_OPENAI_API_VERSION` (default: `2024-10-21`) |
+| Azure OpenAI (library only, see below) | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_RESOURCE` | `AZURE_OPENAI_API_VERSION` (default: `2024-10-21`) |
 
 Set the variable in your shell profile or pass it inline:
 
@@ -84,9 +84,16 @@ Caliban caches the returned key in memory for `refreshIntervalMs` (default 5 min
 A one-liner shell wrapper around `security find-generic-password` (macOS) or `secret-tool lookup` (Linux/GNOME) makes `api_key_helper` work with the OS keychain without storing the key in any file.
 ```
 
-## Bedrock and Vertex configuration
+## Bedrock and Vertex (library only)
 
-AWS Bedrock and Google Vertex are configured through the [model router](./router.md) using `[provider.bedrock]` and `[provider.vertex]` blocks in `caliban.toml`. Authentication follows each platform's standard credential chain:
+```admonish warning title="Not reachable from the caliban binary"
+The binary and its model router accept only `anthropic`, `openai`, and `google`.
+A `[provider.bedrock]` or `[provider.vertex]` block in `caliban.toml` is rejected at
+startup. The notes below apply when you embed `caliban-provider-bedrock` /
+`caliban-provider-vertex` as libraries.
+```
+
+When used as libraries, authentication follows each platform's standard credential chain:
 
 - **Bedrock** — AWS credential chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, instance profiles, `~/.aws/credentials`). A background task refreshes credentials on a configurable interval (default 5 minutes).
 - **Vertex (Anthropic)** — Google Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`).
