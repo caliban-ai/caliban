@@ -16,17 +16,17 @@ routing, memory, skills, and prompt context.
 
 > **Project status.** Daily-usable on `main`. The core agent loop, persistent
 > sessions, ratatui TUI, headless `--print` mode, sub-agents, MCP, sandbox,
-> permissions, checkpoints, auto-memory, image input, and a multi-tier
-> settings system are all shipped. Many small parity gaps with Claude Code
+> permissions, checkpoints, auto-memory, driveable MCP/ACP/HTTP server
+> surfaces, and a multi-tier settings system are all shipped. Many small parity gaps with Claude Code
 > remain — see [`docs/evaluation/competitors/claude-code/parity-gap-matrix.md`](docs/evaluation/competitors/claude-code/parity-gap-matrix.md) for
 > the scoreboard and the [caliban-ai Kanban board](https://github.com/orgs/caliban-ai/projects/1)
-> for the actionable backlog. Private repo, designed to be open-sourced.
+> for the actionable backlog.
 
 ## Why
 
-- **Provider-agnostic.** No SDK lock-in. Anthropic Claude (direct, AWS
-  Bedrock, Google Vertex), OpenAI (direct, Azure), Google Gemini (AI
-  Studio, Vertex), and local Ollama all speak the same internal IR.
+- **Provider-agnostic.** No SDK lock-in. Anthropic Claude, OpenAI, Google
+  Gemini, and local OpenAI-compatible servers (llama.cpp, mlx-lm, LM Studio)
+  all speak the same internal IR.
 - **Operator control.** You decide what model handles what task, what
   context goes into the prompt, and where memory lives. Routing is
   declarative; settings layer at four scopes; permissions and hooks are
@@ -48,9 +48,11 @@ cargo install caliban --locked                              # -> ~/.cargo/bin/ca
 cargo install caliban-supervisor --bin caliband --locked    # optional background-fleet daemon
 ```
 
-Requires Rust 1.95 or newer. There are no pre-built binary downloads yet, so
-this compiles from source; the [container image](#container-image) is the
-no-build alternative. To build from a git checkout instead, see
+Requires Rust 1.95 or newer; this compiles from source. For Apple Silicon, each
+tagged [GitHub Release](https://github.com/caliban-ai/caliban/releases) also
+attaches a prebuilt `caliban-aarch64-apple-darwin.tar.gz` (with a `.sha256`),
+and the [container image](#container-image) is the no-build alternative
+elsewhere. To build from a git checkout instead, see
 [Building](#building) below, or the guide's
 [Installation & Building](docs/guide/src/getting-started/installation.md) page
 for the full walkthrough.
@@ -81,9 +83,8 @@ cargo build --release --bin caliban            # release binary at target/releas
 ```
 
 For diagnosing TUI issues, run with `--debug` (or set `CALIBAN_DEBUG=1`).
-caliban appends events and draws to a file under the platform's cache
-directory (e.g. `~/.cache/caliban/debug.log` on Linux,
-`~/Library/Caches/caliban/debug.log` on macOS).
+caliban appends events and draws to `$XDG_CACHE_HOME/caliban/debug.log`
+(default `~/.cache/caliban/debug.log` on every platform).
 
 ### Test coverage
 
@@ -147,23 +148,24 @@ caliban --session research "Read README.md"
 # Subsequent invocations — conversation continues
 caliban --session research "Now look at Cargo.toml"
 
-# Resume the last session interactively
-caliban --continue
+# Reopen it in the interactive TUI
+caliban --session research
 
-# Resume a specific session by name
-caliban --resume research
+# Continue the most recent session with a one-shot prompt
+caliban --continue -p "where were we?"
+
+# Resume a specific session by name with a prompt
+caliban --resume research "and the tests?"
 
 # One-off run without saving back to the session
 caliban --session research --no-save "what was the first thing I asked?"
 ```
 
-Sessions are saved as pretty-printed JSON under the per-OS session
-directory (override with `--sessions-dir`):
-
-- **Linux:** `$XDG_DATA_HOME/caliban/sessions/<name>.json`
-  (default `~/.local/share/caliban/sessions/<name>.json`)
-- **macOS:** `~/Library/Application Support/caliban/sessions/<name>.json`
-- **Windows:** `%LOCALAPPDATA%\caliban\sessions\<name>.json`
+`--continue` and `--resume` apply to prompt runs; the TUI opens a session via
+`--session`. Sessions are saved as pretty-printed JSON under
+`$XDG_DATA_HOME/caliban/sessions/<name>.json` (default
+`~/.local/share/caliban/sessions/`, on every platform; override with
+`--sessions-dir`).
 
 ### Interactive TUI
 
@@ -238,15 +240,20 @@ Set `ANTHROPIC_API_KEY` before running. Each provider crate has its own
 
 ## Provider matrix
 
+The `caliban` binary (CLI and model router) supports **`anthropic`,
+`openai`, and `google`**. Local models run through `openai` with a `base_url`
+(the bespoke Ollama provider was removed in 0.12.0, ADR 0056).
+
+At the **library** level, the provider crates also carry cloud transports:
+
 | Schema family | Direct | AWS Bedrock | Google Vertex | Azure |
 |---|---|---|---|---|
-| Anthropic Claude | ✅ default | ✅ `bedrock` feature | ✅ `vertex` feature | — |
-| OpenAI | ✅ default | — | — | ✅ `azure` feature |
-| Gemini | ✅ default (AI Studio) | — | ✅ `vertex` feature | — |
-| Ollama (native `/api/chat`, local) — **deprecated, ADR 0056** | ✅ default | — | — | — |
+| Anthropic Claude | ✅ binary + library | 📚 library (`bedrock` feature) | 📚 library (`vertex` feature) | — |
+| OpenAI | ✅ binary + library | — | — | 📚 library (`azure` feature) |
+| Gemini | ✅ binary + library (AI Studio) | — | 📚 library (`vertex` feature) | — |
 
-Cargo feature flags gate cloud transports per-crate. To enable
-Bedrock-Claude + Vertex-Gemini + Azure-OpenAI in one build:
+Bedrock, Vertex, and Azure are not wired into the binary today. Cargo feature
+flags gate those cloud transports per-crate; to build them in one pass:
 
 ```bash
 cargo build --features \
@@ -255,7 +262,7 @@ cargo build --features \
 
 The `caliban-model-router` crate (ADR 0038) layers declarative routing
 on top: load `caliban.toml` with `--config`, define purposes
-(`MainLoop`, `Compaction`, …), assign per-purpose model preferences and
+(`MainLoop`, `Summarization`, …), assign per-purpose model preferences and
 fallbacks, and let the router pick a route per request based on
 capability filters (vision, tool-use, thinking) and breaker state.
 `caliban router debug --help` shows what the router would resolve for a
@@ -267,7 +274,7 @@ synthetic request.
 |---|---|---|
 | Provider abstraction + IR | ✅ | [ADR 0006](docs/adr/0006-message-schema-ir.md), [ADR 0007](docs/adr/0007-transport-trait-pattern.md) |
 | Agent loop (stream-as-primitive, parallel tool dispatch) | ✅ | [ADR 0009](docs/adr/0009-agent-core-design.md), [ADR 0016](docs/adr/0016-parallel-tool-dispatch.md) |
-| Built-in tools (Read/Write/Edit/MultiEdit/NotebookEdit/Bash/BashBg/Glob/Grep/WebFetch/WebSearch/AgentTool/TodoWrite/Plan/Memory) | ✅ | `crates/caliban-tools-builtin/` |
+| Built-in tools (Read/Write/Edit/MultiEdit/NotebookEdit/Bash/BashOutput/KillShell/Glob/Grep/WebFetch/WebSearch/AgentTool/TodoWrite/EnterPlanMode/ExitPlanMode/ReadMemoryTopic/WriteMemoryTopic/ToolSearch, plus Skill) | ✅ | `crates/caliban-tools-builtin/` |
 | Persistent sessions + REPL + TUI | ✅ | [ADR 0011](docs/adr/0011-sessions-and-repl.md), [ADR 0012](docs/adr/0012-tui-via-ratatui.md), [ADR 0027](docs/adr/0027-tui-ergonomics.md) |
 | Headless mode (`-p`, `stream-json` I/O) | ✅ | [ADR 0025](docs/adr/0025-headless-output-protocol.md) |
 | Sub-agents (parallel + background, isolated worktrees) | ✅ | [ADR 0021](docs/adr/0021-sub-agent-primitive.md), [ADR 0037](docs/adr/0037-subagent-isolation-and-background-fleet.md) |
@@ -277,12 +284,14 @@ synthetic request.
 | Permission modes (Default/AcceptEdits/Plan/Auto/DontAsk/Bypass) + rules | ✅ | [ADR 0020](docs/adr/0020-permission-rules.md), [ADR 0029](docs/adr/0029-permission-modes-and-auto-mode.md) |
 | Hooks (extensible event taxonomy) | ✅ | [ADR 0024](docs/adr/0024-hook-event-taxonomy.md) |
 | Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ | [ADR 0026](docs/adr/0026-settings-layering.md) |
-| Checkpoint store + `/rewind` | ✅ | [ADR 0028](docs/adr/0028-checkpointing-rewind.md) |
+| Checkpoint store + `/rewind` (incl. fork a new session from a checkpoint) | ✅ | [ADR 0028](docs/adr/0028-checkpointing-rewind.md) |
+| Driveable server surfaces (`mcp serve` / `acp serve` / `http serve`) | ✅ | [ADR 0055](docs/adr/0055-driveable-server-surface.md) |
+| `caliband` graceful drain + resume from persisted session (supervisor protocol) | ✅ | [ADR 0057](docs/adr/0057-agent-drain-checkpoint-resume.md) |
 | Plugin packaging | ✅ | [ADR 0030](docs/adr/0030-plugin-packaging.md) |
 | Output styles | ✅ | [ADR 0031](docs/adr/0031-output-styles.md) |
 | OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ | [ADR 0032](docs/adr/0032-os-sandbox.md), `crates/caliban-sandbox/README.md` |
 | OpenTelemetry + per-request cost ledger | ✅ | [ADR 0033](docs/adr/0033-opentelemetry-and-cost.md) |
-| Image / vision input | ✅ | [ADR 0039](docs/adr/0039-image-and-vision-input.md) |
+| Image / vision input (pipeline built in `caliban-images`; not yet wired into the binary) | 🟡 | [ADR 0039](docs/adr/0039-image-and-vision-input.md) |
 | Slash command registry | ✅ | [ADR 0040](docs/adr/0040-slash-command-registry.md) |
 | Model router v2 (declarative routes, capability filters) | ✅ | [ADR 0038](docs/adr/0038-model-router-v2.md) |
 | Health-check `caliban doctor` / `/doctor` | ✅ | `caliban/src/diagnostics.rs` |
@@ -310,7 +319,8 @@ list with descriptions. The registry currently includes (non-exhaustive):
   `/heapdump`, `/voice`, `/tui`
 - **Exit:** `/quit`, `/exit`
 
-All of the commands above are registered and functional. A handful of
+All of the commands above are registered; a few are still stubs that only
+report their plan (`/loop`, `/feedback`, `/login`, `/logout`, `/voice`). Other
 Claude-Code-parity commands are still gaps — see the [caliban-ai Kanban
 board](https://github.com/orgs/caliban-ai/projects/1) and the [parity
 matrix](docs/evaluation/competitors/claude-code/parity-gap-matrix.md) for
@@ -328,6 +338,11 @@ caliban agents attach <id>         # stream a running agent's transcript live
 caliban agents spawn --prompt ...  # start a new background agent
 caliban daemon status              # supervisor daemon health
 caliban plugin <verb> [args]       # plugin package management (list/info/install/...)
+caliban perms <verb> [args]        # permission rules (list/test/add/remove/import/audit/lint/...)
+caliban settings import|print      # import foreign settings / print one scope
+caliban mcp serve                  # drive caliban as an MCP server over stdio (ADR 0055)
+caliban acp serve                  # drive caliban from an editor over ACP (stdio JSON-RPC)
+caliban http serve [--addr ...]    # drive caliban over HTTP/JSON
 caliban --bg "<task>"              # spawn a background agent and return immediately
 ```
 
@@ -340,9 +355,9 @@ caliban --bg "<task>"              # spawn a background agent and return immedia
 
 ## Permissions
 
-caliban gates every tool call through a rule list. Rules live in
-`permissions.toml` (preferred) or under the `[permissions]` table of
-`settings.toml`, at four scopes (managed / user / project / local).
+caliban gates every tool call through a rule list. Rules live under the
+`[permissions]` table of `settings.toml` at four scopes (managed / user /
+project / local); a legacy per-feature `permissions.toml` still loads.
 The list is evaluated top to bottom; first match wins. Built-in
 defaults backfill at the end.
 
@@ -396,7 +411,8 @@ matching, so `Edit:src/**/*.rs` works from anywhere in the repo.
 
 ### Modal "always allow / always deny"
 
-Pressing **y** or **n** in the Ask modal opens a sub-prompt:
+In the Ask modal, **y** / **n** allow or deny once; **a** (always allow) or
+**d** (always deny) opens a sub-prompt:
 
 - Pick a pattern (narrow default shown; broader options selectable).
 - Pick a scope (session / project / user / local).
@@ -482,7 +498,7 @@ for the upstream report).
 `qwen35`-family model served by **Ollama (GGUF)** parses tool calls
 correctly — Ollama's `model/parsers/qwen35.go` extracts `<tool_call>`
 blocks into the structured `tool_calls` field server-side. See
-[`docs/2026-05-28-ollama-probe-findings.md`](docs/2026-05-28-ollama-probe-findings.md).
+[`docs/evaluation/probes/2026-05-28-ollama-probe-findings.md`](docs/evaluation/probes/2026-05-28-ollama-probe-findings.md).
 Apple's reference `mlx_lm.server` also handles it when run with explicit
 parser flags (e.g. `--reasoning-parser qwen3_moe --tool-call-parser
 qwen3_coder`); auto-detection currently fails for non-Coder
@@ -529,7 +545,7 @@ limitation and recommend an engine switch instead.
    OpenAI provider at llama.cpp (`llama serve`), `mlx_lm.server`, or
    `llama-swap` via `OPENAI_BASE_URL` / a router `base_url`. See
    `docs/guide/src/providers/local-inference.md`. (The bespoke `ollama`
-   provider is deprecated — ADR 0056.)
+   provider was removed in 0.12.0 — ADR 0056.)
 2. **Use Apple's `mlx_lm.server` with explicit parser flags** —
    e.g. `mlx_lm.server --reasoning-parser qwen3_moe --tool-call-parser
    qwen3_coder ...` — keeps the MLX speed edge while parsing the
@@ -545,7 +561,7 @@ limitation and recommend an engine switch instead.
 > A residual Qwen-family "enumerated single-turn chain
 > under-execution" persists across engines and model sizes — that's
 > model quality, not engine. Documented as F2 in the
-> [2026-05-28 Ollama probe](docs/2026-05-28-ollama-probe-findings.md)
+> [2026-05-28 Ollama probe](docs/evaluation/probes/2026-05-28-ollama-probe-findings.md)
 > and confirmed on `qwen3.5:27b` on 2026-05-28.
 
 ## Repository layout
@@ -554,7 +570,7 @@ limitation and recommend an engine switch instead.
 caliban/             # the user-facing binary
 crates/              # 24 library crates, grouped below
 docs/                # design specs, parity matrix, capability inventory
-docs/adr/            # architecture decision records (0000–0047)
+docs/adr/            # architecture decision records (0000–0057)
 docs/superpowers/    # active design specs + implementation plans
 docs/examples/       # sample settings / permission / hook fragments
 .github/workflows/   # CI
@@ -565,11 +581,11 @@ The 24 library crates, grouped by purpose:
 | Group | Crates |
 |---|---|
 | **Foundation** | `caliban-common` (fs/paths/glob/http/expand helpers) |
-| **Providers** | `caliban-provider` (trait + IR), `caliban-provider-anthropic`, `caliban-provider-openai`, `caliban-provider-google`, `caliban-provider-ollama`, `caliban-provider-bedrock`, `caliban-provider-vertex` |
+| **Providers** | `caliban-provider` (trait + IR), `caliban-provider-anthropic`, `caliban-provider-openai`, `caliban-provider-google`, `caliban-provider-bedrock`, `caliban-provider-vertex` |
 | **Agent core** | `caliban-agent-core` (loop, hooks, compaction, cache markers), `caliban-tools-builtin` |
 | **Sessions & state** | `caliban-sessions`, `caliban-checkpoint`, `caliban-memory`, `caliban-output-styles` |
 | **Routing** | `caliban-model-router` |
-| **Integration** | `caliban-mcp-client`, `caliban-images`, `caliban-skills`, `caliban-plugins` |
+| **Integration** | `caliban-mcp-client`, `caliban-images`, `caliban-skills`, `caliban-plugins`, `caliban-drive` (transport-agnostic drive core behind `mcp`/`acp`/`http serve`) |
 | **Infrastructure** | `caliban-settings`, `caliban-sandbox`, `caliban-telemetry`, `caliban-supervisor` (sub-agent fleet), `caliban-worktrees` |
 
 ## Adding a new crate
@@ -635,7 +651,7 @@ specific enough to act on) live in [caliban-ai Kanban board](https://github.com/
 
 ## Architecture decisions
 
-Browse [`docs/adr/`](docs/adr/) for all 48 ADRs (0000–0047). Highlights by layer:
+Browse [`docs/adr/`](docs/adr/) for all 58 ADRs (0000–0057). Highlights by layer:
 
 - **Foundation (0001–0008):** tokio runtime, error model
   (thiserror libs / anyhow binary), AGPL-3.0, naming, workspace
@@ -654,8 +670,15 @@ Browse [`docs/adr/`](docs/adr/) for all 48 ADRs (0000–0047). Highlights by lay
   Bedrock + Vertex, headless I/O protocol, checkpoint/rewind, auto-memory,
   CLAUDE.md ancestry + imports, model router v2, image + vision input,
   slash command registry.
-- **Recent (0041–0044):** TUI redraw tick closeout, caliband binary
-  placement, arc-swap shared state, rmcp version pin.
+- **0041–0047:** TUI redraw tick closeout, caliband binary placement,
+  arc-swap shared state, rmcp version pin, Permissions v2 + TOML-primary
+  config, two-stage tool surface (lazy MCP + ToolSearch), interactive
+  background sub-agents.
+- **Recent (0048–0057):** workspace-restricted by default, result-frame
+  enrichment, XDG-first paths, caliband network transport and
+  workspace-scoped daemon, OTel GenAI semconv, sandbox confinement posture,
+  driveable server surface, Ollama provider removal, and graceful
+  drain/checkpoint/resume for daemon agents.
 
 ## Design specs
 
