@@ -56,28 +56,35 @@ pub struct TlsClient {
     pub server_name: String,
 }
 
-/// Install the aws-lc-rs crypto provider as the process default, exactly once.
+/// The crypto provider caliband's TLS is pinned to: **aws-lc-rs**.
 ///
-/// aws-lc-rs (not `ring`) matches the workspace's rustls 0.23 standardization
-/// — the AWS SDK's rustls-aws-lc connector already pulls it, so we install the
-/// same backend the rest of the process uses rather than a second one (#593).
-fn ensure_crypto_provider() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
+/// aws-lc-rs (not `ring`) matches the workspace's rustls 0.23 standardization —
+/// the AWS SDK's rustls-aws-lc connector already links it, so caliband reuses
+/// that single backend rather than compiling a second one (#593; `ring` is not
+/// even a `tokio-rustls` feature in this workspace).
+///
+/// This is handed *per-config* to [`ServerConfig::builder_with_provider`] /
+/// [`ClientConfig::builder_with_provider`] rather than relying on the
+/// process-wide `CryptoProvider::install_default()` ambient default. The old
+/// approach swallowed `install_default`'s `Result` behind a `Once`, so a future
+/// dependency that installed a *different* ambient default first could silently
+/// flip caliband's TLS backend with no signal (#320, follow-up to #280 / ADR
+/// 0051). Pinning the provider explicitly makes the backend deterministic and
+/// independent of any ambient default.
+fn transport_crypto_provider() -> Arc<tokio_rustls::rustls::crypto::CryptoProvider> {
+    Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider())
 }
 
 /// Build server TLS from a PEM cert chain + private key.
 pub fn tls_server_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<TlsServer> {
-    ensure_crypto_provider();
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<_, _>>()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let key: PrivateKeyDer<'static> =
         PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let config = ServerConfig::builder()
+    let config = ServerConfig::builder_with_provider(transport_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(std::io::Error::other)?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(std::io::Error::other)?;
@@ -88,14 +95,15 @@ pub fn tls_server_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<T
 
 /// Build client TLS trusting `ca_pem`, verifying the server presents `server_name`.
 pub fn tls_client_from_pem(ca_pem: &[u8], server_name: &str) -> std::io::Result<TlsClient> {
-    ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(ca_pem) {
         roots
             .add(cert.map_err(|e| std::io::Error::other(e.to_string()))?)
             .map_err(std::io::Error::other)?;
     }
-    let config = ClientConfig::builder()
+    let config = ClientConfig::builder_with_provider(transport_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(std::io::Error::other)?
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok(TlsClient {
@@ -539,6 +547,66 @@ mod tests {
         c.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"tls!!");
         server.await.unwrap();
+    }
+
+    /// The client must **reject** a server cert that its trusted CA didn't sign
+    /// — proving certificate verification is actually on, not just that the
+    /// happy path works (#320). Client trusts an unrelated self-signed CA; the
+    /// server presents a different cert → handshake fails client-side.
+    #[tokio::test]
+    async fn tcp_tls_rejects_untrusted_ca() {
+        let (server_cert, server_key) = test_certs();
+        let tls_server = tls_server_from_pem(&server_cert, &server_key).unwrap();
+        let (listener, addr) = tcp_listener_unchecked(Some(tls_server), None).await;
+        // The server-side handshake fails too when the client aborts; spawn it
+        // so the test never blocks and ignore its (error) result.
+        let srv = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        // A *different* self-signed cert as the client's sole trusted CA.
+        let (other_ca, _other_key) = test_certs();
+        let tls_client = tls_client_from_pem(&other_ca, "localhost").unwrap();
+        let res = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(tls_client),
+            token: None,
+        })
+        .await;
+
+        assert!(
+            res.is_err(),
+            "client must reject a server cert not signed by its trusted CA",
+        );
+        let _ = srv.await;
+    }
+
+    /// The client must **reject** a valid, trusted cert when it's presented for
+    /// the wrong hostname (#320). Client trusts the server's own cert as a CA
+    /// but dials expecting a different `server_name` → name-verification fails.
+    #[tokio::test]
+    async fn tcp_tls_rejects_hostname_mismatch() {
+        let (server_cert, server_key) = test_certs(); // SAN: "localhost"
+        let tls_server = tls_server_from_pem(&server_cert, &server_key).unwrap();
+        let (listener, addr) = tcp_listener_unchecked(Some(tls_server), None).await;
+        let srv = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        // Trust the real server cert, but expect a name it is not valid for.
+        let tls_client = tls_client_from_pem(&server_cert, "wrong.example").unwrap();
+        let res = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(tls_client),
+            token: None,
+        })
+        .await;
+
+        assert!(
+            res.is_err(),
+            "client must reject a cert whose name doesn't match the expected server_name",
+        );
+        let _ = srv.await;
     }
 
     #[tokio::test]
