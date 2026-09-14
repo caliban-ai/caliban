@@ -271,6 +271,7 @@ mod tests {
             interactive: false,
             inherited_hooks_config: None,
             source: None,
+            resume_session: None,
         }
     }
 

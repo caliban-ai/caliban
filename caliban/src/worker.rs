@@ -470,6 +470,50 @@ fn build_status_client(
     Ok(control_socket.map(caliban_supervisor::SupervisorClient::new))
 }
 
+/// Load a resumable conversation from a prior agent's session dir (#651,
+/// ADR 0057). Returns the persisted messages, or `None` when no resume dir is
+/// set, `session.json` is absent/unreadable, or the session has no messages
+/// (in which case the caller starts fresh from `initial_prompt`).
+fn load_resume_messages(resume_session: Option<&Path>) -> Option<Vec<caliban_provider::Message>> {
+    let dir = resume_session?;
+    let path = dir.join(caliban_supervisor::store::SESSION_FILE);
+    let bytes = std::fs::read(&path).ok()?;
+    let session: caliban_sessions::PersistedSession = serde_json::from_slice(&bytes).ok()?;
+    (!session.messages.is_empty()).then_some(session.messages)
+}
+
+/// Persist the agent's conversation to `<dir>/session.json` so a `Drain`
+/// checkpoint is resumable (#651, ADR 0057). Best-effort — a failure is logged,
+/// never fatal. Atomic (tempfile + rename) so a concurrent reader (a resuming
+/// worker) never observes a half-written file.
+async fn persist_session(
+    dir: &Path,
+    session_id: &str,
+    model: &str,
+    messages: &[caliban_provider::Message],
+    usage: caliban_provider::Usage,
+) {
+    let mut session = caliban_sessions::PersistedSession::new(session_id, "worker", model);
+    session.messages = messages.to_vec();
+    session.total_usage = usage;
+    let body = match serde_json::to_vec_pretty(&session) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "session.json serialize failed");
+            return;
+        }
+    };
+    let path = dir.join(caliban_supervisor::store::SESSION_FILE);
+    let tmp = dir.join("session.json.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, &body).await {
+        tracing::warn!(error = %e, "session.json write failed");
+        return;
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+        tracing::warn!(error = %e, "session.json rename failed");
+    }
+}
+
 /// Entry point body. Returns the process exit code.
 ///
 /// Exactly one of `socket` (Unix mode) or `listen` (TCP network mode, #280
@@ -738,9 +782,16 @@ pub(crate) async fn run(
     );
 
     // --- Drive the agent loop. ---
-    let messages = vec![caliban_provider::Message::user_text(
-        record.spec.initial_prompt.clone(),
-    )];
+    // Resume a prior conversation when a resume reference is set (#651,
+    // ADR 0057); otherwise start fresh from the initial prompt. In interactive
+    // mode the resumed history is picked up and the worker then awaits the next
+    // operator message; a fresh start seeds the first user turn.
+    let messages =
+        load_resume_messages(record.spec.resume_session.as_deref()).unwrap_or_else(|| {
+            vec![caliban_provider::Message::user_text(
+                record.spec.initial_prompt.clone(),
+            )]
+        });
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stream = if let Some(provider) = input_source {
         // Interactive mode: await inbound messages at each end-of-run boundary.
@@ -774,12 +825,28 @@ pub(crate) async fn run(
     while let Some(event) = stream.next().await {
         match event {
             Ok(ev) => {
-                // Capture the terminal stop condition from RunEnd.
+                // Capture the terminal stop condition from RunEnd, and persist
+                // the resumable session so a `Drain` checkpoint (#650) has
+                // current state to flush and a later resume (#651) can continue.
+                // In interactive mode there is one RunEnd per turn-group, each
+                // carrying the cumulative `final_messages`, so this keeps
+                // session.json current across the agent's life.
                 if let caliban_agent_core::TurnEvent::RunEnd {
-                    ref stopped_for, ..
+                    ref stopped_for,
+                    ref final_messages,
+                    ref total_usage,
+                    ..
                 } = ev
                 {
                     stop = stopped_for.clone();
+                    persist_session(
+                        &record.session_dir,
+                        &record.id,
+                        &model,
+                        final_messages,
+                        *total_usage,
+                    )
+                    .await;
                 }
                 // Write the full event as one NDJSON line. TurnEvent
                 // derives Serialize with an internal `"type"` tag (#78), so
@@ -1034,6 +1101,41 @@ async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use caliban_agent_core::{Action, default_rules};
+
+    // --- session persistence + resume (#651, ADR 0057) ---
+
+    #[tokio::test]
+    async fn session_persist_then_resume_round_trips() {
+        use caliban_provider::{Message, Usage};
+        let dir = tempfile::tempdir().unwrap();
+        let msgs = vec![
+            Message::user_text("hello"),
+            Message::assistant_text("hi there"),
+        ];
+        persist_session(dir.path(), "sess-1", "test-model", &msgs, Usage::default()).await;
+        // The drained session dir is resumable: the exact conversation loads back.
+        let loaded =
+            load_resume_messages(Some(dir.path())).expect("a persisted session must be resumable");
+        assert_eq!(loaded, msgs);
+    }
+
+    #[test]
+    fn load_resume_messages_none_when_unset_absent_or_empty() {
+        // No resume reference → fresh start.
+        assert!(load_resume_messages(None).is_none());
+        // Resume dir with no session.json → fresh start.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(load_resume_messages(Some(empty.path())).is_none());
+        // A session.json that carries no messages → fresh start (nothing to resume).
+        let dir = tempfile::tempdir().unwrap();
+        let session = caliban_sessions::PersistedSession::new("s", "worker", "m");
+        std::fs::write(
+            dir.path().join(caliban_supervisor::store::SESSION_FILE),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+        assert!(load_resume_messages(Some(dir.path())).is_none());
+    }
 
     // --- require_network_credentials: fail-closed TCP session-plane auth (#288) ---
 
@@ -1311,6 +1413,7 @@ mod tests {
                 interactive: false,
                 inherited_hooks_config: None,
                 source: None,
+                resume_session: None,
             },
         };
         store.write_manifest(&rec).unwrap();

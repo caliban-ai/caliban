@@ -26,6 +26,12 @@ use crate::proto::AgentRecord;
 /// truth so the writer and reader can't drift (#143).
 pub const TRANSCRIPT_FILE: &str = "stdout.ndjson";
 
+/// Filename of the resumable session snapshot (`PersistedSession`, caliban-
+/// sessions format) inside a session dir. The daemon worker writes it after
+/// each run so a `Drain` checkpoint is resumable, and a resuming worker reads
+/// it (#651, ADR 0057). Single source of truth so writer and reader can't drift.
+pub const SESSION_FILE: &str = "session.json";
+
 /// On-disk store for agent state. Cheap to clone (one `PathBuf`).
 #[derive(Debug, Clone)]
 pub struct AgentStore {
@@ -165,6 +171,7 @@ mod tests {
                 interactive: false,
                 inherited_hooks_config: None,
                 source: None,
+                resume_session: None,
             },
         }
     }
@@ -245,6 +252,7 @@ mod tests {
             interactive: false,
             inherited_hooks_config: None,
             source: None,
+            resume_session: None,
         };
         store.write_manifest(&rec).unwrap();
 
