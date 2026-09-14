@@ -1255,6 +1255,67 @@ mod tests {
         );
     }
 
+    /// The per-agent session-plane listener must reject a client that can't
+    /// verify its certificate — proving the attach path enforces the same TLS
+    /// guarantee as the control plane, end-to-end through the real accept loop
+    /// (#320). The client trusts an unrelated self-signed CA, so the handshake
+    /// fails before the bearer token is ever sent.
+    #[tokio::test]
+    async fn agent_attach_rejects_client_with_untrusted_ca() {
+        use caliban_supervisor::transport::{
+            BindSpec, ConnectSpec, Endpoint, Listener, connect, tls_client_from_pem,
+            tls_server_from_pem,
+        };
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+        let token = "attach-tok".to_string();
+
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let listener = Listener::bind(&BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: Some(token.clone()),
+        })
+        .await
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let hub = EventHub::new();
+        let has_clients = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(run_agent_accept_loop(
+            listener,
+            hub,
+            None,
+            Arc::clone(&has_clients),
+        ));
+
+        // A *different* self-signed cert as the client's sole trusted CA — it
+        // cannot verify the server's real cert.
+        let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let other_ca = other.cert.pem().into_bytes();
+
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let tls_client = tls_client_from_pem(&other_ca, "localhost").unwrap();
+            connect(&ConnectSpec {
+                endpoint: Endpoint::Tcp { addr },
+                tls: Some(tls_client),
+                token: Some(token.clone()),
+            })
+            .await
+        })
+        .await
+        .expect("the connect attempt should resolve (fail), not hang");
+
+        assert!(
+            res.is_err(),
+            "attach client must reject a server cert its trusted CA didn't sign",
+        );
+    }
+
     #[test]
     fn network_creds_rejects_missing_token() {
         let err = require_network_credentials(None, false).unwrap_err();
