@@ -31,11 +31,12 @@ threshold is `0.75` (75% utilization).
 Configure in `settings.toml`:
 
 ```toml
-auto_compact_threshold = 0.75   # 0.0–1.0; unset or null disables autocompact
+auto_compact_threshold = 0.75   # 0.0–1.0; default 0.75
 ```
 
-Set `auto_compact_threshold` to `null` (or omit it) to disable autocompact
-entirely and rely on manual `/compact` invocations.
+Omitting the key (or setting it to `null`) keeps the default of `0.75`; it does
+**not** disable autocompact. To stop strategy-level compaction, set
+`compact_strategy = "noop"` (see below) and rely on manual `/compact`.
 
 ## Compaction strategy
 
@@ -129,12 +130,12 @@ estimated token count meets the minimum threshold.
 |----------------------------|---------|--------------------------------------------------------------|
 | `--no-prompt-cache`        | off     | Disable prompt caching for this run                          |
 | `CALIBAN_NO_PROMPT_CACHE`  | unset   | Same as `--no-prompt-cache` via environment variable         |
-| `min_cache_block_tokens`   | —       | Minimum tokens on the last user message to merit a cache marker |
+| `min_cache_block_tokens`   | `1024`  | Minimum tokens on the last user message to merit a cache marker |
 
 Configure `min_cache_block_tokens` in `settings.toml`:
 
 ```toml
-min_cache_block_tokens = 1024   # omit to use the upstream default
+min_cache_block_tokens = 1024   # default
 ```
 
 ```admonish tip title="When to disable prompt caching"
@@ -150,15 +151,17 @@ appended to the conversation. This prevents a single large `Read` or `Bash`
 output from consuming a disproportionate share of the context window.
 
 ```toml
-tool_result_cap_chars = 65536   # 0 disables the cap (default)
+tool_result_cap_chars = 65536   # default 50000; 0 disables the cap
 ```
+
+Overflow beyond the cap is spilled to a file. See [Tool Execution](../tools/execution.md#tool-result-capping).
 
 ## Summary of relevant settings
 
 | Setting key                | Type    | Default | Description                                        |
 |----------------------------|---------|---------|----------------------------------------------------|
-| `auto_compact_threshold`   | float   | `0.75`  | Utilization (0–1) that triggers autocompact; `null` disables |
+| `auto_compact_threshold`   | float   | `0.75`  | Utilization (0–1) that triggers autocompact        |
 | `micro_compact_enabled`    | bool    | `true`  | Enable the LLM-free per-turn supersession pass     |
 | `compact_strategy`         | string  | `"summarize"` | `summarize` \| `drop-oldest` \| `noop`       |
-| `min_cache_block_tokens`   | integer | —       | Minimum tokens to place the prompt cache marker    |
-| `tool_result_cap_chars`    | integer | `0`     | Per-result character cap; `0` disables             |
+| `min_cache_block_tokens`   | integer | `1024`  | Minimum tokens to place the prompt cache marker    |
+| `tool_result_cap_chars`    | integer | `50000` | Per-result character cap; `0` disables             |

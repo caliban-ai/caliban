@@ -91,26 +91,28 @@ The same values can be set via environment variables:
 When the sum of both per-tier caps would exceed the combined ceiling, each is
 scaled down proportionally so the sum fits.
 
-## The Memory tool and `/memory`
+## Memory tools and `/memory`
 
-The built-in `Memory` tool is the agent-facing interface for reading and writing
-the auto-memory tier. See [Built-in Tools](../tools/builtin.md) for the full
-tool reference.
+The agent reads and writes the auto-memory tier with the built-in
+`ReadMemoryTopic` and `WriteMemoryTopic` tools. See
+[Built-in Tools](../tools/builtin.md) for the full tool reference.
 
-The `/memory` slash command shows the active tiers, their paths, and their
-estimated token counts:
-
-```text
-/memory
-  global   ~/.config/caliban/CLAUDE.md (412 tokens)
-  project  /Users/me/dev/myproject/CLAUDE.md (880 tokens)
-  auto     ~/.local/share/caliban/projects/…/memory/MEMORY.md (256 tokens)
-    walk     /Users/me/dev/myproject/CLAUDE.md (880 tokens)
-```
+The `/memory` slash command shows the combined token estimate against the
+budget, one line per active tier, and its subcommands (`list`, `show <slug>`,
+`edit <slug>`, `delete <slug> --force`).
 
 ```admonish tip title="Disable auto-memory for CI"
-Set `CALIBAN_DISABLE_AUTO_MEMORY=1` to drop the auto-memory tier entirely and
-prevent the auto-memory skill from loading. This guarantees identical system
-prompts across headless and CI runs regardless of on-disk memory state.
-`--bare` sets the same flag automatically.
+Set `CALIBAN_DISABLE_AUTO_MEMORY=1` to drop the auto-memory tier and keep the
+auto-memory skill and tools from loading. The system prompt then no longer
+depends on on-disk memory state. `--bare` goes further: it skips the whole
+memory prefix, including the global and project `CLAUDE.md` tiers.
+```
+
+```admonish note title="Remote storage substrate"
+By default auto-memory topics live on the local filesystem. With
+`storage.substrate = "remote"` in settings, caliban stores them through a gonzalo
+daemon instead. That requires a binary built with `--features gonzalo`, and startup
+fails with a configuration error otherwise. The `git` and `s3` substrates are
+recognized but not wired yet. `/memory list/show/edit/delete` still operate on the
+filesystem directory.
 ```

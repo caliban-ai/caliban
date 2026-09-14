@@ -7,7 +7,7 @@ Earlier builds stored user data under `~/Library/Application Support/caliban` (m
 ```
 
 ```admonish tip title="Override with environment variables"
-Every base dir honors its XDG variable (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`) on all platforms. Category-specific overrides (`CALIBAN_CHECKPOINT_ROOT`, `CALIBAN_MEMORY_DIR`, `CALIBAN_DAEMON_RUNTIME_DIR`, `CALIBAN_ROUTER_CONFIG`, `CALIBAN_DEBUG`) take precedence — see [Environment Variables](./env-vars.md).
+Every base dir honors its XDG variable (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`) on all platforms. Category-specific overrides (`CALIBAN_CHECKPOINT_ROOT`, `CALIBAN_MEMORY_DIR`, `CALIBAN_DAEMON_RUNTIME_DIR`, `CALIBAN_ROUTER_CONFIG`, `CALIBAN_DEBUG_FILE`) take precedence — see [Environment Variables](./env-vars.md).
 ```
 
 The tables below show the canonical path. Unless noted, it is identical on all platforms; on Windows the defaults resolve under `%USERPROFILE%` (e.g. `%USERPROFILE%\.config\caliban\`).
@@ -51,7 +51,7 @@ Override the root with `CALIBAN_CHECKPOINT_ROOT`. Disable recording with `CALIBA
 
 ## Debug Log
 
-Enabled by `--debug` or `CALIBAN_DEBUG` (any non-empty value). Append-only; rotated automatically.
+Enabled by `--debug` or `CALIBAN_DEBUG` (any non-empty value). Append-only and **not** rotated; delete it periodically. Redirect with `--debug-file` / `CALIBAN_DEBUG_FILE`.
 
 `$XDG_CACHE_HOME/caliban/debug.log` (default `~/.cache/caliban/`)
 

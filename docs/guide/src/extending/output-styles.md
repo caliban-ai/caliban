@@ -17,24 +17,20 @@ The `default` style emits no block at all, so switching to it produces the exact
 
 ## Selecting the active style
 
-**Via settings** (preferred): set `output_style` in your settings file.
-
-```toml
-# ~/.config/caliban/settings.toml
-output_style = "explanatory"
-```
-
-**Via environment variable** (until the settings hierarchy is fully wired):
+**Via environment variable** (the only selector that takes effect today):
 
 ```bash
 CALIBAN_OUTPUT_STYLE=learning caliban
 ```
 
-**Via the TUI**: use `/output-style` to open the picker. The new selection is remembered for the session but takes effect only after `/clear` or a restart, because providers cache the system prompt and a mid-session change would silently invalidate that cache.
+The style is resolved once at startup and spliced into the system prompt, so changing it requires a restart.
 
-```admonish note title="Style activation requires /clear or restart"
-System prompts are cached by every major provider. Selecting a new style mid-session does not change what the provider sees until the next session begins. The `/config` output-style overlay surfaces a "applies after /clear or restart" hint.
+```admonish warning title="The output_style setting is not yet read"
+The `output_style` settings key parses and appears in `/config`, but style selection does
+not consult it yet. Only `CALIBAN_OUTPUT_STYLE` picks the style.
 ```
+
+**In the TUI**: `/output-style` lists the available styles and marks the active one. It does not switch styles.
 
 ## How styles splice into the system prompt
 
@@ -91,9 +87,7 @@ A project style with the same `name` shadows user, plugin, and built-in styles.
 
 ## Plugin-supplied styles and `force_for_plugin`
 
-A plugin-supplied style with `force_for_plugin: true` in its frontmatter overrides the operator's `output_style` setting while the plugin is enabled. The `/config` picker shows a "locked by plugin: X" badge. Disabling the plugin releases the lock.
-
-`force_for_plugin: true` is silently ignored on non-plugin styles (project, user, built-in).
+The `force_for_plugin: true` frontmatter field (also spelled `force-for-plugin`) is designed to let a plugin-supplied style override the operator's selection while the plugin is enabled. It is parsed but **not yet enforced**: startup passes an empty enabled-plugin list to style selection, so the flag currently has no effect. `/output-style` labels it inert.
 
 ## Related pages
 

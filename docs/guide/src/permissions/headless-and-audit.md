@@ -50,8 +50,7 @@ Every tool-call decision (allow, deny, or ask) is appended to an append-only JSO
 
 | Platform | Path |
 |----------|------|
-| Linux | `$XDG_STATE_HOME/caliban/permission-decisions.jsonl` (default: `~/.local/state/caliban/`) |
-| macOS | `$XDG_DATA_HOME/caliban/permission-decisions.jsonl` (default: `~/.local/state/caliban/`) |
+| All (XDG-first, ADR 0050) | `$XDG_STATE_HOME/caliban/permission-decisions.jsonl` (default: `~/.local/state/caliban/`) |
 
 The `audit_log` setting controls whether logging is active:
 

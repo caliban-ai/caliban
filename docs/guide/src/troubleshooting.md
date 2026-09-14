@@ -32,7 +32,7 @@ The output lists each check with a `✓` (pass), `!` (warning), or `✗` (fail) 
    export OPENAI_API_KEY=sk-...
    ```
 
-2. Or configure `apiKeyHelper` in your settings file to fetch credentials dynamically. See [Configuring Providers & API Keys](./providers/configuration.md).
+2. Or configure `api_key_helper` in your settings file to fetch credentials dynamically. See [Configuring Providers & API Keys](./providers/configuration.md).
 
 3. Run `caliban doctor --deep` to confirm the key reaches the provider.
 

@@ -10,7 +10,7 @@ Caliban fires events at the following lifecycle points (ADR 0024):
 |---|---|
 | `SessionStart` | Once at startup, before the first turn |
 | `SessionEnd` | On clean exit |
-| `UserPromptSubmit` | Before each user message is sent (including slash commands; payload includes `is_slash`) |
+| `UserPromptSubmit` | Before each user message is sent, with the raw prompt text |
 | `PreCompact` | Before context compaction begins |
 | `PostCompact` | After compaction completes |
 | `PreToolUse` | Before each tool call; can gate or rewrite the call |
@@ -27,6 +27,13 @@ Caliban fires events at the following lifecycle points (ADR 0024):
 | `Stop` / `StopFailure` | When the agent loop stops (cleanly or with error) |
 
 Additional events (`Setup`, `UserPromptExpansion`, `PostToolBatch`, `InstructionsLoaded`, `WorktreeCreate`, `WorktreeRemove`, `Elicitation`, `ElicitationResult`, `TeammateIdle`) are reserved but not yet fired.
+
+```admonish warning title="Config-file handlers fire on three events today"
+A `command` or `http` handler declared in settings or `hooks.toml` runs only on
+**`PreToolUse`**, **`PostToolUse`**, and **`SessionStart`**. A handler bound to any other
+event in the table is skipped at startup with a logged warning. The other events currently
+reach only in-process Rust hooks, such as the built-in permissions and audit hooks.
+```
 
 ## Handler types
 
@@ -46,7 +53,7 @@ The `mcp`, `prompt`, and `agent` handler types are defined in the config schema 
 
 ## Decision protocol
 
-For `PreToolUse` and `UserPromptSubmit`, `command` and `http` handlers report their decision as:
+For `PreToolUse`, `command` and `http` handlers report their decision as:
 
 **Stdout JSON** (preferred):
 ```json

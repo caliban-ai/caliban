@@ -53,8 +53,8 @@ Caliban follows `sysexits.h` conventions plus two additional signals:
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Generic runtime error |
-| `2` | Tool or assistant error |
+| `1` | Generic runtime error, including provider errors, refusals, and hook denials that stop the run |
+| `2` | The final output failed `--json-schema` validation |
 | `64` | Bad flags (`EX_USAGE`) or malformed `stream-json` input |
 | `66` | Missing input (`EX_NOINPUT`) — e.g. `--resume` names a non-existent session |
 | `75` | `--max-turns` exceeded (`EX_TEMPFAIL`) |

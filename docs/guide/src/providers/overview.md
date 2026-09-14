@@ -7,16 +7,22 @@ Caliban is provider-agnostic: you choose which AI provider and model to use at r
 | Provider | `--provider` value | Transport / access | Notes |
 |---|---|---|---|
 | **Anthropic** | `anthropic` | Direct HTTPS (`api.anthropic.com`) | Default provider |
-| **Anthropic via Bedrock** | *(router only)* | AWS Bedrock (`bedrock-runtime.*`) | Requires `caliban-provider-bedrock`; configured via `caliban.toml` |
-| **Anthropic via Vertex** | *(router only)* | Google Vertex AI | Requires `caliban-provider-vertex`; configured via `caliban.toml` |
-| **OpenAI** | `openai` | Direct HTTPS (`api.openai.com/v1`) | |
-| **OpenAI via Azure** | *(router only)* | Azure OpenAI Service | `azure` feature flag on `caliban-provider-openai`; configured via `caliban.toml` |
+| **OpenAI** | `openai` | Direct HTTPS (`api.openai.com/v1`), or any OpenAI-compatible `base_url` | Also the path for [local inference](./local-inference.md) |
 | **Google** | `google` | Google AI Studio (`generativelanguage.googleapis.com`) | Gemini models |
-| **Google via Vertex** | *(router only)* | Google Vertex AI | `vertex` feature flag; configured via `caliban.toml` |
 
-Bedrock, Vertex, and Azure transports are enabled by **Cargo feature flags** at build time. Binary distributions built by the project team include all features; self-compiled builds must enable the relevant feature (e.g. `--features bedrock`). These transports can only be selected through the [model router](./router.md) — they are not available via the `--provider` CLI flag.
+These three are the only providers the `caliban` binary can use, whether through `--provider` or a `[provider.<name>]` block in the [model router](./router.md). Any other provider name fails at startup (`unknown provider … — supported: anthropic, openai, google`).
+
+```admonish warning title="Bedrock, Vertex, and Azure are library-only"
+The workspace also ships `caliban-provider-bedrock` and `caliban-provider-vertex`, plus
+`bedrock`/`vertex`/`azure` Cargo features on the provider crates. These transports
+work when you embed the crates as a library. The `caliban` binary neither depends on
+nor routes to them, so they **cannot be selected from the CLI or `caliban.toml`
+today**.
+```
 
 ## Capability matrix
+
+Bedrock, Vertex, and Azure rows describe the library adapters (see above).
 
 | Provider | Tool use | Vision | Thinking | Prompt caching |
 |---|---|---|---|---|

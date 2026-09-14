@@ -140,9 +140,9 @@ The `/mcp` slash command shows per-server status:
 
 | Glyph | Meaning |
 |---|---|
-| `●` | Connected |
-| `◐` | Connecting / partial |
-| `○` | Disabled or failed |
+| `●` (green) | Connected, with tool count |
+| `○` (red) | Failed, with reason |
+| `○` (dim) | Disabled |
 
 ## `@server:resource` references
 

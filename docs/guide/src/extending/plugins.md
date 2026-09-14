@@ -1,6 +1,15 @@
 # Plugins
 
-A plugin bundles related customizations — skills, hooks, sub-agent definitions, MCP server configs, and output styles — into a single installable directory. The plugin system (ADR 0030) is a thin orchestrator: it parses a `plugin.json` manifest, namespaces items, expands `${CALIBAN_PLUGIN_ROOT}`, and feeds everything into the same per-surface loaders that project and user files use.
+A plugin bundles related customizations — skills, hooks, sub-agent definitions, MCP server configs, and output styles — into a single installable directory. The plugin system (ADR 0030) is a thin orchestrator: it parses a `plugin.json` manifest, namespaces items, expands `${CALIBAN_PLUGIN_ROOT}`, and is designed to feed everything into the same per-surface loaders that project and user files use.
+
+```admonish warning title="Only plugin skills are loaded at runtime today"
+The `caliban plugin` command manages installs, and the manifest parses every component
+type. At startup, though, the binary currently wires in only each plugin's **skills**.
+Bundled hooks, MCP servers, agents, and commands are parsed but not yet loaded. Plugin
+output styles are picked up only from the user install directory, by the output-styles
+loader. The sections below describe the full design; treat the non-skill surfaces as
+planned.
+```
 
 ## What a plugin contains
 
@@ -73,7 +82,7 @@ Caliban scans three roots at startup. A plugin with the same name in an earlier 
 | 2 | `$XDG_DATA_HOME/caliban/plugins/<name>/` (user install dir) | User |
 | 3 | `/etc/caliban/plugins/<name>/` (platform analogues) | Managed (org policy) |
 
-Managed plugins ignore the `plugins.enabled` list — they run regardless of per-user configuration.
+Which plugins load is filtered at startup by the `CALIBAN_ENABLED_PLUGINS` environment variable (comma-separated names). Managed plugins ignore the filter. `caliban plugin enable/disable` records the choice in the `plugins.enabled` setting, but startup does not read that setting yet.
 
 ## Namespacing
 

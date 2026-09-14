@@ -15,10 +15,10 @@ caliban doctor --deep
 Sample output:
 
 ```text
-caliban doctor — 11 check(s):
+caliban doctor — 10 check(s):
   ✓ settings — 2 scope file(s) loaded
   ✓ sandbox — tool dispatch goes via caliban-sandbox::SandboxedShim
-  ✓ checkpoint_store — /home/user/.local/share/caliban/checkpoints
+  ✓ checkpoint_store — /home/user/.local/share/caliban/projects
   ✓ session_store — /home/user/.local/share/caliban/sessions (writable)
   ✓ skills — 3 skill(s) loaded (scanned: /home/user/.claude/skills, ./.claude/skills)
   ✓ claudemd — 2 CLAUDE.md ancestor(s) found
@@ -74,7 +74,7 @@ caliban doctor || { echo "caliban health check failed"; exit 1; }
 
 ## `/doctor` in the TUI
 
-The `/doctor` slash command runs the same checks inside an interactive session and prints the results to the transcript. Provider pings are always deep when invoked via `/doctor` (the session is already running and API keys are confirmed reachable). The `/status` command shows a brief one-line summary of the daemon and active session state.
+The `/doctor` slash command runs the same checks inside an interactive session and prints the results to the transcript. As on the CLI, provider pings are deep only when you pass `--deep` (`/doctor --deep`). The `/status` command shows the active provider name.
 
 ## Related pages
 

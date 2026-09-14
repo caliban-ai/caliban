@@ -80,6 +80,14 @@ listener that is unauthenticated or plaintext. The default Unix-socket mode is
 unchanged and needs neither. The TCP transport is still **beta**.
 ```
 
+Other network-mode daemon flags: `--advertise-host <HOST>` (the host clients
+dial for per-agent endpoints), `--agent-port-base <PORT>` (default `7100`),
+`--tls-ca <PEM>`, and `--tls-server-name <SAN>`. If the advertise host is a
+wildcard such as `0.0.0.0` (for example, derived from `--listen 0.0.0.0:7070`
+with no `--advertise-host`), `caliband` logs a startup warning. The endpoints it
+reports would be undialable, so set `--advertise-host` to a routable name such
+as the daemon's Service or pod DNS name.
+
 ## Agent lifecycle states
 
 | State | Meaning |
@@ -88,9 +96,10 @@ unchanged and needs neither. The TCP transport is still **beta**.
 | `running` | Actively processing turns |
 | `idle` | Waiting for input; no compute pending |
 | `killed` | Stopped via `kill` |
+| `drained` | Gracefully stopped by a drain request, with its session directory kept for resume (see [Drain and resume](#drain-and-resume)) |
 | `done` | Finished successfully |
 | `failed` | Finished with an error |
-| `crashed` | Daemon restarted while agent was active; needs recovery |
+| `crashed` | Daemon restarted while the agent was `spawning` or `running`; needs recovery |
 
 ## `caliban agents` subcommands
 
@@ -115,13 +124,16 @@ Options:
 
 | Flag | Description |
 |---|---|
-| `--prompt <TEXT>` | Initial prompt for the agent (required) |
+| `--prompt <TEXT>` | Initial prompt for the agent (required, must be non-empty) |
 | `--label <NAME>` | Human-readable label shown in `list` and logs |
+| `--interactive` | Keep the agent running and waiting for operator messages via `agents attach`, instead of finishing after the prompt (ADR 0047) |
+| `--provider <anthropic\|openai\|google>` | Provider for the new agent (defaults to caliban's default) |
 
 ### `caliban agents attach <id>`
 
-Stream a running agent's transcript live. Press `Ctrl+D` to detach without
-stopping the agent.
+Stream a running agent's transcript live. Text you type is sent to the agent,
+which an `--interactive` agent treats as its next message. `Ctrl+D` ends input,
+and `Ctrl+C` detaches without stopping the agent.
 
 ```bash
 caliban agents attach a3f8b2c1
@@ -129,7 +141,7 @@ caliban agents attach a3f8b2c1
 
 ### `caliban agents logs <id>`
 
-Print the agent's session log (`session.json`).
+Print the agent's transcript: the append-only `stdout.ndjson` event stream in its session directory.
 
 ```bash
 caliban agents logs a3f8b2c1
@@ -137,7 +149,7 @@ caliban agents logs a3f8b2c1
 
 ### `caliban agents kill <id>`
 
-Terminate an agent (SIGTERM, escalating to SIGKILL after a grace period).
+Terminate an agent by sending its worker `SIGTERM`. There is no automatic escalation to `SIGKILL`.
 
 ```bash
 caliban agents kill a3f8b2c1
@@ -167,7 +179,7 @@ caliban agents rm a3f8b2c1 --force   # remove even if still running
 
 ## Top-level shorthands
 
-Four common operations have top-level sugar to save typing:
+Common operations have top-level sugar to save typing:
 
 | Shorthand | Equivalent |
 |---|---|
@@ -200,11 +212,43 @@ caliban daemon stop
 
 ## Session storage
 
-Each background agent's transcript is stored as a regular caliban session
-file at `<base>/agents/<id>/session.json`. This means all session tooling
-(compaction, replay, audit) works on background agents out of the box.
-Attaching to an agent is conceptually the same as resuming its session over
-the agent's per-agent socket.
+Each background agent has a session directory holding two files:
+
+| File | Contents |
+|---|---|
+| `stdout.ndjson` | Append-only stream of the agent's turn events. `caliban agents logs` prints it, and it is the transcript `attach` streams live. |
+| `session.json` | A resumable snapshot of the conversation (messages + usage), rewritten atomically at the end of every run. This is what a drain leaves behind for resume. |
+
+Attaching is a live stream over the agent's per-agent socket. It does not resume the session.
+
+If a worker exits non-zero (for example, a provider fails on its first
+request), `caliband` logs the exit status and the last 2 KB of the worker's
+output to its own stdout, and marks the agent `failed`. Check the daemon's log
+first when an agent dies right after spawning.
+
+## Drain and resume
+
+`caliband` supports a graceful **drain** for orchestrators such as
+caliban-operator that need to stop agents without losing their work
+([ADR 0057](../adr/0057-agent-drain-checkpoint-resume.md)):
+
+- A `Drain` control request sends `SIGTERM` to every live agent (`spawning`,
+  `running`, or `idle`), marks each `drained`, and returns each agent's id and
+  session directory as a resume reference. Agents already in a terminal state
+  are skipped. The request carries a grace period, but the daemon does not
+  escalate to `SIGKILL` itself.
+- A spawn request whose spec sets `resume_session` to such a session directory
+  loads that `session.json` and continues the conversation instead of replaying
+  the initial prompt. An interactive agent then waits for the next operator
+  message.
+- Resume replays the persisted conversation, not live process state. A tool
+  call in flight at drain time is not resumed mid-execution.
+
+```admonish note title="Protocol-level only"
+Drain and resume are part of the supervisor control protocol (`SupervisorClient::drain`
+and the spawn spec). There is no `caliban agents drain` or resume subcommand;
+`agents spawn` always starts fresh.
+```
 
 ## Diagram: agent lifecycle
 
@@ -213,11 +257,12 @@ flowchart LR
     A([caliban --bg task]) -->|spawn request| D[caliband daemon]
     D -->|registers| R[(Registry)]
     D -->|starts| W[Agent worker]
-    W -->|streams turns| S[(session.json)]
+    W -->|streams turns| S[(stdout.ndjson)]
+    W -->|each run end| J[(session.json)]
     W -->|per-agent socket| T([caliban attach id])
     W -->|done/failed| R
     T2([caliban agents kill id]) -->|kill request| D
-    D -->|SIGTERM→SIGKILL| W
+    D -->|SIGTERM| W
 ```
 
 For how background agents use git worktree isolation, see

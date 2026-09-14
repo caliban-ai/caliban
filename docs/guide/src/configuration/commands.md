@@ -20,7 +20,13 @@ The output shows the merged `Settings` object. Each top-level key lists the scop
 
 ## `caliban config migrate`
 
-Consolidates legacy per-feature TOML files (`permissions.toml`, `mcp.toml`, `hooks.toml`) in the current workspace into a single `.caliban/settings.toml`. Existing keys in the target file are preserved; the migrated keys are merged on top.
+Consolidates legacy per-feature TOML files (`permissions.toml`, `mcp.toml`, `hooks.toml`) in the current workspace into a single project-scope `.caliban/settings.json`.
+
+```admonish note title="migrate writes JSON"
+Unlike the other settings writers, `config migrate` currently writes `settings.json`, not
+TOML. Run `caliban settings import --from .caliban/settings.json` afterwards if you want the
+canonical TOML form.
+```
 
 ```bash
 # Preview what would be written (nothing is changed)
@@ -30,7 +36,7 @@ caliban config migrate --dry-run
 caliban config migrate
 ```
 
-After migration the per-feature files are no longer read (caliban checks for the unified key first). You can safely delete them, or leave them in place — caliban will ignore them once the corresponding key exists in `settings.toml`.
+After migration the per-feature files are no longer read (caliban checks for the unified key first). You can safely delete them, or leave them in place — caliban will ignore them once the corresponding key exists in the unified settings file.
 
 ```admonish tip title="When to migrate"
 Run `caliban config migrate` once after upgrading to a version that shipped ADR 0026. It is safe to run multiple times — the command is idempotent.
@@ -83,7 +89,7 @@ This differs from `caliban config print` in that it shows the unmerged raw conte
 
 ## TOML-primary write / JSON import-only
 
-Caliban always writes TOML. JSON files at any scope path are accepted on **read** as a legacy or import path, but caliban logs a `WARN` and recommends running `caliban settings import` to migrate.
+Caliban's settings writers emit TOML (the one exception is `config migrate`, above). JSON files at any scope path are accepted on **read** as a legacy or import path, but caliban logs a `WARN` and recommends running `caliban settings import` to migrate.
 
 When both `settings.toml` and `settings.json` exist in the same scope directory, TOML wins and the JSON file is ignored (with a `WARN`).
 
@@ -97,8 +103,8 @@ If caliban finds both `settings.toml` and `settings.json` in the same scope dire
 
 Most settings changes take effect immediately via the file watcher (250 ms debounce). A subset of keys require a full restart:
 
-- **Restart-required:** `model`, `fallback_model`, `mcp_servers.*`, `output_style`, `auto_compact_threshold`, `micro_compact_enabled`, `compact_strategy`
+- **Restart-required:** `model`, `fallback_model`, `agent`, `router`, `mcp_servers`, `memory`, `output_style`
 
 When a restart-required key changes on disk while caliban is running, caliban logs a `WARN` and shows a "restart required" badge in the `/config` TUI overlay. The new value will be used the next time you launch `caliban`.
 
-All other settings — permissions, hooks, `api_key_helper`, UI keys, `env`, `memory` knobs — are live-reloadable and take effect within one debounce cycle without restarting.
+All other settings — permissions, hooks, `api_key_helper`, UI keys, `env` — are treated as live-reloadable and take effect within one debounce cycle without restarting.

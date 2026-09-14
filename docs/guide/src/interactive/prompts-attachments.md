@@ -4,7 +4,7 @@ This chapter covers how to compose prompts, reference files, and send images to 
 
 ## Writing prompts
 
-In the TUI, type your prompt in the input area and press `Enter` to submit. For a multi-line prompt, press `\` followed by `Enter` to insert a newline, then `Enter` alone on a blank line to submit.
+In the TUI, type your prompt in the input area and press `Enter` to submit. To insert a newline instead, press `Shift+Enter` (kitty-protocol terminals), `Alt+Enter`, or end the line with `\` before pressing `Enter`.
 
 For longer drafts, press `Ctrl+G` to open the current input buffer in `$VISUAL` / `$EDITOR` / `vi`. Caliban reads the saved file back when the editor exits.
 
@@ -20,7 +20,7 @@ git diff | caliban -p -
 
 Type `@` in the TUI input bar to open the file suggestion menu (gitignore-aware). Continue typing to narrow by path. The selected file is read and attached to your prompt as a text block at submit time.
 
-You can also type `@path/to/file` directly without the menu. Any `@`-reference that resolves to an image-like extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) is handled by the image pipeline rather than as text — see [Images](#images) below.
+You can also type `@path/to/file` directly without the menu. `@` attachments are resolved only in the TUI, and only as UTF-8 text. An `@`-reference to an image-like file (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) is currently **skipped**, not attached. See [Images](#images) below.
 
 ```admonish note title="Shell escape for quick commands"
 Leading `!` at the start of the input bar runs the rest of the line as a shell command via the `Bash` tool (subject to permission rules). The result is not added to the conversation history.
@@ -47,7 +47,15 @@ caliban \
 
 ## Images
 
-Caliban supports image input via three entry points:
+```admonish warning title="Image input is built but not yet wired into the binary"
+The `caliban-images` crate implements the pipeline described below (ADR 0039), but the
+`caliban` binary does not call it yet. Today an `@image.png` reference is skipped, and
+clipboard paste, drag-and-drop, inline graphics rendering, and image blob storage are not
+active. The `[images]` config table does not exist as a setting. The rest of this section
+describes the designed behavior of the engine.
+```
+
+The image engine is designed around three entry points:
 
 1. **`@path`** — reference an image file by path in the TUI or via `--prompt "@screenshot.png explain this"` in headless mode.
 2. **Clipboard paste** — paste an image from the clipboard directly into the TUI input bar (platform clipboard integration required; built with the `clipboard` feature).
@@ -64,13 +72,7 @@ Before sending an image to a model, caliban runs it through an ingest pipeline:
 3. **Downscale** — if the file exceeds 5 MiB (pre-base64) or the longest edge exceeds 1568 px, caliban downscales using Lanczos3 resampling. A `[downscaled]` badge appears in the TUI. The 1568 px target matches Anthropic's recommended longest edge for cost-efficient vision inputs.
 4. **SHA-256 fingerprint** — deduplicated images are not re-sent within a session.
 
-The pipeline is configurable via `[images]` in `caliban.toml`:
-
-```toml
-[images]
-max_bytes = 5242880          # 5 MiB pre-base64 cap
-downscale_target = 1568      # longest-edge px target
-```
+These limits are compiled-in constants of the engine, not settings.
 
 ### Capability routing
 

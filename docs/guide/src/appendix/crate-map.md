@@ -57,7 +57,8 @@ Persistence, memory, observability, and the background fleet.
 | `caliban-output-styles` | Built-in and custom output style loading and activation (ADR 0031) |
 | `caliban-telemetry` | OpenTelemetry export, cost accounting, metric emission (ADR 0033) |
 | `caliban-worktrees` | Git worktree creation and lifecycle management for sub-agent isolation (ADR 0037) |
-| `caliban-supervisor` | Background agent fleet and `caliband` supervisor daemon (ADR 0037, 0042) |
+| `caliban-supervisor` | Background agent fleet and `caliband` supervisor daemon, including the network session plane and graceful drain/resume of daemon agents (ADR 0037, 0042, 0051, 0057) |
+| `caliban-drive` | Transport-agnostic drive core (run / stream / status / input) behind `caliban mcp serve`, `acp serve`, and `http serve` (ADR 0055) |
 
 ## The binary
 

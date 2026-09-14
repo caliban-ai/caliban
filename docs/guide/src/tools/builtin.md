@@ -14,7 +14,8 @@ Pass `--no-tools` to disable all tools and run caliban in chat-only mode.
 | `MultiEdit` | Filesystem | Apply a sequence of `{old_string, new_string}` replacements to a single file atomically. If any replacement fails to match, the whole operation is rolled back. |
 | `NotebookEdit` | Filesystem | Add, edit, or delete cells in a Jupyter `.ipynb` notebook (nbformat v4). Preserves cell metadata and outputs; writes atomically via tmpfile + rename. |
 | `Bash` | Shell | Run a shell command and capture stdout + stderr. Supports `timeout_seconds`, an optional `cwd`, and a `background` flag for long-running processes. |
-| `BashBg` | Shell | Companion tools for background Bash jobs: read buffered output (`BashOutput`) or terminate a job (`KillShell`). Background jobs use a 5 GiB ring buffer. |
+| `BashOutput` | Shell | Read the buffered output of a background shell started with `Bash` `background: true`, by `shell_id`, with an optional `since_offset`. |
+| `KillShell` | Shell | Terminate a background shell by `shell_id` (SIGTERM, then SIGKILL if it does not exit). |
 | `Glob` | Search | Find files by name pattern relative to the workspace root. |
 | `Grep` | Search | Search file contents with a regex, powered by the ripgrep library. Returns up to 100 matches by default (max 500). |
 | `WebFetch` | Web | GET a URL and return the body as markdown or plain text. HTML is converted via `htmd`. 10 MB body cap, 60 s default timeout (configurable up to 300 s). |
@@ -23,7 +24,9 @@ Pass `--no-tools` to disable all tools and run caliban in chat-only mode.
 | `AgentTool` | Agent | Spawn an in-process sub-agent with a task prompt and an optional tool allowlist. Output is capped at 5,000 characters. See [Sub-agents](../subagents/overview.md). |
 | `EnterPlanMode` | Plan | Switch the session into plan mode. While active, only read-only tools may run; destructive tools are blocked until the operator confirms the plan. |
 | `ExitPlanMode` | Plan | Confirm or abandon the current plan and return to normal execution. |
-| `ReadMemoryTopic` | Memory | Read one auto-memory topic file by slug. See [Memory Tiers](../memory/tiers.md). |
+| `Skill` | Agent | Load a skill's body by `name`. Not registered with `--no-skills` or `--bare`. See [Skills](../extending/skills.md). |
+| `ToolSearch` | Agent | Find MCP tools whose schemas are not loaded yet (by substring, or exactly with `select:a,b`) and activate them for the session. Not registered with `--no-tools`, `--no-mcp`, or `--bare`. See [MCP Servers](../extending/mcp.md). |
+| `ReadMemoryTopic` | Memory | Read one auto-memory topic file by slug. Registered only when auto-memory is enabled (and not under `--bare`). See [Memory Tiers](../memory/tiers.md). |
 | `WriteMemoryTopic` | Memory | Write or update an auto-memory topic file and update the `MEMORY.md` index entry atomically. Topic type must be one of `user`, `feedback`, `project`, or `reference`. See [Memory Tiers](../memory/tiers.md). |
 
 ## WebSearch backends

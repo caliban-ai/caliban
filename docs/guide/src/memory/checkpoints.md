@@ -22,6 +22,13 @@ recorded from that point forward.
 Plan-mode prompts (which reject mutating tools) emit an empty manifest so they
 are still selectable as conversation-rewind targets.
 
+```admonish note title="When checkpointing is on"
+Checkpoints are recorded only for an **interactive TUI** session started without an
+inline prompt. `-p` headless runs, `caliban "prompt"` runs, and driven serve runs record
+none. The checkpoint directory is keyed by the `--session` name. Without `--session`, every
+unnamed TUI run shares the `tui-ephemeral` checkpoint directory for that working directory.
+```
+
 ## Disk layout
 
 ```text
@@ -62,18 +69,21 @@ Open the rewind overlay from the TUI in two ways:
 - Press **Esc Esc** (two Esc presses within 400 ms) when the input buffer is
   empty.
 
-The overlay lists prompts newest-first. Navigate with arrow keys, confirm with
-Enter.
+The overlay lists prompts newest-first. Move the cursor with **↑/↓** (or
+**j/k**), then press an action key. The overlay closes and the action runs
+against the selected checkpoint; the outcome is reported as a toast. There is
+no Enter default: every action has its own key.
 
-## Restore options
+## Rewind actions
 
-| Option                     | Default | Effect                                                         |
-|----------------------------|---------|----------------------------------------------------------------|
-| Restore both               | Enter   | Overwrite tracked files **and** truncate conversation          |
-| Restore code only          |         | Overwrite tracked files; leave conversation intact             |
-| Restore conversation only  |         | Truncate messages; leave files intact                          |
-| Summarize from here        |         | Run the compactor on the messages *after* the checkpoint       |
-| Summarize up to here       |         | Run the compactor on the messages *up to* the checkpoint       |
+| Key   | Action                     | Effect                                                         |
+|-------|----------------------------|----------------------------------------------------------------|
+| `c`   | Restore code only          | Overwrite tracked files; leave conversation intact             |
+| `v`   | Restore conversation only  | Truncate messages; leave files intact                          |
+| `b`   | Restore both               | Overwrite tracked files **and** truncate conversation          |
+| `s`   | Summarize from here        | Run the compactor on the messages *after* the checkpoint       |
+| `S`   | Summarize up to here       | Run the compactor on the messages *up to* the checkpoint       |
+| `f`   | Fork                       | Write a **new** session branched at the checkpoint; see [Forking a session](#forking-a-session) |
 
 "Truncate conversation" removes all messages after the selected prompt's last
 assistant message, so the conversation ends at that point in time.
@@ -85,14 +95,41 @@ rolling back — for example, summarize everything before the rewind point so th
 model retains the overall arc without the failed detour.
 ```
 
+## Forking a session
+
+The restore actions rewind the current session in place. **Fork** (`f`) is the
+non-destructive alternative. It creates a brand-new session whose conversation
+is truncated at the selected checkpoint, using the same rule as `v`, and leaves
+the current session, its checkpoint history, and the working tree untouched.
+
+- The fork gets a fresh identity: a new name, new timestamps, and zeroed
+  cumulative usage. The todo list and plan-mode state carry over from the source.
+- The name is derived from the current session: `<session>-fork<N>-<id>`, where
+  `<N>` is the checkpoint's prompt index and `<id>` is a short unique suffix.
+  The name is sanitized to letters, digits, `-`, and `_`, and capped at 64
+  characters.
+- The fork is saved and flushed right away. It shows up in the `/resume` list,
+  and you can open it with `caliban --session <name>`.
+- Forking needs session persistence. Without it, for example when you did not
+  start caliban with `--session`, the overlay shows a toast asking you to
+  start with `--session` instead of forking.
+
+```admonish note title="Files are not forked"
+There is one working tree, so a fork branches only the conversation. To roll the
+files back too, run `c` (restore code) on the same checkpoint.
+```
+
 ## Storage limits and pruning
 
-`CALIBAN_CHECKPOINT_MAX_BYTES` caps total blob storage per project (default
-5 GiB). When the cap is exceeded, oldest prompt blobs are dropped first; the
-manifest is kept as a `cleared` marker so the prompt remains selectable for
-conversation rewind (but file restore is no longer possible).
+`CALIBAN_CHECKPOINT_MAX_FILE_BYTES` (default 16 MiB) is the largest file whose
+pre-image is captured. A larger file is recorded in the manifest, but it cannot
+be restored.
 
-A checkpoint directory is removed only when `cleanupPeriodDays` (default 30)
-has elapsed since its last update **and** the corresponding session is being
-pruned by the session store. Checkpoints are never orphaned while a session is
-still resumable.
+```admonish warning title="Byte cap and age pruning are not enforced yet"
+The `caliban-checkpoint` crate implements a per-project blob cap
+(`CALIBAN_CHECKPOINT_MAX_BYTES`, default 5 GiB) and age-based pruning
+(`CALIBAN_CLEANUP_PERIOD_DAYS`, default 30). When the cap is exceeded, the oldest
+prompt blobs are dropped and each manifest is kept as a `cleared` marker. The
+`caliban` binary does not call either routine yet, so checkpoint storage currently
+grows until you remove it manually.
+```

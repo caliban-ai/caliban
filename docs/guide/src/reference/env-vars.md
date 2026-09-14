@@ -2,6 +2,13 @@
 
 Caliban reads environment variables in two groups: `CALIBAN_*` variables that control the harness itself, and per-provider API-key and endpoint variables. Most `CALIBAN_*` flags mirror a corresponding CLI flag; the CLI flag always wins when both are set.
 
+```admonish note title="Boolean flag variables"
+Variables that mirror a boolean CLI flag (`CALIBAN_NO_MCP`, `CALIBAN_NO_HOOKS`,
+`CALIBAN_AUTO_ALLOW`, and similar) use the flag parser: `1/true/yes/on` enable,
+`0/false/no/off` disable (case-insensitive), and any other value is a startup error.
+Where a row below says "any non-empty value", read it as "a truthy value".
+```
+
 ---
 
 ## Provider API Keys
@@ -10,7 +17,7 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic | **Required.** API key for the Anthropic provider. |
 | `ANTHROPIC_BASE_URL` | Anthropic | Optional. Override the Anthropic API base URL (useful for proxies or Bedrock-compatible endpoints). |
-| `OPENAI_API_KEY` | OpenAI | **Required** when using OpenAI. |
+| `OPENAI_API_KEY` | OpenAI | **Required** for the hosted OpenAI API. Not required when `OPENAI_BASE_URL` points at a local OpenAI-compatible server. |
 | `OPENAI_BASE_URL` | OpenAI | Optional. Override the OpenAI API base URL (for LM Studio, Mistral, and other OpenAI-compatible endpoints). |
 | `OPENAI_ORG_ID` | OpenAI | Optional. OpenAI organization ID. |
 | `OPENAI_PROJECT` | OpenAI | Optional. OpenAI project ID. |
@@ -75,6 +82,15 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 | `CALIBAN_NO_SUB_AGENT` | — | Any non-empty value disables the built-in `AgentTool`. |
 | `CALIBAN_DAEMON_RUNTIME_DIR` | Platform default | Override the runtime socket directory for the supervisor daemon. |
 | `CALIBAN_DAEMON_LISTEN` | — | TCP listen address (e.g. `0.0.0.0:7000`) that switches the `caliband` supervisor into networked control-plane mode; the `caliban agents` CLI dials the same address to reach a remote daemon. Unset means the local Unix-socket path. TLS/token come from the `CALIBAN_DAEMON_TLS_*` / `CALIBAN_DAEMON_TOKEN` vars. |
+| `CALIBAN_KEEP_WORKTREES` | — | Debug escape hatch: keep sub-agent worktrees instead of removing them when the worker exits. |
+
+---
+
+## Driving (serve surfaces)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CALIBAN_DRIVE_TOKEN` | — | Bearer token that non-loopback peers must present to `caliban http serve` (and the other drive surfaces). Binding to a non-loopback address without it is refused. See [Driving Caliban](../driving/overview.md). |
 
 ---
 
@@ -159,6 +175,7 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CALIBAN_DEBUG` | — | Any non-empty value enables the file-backed tracing subscriber (appends to the platform debug log). Also settable via `--debug`. |
+| `CALIBAN_DEBUG_FILE` | — | Redirect debug output to this path (implies debug). Also settable via `--debug-file`. |
 
 ---
 
@@ -172,6 +189,9 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 
 ---
 
-```admonish note title="Provider precedence"
-When `CALIBAN_PROVIDER` is set, it overrides the `--provider` flag and settings-derived provider. This is the escape hatch for scripting scenarios where injecting a flag is inconvenient.
+```admonish note title="CALIBAN_PROVIDER is an output, not an input"
+Caliban does not read `CALIBAN_PROVIDER` to choose a provider. Use `--provider` or settings for that. Caliban
+**sets** `CALIBAN_PROVIDER` (and `CALIBAN_API_KEY_HELPER_TTL_MS`) in the environment of an
+`api_key_helper` process so the script knows which provider's key to print. See
+[Configuring Providers & API Keys](../providers/configuration.md).
 ```

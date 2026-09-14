@@ -16,20 +16,22 @@ Three flags handle resume:
 
 | Flag | Meaning |
 |------|---------|
-| `--session NAME` | Load or create the session named `NAME`. |
-| `-c` / `--continue` | Resume the most recently updated session. |
-| `-r NAME` / `--resume NAME` | Resume a named session (alias for `--session` with load semantics). |
+| `--session NAME` | Load or create the session named `NAME`. Works in the TUI and in prompt runs. |
+| `-c` / `--continue` | Resume the most recently updated session. Prompt runs only. |
+| `-r NAME` / `--resume NAME` | Resume an existing named session. Prompt runs only. Exits `66` if the session does not exist, and takes precedence over `--session`. |
 
-`-c` is the fastest way back into your last conversation:
+`-c` and `-r` conflict, so pass at most one of them.
 
-```bash
-caliban -c
+```admonish warning title="--continue / --resume do not reach the TUI"
+`-c` and `-r` are read only by prompt runs: `-p` headless mode or a prompt given as an
+argument. An interactive `caliban -c` or `caliban -r NAME` launches the TUI **without**
+loading the session. To reopen a session interactively, use `caliban --session NAME`.
 ```
 
-`-r` accepts the same name grammar as `--session`:
-
 ```bash
-caliban -r my-project
+caliban -c -p "Where were we?"             # continue the latest session, one-shot
+caliban -r my-project "Run the tests again" # resume a named session with a prompt
+caliban --session my-project                 # reopen it in the TUI
 ```
 
 ## Resume semantics
@@ -78,5 +80,6 @@ Inside the TUI, `/resume` lists all known sessions sorted by last-modified date.
 Each row shows the session name, turn count, total token usage, and last-modified time. To open a listed session, exit and re-launch with `caliban --session <NAME>`.
 
 ```admonish tip title="Quick pick"
-`caliban -c` is the fastest path back to recent work — no name needed.
+Keep a stable `--session` name per project. `caliban --session <name>` is the one
+command that reopens a conversation both interactively and in prompt runs.
 ```
