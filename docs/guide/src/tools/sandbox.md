@@ -2,7 +2,7 @@
 
 Caliban can wrap every subprocess spawned by the `Bash` tool in an OS-level sandbox that restricts what the child process may do — independent of permission rules. Where permission rules decide *whether* a command runs, the sandbox controls *what it can access* once it does.
 
-The sandbox is implemented by the `caliban-sandbox` crate (ADR 0032). It is **disabled by default** and must be explicitly enabled in settings.
+The sandbox is implemented by the `caliban-sandbox` crate (ADR 0032). It is off for a plain run and turns on automatically with `--workspace` or `--restrict-paths`. No settings switch enables or disables it.
 
 ## The `--workspace` fence (what you actually get)
 
@@ -62,6 +62,12 @@ or, persistently, in `settings.json`:
 
 The CLI flag wins over settings; settings win over the default (`deny`).
 
+```admonish warning title="No backend, no Bash fence"
+If neither `bwrap` (Linux) nor `sandbox-exec` (macOS) is usable, caliban logs a warning and
+runs `Bash` commands **unfenced**. The file tools stay confined to the workspace. Install
+bubblewrap on Linux to contain shell writes.
+```
+
 Per-hostname allowlists (e.g. "allow `github.com` only, so the agent can open a PR") are **not yet supported** — neither sandbox backend can filter egress by hostname, so it requires a proxy. Tracked in [#477](https://github.com/caliban-ai/caliban/issues/477). Until then the opt-out is all-or-nothing.
 
 ```admonish note title="The `[sandbox]` TOML table below is not wired"
@@ -87,17 +93,9 @@ Endpoint Security Framework if Apple removes `sandbox-exec` in a future OS
 version. There is no announced removal date.
 ```
 
-## Enabling the sandbox
+## Engine reference (library `Policy`, not settings)
 
-Add a `[sandbox]` block to your project or user `settings.toml`:
-
-```toml
-[sandbox]
-enabled = true
-fail_if_unavailable = true   # refuse to start if bwrap/sandbox-exec is missing
-```
-
-With `fail_if_unavailable = false` (the default), caliban falls back to running unsandboxed if the backend binary is absent or too old, and logs a warning.
+Everything from here down describes the `caliban-sandbox` engine's `Policy` surface. None of it can be set from a config file today: `enabled`, `fail_if_unavailable`, the filesystem ACLs, and the other knobs below exist on the library type only. The fence caliban applies is the fixed [`--workspace` policy](#the---workspace-fence-what-you-actually-get), plus `sandbox.network`.
 
 ## What the sandbox restricts
 

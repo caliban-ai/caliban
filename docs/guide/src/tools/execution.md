@@ -64,7 +64,7 @@ Large tool results — for example, reading a multi-thousand-line file — can f
 
 **`tool_result_cap_chars`** (settings key, default `50000`) — Maximum character count for a single tool result delivered inline to the model. Set to `0` to disable capping.
 
-When a result exceeds the cap, the overflow text is written to a spill file under the caliban cache directory (`~/.cache/caliban/tool-overflows/` on Linux, `~/Library/Caches/caliban/tool-overflows/` on macOS) and the model receives a truncated result with a note pointing at the spill path. The model can then decide whether to read the spill file directly.
+When a result exceeds the cap, the overflow text is written to a spill file under the caliban cache directory (`$XDG_CACHE_HOME/caliban/tool-overflows/`, default `~/.cache/caliban/tool-overflows/` on every platform per ADR 0050) and the model receives a truncated result with a note pointing at the spill path. The model can then decide whether to read the spill file directly.
 
 ```toml
 # .caliban/settings.toml — raise the cap for large codebases
