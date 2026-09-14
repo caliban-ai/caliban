@@ -2064,6 +2064,51 @@ mod tests {
         assert_eq!(app.pending_rewind.unwrap().prompt_index, 1);
     }
 
+    /// `[f]` queues a Fork request against the selected checkpoint and closes
+    /// the overlay, just like the restore actions (#37).
+    #[tokio::test]
+    async fn rewind_overlay_f_queues_fork_request() {
+        use caliban_checkpoint::{CheckpointRecorder, CheckpointStore, ManifestKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let root = tmp.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = CheckpointStore::open_in(&root, &ws, "sess-1").unwrap();
+        let rec = CheckpointRecorder::new(store.clone(), ws.clone());
+        for i in 1..=2u32 {
+            let idx = store.claim_prompt_index(i).unwrap();
+            rec.open_prompt(idx, ManifestKind::Files, format!("p{i}"))
+                .await
+                .unwrap();
+            rec.close_prompt().await.unwrap();
+        }
+
+        let mut app = crate::tui::App::for_tests().with_checkpoint_store(store);
+        app.view = ViewState::Overlay(Overlay::Rewind);
+        app.rewind_cursor = 0; // newest-first → checkpoint #2
+
+        let consumed = handle_rewind_overlay_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(consumed, "the fork key must be consumed by the handler");
+        let req = app
+            .pending_rewind
+            .expect("`[f]` must queue a pending request");
+        assert_eq!(
+            req.prompt_index, 2,
+            "cursor 0 selects the newest checkpoint"
+        );
+        assert_eq!(req.action, crate::tui::rewind::RewindAction::Fork);
+        assert!(
+            matches!(app.view, ViewState::Main),
+            "overlay closes so the async loop can execute the fork"
+        );
+    }
+
     #[test]
     fn provider_error_surfaces_as_error_with_caliban_framing() {
         let s = stopped_for_surface(&StopCondition::ProviderError(
