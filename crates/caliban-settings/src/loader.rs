@@ -192,6 +192,9 @@ pub enum LoadError {
     /// `--setting-sources` named a scope that doesn't exist.
     #[error("settings: --setting-sources entry '{0}' is not one of managed/user/project/local/cli")]
     UnknownScope(String),
+    /// A `CALIBAN_STORAGE_*` environment override held an invalid value (#659).
+    #[error("settings: {0}")]
+    EnvOverride(String),
 }
 
 /// Top-level settings keys that only the **user** and **managed** (admin)
@@ -225,8 +228,16 @@ fn strip_user_managed_only_keys(value: &mut Value) -> Vec<&'static str> {
 #[allow(clippy::too_many_lines)]
 pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
     if opts.bare {
+        // Even in bare mode the `CALIBAN_STORAGE_*` env overrides apply: they are
+        // an explicit operator gesture (like the other CALIBAN_* env vars caliban
+        // honors regardless of on-disk config), not file configuration (#659).
+        let mut settings = Settings::default();
+        settings
+            .storage
+            .apply_env_overrides(|k| std::env::var(k).ok())
+            .map_err(LoadError::EnvOverride)?;
         return Ok(LoadOutcome {
-            settings: Settings::default(),
+            settings,
             sources: Vec::new(),
             provenance: BTreeMap::new(),
             validation_warnings: Vec::new(),
@@ -403,6 +414,15 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
 
     // Step 6: deserialize.
     let mut settings: Settings = serde_json::from_value(accumulated).map_err(LoadError::Final)?;
+
+    // Step 6b: environment overrides for storage (#659). Env wins over the
+    // loaded file settings so caliban-operator can point an agent pod at a
+    // remote gonzalod (and name its token var via `token_env`) without
+    // generating a caliban settings file (caliban-operator ADR 0005).
+    settings
+        .storage
+        .apply_env_overrides(|k| std::env::var(k).ok())
+        .map_err(LoadError::EnvOverride)?;
 
     // Step 7: legacy `.toml` compat shims.
     //
