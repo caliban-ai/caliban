@@ -78,6 +78,7 @@ conventions.
 | [0055](0055-driveable-server-surface.md) | Driveable server surface — MCP-server + ACP + headless HTTP serve as thin adapters over one core (MCP-server leads v1) | accepted |
 | [0056](0056-deprecate-ollama-provider.md) | Deprecate + remove the bespoke Ollama provider — reach local models through the OpenAI-compatible surface + per-host `base_url` (amends 0007/0033/0038) | accepted |
 | [0057](0057-agent-drain-checkpoint-resume.md) | Graceful drain / checkpoint / resume for daemon-managed agents — flushed session dir on the retained PVC is the checkpoint; operator finalizer + `idleTimeout`→suspend (builds on 0028/0037/0047/0051/0052) | accepted |
+| [0058](0058-agent-loop-policy-surface.md) | Agent-loop policy surface — model-adaptive turn/time/cost budgets, spiral + wrong-path containment, and verification guidance; defaults keyed on cloud-vs-local execution context with an explicit profile override (builds on 0009) | accepted |
 
 ## Adding a new ADR
 
