@@ -111,6 +111,24 @@ Where a row below says "any non-empty value", read it as "a truthy value".
 
 ---
 
+## Storage (remote memory substrate)
+
+These override the `[storage]` settings so caliban can be pointed at a remote
+gonzalo daemon **without** a settings file (env wins over the file; a blank value
+is ignored, leaving the file setting in place). Substrate values use the same
+vocabulary as the settings file — `fs` / `remote` / `git` / `s3`, i.e. `fs`, not
+`local` — and an invalid value is a startup error naming the variable. The bearer
+token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
+*variable* that holds it, so no secret lives in settings or in these overrides.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CALIBAN_STORAGE_SUBSTRATE` | `fs` | Override `storage.substrate` — `fs` (local filesystem) or `remote` (a gonzalo daemon); `git`/`s3` are recognized but not wired yet. |
+| `CALIBAN_STORAGE_REMOTE_URL` | — | Override `storage.remote.url` — the gonzalod base URL (e.g. `http://host:8080`). Creates the `[storage.remote]` block if absent. |
+| `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` | — | Override `storage.remote.token_env` — the *name* of the env var holding the gonzalod bearer token (e.g. `GONZALO_TOKEN`), not the token itself. |
+
+---
+
 ## Checkpoints
 
 | Variable | Default | Description |

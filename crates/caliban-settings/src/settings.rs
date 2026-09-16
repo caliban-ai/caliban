@@ -276,6 +276,85 @@ pub struct StorageConfig {
     pub remote: Option<RemoteStorageConfig>,
 }
 
+/// Environment variable that overrides `storage.substrate` (#659).
+pub const ENV_STORAGE_SUBSTRATE: &str = "CALIBAN_STORAGE_SUBSTRATE";
+/// Environment variable that overrides `storage.remote.url` (#659).
+pub const ENV_STORAGE_REMOTE_URL: &str = "CALIBAN_STORAGE_REMOTE_URL";
+/// Environment variable that overrides `storage.remote.token_env` (#659).
+pub const ENV_STORAGE_REMOTE_TOKEN_ENV: &str = "CALIBAN_STORAGE_REMOTE_TOKEN_ENV";
+
+/// Parse a substrate token using the **same lowercase vocabulary the settings
+/// file accepts** (`fs`/`remote`/`git`/`s3`), by round-tripping through the
+/// enum's own `Deserialize`. This keeps the env override in lockstep with the
+/// file so the two can never diverge on the same concept — note it is `fs`, not
+/// `local`. Returns `None` for an unknown token.
+fn parse_storage_substrate(token: &str) -> Option<StorageSubstrate> {
+    serde_json::from_value(serde_json::Value::String(token.trim().to_ascii_lowercase())).ok()
+}
+
+impl StorageConfig {
+    /// Apply the `CALIBAN_STORAGE_*` environment overrides on top of the loaded
+    /// settings — **env wins** over the settings file (#659). `lookup` resolves a
+    /// variable name to its value (production passes `|k| std::env::var(k).ok()`;
+    /// tests pass a map), so the logic is pure and testable without touching the
+    /// process environment.
+    ///
+    /// Rules, matching the ticket contract:
+    /// - A **blank** (empty or whitespace-only) value is ignored — the file
+    ///   setting stands.
+    /// - `CALIBAN_STORAGE_SUBSTRATE` accepts the same vocabulary as the file
+    ///   (`fs`/`remote`/`git`/`s3`); an **invalid** value is a hard error that
+    ///   names the variable, never a silent fallback.
+    /// - `CALIBAN_STORAGE_REMOTE_URL` / `_TOKEN_ENV` synthesize `[storage.remote]`
+    ///   when it is absent, so `substrate=remote` + a URL alone (no settings
+    ///   file) yields a usable remote store.
+    /// - The token itself is never read here — only `token_env`, the *name* of
+    ///   the variable holding it (the indirection that keeps secrets out of
+    ///   settings and out of these overrides).
+    ///
+    /// # Errors
+    /// Returns a human-facing message naming `CALIBAN_STORAGE_SUBSTRATE` when it
+    /// holds an unrecognized substrate. The struct is not mutated on error.
+    pub fn apply_env_overrides(
+        &mut self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        // Resolve the substrate first (fallible) before mutating anything, so an
+        // invalid substrate leaves the struct untouched.
+        let new_substrate = match lookup(ENV_STORAGE_SUBSTRATE) {
+            Some(raw) if !raw.trim().is_empty() => {
+                Some(parse_storage_substrate(&raw).ok_or_else(|| {
+                    format!(
+                        "{ENV_STORAGE_SUBSTRATE}: unknown storage substrate {raw:?}; \
+                         expected one of fs, remote, git, s3"
+                    )
+                })?)
+            }
+            _ => None,
+        };
+        if let Some(s) = new_substrate {
+            self.substrate = s;
+        }
+        if let Some(raw) = lookup(ENV_STORAGE_REMOTE_URL) {
+            let url = raw.trim();
+            if !url.is_empty() {
+                self.remote
+                    .get_or_insert_with(RemoteStorageConfig::default)
+                    .url = url.to_string();
+            }
+        }
+        if let Some(raw) = lookup(ENV_STORAGE_REMOTE_TOKEN_ENV) {
+            let name = raw.trim();
+            if !name.is_empty() {
+                self.remote
+                    .get_or_insert_with(RemoteStorageConfig::default)
+                    .token_env = Some(name.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -1192,7 +1271,20 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
 
     #[cfg(test)]
     mod storage_config_tests {
-        use super::{Settings, StorageSubstrate};
+        use super::{
+            ENV_STORAGE_REMOTE_TOKEN_ENV, ENV_STORAGE_REMOTE_URL, ENV_STORAGE_SUBSTRATE,
+            RemoteStorageConfig, Settings, StorageConfig, StorageSubstrate,
+        };
+        use std::collections::HashMap;
+
+        /// Build an injected env lookup from `(name, value)` pairs.
+        fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+            let m: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            move |k: &str| m.get(k).cloned()
+        }
 
         #[test]
         fn absent_storage_defaults_to_fs() {
@@ -1225,6 +1317,120 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
         fn unknown_substrate_value_is_rejected() {
             let e = serde_json::from_str::<Settings>(r#"{ "storage": { "substrate": "sqlite" } }"#);
             assert!(e.is_err(), "unknown substrate variant should fail");
+        }
+
+        // ----- #659 env overrides (env wins over the loaded file) -----
+
+        #[test]
+        fn env_substrate_overrides_file_setting() {
+            let mut s = StorageConfig::default(); // fs
+            s.apply_env_overrides(env(&[(ENV_STORAGE_SUBSTRATE, "remote")]))
+                .unwrap();
+            assert_eq!(s.substrate, StorageSubstrate::Remote);
+        }
+
+        #[test]
+        fn env_url_and_token_env_synthesize_remote_block() {
+            let mut s = StorageConfig::default();
+            s.apply_env_overrides(env(&[
+                (ENV_STORAGE_SUBSTRATE, "remote"),
+                (ENV_STORAGE_REMOTE_URL, "http://gonzalod:8080"),
+                (ENV_STORAGE_REMOTE_TOKEN_ENV, "GONZALO_TOKEN"),
+            ]))
+            .unwrap();
+            assert_eq!(s.substrate, StorageSubstrate::Remote);
+            let r = s.remote.expect("remote block synthesized from env");
+            assert_eq!(r.url, "http://gonzalod:8080");
+            assert_eq!(r.token_env.as_deref(), Some("GONZALO_TOKEN"));
+        }
+
+        #[test]
+        fn remote_from_env_alone_with_no_file_yields_remote_store() {
+            // No settings file ⇒ default config (fs, no remote). substrate + url
+            // from env alone must produce a usable remote store.
+            let mut s = StorageConfig::default();
+            s.apply_env_overrides(env(&[
+                (ENV_STORAGE_SUBSTRATE, "remote"),
+                (ENV_STORAGE_REMOTE_URL, "http://h:8080"),
+            ]))
+            .unwrap();
+            assert_eq!(s.substrate, StorageSubstrate::Remote);
+            assert_eq!(s.remote.expect("remote synthesized").url, "http://h:8080");
+        }
+
+        #[test]
+        fn blank_env_values_are_ignored_file_stands() {
+            let mut s = StorageConfig {
+                substrate: StorageSubstrate::Remote,
+                remote: Some(RemoteStorageConfig {
+                    url: "http://from-file:9".into(),
+                    token_env: Some("FILE_TOKEN".into()),
+                }),
+            };
+            s.apply_env_overrides(env(&[
+                (ENV_STORAGE_SUBSTRATE, "   "),
+                (ENV_STORAGE_REMOTE_URL, ""),
+                (ENV_STORAGE_REMOTE_TOKEN_ENV, ""),
+            ]))
+            .unwrap();
+            assert_eq!(s.substrate, StorageSubstrate::Remote);
+            let r = s.remote.unwrap();
+            assert_eq!(r.url, "http://from-file:9");
+            assert_eq!(r.token_env.as_deref(), Some("FILE_TOKEN"));
+        }
+
+        #[test]
+        fn invalid_substrate_errors_naming_the_var_and_does_not_mutate() {
+            let mut s = StorageConfig::default();
+            let err = s
+                .apply_env_overrides(env(&[(ENV_STORAGE_SUBSTRATE, "sqlite")]))
+                .unwrap_err();
+            assert!(
+                err.contains("CALIBAN_STORAGE_SUBSTRATE"),
+                "error must name the variable: {err}"
+            );
+            assert!(
+                err.contains("sqlite"),
+                "error must echo the bad value: {err}"
+            );
+            assert_eq!(
+                s.substrate,
+                StorageSubstrate::Fs,
+                "must not mutate on error"
+            );
+        }
+
+        #[test]
+        fn env_vocabulary_matches_the_file_fs_not_local() {
+            // `local` is NOT accepted — the env var uses the file's vocabulary.
+            let mut s = StorageConfig::default();
+            assert!(
+                s.apply_env_overrides(env(&[(ENV_STORAGE_SUBSTRATE, "local")]))
+                    .is_err(),
+                "`local` is not a valid substrate; the file uses `fs`"
+            );
+            // `fs` (with surrounding whitespace) is accepted and normalizes.
+            let mut s2 = StorageConfig {
+                substrate: StorageSubstrate::Remote,
+                remote: None,
+            };
+            s2.apply_env_overrides(env(&[(ENV_STORAGE_SUBSTRATE, " FS ")]))
+                .unwrap();
+            assert_eq!(s2.substrate, StorageSubstrate::Fs);
+        }
+
+        #[test]
+        fn absent_env_leaves_settings_untouched() {
+            let mut s = StorageConfig {
+                substrate: StorageSubstrate::Remote,
+                remote: Some(RemoteStorageConfig {
+                    url: "http://f:1".into(),
+                    token_env: None,
+                }),
+            };
+            s.apply_env_overrides(|_| None).unwrap();
+            assert_eq!(s.substrate, StorageSubstrate::Remote);
+            assert_eq!(s.remote.unwrap().url, "http://f:1");
         }
     }
 
