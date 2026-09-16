@@ -54,6 +54,14 @@ a settings file.
   and the suite now proves an untrusted CA and a hostname mismatch are
   rejected. (#657)
 
+### Security
+
+- **rustls upgraded to 0.23.45** for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285) — TLS 1.3
+  handshake messages were incorrectly accepted across encryption-level boundaries.
+  caliband's network transport rides on rustls, so the patched crypto stack
+  (aws-lc-rs 1.18, rustls-webpki 0.103.15) is shipped in this release.
+
 Observability: the caliband supervisor now logs a worker's spawn-death cause to
 its stdout, so a worker that dies during spawn is diagnosable (#646, #647).
 
