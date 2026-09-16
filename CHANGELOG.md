@@ -9,6 +9,69 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-16
+
+The daemon-lifecycle release. Long-running daemon-managed agents gain a full
+drain → checkpoint → resume path; `/rewind` finally works end to end; and a new
+fork-from-checkpoint branches a session without disturbing the original. The
+caliband network transport is hardened, and three storage environment overrides
+let an operator point an agent at a remote gonzalo daemon without hand-authoring
+a settings file.
+
+### Added
+
+- **Fork from a checkpoint** (#37): from the `/n` checkpoint overlay, `[f]`
+  branches a **new** session from the selected checkpoint — written to disk and
+  seeded with the conversation truncated at that point — leaving the current
+  session, its checkpoint history, and the working tree untouched. (#655)
+- **Graceful drain of daemon agents** (#650): a `Drain` control command SIGTERMs
+  live agents, marks them `Drained`, and returns their session directories as
+  resume references — the checkpoint half of
+  [ADR 0057](docs/adr/0057-agent-drain-checkpoint-resume.md). (#653)
+- **Resume a daemon agent from a persisted session** (#651): a worker given a
+  `resume_session` reference continues from the persisted `session.json`,
+  completing the drain → resume round-trip. (#654)
+- **Environment overrides for the storage substrate** (#659):
+  `CALIBAN_STORAGE_SUBSTRATE`, `CALIBAN_STORAGE_REMOTE_URL`, and
+  `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` override the `[storage]` settings (env wins),
+  so caliban can be pointed at a remote gonzalo daemon — and handed its token by
+  name — without a settings file. The `token_env` indirection keeps the secret
+  out of settings. (#667)
+
+### Fixed
+
+- **`/rewind` actually restores now** (#549): the `CheckpointHook` was never
+  installed, so per-prompt checkpoints were never recorded and `/rewind` had
+  nothing to restore. It is now wired as the last hook layer, so all five rewind
+  actions — code, conversation, both, summarize-forward, summarize-backward —
+  work. (#649)
+- **caliband network mode hardened** (#319): the agent registry no longer aborts
+  on a single un-deserializable manifest, a wildcard advertise host is flagged,
+  and the network control endpoint is honored only in network mode. (#648)
+- **caliband TLS pinned to aws-lc-rs, with negative-path tests** (#320): the
+  crypto provider is pinned per-config instead of relying on the process-wide
+  ambient default (so a future dependency cannot silently flip the TLS backend),
+  and the suite now proves an untrusted CA and a hostname mismatch are
+  rejected. (#657)
+
+### Security
+
+- **rustls upgraded to 0.23.45** for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285) — TLS 1.3
+  handshake messages were incorrectly accepted across encryption-level boundaries.
+  caliband's network transport rides on rustls, so the patched crypto stack
+  (aws-lc-rs 1.18, rustls-webpki 0.103.15) is shipped in this release.
+
+Observability: the caliband supervisor now logs a worker's spawn-death cause to
+its stdout, so a worker that dies during spawn is diagnosable (#646, #647).
+
+Docs: [ADR 0057](docs/adr/0057-agent-drain-checkpoint-resume.md) records the
+drain/checkpoint/resume design (#652); [ADR 0058](docs/adr/0058-agent-loop-policy-surface.md)
+records the agent-loop policy surface — model-adaptive budgets, spiral + wrong-path
+containment, and verification guidance, grounded in the eval finding that
+self-verification helps strong models but hurts weaker ones (#660); and the user
+guide + README were refreshed for v0.12.0 and the drain/resume/fork work (#658).
+
 ## [0.12.0] - 2026-09-13
 
 The Ollama release. caliban's bespoke `ollama` provider is **removed** in favor
@@ -858,7 +921,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/caliban-ai/caliban/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/caliban-ai/caliban/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/caliban-ai/caliban/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/caliban-ai/caliban/compare/v0.9.0...v0.10.0
