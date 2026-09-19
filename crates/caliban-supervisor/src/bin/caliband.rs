@@ -54,30 +54,42 @@ fn env_opt(key: &str) -> Option<String> {
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_from(std::env::args().skip(1))
+}
+
+/// Parse caliband args from an explicit token iterator. Split out from
+/// [`parse_args`] so the `#[cfg(test)]` drift guard can feed
+/// `caliban_contract::launch::CalibandLaunch::args()` through the real parser and
+/// assert every emitted flag is recognized (#656).
+fn parse_from(tokens: impl Iterator<Item = String>) -> Result<Args, String> {
+    // Flag names come from the contract crate's constants (#656) — the same
+    // source of truth `CalibandLaunch::args()` emits, so the two cannot drift
+    // (see the `caliband_launch_args_are_recognized_by_the_parser` drift test).
+    use caliban_contract::launch as l;
     let mut a = Args::default();
-    let mut it = std::env::args().skip(1);
+    let mut it = tokens;
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--workspace-root" | "--repo-root" => {
+            a_flag if a_flag == l::FLAG_WORKSPACE_ROOT || a_flag == l::FLAG_REPO_ROOT => {
                 a.workspace_root = it.next().map(PathBuf::from);
             }
-            "--socket-path" => a.socket_path = it.next().map(PathBuf::from),
-            "--data-base" => a.data_base = it.next().map(PathBuf::from),
-            "--listen" => a.listen = it.next(),
-            "--advertise-host" => a.advertise_host = it.next(),
-            "--agent-port-base" => {
+            a_flag if a_flag == l::FLAG_SOCKET_PATH => a.socket_path = it.next().map(PathBuf::from),
+            a_flag if a_flag == l::FLAG_DATA_BASE => a.data_base = it.next().map(PathBuf::from),
+            a_flag if a_flag == l::FLAG_LISTEN => a.listen = it.next(),
+            a_flag if a_flag == l::FLAG_ADVERTISE_HOST => a.advertise_host = it.next(),
+            a_flag if a_flag == l::FLAG_AGENT_PORT_BASE => {
                 a.agent_port_base = Some(
                     it.next()
-                        .ok_or_else(|| "--agent-port-base needs a value".to_string())?
+                        .ok_or_else(|| format!("{} needs a value", l::FLAG_AGENT_PORT_BASE))?
                         .parse()
-                        .map_err(|e| format!("--agent-port-base: {e}"))?,
+                        .map_err(|e| format!("{}: {e}", l::FLAG_AGENT_PORT_BASE))?,
                 );
             }
-            "--tls-cert" => a.tls_cert = it.next().map(PathBuf::from),
-            "--tls-key" => a.tls_key = it.next().map(PathBuf::from),
-            "--tls-ca" => a.tls_ca = it.next().map(PathBuf::from),
-            "--tls-server-name" => a.tls_server_name = it.next(),
-            "--token" => a.token = it.next(),
+            a_flag if a_flag == l::FLAG_TLS_CERT => a.tls_cert = it.next().map(PathBuf::from),
+            a_flag if a_flag == l::FLAG_TLS_KEY => a.tls_key = it.next().map(PathBuf::from),
+            a_flag if a_flag == l::FLAG_TLS_CA => a.tls_ca = it.next().map(PathBuf::from),
+            a_flag if a_flag == l::FLAG_TLS_SERVER_NAME => a.tls_server_name = it.next(),
+            a_flag if a_flag == l::FLAG_TOKEN => a.token = it.next(),
             "-h" | "--help" => {
                 eprintln!(
                     "Usage: caliband --workspace-root <path> [--repo-root <path>] [--socket-path <path>]\n\
@@ -91,32 +103,32 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown arg: {other}")),
         }
     }
-    // Env fallbacks (flags win).
-    a.listen = a.listen.or_else(|| env_opt("CALIBAN_DAEMON_LISTEN"));
+    // Env fallbacks (flags win). Env names come from the contract constants too.
+    a.listen = a.listen.or_else(|| env_opt(l::ENV_DAEMON_LISTEN));
     a.advertise_host = a
         .advertise_host
-        .or_else(|| env_opt("CALIBAN_DAEMON_ADVERTISE_HOST"));
+        .or_else(|| env_opt(l::ENV_DAEMON_ADVERTISE_HOST));
     if a.agent_port_base.is_none()
-        && let Some(v) = env_opt("CALIBAN_DAEMON_AGENT_PORT_BASE")
+        && let Some(v) = env_opt(l::ENV_DAEMON_AGENT_PORT_BASE)
     {
         a.agent_port_base = Some(
             v.parse()
-                .map_err(|e| format!("CALIBAN_DAEMON_AGENT_PORT_BASE: {e}"))?,
+                .map_err(|e| format!("{}: {e}", l::ENV_DAEMON_AGENT_PORT_BASE))?,
         );
     }
     a.tls_cert = a
         .tls_cert
-        .or_else(|| env_opt("CALIBAN_DAEMON_TLS_CERT").map(PathBuf::from));
+        .or_else(|| env_opt(l::ENV_DAEMON_TLS_CERT).map(PathBuf::from));
     a.tls_key = a
         .tls_key
-        .or_else(|| env_opt("CALIBAN_DAEMON_TLS_KEY").map(PathBuf::from));
+        .or_else(|| env_opt(l::ENV_DAEMON_TLS_KEY).map(PathBuf::from));
     a.tls_ca = a
         .tls_ca
-        .or_else(|| env_opt("CALIBAN_DAEMON_TLS_CA").map(PathBuf::from));
+        .or_else(|| env_opt(l::ENV_DAEMON_TLS_CA).map(PathBuf::from));
     a.tls_server_name = a
         .tls_server_name
-        .or_else(|| env_opt("CALIBAN_DAEMON_TLS_SERVER_NAME"));
-    a.token = a.token.or_else(|| env_opt("CALIBAN_DAEMON_TOKEN"));
+        .or_else(|| env_opt(l::ENV_DAEMON_TLS_SERVER_NAME));
+    a.token = a.token.or_else(|| env_opt(l::ENV_DAEMON_TOKEN));
 
     if a.workspace_root.is_none() {
         return Err("--workspace-root required (or --repo-root)".to_string());
@@ -388,6 +400,47 @@ fn tracing_subscriber_init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #656 drift guard: caliband's parser and `CalibandLaunch::args()` share the
+    /// contract's flag-name constants, so a fully-populated launch spec must parse
+    /// cleanly through the REAL parser and round-trip every value. A flag renamed
+    /// on one side but not the other — the class of bug that caused
+    /// caliban-operator#30/#32/#35/#44 — fails here.
+    #[test]
+    fn caliband_launch_args_are_recognized_by_the_parser() {
+        use caliban_contract::launch::{CalibandLaunch, CalibandTls};
+        use std::path::Path;
+
+        let launch = CalibandLaunch {
+            socket_path: Some("/x.sock".into()),
+            data_base: Some("/data".into()),
+            listen: Some("0.0.0.0:7070".into()),
+            advertise_host: Some("caliband.pod".into()),
+            agent_port_base: Some(7100),
+            tls: Some(CalibandTls {
+                cert: "/tls/cert.pem".into(),
+                key: "/tls/key.pem".into(),
+                ca: Some("/tls/ca.pem".into()),
+                server_name: Some("caliband".into()),
+            }),
+            token: Some("s3cret".into()),
+            router_config: Some("{}".into()), // env-only; not emitted by args()
+            ..CalibandLaunch::new("/repo")
+        };
+        let parsed = parse_from(launch.args().into_iter())
+            .expect("caliband must recognize every flag CalibandLaunch::args() emits");
+        assert_eq!(parsed.workspace_root.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(parsed.socket_path.as_deref(), Some(Path::new("/x.sock")));
+        assert_eq!(parsed.data_base.as_deref(), Some(Path::new("/data")));
+        assert_eq!(parsed.listen.as_deref(), Some("0.0.0.0:7070"));
+        assert_eq!(parsed.advertise_host.as_deref(), Some("caliband.pod"));
+        assert_eq!(parsed.agent_port_base, Some(7100));
+        assert_eq!(parsed.tls_cert.as_deref(), Some(Path::new("/tls/cert.pem")));
+        assert_eq!(parsed.tls_key.as_deref(), Some(Path::new("/tls/key.pem")));
+        assert_eq!(parsed.tls_ca.as_deref(), Some(Path::new("/tls/ca.pem")));
+        assert_eq!(parsed.tls_server_name.as_deref(), Some("caliband"));
+        assert_eq!(parsed.token.as_deref(), Some("s3cret"));
+    }
 
     /// #512: the worker's TLS verification identity must never be *derived* from
     /// the advertise host. The advertise host is where workers dial; the server
