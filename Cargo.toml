@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/caliban-common",
+    "crates/caliban-contract",
     "crates/caliban-provider",
     "crates/caliban-provider-anthropic",
     "crates/caliban-provider-bedrock",
@@ -42,6 +43,7 @@ homepage     = "https://github.com/caliban-ai/caliban"
 # sources; version is what `cargo publish` writes into the registry
 # manifest (crates.io requires every dependency to carry a version).
 caliban-common             = { path = "crates/caliban-common",             version = "0.13.0" }
+caliban-contract           = { path = "crates/caliban-contract",           version = "0.13.0" }
 caliban-provider           = { path = "crates/caliban-provider",           version = "0.13.0" }
 caliban-provider-anthropic = { path = "crates/caliban-provider-anthropic", version = "0.13.0" }
 caliban-provider-bedrock   = { path = "crates/caliban-provider-bedrock",   version = "0.13.0" }

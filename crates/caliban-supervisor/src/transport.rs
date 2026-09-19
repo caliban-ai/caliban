@@ -6,7 +6,6 @@
 //! rides *on top* of a [`BoxConn`] unchanged — TLS and the token preamble are
 //! transport framing below it. See ADR 0051.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -18,20 +17,11 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 /// Where a caliband socket lives, independent of transport family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scheme", rename_all = "snake_case")]
-pub enum Endpoint {
-    /// Local Unix-domain socket at this filesystem path.
-    Unix {
-        /// Socket file path.
-        path: PathBuf,
-    },
-    /// TCP endpoint as a `host:port` string (host may be a DNS name).
-    Tcp {
-        /// `host:port`.
-        addr: String,
-    },
-}
+///
+/// Defined in the thin contract crate (#656) and re-exported here so
+/// `caliban_supervisor::transport::Endpoint` (and the crate-root re-export) keep
+/// resolving — the wire types have a single definition.
+pub use caliban_contract::wire::Endpoint;
 
 /// A duplex byte stream over any transport family.
 pub trait Conn: AsyncRead + AsyncWrite + Unpin + Send {}
