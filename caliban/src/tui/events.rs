@@ -1020,6 +1020,7 @@ pub(crate) fn handoff_to_supervisor(app: &mut App) {
         source: None,
         resume_session: None,
         permission_posture: caliban_supervisor::PermissionPosture::default(),
+        drive_protocol: caliban_supervisor::DriveProtocol::default(),
     };
 
     // We're inside synchronous key handling; block on a one-shot async

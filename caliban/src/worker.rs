@@ -588,6 +588,22 @@ pub(crate) async fn run(
             return 74; // EX_IOERR
         }
     };
+
+    // --- ACP protocol fork (#675, ADR 0059 — transport Option 2). ---
+    // When the spawn selects ACP, the worker does NOT run an autonomous agent
+    // with an NDJSON attach plane. Instead it serves the Agent Client Protocol
+    // (JSON-RPC) over the SAME TLS + bearer-token listener, building a run per
+    // `session/new` through the shared ADR 0055 drive core. The driver
+    // (prospero) dials the per-agent port it already secures; the stdio
+    // `caliban acp serve` path is untouched. Everything below this branch is the
+    // unchanged NDJSON session-plane path.
+    if matches!(
+        record.spec.drive_protocol,
+        caliban_supervisor::DriveProtocol::Acp
+    ) {
+        return run_acp_worker(&record, listener).await;
+    }
+
     // --- Shared attached-client counter for idle-timeout tracking (#81 ticket 5).
     // Every accept connection increments this via ClientCountGuard and
     // decrements on drop, so SocketInputProvider can reset its idle timer
@@ -998,6 +1014,141 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
 /// handshake + bearer-token preamble before it is dropped. Matches the control
 /// plane's `HANDSHAKE_TIMEOUT` (#401) so a pre-auth slowloris can't hold a slot.
 const AGENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Serve the per-agent worker as an ACP endpoint over its network listener
+/// (#675, ADR 0059 — transport Option 2). Builds the production drive factory
+/// (real provider + the full builtin registry, ADR 0055) once, then serves ACP
+/// over every authenticated connection until the process is stopped. Unlike the
+/// NDJSON path there is no autonomous agent here — the factory builds a run per
+/// `session/new`, and each run's permission posture follows
+/// `spec.permission_posture` (ADR 0059): `supervised` (the default) surfaces an
+/// `Ask` over the ACP `session/request_permission` bridge (#528); `unattended`
+/// runs under a bypass profile (audited).
+async fn run_acp_worker(
+    record: &AgentRecord,
+    listener: caliban_supervisor::transport::Listener,
+) -> i32 {
+    // Minimal `Args` with the spec's provider + model override, exactly as the
+    // NDJSON path builds it (see `run`). Workers always run `--bare` (no TUI/MCP).
+    let mut args = match crate::args::Args::try_parse_from(["caliban", "--bare"]) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[caliban __agent-worker] args construction failed: {e}");
+            return 70; // EX_SOFTWARE
+        }
+    };
+    if let Some(p) = record.spec.provider.as_deref() {
+        if let Some(pk) = parse_provider(p) {
+            args.provider = Some(pk);
+        } else {
+            eprintln!("[caliban __agent-worker] unknown provider {p:?}");
+            return 64; // EX_USAGE
+        }
+    }
+    if let Some(model) = record.spec.model.clone() {
+        args.model = Some(model);
+    }
+
+    // Permission posture (#676 / ADR 0059) applies to the ACP path too, so both
+    // transports honor the operator's choice identically. `unattended` runs the
+    // factory under a bypass profile (audited); `supervised` (the default) keeps
+    // the factory's normal Permissions-v2 gate, whose `Ask` decisions the ACP
+    // adapter surfaces over `session/request_permission` (#528). Authority to
+    // *request* unattended is enforced upstream (prospero / operator Workspace
+    // policy, caliban-operator#80) — the worker only honors it.
+    if permission_posture_bypasses_gate(record.spec.permission_posture) {
+        eprintln!(
+            "[caliban __agent-worker] AUDIT: agent {} serving ACP UNATTENDED — permission gate bypassed (ADR 0059)",
+            record.id
+        );
+        args.allow_dangerously_skip_permissions = true;
+    }
+
+    let pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+    let provider = match crate::startup::build_provider(&args, &pool) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[caliban __agent-worker] provider: {e}");
+            return 1;
+        }
+    };
+
+    // Load the same layered settings the NDJSON path does, so the factory honors
+    // `sandbox.network`, permission rules, etc. On failure, fall back to the
+    // fail-closed default.
+    let workspace = caliban_tools_builtin::WorkspaceRoot::current_dir()
+        .unwrap_or_else(|_| caliban_tools_builtin::WorkspaceRoot::new(record.session_dir.clone()));
+    let settings = crate::startup::load_layered_settings(&args, workspace.root())
+        .map(|o| o.settings)
+        .unwrap_or_default();
+
+    let factory: Arc<dyn crate::serve::registry::AgentFactory> =
+        match crate::serve::registry::build_prod_factory(&args, settings, provider) {
+            Ok(f) => Arc::new(f),
+            Err(e) => {
+                // Fail closed: e.g. an `enforce = true` policy refusing the
+                // unattended bypass flag. Never serve an ungated ACP endpoint.
+                eprintln!("[caliban __agent-worker] ACP factory refused to assemble: {e}");
+                return 78; // EX_CONFIG
+            }
+        };
+
+    eprintln!(
+        "[caliban __agent-worker] agent {} serving ACP over its network listener (ADR 0059)",
+        record.id
+    );
+    run_agent_acp_accept_loop(listener, factory).await;
+    0
+}
+
+/// Per-agent ACP accept loop (#675, ADR 0059): serves the Agent Client Protocol
+/// over the worker's TLS+token listener, one connection per accepted+
+/// authenticated peer. Mirrors [`run_agent_accept_loop`] (the NDJSON plane) — the
+/// transport performs the TLS handshake + bearer-token check under a timeout in
+/// the spawned task (never on the accept loop), and a single rejected/garbage
+/// dial is logged without disabling future accepts. The authenticated, decrypted
+/// stream is handed to the shared drive core via
+/// [`crate::serve::acp::serve_network_conn`], which disables the ACP-level auth
+/// gate because the transport already authenticated the peer.
+async fn run_agent_acp_accept_loop(
+    listener: caliban_supervisor::transport::Listener,
+    factory: Arc<dyn crate::serve::registry::AgentFactory>,
+) {
+    loop {
+        match listener.accept_raw().await {
+            Ok(incoming) => {
+                let factory = Arc::clone(&factory);
+                tokio::spawn(async move {
+                    let conn = match tokio::time::timeout(
+                        AGENT_HANDSHAKE_TIMEOUT,
+                        incoming.authenticate(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "per-agent ACP handshake/auth failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!("per-agent ACP handshake/auth timed out");
+                            return;
+                        }
+                    };
+                    let (read_half, write_half) = tokio::io::split(conn);
+                    if let Err(e) =
+                        crate::serve::acp::serve_network_conn(factory, read_half, write_half).await
+                    {
+                        tracing::warn!(error = %e, "per-agent ACP session ended with error");
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "per-agent ACP accept failed");
+            }
+        }
+    }
+}
 
 /// Per-agent accept loop: spawns [`serve_attach_client`] for every accepted
 /// connection, forever.
@@ -1513,6 +1664,7 @@ mod tests {
                 source: None,
                 resume_session: None,
                 permission_posture: caliban_supervisor::PermissionPosture::default(),
+                drive_protocol: caliban_supervisor::DriveProtocol::default(),
             },
         };
         store.write_manifest(&rec).unwrap();
@@ -2617,5 +2769,173 @@ mod tests {
         let event: caliban_agent_core::TurnEvent = serde_json::from_str(&line).unwrap();
         let rendered = crate::attach::render_event(&event);
         assert!(rendered.contains("done"), "got: {rendered:?}");
+    }
+
+    // --- ACP over the network (#675 / ADR 0059 — transport Option 2) ---
+
+    /// A minimal [`AgentFactory`](crate::serve::registry::AgentFactory) that
+    /// streams one plain-text turn per run — enough to drive the ACP serve path
+    /// end-to-end without a real provider.
+    struct AcpTextFactory;
+    impl crate::serve::registry::AgentFactory for AcpTextFactory {
+        fn build_run(
+            &self,
+            spec: &crate::serve::registry::RunSpec,
+        ) -> anyhow::Result<crate::serve::registry::BuiltRun> {
+            use caliban_provider::{
+                StopReason, StreamEvent, StreamingContentType, StreamingDelta, Usage,
+            };
+            let mp = Arc::new(caliban_provider::MockProvider::new());
+            mp.enqueue_stream(vec![
+                Ok(StreamEvent::MessageStart {
+                    id: "m".into(),
+                    model: "mock-model".into(),
+                }),
+                Ok(StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_type: StreamingContentType::Text,
+                }),
+                Ok(StreamEvent::Delta {
+                    index: 0,
+                    delta: StreamingDelta::Text("hi from acp".into()),
+                }),
+                Ok(StreamEvent::ContentBlockStop { index: 0 }),
+                Ok(StreamEvent::MessageDelta {
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage_delta: Some(Usage::default()),
+                }),
+                Ok(StreamEvent::MessageStop),
+            ]);
+            let agent = caliban_agent_core::Agent::builder()
+                .provider(mp as Arc<dyn caliban_provider::Provider + Send + Sync>)
+                .tools(caliban_agent_core::ToolRegistry::default())
+                .model("mock-model")
+                .max_tokens(64)
+                .build()
+                .expect("agent builds");
+            let (_ask, perm_rx) = crate::serve::permissions::DriveAskHandler::pair();
+            Ok(crate::serve::registry::BuiltRun {
+                agent: Arc::new(agent),
+                messages: vec![caliban_provider::Message::user_text(spec.prompt.clone())],
+                perm_rx,
+                interactive: spec.interactive,
+            })
+        }
+    }
+
+    async fn send_acp_frame<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, v: serde_json::Value) {
+        let mut s = v.to_string();
+        s.push('\n');
+        w.write_all(s.as_bytes()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    /// #675 acceptance: a remote ACP client drives a run over the worker's REAL
+    /// TLS + bearer-token listener — `initialize` → `session/new` →
+    /// `session/prompt`, streaming `session/update` notifications and an
+    /// `end_turn` stopReason. Exercises the real accept loop
+    /// (`run_agent_acp_accept_loop`) + transport auth (TLS + token, #527), not a
+    /// stand-in. Wrong-token/plaintext rejection is the SAME transport path the
+    /// NDJSON plane uses (`accept_raw` + `authenticate`), covered by
+    /// `attach_listener_rejects_wrong_token` and
+    /// `per_agent_accept_loop_survives_a_rejected_connection`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acp_over_tcp_tls_token_drives_a_run() {
+        use caliban_supervisor::transport::{
+            BindSpec, ConnectSpec, Endpoint, Listener, connect, tls_client_from_pem,
+            tls_server_from_pem,
+        };
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+        let token = "acp-worker-tok".to_string();
+
+        let tls_server = tls_server_from_pem(&cert_pem, &key_pem).unwrap();
+        let bind = BindSpec {
+            endpoint: Endpoint::Tcp {
+                addr: "127.0.0.1:0".into(),
+            },
+            tls: Some(tls_server),
+            token: Some(token.clone()),
+        };
+        let listener = Listener::bind(&bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let factory: Arc<dyn crate::serve::registry::AgentFactory> = Arc::new(AcpTextFactory);
+        let server = tokio::spawn(run_agent_acp_accept_loop(listener, factory));
+
+        // Client dials over TCP + TLS + token — the real network path.
+        let tls_client = tls_client_from_pem(&cert_pem, "localhost").unwrap();
+        let conn = connect(&ConnectSpec {
+            endpoint: Endpoint::Tcp { addr },
+            tls: Some(tls_client),
+            token: Some(token),
+        })
+        .await
+        .unwrap();
+        let (read_half, mut write_half) = tokio::io::split(conn);
+        let mut lines = BufReader::new(read_half).lines();
+
+        // initialize
+        send_acp_frame(
+            &mut write_half,
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": 1, "clientCapabilities": {} } }),
+        )
+        .await;
+        let init: serde_json::Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(init["id"], 1);
+        assert_eq!(init["result"]["protocolVersion"], 1);
+        assert!(init["result"]["agentCapabilities"].is_object());
+
+        // session/new
+        send_acp_frame(
+            &mut write_half,
+            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": "/tmp", "mcpServers": [] } }),
+        )
+        .await;
+        let new: serde_json::Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let session_id = new["result"]["sessionId"].as_str().unwrap().to_string();
+
+        // session/prompt — streams session/update notifications, then a result.
+        send_acp_frame(
+            &mut write_half,
+            serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": { "sessionId": session_id.clone(),
+                            "prompt": [{ "type": "text", "text": "hello" }] } }),
+        )
+        .await;
+
+        let mut saw_message_chunk = false;
+        let stop_reason;
+        loop {
+            let raw = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("prompt response timed out")
+                .unwrap()
+                .expect("a frame before EOF");
+            let f: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if f.get("method").and_then(serde_json::Value::as_str) == Some("session/update") {
+                assert_eq!(f["params"]["sessionId"], serde_json::json!(session_id));
+                if f["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+                    saw_message_chunk = true;
+                }
+            } else if f["id"] == 3 {
+                stop_reason = f["result"]["stopReason"].as_str().unwrap().to_string();
+                break;
+            }
+        }
+        assert!(
+            saw_message_chunk,
+            "never streamed an agent_message_chunk over the network"
+        );
+        assert_eq!(stop_reason, "end_turn");
+
+        server.abort();
     }
 }

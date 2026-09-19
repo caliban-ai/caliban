@@ -46,6 +46,7 @@ fn spec() -> SpawnSpec {
         source: None,
         resume_session: None,
         permission_posture: caliban_supervisor::PermissionPosture::default(),
+        drive_protocol: caliban_supervisor::DriveProtocol::default(),
     }
 }
 
@@ -481,6 +482,7 @@ async fn spawn_launches_worker_and_reaches_done() {
         source: None,
         resume_session: None,
         permission_posture: caliban_supervisor::PermissionPosture::default(),
+        drive_protocol: caliban_supervisor::DriveProtocol::default(),
     };
     let (id, endpoint) = client.spawn(spec).await.unwrap();
     let caliban_supervisor::Endpoint::Unix { path: socket_path } = endpoint else {
