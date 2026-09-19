@@ -256,13 +256,20 @@ pub fn models() -> Vec<ModelInfo> {
 
 /// Look up `Capabilities` for a model by canonical or native ID.
 ///
-/// Falls back to conservative defaults if the model is not in the table.
+/// Falls back to conservative defaults if the model is not in the table. The
+/// fallback context window is `0` = **unknown** (#669): a model we don't know and
+/// whose server doesn't report a window (e.g. a local model behind llama-swap
+/// with no `meta.n_ctx`) must not fabricate a 128K window and present it as fact.
+/// Consumers treat `max_input_tokens == 0` as "unknown" — the TUI hides the
+/// utilization segment and the context-based compactors no-op rather than
+/// targeting a fake budget. The output cap stays a conservative non-zero default
+/// so request construction still has a sane completion budget.
 #[must_use]
 pub fn capabilities_for(model: &str) -> Capabilities {
     models()
         .into_iter()
         .find(|m| m.id == model || m.native_id == model)
-        .map_or_else(|| caps(128_000, 4_096, false, false), |m| m.capabilities)
+        .map_or_else(|| caps(0, 4_096, false, false), |m| m.capabilities)
 }
 
 /// Whether the given model is in a family that requires `max_completion_tokens`
@@ -282,7 +289,23 @@ pub fn uses_completion_tokens(model: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::uses_completion_tokens;
+    use super::{capabilities_for, uses_completion_tokens};
+
+    #[test]
+    fn unknown_model_reports_zero_context_window_not_a_fabricated_default() {
+        // #669: a model absent from the static table (e.g. a local model served
+        // via llama-swap whose `/v1/models` exposes no `meta.n_ctx`) must report
+        // an UNKNOWN context window (0) rather than a hardcoded 128K presented as
+        // fact. Consumers treat 0 as "unknown": the TUI hides the segment and the
+        // context-based compactors no-op instead of shrinking to a fake budget.
+        let caps = capabilities_for("mlx-community/Qwen3.6-27B-4bit");
+        assert_eq!(
+            caps.max_input_tokens, 0,
+            "unknown model must not fabricate a context window"
+        );
+        // A real, tabled model still reports its true window.
+        assert!(capabilities_for("gpt-4o").max_input_tokens > 0);
+    }
 
     #[test]
     fn gpt5_family_uses_completion_tokens() {

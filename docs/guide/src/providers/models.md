@@ -29,6 +29,8 @@ When `--model` is omitted and no model is set in settings, caliban uses a built-
 
 A local server's models are inherently dynamic — you load, swap, and unload them at will — so the OpenAI adapter discovers them at runtime rather than relying on a static table. When pointed at a local `/v1` endpoint (via `base_url`), it queries `GET /v1/models` and reads each model's loaded context window from the entry's `meta.n_ctx`, so the window shown in the status bar reflects what the server actually reports — e.g. a 256K-context model shows 256K, not a hardcoded guess. This is the same capability the removed bespoke provider offered, now on the OpenAI-compatible seam ([ADR 0056](../adr/README.md)). See [Local Inference](./local-inference.md) for setup.
 
+Not every server reports a window. `meta.n_ctx` is a llama.cpp field; mlx-lm and the llama-swap aggregate `/v1/models` list model ids with no context metadata. When the window can't be discovered — and the model isn't in the static table — caliban treats it as **unknown** rather than inventing a value: the status bar simply omits the utilization segment (no fabricated "0% of 128K"), headless `system` frames report `model_context_window: null`, and context-window-based autocompaction stays off (it has no real limit to target). Set the window explicitly in config if your server doesn't expose it.
+
 ## Setting a model in settings
 
 Set `model` in your project or user settings file to avoid repeating `--model` on every invocation. Two forms are accepted:
