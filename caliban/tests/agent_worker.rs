@@ -30,6 +30,7 @@ async fn worker_runs_and_writes_ndjson() {
             inherited_hooks_config: None,
             source: None,
             resume_session: None,
+            permission_posture: caliban_supervisor::PermissionPosture::default(),
         },
     };
     store.write_manifest(&rec).unwrap();
@@ -84,6 +85,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
             inherited_hooks_config: None,
             source: None,
             resume_session: None,
+            permission_posture: caliban_supervisor::PermissionPosture::default(),
         },
     };
     store.write_manifest(&rec).unwrap();

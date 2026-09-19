@@ -172,6 +172,7 @@ mod tests {
                 inherited_hooks_config: None,
                 source: None,
                 resume_session: None,
+                permission_posture: crate::proto::PermissionPosture::default(),
             },
         }
     }
@@ -253,6 +254,7 @@ mod tests {
             inherited_hooks_config: None,
             source: None,
             resume_session: None,
+            permission_posture: crate::proto::PermissionPosture::default(),
         };
         store.write_manifest(&rec).unwrap();
 

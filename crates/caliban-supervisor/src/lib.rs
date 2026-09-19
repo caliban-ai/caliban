@@ -28,8 +28,8 @@ pub mod transport;
 pub use client::{ClientError, SupervisorClient};
 pub use proc::{ExecWorkerLauncher, OsSignaller, Signaller, WorkerHandle, WorkerLauncher};
 pub use proto::{
-    AgentId, AgentRecord, AgentStatus, CtlReply, CtlRequest, DaemonStatus, SpawnSpec,
-    SupervisorError,
+    AgentId, AgentRecord, AgentStatus, CtlReply, CtlRequest, DaemonStatus, PermissionPosture,
+    SpawnSpec, SupervisorError,
 };
 pub use registry::Registry;
 pub use runtime::{workspace_socket_path, workspace_socket_path_in};

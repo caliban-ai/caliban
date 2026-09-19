@@ -343,6 +343,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
                 inherited_hooks_config: None,
                 source: None,
                 resume_session: None,
+                permission_posture: caliban_supervisor::PermissionPosture::default(),
             };
             match client.spawn(spec).await {
                 Ok((id, endpoint)) => {
@@ -534,6 +535,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
         inherited_hooks_config: None,
         source: None,
         resume_session: None,
+        permission_posture: caliban_supervisor::PermissionPosture::default(),
     };
     match client.spawn(spec).await {
         Ok((id, endpoint)) => {

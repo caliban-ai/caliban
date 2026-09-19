@@ -137,6 +137,33 @@ pub struct SpawnSpec {
     /// of replaying `initial_prompt`. `None` starts fresh (the default).
     #[serde(default)]
     pub resume_session: Option<PathBuf>,
+    /// Per-session permission posture (ADR 0059). `supervised` (default) runs the
+    /// normal permission gate — an `Ask` rule is denied non-interactively when no
+    /// human is attached (a drive adapter surfaces it to a human when one is);
+    /// `unattended` runs under a bypass profile (no permission gate). Choosing
+    /// `unattended` is privileged and authorized **upstream** (prospero / the
+    /// operator Workspace policy, caliban-operator#80); the worker only honors +
+    /// audits it. Default is fail-closed (`supervised`).
+    #[serde(default)]
+    pub permission_posture: PermissionPosture,
+}
+
+/// Per-session permission posture carried on a [`SpawnSpec`] (ADR 0059).
+///
+/// Values match the `CalibanTask` CR `permissionPosture` enum (caliban-operator#80),
+/// so the operator/prospero map the CR field onto this without translation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionPosture {
+    /// Normal permission gate. An `Ask` rule is denied non-interactively when no
+    /// human is in the loop (a drive adapter surfaces it to a human when one is
+    /// attached). The safe default — fail-closed.
+    #[default]
+    Supervised,
+    /// Bypass the permission gate entirely — every tool runs without asking. A
+    /// privileged, audited posture for long unattended runs; authorization is
+    /// enforced upstream, never here.
+    Unattended,
 }
 
 fn true_default() -> bool {
@@ -162,6 +189,35 @@ mod tests {
             serde_json::from_str::<SpawnSpec>(&json).unwrap().source,
             Some("gonzalo".into())
         );
+    }
+
+    #[test]
+    fn permission_posture_defaults_to_supervised_and_roundtrips() {
+        // Absent field ⇒ fail-closed default (ADR 0059).
+        let legacy = r#"{"initial_prompt":"hi"}"#;
+        let spec: SpawnSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(spec.permission_posture, PermissionPosture::Supervised);
+
+        // Explicit unattended round-trips.
+        let unatt: SpawnSpec =
+            serde_json::from_str(r#"{"initial_prompt":"hi","permission_posture":"unattended"}"#)
+                .unwrap();
+        assert_eq!(unatt.permission_posture, PermissionPosture::Unattended);
+    }
+
+    #[test]
+    fn permission_posture_wire_values_match_the_cr_enum() {
+        // These strings are the CalibanTask CR `permissionPosture` enum
+        // (caliban-operator#80); they must not drift.
+        assert_eq!(
+            serde_json::to_value(PermissionPosture::Supervised).unwrap(),
+            serde_json::json!("supervised")
+        );
+        assert_eq!(
+            serde_json::to_value(PermissionPosture::Unattended).unwrap(),
+            serde_json::json!("unattended")
+        );
+        assert_eq!(PermissionPosture::default(), PermissionPosture::Supervised);
     }
 }
 
