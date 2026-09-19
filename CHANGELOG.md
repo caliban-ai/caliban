@@ -9,6 +9,63 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-19
+
+The ACP-over-network release. Following [ADR 0059](docs/adr/0059-acp-over-network-and-permission-posture.md),
+a per-agent worker can now be driven over the Agent Client Protocol on its
+existing TLS + bearer-token listener, with a per-session permission posture the
+operator chooses — so a control plane like prospero can drive in-cluster agents
+over ACP on the path it already secures. A new thin `caliban-contract` crate
+publishes caliban's launch and control-plane contract so out-of-tree components
+stop hand-copying flag names and wire types. Two robustness fixes from a
+dogfooding round round it out: a malformed repo-committed config no longer bricks
+every run, and an undiscoverable model context window is shown honestly instead
+of a fabricated default.
+
+### Added
+
+- **A per-session permission posture on `SpawnSpec`** (#676): the worker honors a
+  typed `permission_posture` (`supervised` default / `unattended`), constructing
+  its permission gate from it — fixing the in-cluster "every tool denied" blocker
+  and giving the operator a real, audited lever. Wire values match the
+  `CalibanTask` CR enum. [ADR 0059](docs/adr/0059-acp-over-network-and-permission-posture.md). (#678)
+- **Tool-call input + accounting over ACP** (#674): the ACP adapter now surfaces
+  accumulated tool-call `rawInput` and threads token-usage/turn accounting into
+  the prompt result's `_meta` (`caliban/usage`, `caliban/turns`), closing
+  data-parity gaps with the NDJSON drive wire. (#680)
+- **The worker speaks ACP on its network listener** (#675): per ADR 0059
+  (transport Option 2), a spawn may select `drive_protocol = acp`, and the worker
+  serves the Agent Client Protocol (JSON-RPC) as an alternative to the NDJSON
+  session plane on the **same** TLS + bearer-token listener (#527 gate), reusing
+  the [ADR 0055](docs/adr/0055-driveable-server-surface.md) drive core. The stdio
+  `caliban acp serve` path is unchanged. (#681)
+- **A thin `caliban-contract` crate** (#656): caliban's launch and control-plane
+  contract — the `CalibandLaunch` builder (flag/env names + `.args()`/`.env()`),
+  provider credential-env helpers, and the supervisor wire types — now live in a
+  dependency-light crate (serde only, no daemon internals) that out-of-tree
+  drivers (prospero, caliban-operator) can depend on directly instead of
+  hand-copying names and types. `caliban-supervisor` re-exports the wire types, so
+  there is a single definition, and a drift test fails if caliband's CLI and the
+  builder disagree on a flag. (#682)
+
+### Fixed
+
+- **A malformed untrusted-scope config no longer bricks startup** (#670): a syntax
+  error in a project- or local-scope `.caliban/*.toml` is now warn-and-skipped
+  (the scope is dropped with a clear, file-naming warning) instead of hard-failing
+  every non-bare caliban run in the repo with `exit 78`. Trusted (user/managed)
+  scopes stay fail-loud, preserving the #410 guarantee. (#683)
+- **An undiscoverable context window is shown honestly, not fabricated** (#669):
+  when a model is absent from the static table and its server exposes no
+  `meta.n_ctx` (e.g. llama-swap, mlx-lm), caliban now reports the context window
+  as **unknown** — the status bar omits the utilization segment (no "0% of 128K"),
+  headless reports `model_context_window: null`, and context-based autocompaction
+  stays off — rather than presenting a hardcoded 128K as fact. (#685)
+
+Docs: [ADR 0059](docs/adr/0059-acp-over-network-and-permission-posture.md) records
+the ACP-over-network transport choice, auth reuse, and permission-posture model,
+amending ADR 0055 (#677).
+
 ## [0.13.0] - 2026-09-16
 
 The daemon-lifecycle release. Long-running daemon-managed agents gain a full
@@ -921,7 +978,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/caliban-ai/caliban/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/caliban-ai/caliban/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/caliban-ai/caliban/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/caliban-ai/caliban/compare/v0.10.0...v0.11.0
