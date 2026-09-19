@@ -381,7 +381,10 @@ impl Conn {
 
         // Pump: drive the run for one turn, streaming updates, until it parks at
         // a turn boundary (awaiting_input), finishes, fails, or is cancelled.
-        let stop_reason = self.pump_turn(&sid, &run_id, &mut cursor, &cancel).await;
+        let mut accounting: Option<Value> = None;
+        let stop_reason = self
+            .pump_turn(&sid, &run_id, &mut cursor, &cancel, &mut accounting)
+            .await;
 
         // Persist the advanced cursor for the next prompt turn.
         if let Some(state) = lock(&self.sessions).get_mut(&sid) {
@@ -389,7 +392,13 @@ impl Conn {
         }
 
         match stop_reason {
-            Ok(reason) => self.send_result(&id, &json!({ "stopReason": reason })),
+            Ok(reason) => {
+                let mut result = json!({ "stopReason": reason });
+                if let Some(meta) = accounting.take() {
+                    result["_meta"] = meta;
+                }
+                self.send_result(&id, &result);
+            }
             Err(message) => self.send_err(&id, INTERNAL_ERROR, message),
         }
     }
@@ -404,6 +413,7 @@ impl Conn {
         run_id: &str,
         cursor: &mut usize,
         cancel: &AtomicBool,
+        accounting: &mut Option<Value>,
     ) -> Result<&'static str, String> {
         // The lifecycle status is watch-driven and can flip to a
         // boundary/terminal state before the event drainer has pushed the last
@@ -411,6 +421,9 @@ impl Conn {
         // require SETTLE consecutive empty polls first, to flush stragglers.
         const SETTLE: u8 = 3;
         let mut settle = 0u8;
+        // Accumulate each tool's streamed input fragments so the completing
+        // `tool_call_update` can carry the full `rawInput` (#674).
+        let mut input_buf: HashMap<String, String> = HashMap::new();
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -422,8 +435,40 @@ impl Conn {
             };
 
             for event in &view.events {
-                if let Some(update) = turn_event_to_update(event) {
-                    self.session_update(session_id, &update);
+                match event {
+                    // Accumulate tool input fragments (surfaced on ToolCallEnd).
+                    TurnEvent::ToolCallInputDelta {
+                        tool_use_id,
+                        partial_json,
+                        ..
+                    } => {
+                        input_buf
+                            .entry(tool_use_id.clone())
+                            .or_default()
+                            .push_str(partial_json);
+                    }
+                    // Capture end-of-run accounting for the prompt result `_meta`.
+                    TurnEvent::RunEnd {
+                        total_usage,
+                        turn_count,
+                        ..
+                    } => {
+                        *accounting = Some(accounting_meta(total_usage, *turn_count));
+                    }
+                    // Enrich the completing tool call with its accumulated input.
+                    TurnEvent::ToolCallEnd { tool_use_id, .. } => {
+                        if let Some(mut update) = turn_event_to_update(event) {
+                            if let Some(raw) = input_buf.remove(tool_use_id) {
+                                enrich_tool_end_input(&mut update, &raw);
+                            }
+                            self.session_update(session_id, &update);
+                        }
+                    }
+                    other => {
+                        if let Some(update) = turn_event_to_update(other) {
+                            self.session_update(session_id, &update);
+                        }
+                    }
                 }
             }
             let drained = view.events.is_empty();
@@ -586,6 +631,34 @@ fn turn_event_to_update(event: &TurnEvent) -> Option<Value> {
     }
 }
 
+/// Enrich a `tool_call_update` (built from a `ToolCallEnd`) with the tool's
+/// input, accumulated from the turn's `ToolCallInputDelta.partial_json`
+/// fragments (#674). The NDJSON wire carries tool input; without this the ACP
+/// adapter dropped it (the prospero dashboard inspector shows input). Parses the
+/// buffered JSON when it forms a valid object; falls back to the raw string.
+/// No-op for empty input.
+fn enrich_tool_end_input(update: &mut Value, raw_input: &str) {
+    if raw_input.is_empty() {
+        return;
+    }
+    let parsed = serde_json::from_str::<Value>(raw_input).unwrap_or_else(|_| json!(raw_input));
+    if let Value::Object(map) = update {
+        map.insert("rawInput".to_string(), parsed);
+    }
+}
+
+/// Build the ACP prompt-result `_meta` accounting object from a `RunEnd` (#674):
+/// token usage + turn count, namespaced under `caliban/*` (ACP's `_meta`
+/// extension channel), so a driver like prospero recovers the accounting the
+/// NDJSON wire carries (`/api/usage`). Cost is derivable from usage + model
+/// rates and is not duplicated here.
+fn accounting_meta<U: serde::Serialize>(total_usage: U, turn_count: u32) -> Value {
+    json!({
+        "caliban/usage": total_usage,
+        "caliban/turns": turn_count,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Serve loop
 // ---------------------------------------------------------------------------
@@ -706,8 +779,8 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 
     use super::{
-        AuthGate, INVALID_PARAMS, METHOD_NOT_FOUND, permission_decision, prompt_text, serve_conn,
-        turn_event_to_update,
+        AuthGate, INVALID_PARAMS, METHOD_NOT_FOUND, accounting_meta, enrich_tool_end_input,
+        permission_decision, prompt_text, serve_conn, turn_event_to_update,
     };
     use crate::serve::permissions::{DriveAskHandler, PermissionDecision};
     use crate::serve::registry::{AgentFactory, BuiltRun, RunSpec};
@@ -785,6 +858,31 @@ mod tests {
         let u = turn_event_to_update(&end).unwrap();
         assert_eq!(u["sessionUpdate"], "tool_call_update");
         assert_eq!(u["status"], "failed");
+    }
+
+    #[test]
+    fn enrich_tool_end_input_parses_json_and_falls_back() {
+        // parseable JSON becomes a structured rawInput object
+        let mut update = json!({ "sessionUpdate": "tool_call_update", "toolCallId": "tu1" });
+        enrich_tool_end_input(&mut update, r#"{"path":"/x","limit":10}"#);
+        assert_eq!(update["rawInput"]["path"], "/x");
+        assert_eq!(update["rawInput"]["limit"], 10);
+        // unparseable input falls back to the raw string
+        let mut u2 = json!({ "sessionUpdate": "tool_call_update" });
+        enrich_tool_end_input(&mut u2, "{not json");
+        assert_eq!(u2["rawInput"], "{not json");
+        // empty input is a no-op (no rawInput key)
+        let mut u3 = json!({ "sessionUpdate": "tool_call_update" });
+        enrich_tool_end_input(&mut u3, "");
+        assert!(u3.get("rawInput").is_none());
+    }
+
+    #[test]
+    fn accounting_meta_namespaces_usage_and_turns() {
+        let usage = serde_json::json!({ "input_tokens": 100, "output_tokens": 42 });
+        let meta = accounting_meta(&usage, 3);
+        assert_eq!(meta["caliban/usage"]["input_tokens"], 100);
+        assert_eq!(meta["caliban/turns"], 3);
 
         // Bookkeeping events produce no editor-facing update.
         assert!(
