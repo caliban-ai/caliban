@@ -433,6 +433,12 @@ impl Compactor for DropOldestCompactor {
         messages: &[Message],
         capabilities: &Capabilities,
     ) -> Result<Option<Compaction>> {
+        // #669: an unknown context window (0) means the model/server never
+        // reported one. We cannot compute a target fraction of an unknown limit,
+        // and must not shrink to a fabricated budget — no-op instead.
+        if capabilities.max_input_tokens == 0 {
+            return Ok(None);
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target =
             (f64::from(capabilities.max_input_tokens) * f64::from(self.target_fraction)) as u32;
@@ -513,6 +519,11 @@ impl Compactor for SummarizingCompactor {
         messages: &[Message],
         capabilities: &Capabilities,
     ) -> Result<Option<Compaction>> {
+        // #669: unknown context window (0) — cannot target a fraction of an
+        // unknown limit; no-op rather than compact to a fabricated budget.
+        if capabilities.max_input_tokens == 0 {
+            return Ok(None);
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target =
             (f64::from(capabilities.max_input_tokens) * f64::from(self.target_fraction)) as u32;
@@ -932,6 +943,54 @@ mod correctness_329_tests {
             "window must open on a user turn"
         );
         assert_no_orphans(&out);
+    }
+
+    // ---- #669: an unknown context window (0) must not trigger compaction ----
+    #[tokio::test]
+    async fn dropoldest_no_ops_when_context_window_unknown() {
+        // A large history that would normally compact — but with an unknown
+        // window (0), targeting a fraction of 0 would try to shrink to nothing.
+        // The compactor must no-op instead.
+        let mut msgs = vec![Message::system_text("sys")];
+        for i in 0..15 {
+            msgs.push(user(&format!("ask {i} {}", "x".repeat(300))));
+        }
+        let c = DropOldestCompactor {
+            target_fraction: 0.7,
+            keep_recent_turns: 2,
+        };
+        let out = c.compact(&msgs, &caps(0)).await.unwrap();
+        assert!(
+            out.is_none(),
+            "unknown context window (0) must not compact to a fabricated budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn summarizing_no_ops_when_context_window_unknown() {
+        let mut msgs = vec![Message::system_text("sys")];
+        for i in 0..15 {
+            msgs.push(user(&format!("ask {i} {}", "x".repeat(300))));
+        }
+        let provider = Arc::new(CapturingProvider {
+            seen: Mutex::new(None),
+            usage: Usage::default(),
+        });
+        let c = SummarizingCompactor {
+            provider: provider.clone(),
+            summarizer_model: "m".into(),
+            target_fraction: 0.7,
+            keep_recent_turns: 2,
+        };
+        let out = c.compact(&msgs, &caps(0)).await.unwrap();
+        assert!(
+            out.is_none(),
+            "unknown context window (0) must not summarize against a fake budget"
+        );
+        assert!(
+            provider.seen.lock().unwrap().is_none(),
+            "summarizer provider must not be invoked when the window is unknown"
+        );
     }
 
     // ---- #421: oversized tool_use *input* is truncated, not errored ----
