@@ -45,6 +45,7 @@ fn spec() -> SpawnSpec {
         inherited_hooks_config: None,
         source: None,
         resume_session: None,
+        permission_posture: caliban_supervisor::PermissionPosture::default(),
     }
 }
 
@@ -479,6 +480,7 @@ async fn spawn_launches_worker_and_reaches_done() {
         inherited_hooks_config: None,
         source: None,
         resume_session: None,
+        permission_posture: caliban_supervisor::PermissionPosture::default(),
     };
     let (id, endpoint) = client.spawn(spec).await.unwrap();
     let caliban_supervisor::Endpoint::Unix { path: socket_path } = endpoint else {

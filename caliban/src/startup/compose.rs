@@ -1029,6 +1029,7 @@ pub(crate) fn install_sub_agent(
                 },
                 source: None,
                 resume_session: None,
+                permission_posture: caliban_supervisor::PermissionPosture::default(),
             };
             let repo = repo.clone();
             // We can't `await` directly inside a non-async closure;

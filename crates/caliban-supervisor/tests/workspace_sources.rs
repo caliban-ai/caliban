@@ -55,6 +55,7 @@ fn spawn_spec(source: Option<&str>, isolation_worktree: bool) -> SpawnSpec {
         inherited_hooks_config: None,
         source: source.map(str::to_string),
         resume_session: None,
+        permission_posture: caliban_supervisor::PermissionPosture::default(),
     }
 }
 

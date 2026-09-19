@@ -753,20 +753,35 @@ pub(crate) async fn run(
     } else {
         None
     };
-    let permissions: Arc<dyn caliban_agent_core::Hooks + Send + Sync> = if let Some(cfg) = inherited
-    {
-        build_inherited_hooks(cfg, &provider, &model, record.id.clone())
-    } else {
-        // #75 default gate (unchanged).
-        let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
-        let ask: Arc<dyn caliban_agent_core::AskHandler> =
-            Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
-        Arc::new(caliban_agent_core::PermissionsHook::new(
-            rules,
-            ask,
-            Arc::new(caliban_agent_core::NoopHooks),
-        ))
-    };
+    // Permission posture (#676, ADR 0059) is the primary lever and is honored
+    // before the inherit/default gate: `unattended` runs under a bypass profile
+    // (no permission gate at all); `supervised` (the default) keeps the normal
+    // gate below. Authorization to *request* `unattended` is enforced upstream
+    // (prospero / operator Workspace policy, caliban-operator#80) — the worker
+    // only honors it, and audit-logs a bypass so an unattended session is
+    // traceable in caliband's output (#646).
+    let permissions: Arc<dyn caliban_agent_core::Hooks + Send + Sync> =
+        if permission_posture_bypasses_gate(record.spec.permission_posture) {
+            eprintln!(
+                "[caliban __agent-worker] AUDIT: agent {} running UNATTENDED — permission gate bypassed (ADR 0059)",
+                record.id
+            );
+            Arc::new(caliban_agent_core::NoopHooks)
+        } else if let Some(cfg) = inherited {
+            build_inherited_hooks(cfg, &provider, &model, record.id.clone())
+        } else {
+            // #75 default (supervised) gate: read-only Allow; Bash/Write/Edit Ask →
+            // denied non-interactively (a drive adapter surfaces the Ask to a human
+            // when one is attached).
+            let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
+            let ask: Arc<dyn caliban_agent_core::AskHandler> =
+                Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
+            Arc::new(caliban_agent_core::PermissionsHook::new(
+                rules,
+                ask,
+                Arc::new(caliban_agent_core::NoopHooks),
+            ))
+        };
 
     let agent = Arc::new(
         caliban_agent_core::Agent::builder()
@@ -955,6 +970,13 @@ fn filter_registry(
 /// tail governs everything else (read-only allowed; Bash/Write/Edit/Web
 /// fall to Ask → denied non-interactively). First match wins, so the
 /// allowlist grants must precede the default tail.
+/// Whether a permission posture bypasses the worker's permission gate entirely
+/// (`unattended`) versus running the normal gate (`supervised`) — #676, ADR 0059.
+/// Authorization to *request* `unattended` is enforced upstream, not here.
+fn permission_posture_bypasses_gate(posture: caliban_supervisor::PermissionPosture) -> bool {
+    matches!(posture, caliban_supervisor::PermissionPosture::Unattended)
+}
+
 fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::Rule> {
     let mut rules: Vec<caliban_agent_core::Rule> = Vec::new();
     if let Some(names) = allowlist {
@@ -1100,6 +1122,21 @@ async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_posture_only_unattended_bypasses_the_gate() {
+        use caliban_supervisor::PermissionPosture;
+        assert!(permission_posture_bypasses_gate(
+            PermissionPosture::Unattended
+        ));
+        assert!(!permission_posture_bypasses_gate(
+            PermissionPosture::Supervised
+        ));
+        // Fail-closed: the default posture keeps the gate.
+        assert!(!permission_posture_bypasses_gate(
+            PermissionPosture::default()
+        ));
+    }
     use caliban_agent_core::{Action, default_rules};
 
     // --- session persistence + resume (#651, ADR 0057) ---
@@ -1475,6 +1512,7 @@ mod tests {
                 inherited_hooks_config: None,
                 source: None,
                 resume_session: None,
+                permission_posture: caliban_supervisor::PermissionPosture::default(),
             },
         };
         store.write_manifest(&rec).unwrap();
