@@ -146,6 +146,27 @@ pub struct SpawnSpec {
     /// audits it. Default is fail-closed (`supervised`).
     #[serde(default)]
     pub permission_posture: PermissionPosture,
+    /// Which protocol drives this agent over its per-agent network listener
+    /// (ADR 0059, #675). `ndjson` (default) is the live-attach session plane;
+    /// `acp` makes the worker speak the Agent Client Protocol on the **same**
+    /// TLS + bearer-token listener (Option 2 — a per-spawn flag, not per-socket
+    /// negotiation). One protocol per agent; the driver (prospero) chooses.
+    #[serde(default)]
+    pub drive_protocol: DriveProtocol,
+}
+
+/// Which wire protocol a driver uses to reach an agent over its per-agent
+/// network listener (ADR 0059, #675). Selected per spawn; the worker serves one
+/// or the other on its single TLS+token listener, never both at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriveProtocol {
+    /// The NDJSON live-attach session plane (stream / status / input) — the
+    /// default, unchanged.
+    #[default]
+    Ndjson,
+    /// The Agent Client Protocol (JSON-RPC) over the same TLS+token listener.
+    Acp,
 }
 
 /// Per-session permission posture carried on a [`SpawnSpec`] (ADR 0059).
@@ -218,6 +239,34 @@ mod tests {
             serde_json::json!("unattended")
         );
         assert_eq!(PermissionPosture::default(), PermissionPosture::Supervised);
+    }
+
+    #[test]
+    fn drive_protocol_defaults_to_ndjson_and_roundtrips() {
+        // Absent field ⇒ the unchanged NDJSON session plane (ADR 0059, #675).
+        let legacy = r#"{"initial_prompt":"hi"}"#;
+        let spec: SpawnSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(spec.drive_protocol, DriveProtocol::Ndjson);
+
+        // Explicit acp round-trips.
+        let acp: SpawnSpec =
+            serde_json::from_str(r#"{"initial_prompt":"hi","drive_protocol":"acp"}"#).unwrap();
+        assert_eq!(acp.drive_protocol, DriveProtocol::Acp);
+    }
+
+    #[test]
+    fn drive_protocol_wire_values_are_stable_snake_case() {
+        // The driver (prospero) selects the protocol by these strings; they must
+        // not drift.
+        assert_eq!(
+            serde_json::to_value(DriveProtocol::Ndjson).unwrap(),
+            serde_json::json!("ndjson")
+        );
+        assert_eq!(
+            serde_json::to_value(DriveProtocol::Acp).unwrap(),
+            serde_json::json!("acp")
+        );
+        assert_eq!(DriveProtocol::default(), DriveProtocol::Ndjson);
     }
 }
 

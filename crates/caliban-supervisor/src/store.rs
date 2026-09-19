@@ -173,6 +173,7 @@ mod tests {
                 source: None,
                 resume_session: None,
                 permission_posture: crate::proto::PermissionPosture::default(),
+                drive_protocol: crate::proto::DriveProtocol::default(),
             },
         }
     }
@@ -255,6 +256,7 @@ mod tests {
             source: None,
             resume_session: None,
             permission_posture: crate::proto::PermissionPosture::default(),
+            drive_protocol: crate::proto::DriveProtocol::default(),
         };
         store.write_manifest(&rec).unwrap();
 

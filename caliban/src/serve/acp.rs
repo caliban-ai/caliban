@@ -731,6 +731,29 @@ where
     Ok(())
 }
 
+/// Serve one **network** ACP connection whose peer the transport has already
+/// authenticated (TLS + bearer token on the per-agent worker listener, ADR 0051
+/// / #527 / #675). The ACP-level [`AuthGate`] is therefore disabled
+/// (`AuthGate::new(None)`): auth is not *bypassed*, it has moved down to the
+/// transport for this path, exactly as the stdio path defers to loopback. Reuses
+/// the shared ADR 0055 drive core via [`serve_conn`] — the two codecs stay thin
+/// over the one core (no agent logic here).
+///
+/// # Errors
+///
+/// Propagates the underlying [`serve_conn`] transport/serialization errors.
+pub(crate) async fn serve_network_conn<R, W>(
+    factory: Arc<dyn AgentFactory>,
+    reader: R,
+    writer: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_conn(factory, AuthGate::new(None), reader, writer).await
+}
+
 /// Serve caliban as an ACP agent over stdio (`caliban acp serve`).
 ///
 /// # Errors

@@ -56,6 +56,7 @@ fn spawn_spec(source: Option<&str>, isolation_worktree: bool) -> SpawnSpec {
         source: source.map(str::to_string),
         resume_session: None,
         permission_posture: caliban_supervisor::PermissionPosture::default(),
+        drive_protocol: caliban_supervisor::DriveProtocol::default(),
     }
 }
 

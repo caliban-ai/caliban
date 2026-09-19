@@ -31,6 +31,7 @@ async fn worker_runs_and_writes_ndjson() {
             source: None,
             resume_session: None,
             permission_posture: caliban_supervisor::PermissionPosture::default(),
+            drive_protocol: caliban_supervisor::DriveProtocol::default(),
         },
     };
     store.write_manifest(&rec).unwrap();
@@ -86,6 +87,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
             source: None,
             resume_session: None,
             permission_posture: caliban_supervisor::PermissionPosture::default(),
+            drive_protocol: caliban_supervisor::DriveProtocol::default(),
         },
     };
     store.write_manifest(&rec).unwrap();
