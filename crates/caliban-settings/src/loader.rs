@@ -258,9 +258,41 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         {
             continue;
         }
-        if let Some((mut value, source)) =
-            read_scope(scope, &opts.workspace_root, &opts.paths, &mut warnings)?
-        {
+        // #670: a *syntax* error in an untrusted (project/local, repo-controlled)
+        // scope must not brick every caliban invocation in that repo. Treat a
+        // parse error from those scopes as warn-and-skip — mirroring the #217
+        // key-sanitization posture and the #319 skip-and-warn pattern — while
+        // trusted scopes (user/managed, operator-controlled) stay fail-loud so a
+        // typo never silently drops the operator's deny rules (#410). IO and
+        // other errors stay fatal for every scope.
+        let scope_read = match read_scope(scope, &opts.workspace_root, &opts.paths, &mut warnings) {
+            Ok(v) => v,
+            Err(err) => {
+                let is_parse_error = matches!(
+                    err,
+                    LoadError::ParseToml { .. } | LoadError::ParseJson { .. }
+                );
+                if is_parse_error && matches!(scope, Scope::Project | Scope::Local) {
+                    let msg = format!(
+                        "{}: ignored this scope — {err}. An untrusted (repo-controlled) \
+                         config with a syntax error is skipped rather than failing startup \
+                         (#670); fix or remove the file to re-enable it.",
+                        scope.label()
+                    );
+                    tracing::warn!(
+                        target: caliban_common::tracing_targets::TARGET_SETTINGS,
+                        scope = scope.label(),
+                        error = %err,
+                        "skipped an untrusted scope with a malformed config file (#670)",
+                    );
+                    warnings.push(msg);
+                    None
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+        if let Some((mut value, source)) = scope_read {
             if matches!(scope, Scope::Project | Scope::Local) {
                 for key in strip_user_managed_only_keys(&mut value) {
                     let msg = format!(
@@ -730,15 +762,27 @@ mod tests {
     }
 
     #[test]
-    fn malformed_permissions_file_errors_not_swallowed() {
-        // #410: a malformed per-scope permissions file must fail loudly
+    fn malformed_permissions_file_in_a_trusted_scope_errors_not_swallowed() {
+        // #410: a malformed per-scope permissions file in a TRUSTED
+        // (user/managed, operator-controlled) scope must fail loudly
         // (fail-closed) rather than be silently ignored — a typo must not drop
         // the operator's deny rules while they believe the file is in force.
+        // #670 relaxes this to warn-and-skip for the *untrusted* project/local
+        // scopes only (see the two tests below); the user/managed guarantee here
+        // is unchanged.
         let tmp = tempfile::TempDir::new().unwrap();
         let ws = tmp.path().to_path_buf();
-        write(&ws.join(".caliban/settings.toml"), r#"model = "x""#);
+        // User scope (trusted): a valid settings.toml + a malformed sibling
+        // permissions.toml under the user config dir.
+        write(
+            &tmp.path().join("user-config/caliban/settings.toml"),
+            r#"model = "x""#,
+        );
         // Invalid TOML (unterminated array).
-        write(&ws.join(".caliban/permissions.toml"), "deny = [\n");
+        write(
+            &tmp.path().join("user-config/caliban/permissions.toml"),
+            "deny = [\n",
+        );
         let opts = LoadOptions {
             workspace_root: ws,
             paths: fake_paths(tmp.path()),
@@ -747,7 +791,84 @@ mod tests {
         let err = load_settings(&opts).unwrap_err();
         assert!(
             matches!(err, LoadError::ParseToml { .. }),
-            "expected a surfaced parse error, got {err:?}"
+            "expected a surfaced parse error from the trusted user scope, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_toml_in_project_scope_warns_and_skips_not_fatal() {
+        // #670: a syntax error in an untrusted (repo-controlled) project-scope
+        // file must NOT brick every caliban invocation in the repo. It is
+        // warn-and-skipped (mirroring #217 sanitization + #319 skip-and-warn),
+        // so startup succeeds with the malformed scope dropped and a clear
+        // warning naming the file.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        // A user-scope value so we can confirm the load still succeeds and other
+        // scopes still apply.
+        write(
+            &tmp.path().join("user-config/caliban/settings.toml"),
+            r#"model = "from-user""#,
+        );
+        // Malformed project settings.toml (unterminated basic string) — the exact
+        // shape from the QA repro.
+        write(
+            &ws.join(".caliban/settings.toml"),
+            "pattern = \"Bash:gh api graphql\n",
+        );
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let outcome = load_settings(&opts).expect("untrusted-scope syntax error must not be fatal");
+        // The good user scope still applies.
+        assert!(
+            matches!(outcome.settings.model, Some(crate::ModelSelector::Name(ref n)) if n == "from-user")
+        );
+        // A warning names the skipped file + scope.
+        assert!(
+            outcome
+                .validation_warnings
+                .iter()
+                .any(|w| w.contains("settings.toml") && w.to_lowercase().contains("ignored")),
+            "expected a warn-and-skip notice naming the file, got {:?}",
+            outcome.validation_warnings
+        );
+        // The broken project scope contributed nothing.
+        assert!(
+            outcome.sources.iter().all(|s| s.scope != Scope::Project),
+            "the malformed project scope must be dropped, not merged"
+        );
+    }
+
+    #[test]
+    fn malformed_permissions_in_local_scope_warns_and_skips_not_fatal() {
+        // #670: same resilience for the local scope's per-feature permissions
+        // file (the QA repro was a malformed `permissions` file specifically).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        write(&ws.join(".caliban/settings.local.toml"), r#"model = "x""#);
+        // Invalid TOML (unterminated array) in the local permissions file.
+        write(&ws.join(".caliban/permissions.local.toml"), "deny = [\n");
+        let opts = LoadOptions {
+            workspace_root: ws,
+            paths: fake_paths(tmp.path()),
+            ..LoadOptions::default()
+        };
+        let outcome =
+            load_settings(&opts).expect("untrusted local-scope syntax error must not be fatal");
+        assert!(
+            outcome
+                .validation_warnings
+                .iter()
+                .any(|w| w.to_lowercase().contains("ignored")),
+            "expected a warn-and-skip notice, got {:?}",
+            outcome.validation_warnings
+        );
+        assert!(
+            outcome.sources.iter().all(|s| s.scope != Scope::Local),
+            "the malformed local scope must be dropped, not merged"
         );
     }
 
