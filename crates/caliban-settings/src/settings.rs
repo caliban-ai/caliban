@@ -250,6 +250,26 @@ pub struct ToolsConfig {
 /// budget, B3 cost budget, B4 divergence guard, B5 verification policy, B6
 /// adaptive defaults + named profiles).
 ///
+/// How much verification the system prompt encourages (ADR 0058, B5 · #665).
+///
+/// This shapes *guidance text* injected into the system prompt — caliban never
+/// runs tests on the model's behalf; it shapes when the model is *encouraged* to
+/// write and run its own reproduction. The `off`/`verify-when-cheap`/`full` axis
+/// is exactly what eval sub-project A controlled (the +8pt / −16pt lever, whose
+/// sign flips with model strength — hence the per-profile default in B6).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerificationGuidance {
+    /// No verification guidance is injected (behavior-preserving default).
+    #[default]
+    Off,
+    /// Encourage the model to verify *when it is cheap* to do so — write and run
+    /// a quick reproduction where the cost is low. The "A" treatment arm.
+    VerifyWhenCheap,
+    /// Strongly encourage the model to verify its work before finishing.
+    Full,
+}
+
 /// Every field is `Option` so an unset key leaves the corresponding
 /// [`caliban_agent_core::AgentConfig`] default untouched (behavior-preserving).
 // No `Eq`: `cost_budget_usd` is `f64` (only `PartialEq`).
@@ -286,6 +306,10 @@ pub struct AgentLoopConfig {
     /// estimated cost reaches it. Enforced only when the binary has a rate card
     /// to price usage (it injects the cost model); inert otherwise.
     pub cost_budget_usd: Option<f64>,
+    /// How much the system prompt encourages self-verification (ADR 0058, B5 ·
+    /// #665). `None`/unset behaves like `off` — no guidance injected (today's
+    /// behavior). Its effective default is set per named profile by B6.
+    pub verification_guidance: Option<VerificationGuidance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +857,19 @@ impl Settings {
         self.agent_loop.as_ref().and_then(|al| al.max_turns)
     }
 
+    /// The effective verification-guidance level (ADR 0058, B5 · #665),
+    /// defaulting to [`VerificationGuidance::Off`] (no injected guidance —
+    /// today's behavior) when unset. The binary reads this to shape the system
+    /// prompt; it does not thread through `AgentConfig` because it affects only
+    /// the prompt, not the loop.
+    #[must_use]
+    pub fn agent_loop_verification_guidance(&self) -> VerificationGuidance {
+        self.agent_loop
+            .as_ref()
+            .and_then(|al| al.verification_guidance)
+            .unwrap_or_default()
+    }
+
     /// When `settings.hooks` contains the legacy-compat sentinel written by
     /// [`crate::compat::maybe_load_legacy_hooks`], extract the handler-count
     /// for diagnostics. Returns `None` when no sentinel is present.
@@ -1164,6 +1201,26 @@ mod tests {
         assert_eq!(al.time_budget_secs, Some(600));
         assert_eq!(al.cost_budget_usd, Some(2.5));
         assert_eq!(s.agent_loop_max_turns(), Some(120));
+    }
+
+    #[test]
+    fn verification_guidance_parses_and_defaults_to_off() {
+        // Unset → Off (behavior-preserving default).
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        assert_eq!(
+            s.agent_loop_verification_guidance(),
+            VerificationGuidance::Off
+        );
+        // Each kebab-case value parses.
+        for (raw, want) in [
+            ("off", VerificationGuidance::Off),
+            ("verify-when-cheap", VerificationGuidance::VerifyWhenCheap),
+            ("full", VerificationGuidance::Full),
+        ] {
+            let json = format!(r#"{{"agent_loop": {{"verification_guidance": "{raw}"}}}}"#);
+            let s: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(s.agent_loop_verification_guidance(), want, "value {raw}");
+        }
     }
 
     #[test]

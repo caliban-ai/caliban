@@ -180,6 +180,45 @@ pub(crate) fn append_session_context_block(prompt: &str, blocks: &[String]) -> S
     out
 }
 
+/// Append the verification-guidance block for `guidance` (ADR 0058, B5 · #665).
+///
+/// `Off` returns the prompt byte-for-byte (no block — today's behavior);
+/// `VerifyWhenCheap` and `Full` append the matching guidance fragment. caliban
+/// never runs tests for the model — this only shapes when it is *encouraged* to
+/// write and run its own reproduction.
+#[must_use]
+pub(crate) fn append_verification_guidance_block(
+    prompt: &str,
+    guidance: caliban_settings::VerificationGuidance,
+) -> String {
+    use caliban_settings::VerificationGuidance as VG;
+    let fragment = match guidance {
+        VG::Off => return prompt.to_string(),
+        VG::VerifyWhenCheap => {
+            "\n## Verifying your work\n\
+             When it is cheap to do so, verify a change before finishing: write and run a \
+             small reproduction or a targeted test for the specific behavior you changed. \
+             Skip verification when standing it up would cost more than the change is worth \
+             (e.g. a heavy build just to check a one-line edit) — make the minimal correct \
+             edit instead of looping on environment setup.\n"
+        }
+        VG::Full => {
+            "\n## Verifying your work\n\
+             Verify your work before finishing. Reproduce the original problem, apply your \
+             change, and confirm the fix by running a test or reproduction that exercises \
+             the specific behavior you changed. Prefer a failing-then-passing check over \
+             asserting success from inspection alone.\n"
+        }
+    };
+    let mut out = String::with_capacity(prompt.len() + fragment.len() + 8);
+    out.push_str(prompt);
+    if !prompt.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(fragment);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +234,50 @@ mod tests {
     fn session_context_block_empty_is_noop() {
         let base = "You are caliban.\n";
         assert_eq!(append_session_context_block(base, &[]), base);
+    }
+
+    #[test]
+    fn verification_guidance_off_injects_nothing() {
+        use caliban_settings::VerificationGuidance as VG;
+        let base = "You are caliban.\n";
+        // Byte-for-byte identical — no block, no delimiter (today's behavior).
+        assert_eq!(append_verification_guidance_block(base, VG::Off), base);
+    }
+
+    #[test]
+    fn verification_guidance_verify_when_cheap_injects_the_cheap_fragment() {
+        use caliban_settings::VerificationGuidance as VG;
+        let base = "You are caliban.\n";
+        let out = append_verification_guidance_block(base, VG::VerifyWhenCheap);
+        assert!(out.starts_with(base), "must append, not replace");
+        assert!(out.contains("## Verifying your work"));
+        assert!(
+            out.contains("cheap"),
+            "verify-when-cheap fragment must mention the cheapness condition"
+        );
+    }
+
+    #[test]
+    fn verification_guidance_full_injects_the_full_fragment() {
+        use caliban_settings::VerificationGuidance as VG;
+        let base = "You are caliban.\n";
+        let out = append_verification_guidance_block(base, VG::Full);
+        assert!(out.contains("## Verifying your work"));
+        assert!(
+            out.contains("Reproduce"),
+            "full fragment must ask the model to reproduce + confirm"
+        );
+        // `full` is stronger than `verify-when-cheap`: it does not gate on cost.
+        let cheap = append_verification_guidance_block(base, VG::VerifyWhenCheap);
+        assert_ne!(out, cheap, "full and verify-when-cheap must differ");
+    }
+
+    #[test]
+    fn verification_guidance_appends_newline_when_prompt_lacks_one() {
+        use caliban_settings::VerificationGuidance as VG;
+        let base = "no trailing newline";
+        let out = append_verification_guidance_block(base, VG::Full);
+        assert!(out.starts_with("no trailing newline\n"));
     }
 
     #[test]

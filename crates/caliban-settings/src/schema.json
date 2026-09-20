@@ -192,7 +192,8 @@
         "empty_turn_nudge_max":    { "type": "integer", "minimum": 0, "default": 2 },
         "max_turn_thinking_chars": { "type": "integer", "minimum": 0, "default": 262144 },
         "time_budget_secs":        { "type": "integer", "minimum": 0, "default": 0 },
-        "cost_budget_usd":         { "type": "number",  "minimum": 0 }
+        "cost_budget_usd":         { "type": "number",  "minimum": 0 },
+        "verification_guidance":   { "type": "string",  "enum": ["off", "verify-when-cheap", "full"] }
       },
       "additionalProperties": false
     },
