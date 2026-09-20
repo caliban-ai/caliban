@@ -1779,8 +1779,12 @@ pub(crate) async fn resolve_system_prompt(
 
     if !default_prompt_in_effect {
         let with_skills = system_prompt::append_skills_block(&body, &skill_names);
-        return Ok(Some(system_prompt::append_session_context_block(
+        let with_verify = system_prompt::append_verification_guidance_block(
             &with_skills,
+            settings_snapshot.agent_loop_verification_guidance(),
+        );
+        return Ok(Some(system_prompt::append_session_context_block(
+            &with_verify,
             session_context,
         )));
     }
@@ -1836,8 +1840,12 @@ pub(crate) async fn resolve_system_prompt(
         }
     };
     let with_skills = system_prompt::append_skills_block(&final_prompt, &skill_names);
-    Ok(Some(system_prompt::append_session_context_block(
+    let with_verify = system_prompt::append_verification_guidance_block(
         &with_skills,
+        settings_snapshot.agent_loop_verification_guidance(),
+    );
+    Ok(Some(system_prompt::append_session_context_block(
+        &with_verify,
         session_context,
     )))
 }
