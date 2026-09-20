@@ -109,9 +109,11 @@ re-opening it with `--sandbox-network=allow` restores the exfiltration path.
 - **Per-hostname allowlists require a proxy** (#477). Neither backend can filter
   egress by hostname: bwrap only toggles the netns, and Seatbelt's `(remote tcp
   …)` matches resolved socket addresses, not names. This is why #403 made bare
-  domain lists fail closed. `http_proxy_port` is already honored by both
-  backends; only the proxy process is missing. Until it lands, the opt-out is
-  all-or-nothing.
+  domain lists fail closed. `http_proxy_port` is plumbed into both backends but
+  effective only on Seatbelt: the bwrap backend `--unshare-net`s the sandbox, so
+  a host-loopback proxy is unreachable there (consistent with "bwrap only toggles
+  the netns" above). Either way the proxy process itself is still missing, so
+  until it lands the opt-out is all-or-nothing.
 - **An allowlist, when it lands, will bound *where* data can go, not *what*.**
   Allowing `github.com` so `gh pr create` works equally permits `gh gist
   create` — the credentials are *for* the allowed host. Claude Code documents

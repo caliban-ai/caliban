@@ -50,25 +50,21 @@ caliban adopts the standard `OTEL_*` env-var contract verbatim:
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc`, `http/protobuf`, or `http/json` |
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | Static auth / routing headers (`k=v,k2=v2`) |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60s` | How often metrics are flushed |
-| `OTEL_LOGS_EXPORTER` | `otlp` | `otlp`, `console`, or `none` |
-| `OTEL_METRICS_EXPORTER` | `otlp` | Same options |
-| `OTEL_TRACES_EXPORTER` | `otlp` | Same options |
-| `OTEL_LOG_USER_PROMPTS` | `0` | Include user prompt text in log spans |
-| `OTEL_LOG_TOOL_DETAILS` | `0` | Include tool name/args in spans |
-| `OTEL_LOG_TOOL_CONTENT` | `0` | Include full tool output in spans |
-| `OTEL_LOG_RAW_API_BODIES` | `0` | Log raw provider request/response bodies (`0`, `1`, or `file:<dir>`) |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` exports metrics; any other value (e.g. `none`) suppresses metric export |
+| `OTEL_TRACES_EXPORTER` | `otlp` | `otlp` exports spans; any other value (e.g. `none`) suppresses span export |
+| `OTEL_LOG_USER_PROMPTS` | `0` | Include prompt/completion content on `gen_ai` spans (ADR 0053) |
 
 caliban recognises the standard mTLS env vars — `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY`, and `OTEL_EXPORTER_OTLP_CERTIFICATE` — but wiring them into the exporter's TLS config is not yet implemented (tracked in #465): today they are parsed and otherwise ignored.
 
 ```admonish warning title="Content logging is a privacy footgun"
-`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_CONTENT`, and `OTEL_LOG_RAW_API_BODIES` send potentially sensitive content to your collector. Ensure your collector pipeline is appropriately access-controlled before enabling these.
+`OTEL_LOG_USER_PROMPTS` sends potentially sensitive prompt/completion content to your collector. Ensure your collector pipeline is appropriately access-controlled before enabling it.
 ```
 
 ## Dynamic OTLP headers
 
-Short-lived bearer tokens (e.g. from a secrets manager) can be injected without restarting caliban. Set `telemetry.otel_headers_helper` in your settings to a path; caliban spawns it at startup and periodically (`telemetry.otel_headers_refresh`, default `5m`), parses stdout as `key=value` lines, and merges them with `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on collision).
+Short-lived bearer tokens (e.g. from a secrets manager) can be supplied by a helper script. Set `CALIBAN_OTEL_HEADERS_HELPER=/path/to/script`; caliban runs it **once at startup**, parses stdout as `key=value` lines, and merges them with `OTEL_EXPORTER_OTLP_HEADERS` (helper wins on collision) before the exporter is built.
 
-Alternatively, the env-var escape hatch `CALIBAN_OTEL_HEADERS_HELPER=/path/to/script` achieves the same effect without a settings file.
+The helper is a one-shot, env-only knob — there is no settings key and no periodic refresh thread (ADR 0033, reconciled in #381). A token minted at startup is used for the lifetime of the process; restart caliban to pick up a new one.
 
 ## Traces
 

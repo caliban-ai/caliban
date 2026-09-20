@@ -332,20 +332,12 @@ pub struct TelemetryConfig {
     pub headers: BTreeMap<String, String>,
     /// `OTEL_METRIC_EXPORT_INTERVAL`, parsed humantime → Duration.
     pub metric_export_interval: Duration,
-    /// `OTEL_LOGS_EXPORTER` (`otlp` / `console` / `none`).
-    pub logs_exporter: String,
-    /// `OTEL_METRICS_EXPORTER`.
+    /// `OTEL_METRICS_EXPORTER` (`otlp` / `none`); `none` suppresses metric export.
     pub metrics_exporter: String,
-    /// `OTEL_TRACES_EXPORTER`.
+    /// `OTEL_TRACES_EXPORTER` (`otlp` / `none`); `none` suppresses span export.
     pub traces_exporter: String,
     /// `OTEL_LOG_USER_PROMPTS`.
     pub log_user_prompts: bool,
-    /// `OTEL_LOG_TOOL_DETAILS`.
-    pub log_tool_details: bool,
-    /// `OTEL_LOG_TOOL_CONTENT`.
-    pub log_tool_content: bool,
-    /// `OTEL_LOG_RAW_API_BODIES` (`0`, `1`, or `file:<dir>`).
-    pub log_raw_api_bodies: String,
     /// mTLS client certificate path.
     pub client_cert: Option<PathBuf>,
     /// mTLS client private key path.
@@ -386,17 +378,12 @@ impl TelemetryConfig {
         let metric_export_interval =
             parse_duration(&interval_str).unwrap_or(Duration::from_mins(1));
 
-        let logs_exporter = std::env::var("OTEL_LOGS_EXPORTER").unwrap_or_else(|_| "otlp".into());
         let metrics_exporter =
             std::env::var("OTEL_METRICS_EXPORTER").unwrap_or_else(|_| "otlp".into());
         let traces_exporter =
             std::env::var("OTEL_TRACES_EXPORTER").unwrap_or_else(|_| "otlp".into());
 
         let log_user_prompts = env_truthy_default("OTEL_LOG_USER_PROMPTS", false);
-        let log_tool_details = env_truthy_default("OTEL_LOG_TOOL_DETAILS", false);
-        let log_tool_content = env_truthy_default("OTEL_LOG_TOOL_CONTENT", false);
-        let log_raw_api_bodies =
-            std::env::var("OTEL_LOG_RAW_API_BODIES").unwrap_or_else(|_| "0".into());
 
         let client_cert = std::env::var("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
             .ok()
@@ -422,13 +409,9 @@ impl TelemetryConfig {
             protocol,
             headers: env_headers,
             metric_export_interval,
-            logs_exporter,
             metrics_exporter,
             traces_exporter,
             log_user_prompts,
-            log_tool_details,
-            log_tool_content,
-            log_raw_api_bodies,
             client_cert,
             client_key,
             ca_cert,
@@ -603,15 +586,18 @@ impl Telemetry {
             metrics.emit_session("start");
         }
 
-        // Build the real OTLP span-export pipeline when telemetry is enabled
-        // and the exporter feature is compiled in. The batch span processor
-        // spawns a background task via `runtime::Tokio`, so a Tokio runtime must
-        // be present — the caliban binary is `#[tokio::main]`. Guard on that so
-        // non-async callers (e.g. unit tests) don't panic; they just get no
-        // span export. Setup failures degrade to export-off rather than
-        // aborting startup — cost accounting and metrics stay live.
+        // Build the real OTLP span-export pipeline when telemetry is enabled,
+        // `OTEL_TRACES_EXPORTER` selects otlp, and the exporter feature is
+        // compiled in. The `traces_exporter` gate mirrors the metrics pipeline
+        // above so `OTEL_TRACES_EXPORTER=none` actually suppresses span export
+        // (#499). The batch span processor spawns a background task via
+        // `runtime::Tokio`, so a Tokio runtime must be present — the caliban
+        // binary is `#[tokio::main]`. Guard on that so non-async callers (e.g.
+        // unit tests) don't panic; they just get no span export. Setup failures
+        // degrade to export-off rather than aborting startup — cost accounting
+        // and metrics stay live.
         #[cfg(feature = "otlp")]
-        let tracer_provider = if config.enabled {
+        let tracer_provider = if config.enabled && config.traces_exporter == "otlp" {
             if tokio::runtime::Handle::try_current().is_ok() {
                 match otlp_pipeline::build_tracer_provider(&config, env!("CARGO_PKG_VERSION")) {
                     Ok(provider) => {
@@ -696,13 +682,9 @@ impl Telemetry {
                 protocol: "grpc".into(),
                 headers: BTreeMap::new(),
                 metric_export_interval: Duration::from_mins(1),
-                logs_exporter: "otlp".into(),
                 metrics_exporter: "otlp".into(),
                 traces_exporter: "otlp".into(),
                 log_user_prompts: false,
-                log_tool_details: false,
-                log_tool_content: false,
-                log_raw_api_bodies: "0".into(),
                 client_cert: None,
                 client_key: None,
                 ca_cert: None,
@@ -849,13 +831,9 @@ mod tests {
                 protocol: "grpc".into(),
                 headers: BTreeMap::new(),
                 metric_export_interval: Duration::from_mins(1),
-                logs_exporter: "otlp".into(),
                 metrics_exporter: "otlp".into(),
                 traces_exporter: "otlp".into(),
                 log_user_prompts: false,
-                log_tool_details: false,
-                log_tool_content: false,
-                log_raw_api_bodies: "0".into(),
                 client_cert: None,
                 client_key: None,
                 ca_cert: None,
@@ -893,13 +871,9 @@ mod otlp_tests {
             protocol: protocol.to_string(),
             headers: BTreeMap::new(),
             metric_export_interval: Duration::from_mins(1),
-            logs_exporter: "otlp".into(),
             metrics_exporter: "otlp".into(),
             traces_exporter: "otlp".into(),
             log_user_prompts: false,
-            log_tool_details: false,
-            log_tool_content: false,
-            log_raw_api_bodies: "0".into(),
             client_cert: None,
             client_key: None,
             ca_cert: None,
