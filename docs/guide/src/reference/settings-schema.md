@@ -139,7 +139,22 @@ GONZALO_ROOT = "/path/to/graph-store"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `router` | object | — | Router config (opaque; schema owned by `caliban-model-router`). Use `caliban.toml` `[router]` for the primary router config. |
+| `router` | object | — | Model-router config — the same shape as the `[router]` section of `caliban.toml` (`default_purpose` + `[[router.route]]`). Schema owned by `caliban-model-router`, so the settings layer carries it as an opaque object. |
+
+When a `router` value is present in settings, it is used in preference to a
+standalone `caliban.toml` — the router config then flows through the normal
+settings precedence and shows up in `caliban config print` with its source scope
+like any other key. If no `router` value is set, caliban falls back to
+`caliban.toml` discovery (`--config` / `CALIBAN_ROUTER_CONFIG` / walk-up / the
+user config dir), so existing `caliban.toml` files keep working unchanged.
+
+```admonish note
+Per-provider `[provider.X]` blocks (custom `api_key_env` / `base_url`) are not
+yet mirrored into the settings `router` object — routes configured via settings
+resolve provider keys from the default env vars. Set them via `caliban.toml` if
+you need per-provider overrides. (Full fold + `caliban.toml` retirement is
+tracked as a #540 follow-up.)
+```
 
 ---
 

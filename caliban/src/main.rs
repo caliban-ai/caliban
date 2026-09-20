@@ -304,15 +304,27 @@ async fn main() -> Result<()> {
     let provider: Arc<dyn Provider + Send + Sync> =
         preflight!((|| -> anyhow::Result<Arc<dyn Provider + Send + Sync>> {
             Ok(
-                match router::try_load(args.config_path.as_deref(), &cwd_for_router, &helper_pool)?
-                {
+                match router::try_load_from_settings(
+                    settings_snapshot.router.as_ref(),
+                    args.config_path.as_deref(),
+                    &cwd_for_router,
+                    &helper_pool,
+                )? {
                     Some(wiring) => {
-                        tracing::info!(
-                            target: caliban_common::tracing_targets::TARGET_ROUTER,
-                            path = %wiring.config_path.display(),
-                            routes = wiring.router.routes().len(),
-                            "model router wired from caliban.toml",
-                        );
+                        if wiring.from_settings {
+                            tracing::info!(
+                                target: caliban_common::tracing_targets::TARGET_ROUTER,
+                                routes = wiring.router.routes().len(),
+                                "model router wired from the settings [router] section",
+                            );
+                        } else {
+                            tracing::info!(
+                                target: caliban_common::tracing_targets::TARGET_ROUTER,
+                                path = %wiring.config_path.display(),
+                                routes = wiring.router.routes().len(),
+                                "model router wired from caliban.toml",
+                            );
+                        }
                         wiring.router
                     }
                     None => startup::build_provider(&args, &helper_pool)?,

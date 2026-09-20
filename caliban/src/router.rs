@@ -19,13 +19,17 @@ use caliban_provider::{Provider, RequestPurpose};
 
 use crate::provider_wiring::{resolve_key, resolve_key_optional, wrap_with_refresh_if_helper};
 
-/// Result of attempting to wire the router from `caliban.toml`.
+/// Result of attempting to wire the router from settings or `caliban.toml`.
 #[derive(Debug)]
 pub(crate) struct RouterWiring {
     /// The constructed router.
     pub router: Arc<ModelRouter>,
-    /// Path the config was loaded from (for `[caliban] init` log lines).
+    /// Path the config was loaded from (for `[caliban] init` log lines). Empty
+    /// when the config came from the settings layer rather than a file.
     pub config_path: std::path::PathBuf,
+    /// True when the router config came from the settings-layer `[router]`
+    /// section rather than an on-disk `caliban.toml` (#540).
+    pub from_settings: bool,
 }
 
 /// Try to discover + build a router from `caliban.toml`. Returns `Ok(None)`
@@ -54,7 +58,40 @@ pub(crate) fn try_load(
     Ok(Some(RouterWiring {
         router: Arc::new(router),
         config_path: path,
+        from_settings: false,
     }))
+}
+
+/// Wire the router, preferring the settings-layer `[router]` section over
+/// on-disk `caliban.toml` discovery (#540).
+///
+/// When `settings_router` is present it wins: the opaque settings value is typed
+/// into a [`RouterConfig`] via [`caliban_model_router::router_config_from_value`]
+/// (keeping `caliban-settings` free of a dependency on the router schema), and
+/// the router is built with the default (env-based) provider blocks — per-server
+/// `[provider.X]` overrides are not yet mirrored into settings (tracked as the
+/// #540 follow-up). When `settings_router` is absent, this falls back to the
+/// existing discovery chain (`--config` / `CALIBAN_ROUTER_CONFIG` / walk-up /
+/// home), so existing `caliban.toml` files keep working unchanged.
+pub(crate) fn try_load_from_settings(
+    settings_router: Option<&serde_json::Value>,
+    explicit: Option<&Path>,
+    start_dir: &Path,
+    pool: &Arc<caliban_settings::ApiKeyHelperPool>,
+) -> Result<Option<RouterWiring>> {
+    if let Some(value) = settings_router.filter(|v| !v.is_null()) {
+        let router_cfg = caliban_model_router::router_config_from_value(value)
+            .context("parsing the [router] section from settings")?;
+        let providers = build_provider_handles(&router_cfg, &HashMap::new(), pool)?;
+        let router = ModelRouter::from_config(router_cfg, providers)
+            .context("building ModelRouter from the settings [router] section")?;
+        return Ok(Some(RouterWiring {
+            router: Arc::new(router),
+            config_path: std::path::PathBuf::new(),
+            from_settings: true,
+        }));
+    }
+    try_load(explicit, start_dir, pool)
 }
 
 /// Build a provider handle for every name referenced by the routes.
@@ -428,5 +465,36 @@ model = "x"
         .unwrap_err();
         let s = format!("{err:?}");
         assert!(s.contains("unknown provider"), "{s}");
+    }
+
+    #[test]
+    fn settings_absent_falls_back_to_caliban_toml() {
+        // #540: with no settings-layer [router], discovery still loads
+        // caliban.toml and the wiring is marked file-sourced.
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("caliban.toml"), MINIMAL_ROUTE).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let empty_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+        let wiring = try_load_from_settings(None, None, tmp.path(), &empty_pool)
+            .unwrap()
+            .expect("caliban.toml should load via discovery fallback");
+        assert!(!wiring.from_settings, "file-sourced wiring");
+        assert_eq!(wiring.router.routes().len(), 1);
+    }
+
+    #[test]
+    fn settings_router_takes_precedence_over_caliban_toml() {
+        // #540: a present settings [router] is consulted before on-disk
+        // discovery. A malformed settings value errors even though a valid
+        // caliban.toml sits in the start dir — proving settings wins.
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("caliban.toml"), MINIMAL_ROUTE).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let empty_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+        // Missing `default_purpose` → invalid [router].
+        let bad = serde_json::json!({ "route": [] });
+        let err = try_load_from_settings(Some(&bad), None, tmp.path(), &empty_pool).unwrap_err();
+        let s = format!("{err:?}");
+        assert!(s.contains("[router] section from settings"), "{s}");
     }
 }
