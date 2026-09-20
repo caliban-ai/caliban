@@ -21,7 +21,7 @@ The table below summarizes the major shipped areas. All items marked ✅ are ava
 | MCP client (stdio + HTTP, OAuth, elicitation, per-server permissions) | ✅ |
 | Sub-agents (in-process, background fleet via `caliband`, worktree isolation) | ✅ |
 | Memory tiers: `CLAUDE.md` ancestry, `@`-imports, auto-memory | ✅ |
-| Settings layering (Managed > User > Project > Local, deep-merge, live reload) | ✅ |
+| Settings layering (Managed > User > Project > Local, deep-merge) | ✅ |
 | Model router v2 (declarative routes, fallback chains, circuit breakers, capability filters) | ✅ |
 | Providers in the binary: Anthropic, OpenAI, Google Gemini (+ local OpenAI-compatible servers); Bedrock/Vertex/Azure adapters are library-only | ✅ |
 | Checkpoints + `/rewind`, including forking a new session from a checkpoint | ✅ |

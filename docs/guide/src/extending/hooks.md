@@ -16,7 +16,7 @@ Caliban fires events at the following lifecycle points (ADR 0024):
 | `PreToolUse` | Before each tool call; can gate or rewrite the call |
 | `PostToolUse` | After each tool call completes |
 | `PostToolUseFailure` | When a tool call errors |
-| `ConfigChange` | When a settings file changes on disk (live reload) |
+| `ConfigChange` | Reserved for when a settings file changes on disk. **Not currently emitted** — live reload is not yet wired ([#617](https://github.com/caliban-ai/caliban/issues/617)); settings are read once at startup. |
 | `CwdChanged` | When the working directory changes |
 | `FileChanged` | When a file the agent edited is detected to have changed |
 | `SubagentStart` / `SubagentStop` | When a sub-agent is spawned or exits |

@@ -22,7 +22,7 @@ Three-tier prompt prefix, CLAUDE.md ancestor walk + `@`-imports, auto-memory, `c
 
 ### D — Configuration / settings ✅
 
-Layered settings (managed > user > project > local), `/config` interactive editor, live reload, `apiKeyHelper` pool, and schema validation are shipped (ADR 0026 + 0045). TOML is the primary write format; JSON is accepted on read.
+Layered settings (managed > user > project > local), `/config` interactive editor, `apiKeyHelper` pool, and schema validation are shipped (ADR 0026 + 0045). Settings are read once at startup; live reload is scaffolded but not yet wired (#617). TOML is the primary write format; JSON is accepted on read.
 
 ### E — TUI ergonomics 🟡
 
