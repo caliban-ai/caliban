@@ -170,7 +170,9 @@ pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition)
     use caliban_agent_core::StopCondition;
     match stop {
         StopCondition::EndOfTurn => 0,
-        StopCondition::MaxTurnsReached(_) => 75,
+        // Wall-clock time budget shares the max-turns EX_TEMPFAIL code (#662):
+        // both are graceful bound-reached stops, not failures.
+        StopCondition::MaxTurnsReached(_) | StopCondition::TimeBudgetExceeded(_) => 75,
         StopCondition::Cancelled => 124,
         StopCondition::ProviderError(_)
         | StopCondition::HookDenied(_)
@@ -1049,6 +1051,17 @@ mod tests {
     fn exit_code_max_turns_is_seventyfive() {
         assert_eq!(
             stop_condition_exit_code(&StopCondition::MaxTurnsReached(50)),
+            75
+        );
+    }
+
+    #[test]
+    fn exit_code_time_budget_is_seventyfive() {
+        // A wall-clock budget stop shares the graceful max-turns code (#662).
+        assert_eq!(
+            stop_condition_exit_code(&StopCondition::TimeBudgetExceeded(
+                std::time::Duration::from_mins(5)
+            )),
             75
         );
     }

@@ -525,6 +525,12 @@ pub enum StopCondition {
     /// Independent of the idle watchdog (the spiral streams continuously) and of
     /// the `max_tokens` budget (recovery raises it).
     ThinkingBudgetExhausted,
+    /// The configured wall-clock **time budget** (`AgentConfig::time_budget`)
+    /// elapsed (ADR 0058, B2 · #662). Checked at the top of each turn; a
+    /// graceful bound like [`Self::MaxTurnsReached`], not a failure — the run
+    /// stops with whatever it has produced so far. Independent of the turn
+    /// budget and the stream watchdogs. Carries the configured budget.
+    TimeBudgetExceeded(std::time::Duration),
 }
 
 impl StopCondition {
@@ -561,6 +567,10 @@ impl StopCondition {
             Self::HookDenied(msg) => (format!("hook denied: {msg}"), StopLevel::Error),
             Self::CompactionFailed(msg) => (format!("compaction failed: {msg}"), StopLevel::Error),
             Self::MaxTurnsReached(n) => (format!("max-turns ({n}) reached"), StopLevel::Info),
+            Self::TimeBudgetExceeded(d) => (
+                format!("time budget ({}s) exceeded", d.as_secs()),
+                StopLevel::Info,
+            ),
             Self::Cancelled => ("cancelled".to_string(), StopLevel::Info),
             Self::MaxTokensExhausted => (
                 "max-tokens recovery exhausted \u{2014} try /effort low to reduce reasoning budget"
@@ -1448,6 +1458,11 @@ impl Agent {
             // cannot loop forever.
             let mut empty_turn_nudges: u32 = 0;
 
+            // B2 (#662) — wall-clock time budget. `None` (default) means no
+            // deadline (today's behavior). Checked at the top of each turn.
+            let time_budget = self.config.time_budget;
+            let run_started = std::time::Instant::now();
+
             'outer: for turn_index in 0..max_turns {
                 // #245: bounded budget to re-issue THIS turn when the provider
                 // stream is interrupted *before any content is emitted*. Fresh
@@ -1463,6 +1478,16 @@ impl Agent {
                 // ---- Cancellation check ----
                 if cancel.is_cancelled() {
                     stopped_for = StopCondition::Cancelled;
+                    break 'outer;
+                }
+
+                // ---- Wall-clock time budget (B2 · #662) ----
+                // A graceful bound: stop with whatever has been produced rather
+                // than starting another turn once the deadline has passed.
+                if let Some(budget) = time_budget
+                    && run_started.elapsed() >= budget
+                {
+                    stopped_for = StopCondition::TimeBudgetExceeded(budget);
                     break 'outer;
                 }
 

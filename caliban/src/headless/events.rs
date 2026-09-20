@@ -51,6 +51,9 @@ pub(crate) enum ResultSubtype {
     Error,
     /// `--max-turns` exceeded.
     MaxTurns,
+    /// The `[agent_loop]` wall-clock time budget elapsed (ADR 0058, B2 · #662).
+    /// Distinct from `BudgetExceeded` (the `--max-budget-usd` cost budget).
+    TimeBudget,
     /// `--max-budget-usd` exceeded.
     BudgetExceeded,
     /// Cancelled (Ctrl-C / SIGTERM).
@@ -70,6 +73,7 @@ impl ResultSubtype {
             Self::Success => "success",
             Self::Error => "error",
             Self::MaxTurns => "max_turns",
+            Self::TimeBudget => "time_budget",
             Self::BudgetExceeded => "budget_exceeded",
             Self::Cancelled => "cancelled",
             Self::MaxTokens => "max_tokens",
@@ -273,8 +277,8 @@ pub(crate) struct UsageTotals {
 /// - `success` → `result` carries the assistant's final reply (load-bearing
 ///   contract; downstream `jq` consumers depend on it). `last_assistant_text`
 ///   and `tool_calls_seen` are omitted.
-/// - All non-`success` subtypes (`error`, `max_turns`, `budget_exceeded`,
-///   `cancelled`) → `result` is omitted; consumers should read the
+/// - All non-`success` subtypes (`error`, `max_turns`, `time_budget`,
+///   `budget_exceeded`, `cancelled`) → `result` is omitted; consumers should read the
 ///   structured fields (`last_assistant_text`, `tool_calls_seen`,
 ///   `error`) instead. This avoids the old behavior where `result` was the
 ///   raw concatenation of every assistant-text fragment across a truncated
@@ -284,8 +288,8 @@ pub(crate) struct ResultFrame {
     /// Always `"result"`.
     #[serde(rename = "type")]
     pub(crate) kind: String,
-    /// Outcome category (`success`, `error`, `max_turns`, `budget_exceeded`,
-    /// `cancelled`).
+    /// Outcome category (`success`, `error`, `max_turns`, `time_budget`,
+    /// `budget_exceeded`, `cancelled`).
     pub(crate) subtype: String,
     /// Final assistant text (best-effort summary). Present only when
     /// `subtype == "success"`; for non-`success` subtypes see
@@ -824,6 +828,7 @@ mod tests {
         for st in [
             ResultSubtype::Error,
             ResultSubtype::MaxTurns,
+            ResultSubtype::TimeBudget,
             ResultSubtype::Cancelled,
             ResultSubtype::BudgetExceeded,
             ResultSubtype::MaxTokens,
@@ -873,6 +878,7 @@ mod tests {
         for (subtype, expected) in [
             (ResultSubtype::Error, "error"),
             (ResultSubtype::MaxTurns, "max_turns"),
+            (ResultSubtype::TimeBudget, "time_budget"),
             (ResultSubtype::BudgetExceeded, "budget_exceeded"),
             (ResultSubtype::Cancelled, "cancelled"),
             (ResultSubtype::MaxTokens, "max_tokens"),
@@ -966,6 +972,7 @@ mod tests {
     fn result_subtype_str_matches_serialization() {
         assert_eq!(ResultSubtype::Success.as_str(), "success");
         assert_eq!(ResultSubtype::MaxTurns.as_str(), "max_turns");
+        assert_eq!(ResultSubtype::TimeBudget.as_str(), "time_budget");
         assert_eq!(ResultSubtype::BudgetExceeded.as_str(), "budget_exceeded");
         assert_eq!(ResultSubtype::MaxTokens.as_str(), "max_tokens");
     }
