@@ -181,9 +181,8 @@ token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | Additional headers for the OTLP exporter. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60s` | OTel metric export interval. |
 | `OTEL_LOG_USER_PROMPTS` | `false` | Opt-in capture of prompt/completion content on `gen_ai` spans. Off by default; any truthy value records user prompts and model completions as span content (ADR 0053). |
-| `OTEL_LOGS_EXPORTER` | `otlp` | OTel logs exporter type. |
-| `OTEL_METRICS_EXPORTER` | `otlp` | OTel metrics exporter type. |
-| `OTEL_TRACES_EXPORTER` | `otlp` | OTel traces exporter type. |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` exports metrics; any other value (e.g. `none`) suppresses metric export. |
+| `OTEL_TRACES_EXPORTER` | `otlp` | `otlp` exports spans; any other value (e.g. `none`) suppresses span export. |
 | `CALIBAN_RATES_YAML` | — | Path to a YAML file overriding the built-in provider pricing rate card. |
 
 ---

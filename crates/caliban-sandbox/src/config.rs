@@ -55,9 +55,14 @@ pub struct EnvAcl {
     /// complementary control.
     #[serde(default)]
     pub scrub_secrets: bool,
-    /// Variable names to **keep** even when `scrub_secrets` would drop them.
-    /// The escape hatch for a command that legitimately needs a matched var
+    /// Variable names to **keep** even when `scrub_secrets` would drop them —
+    /// an escape hatch for a command that legitimately needs a matched var
     /// (e.g. `GH_TOKEN` for `gh`). Exact-match, case-sensitive.
+    ///
+    /// Not yet reachable from user settings: `SandboxSettings` exposes only
+    /// `network`, so there is no `[sandbox.env]` config surface to populate this,
+    /// and the fence constructs `EnvAcl` with an empty `passthrough`. It stays as
+    /// the internal representation for when that surface is wired (#499 / #538).
     #[serde(default)]
     pub passthrough: Vec<String>,
 }

@@ -485,9 +485,10 @@ stores) is tracked in **#481**.
   `ANTHROPIC_API_KEY`, `CALIBAN_*` tokens, and the like are no longer visible to
   commands the model runs. Matches Codex's default. Defense-in-depth on top of
   the closed egress (#406) — and it keeps secrets out of anything that dumps
-  `env` into a log or a file. Keep a specific variable with
-  `[sandbox.env] passthrough = ["GH_TOKEN"]`. This is a name-based filter; a
-  secret in an innocuously-named variable is not caught.
+  `env` into a log or a file. This is a name-based filter; a secret in an
+  innocuously-named variable is not caught. (A per-variable `passthrough`
+  escape hatch to keep a matched variable is not yet configurable via settings
+  — the scrubber currently keeps nothing back; tracked in #499.)
 
 ### Fixed
 

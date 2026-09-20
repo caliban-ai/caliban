@@ -93,6 +93,21 @@ fn content_capture_enabled() -> bool {
     *LOG_USER_PROMPTS
 }
 
+/// Map a provider's internal `name()` to the OpenTelemetry `GenAI` semconv
+/// value for `gen_ai.provider.name` (ADR 0053 mandates semconv-only attribute
+/// values). The provider's own name is a routing/display identifier and does
+/// not always match the semconv enum: `bedrock`/`google`/`vertex` diverge and
+/// are mapped here; `anthropic`/`openai` already match the canonical values and
+/// pass through, as does any provider name we don't specifically remap.
+fn semconv_provider_name(provider_name: &str) -> &str {
+    match provider_name {
+        "bedrock" => "aws.bedrock",
+        "google" => "gcp.gemini",
+        "vertex" => "gcp.vertex_ai",
+        other => other,
+    }
+}
+
 /// Serialize a slice of provider [`Message`]s to the OpenTelemetry `GenAI`
 /// structured message shape (semconv "current form") as a single JSON string,
 /// suitable for the `gen_ai.input.messages` / `gen_ai.output.messages`
@@ -669,6 +684,28 @@ mod finish_reason_tests {
             finish_reason_str(StopReason::ContentFilter),
             "content_filter"
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_semconv_tests {
+    use super::*;
+
+    #[test]
+    fn maps_diverging_provider_names_to_semconv_values() {
+        // #499: gen_ai.provider.name must use OTel GenAI semconv values.
+        assert_eq!(semconv_provider_name("bedrock"), "aws.bedrock");
+        assert_eq!(semconv_provider_name("google"), "gcp.gemini");
+        assert_eq!(semconv_provider_name("vertex"), "gcp.vertex_ai");
+    }
+
+    #[test]
+    fn passes_already_compliant_and_unknown_names_through() {
+        // anthropic/openai already match the enum; unknown names (e.g. the mock
+        // provider, or a router-delegated inner name) pass through unchanged.
+        assert_eq!(semconv_provider_name("anthropic"), "anthropic");
+        assert_eq!(semconv_provider_name("openai"), "openai");
+        assert_eq!(semconv_provider_name("mock"), "mock");
     }
 }
 
@@ -1582,7 +1619,7 @@ impl Agent {
                     otel.name = Empty,
                     otel.kind = "client",
                     gen_ai.operation.name = "chat",
-                    gen_ai.provider.name = %self.provider.name(),
+                    gen_ai.provider.name = %semconv_provider_name(self.provider.name()),
                     gen_ai.request.model = %req.model,
                     gen_ai.request.temperature = Empty,
                     gen_ai.request.max_tokens = Empty,

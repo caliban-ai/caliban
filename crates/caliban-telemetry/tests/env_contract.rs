@@ -32,16 +32,12 @@ fn clean_env() {
         "OTEL_EXPORTER_OTLP_CERTIFICATE",
         "OTEL_EXPORTER_OTLP_CA_CERTIFICATE",
         "OTEL_METRIC_EXPORT_INTERVAL",
-        "OTEL_LOGS_EXPORTER",
         "OTEL_METRICS_EXPORTER",
         "OTEL_TRACES_EXPORTER",
         "OTEL_METRICS_INCLUDE_SESSION_ID",
         "OTEL_METRICS_INCLUDE_VERSION",
         "OTEL_METRICS_INCLUDE_ACCOUNT_UUID",
         "OTEL_LOG_USER_PROMPTS",
-        "OTEL_LOG_TOOL_DETAILS",
-        "OTEL_LOG_TOOL_CONTENT",
-        "OTEL_LOG_RAW_API_BODIES",
         "CALIBAN_OTEL_HEADERS_HELPER",
         "CALIBAN_RATES_YAML",
     ];
@@ -156,26 +152,22 @@ fn metric_export_interval_parses() {
 }
 
 #[test]
-fn content_control_envs_default_off() {
+fn content_control_env_defaults_off() {
     let _g = env_guard();
     clean_env();
     let cfg = TelemetryConfig::from_env();
+    // Only OTEL_LOG_USER_PROMPTS is modeled; the tool-detail/content/raw-body
+    // knobs had no reader and were dropped in #499.
     assert!(!cfg.log_user_prompts);
-    assert!(!cfg.log_tool_details);
-    assert!(!cfg.log_tool_content);
-    assert_eq!(cfg.log_raw_api_bodies, "0");
 }
 
 #[test]
-fn content_control_envs_can_be_enabled() {
+fn content_control_env_can_be_enabled() {
     let _g = env_guard();
     clean_env();
     set_env("OTEL_LOG_USER_PROMPTS", "1");
-    set_env("OTEL_LOG_TOOL_CONTENT", "1");
     let cfg = TelemetryConfig::from_env();
     assert!(cfg.log_user_prompts);
-    assert!(cfg.log_tool_content);
-    assert!(!cfg.log_tool_details, "OTEL_LOG_TOOL_DETAILS remained off");
     clean_env();
 }
 
