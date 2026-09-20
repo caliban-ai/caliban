@@ -299,3 +299,33 @@ Precedence: an explicit knob (e.g. `verification_guidance`) **>** the named `pro
 | `additional_directories` | `string[]` | `[]` | Extra workspace roots to consult for CLAUDE.md and skills. |
 | `claude_md_excludes` | `string[]` | `[]` | Glob patterns to exclude from CLAUDE.md/AGENTS.md discovery (`claudeMdExcludes`). **Unioned** with the `CALIBAN_CLAUDE_MD_EXCLUDES` env var — both sets apply (#694). |
 | `env` | `{ string → string }` | `{}` | Environment-variable overrides applied to child processes caliban spawns — Bash commands, stdio MCP servers, and command hooks (#694). Precedence: a more-specific per-item env (an MCP server's `env`, a hook's `env`) wins over these, which in turn override the inherited process environment. |
+
+---
+
+## Environment overrides
+
+A subset of settings can be overridden by `CALIBAN_*` environment variables that
+are read into the settings layer. **The environment wins over the settings
+file**, and each override is attributed in `caliban config print` under
+`_env_overrides` (a list of `{ key, env }`) so you can see exactly which key an
+environment variable set — the environment is a real, visible source, not a
+silent side channel (#538).
+
+| Variable | Settings key | Notes |
+|----------|--------------|-------|
+| `CALIBAN_STORAGE_SUBSTRATE` | `storage.substrate` | Same vocabulary as the file (`fs` / `remote` / `git` / `s3`); an invalid value is a hard error naming the variable (#659). |
+| `CALIBAN_STORAGE_REMOTE_URL` | `storage.remote.url` | Synthesizes `[storage.remote]` when absent. |
+| `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` | `storage.remote.token_env` | The *name* of the variable holding the token, never the token itself. |
+
+A blank (empty / whitespace-only) value is ignored — the file setting stands.
+
+```admonish note
+This is the initial slice of the environment settings layer: today it covers the
+storage overrides, applied through a single aggregation point
+(`Settings::apply_env_overrides`) with an injectable lookup so configurations are
+testable without mutating process env. Extending the registry to the remaining
+`CALIBAN_*` settings-shadowing variables (and adding a CI lint that bans ad-hoc
+`env::var` reads for them) is tracked as the #538 follow-up. Bootstrap/runtime
+variables — the daemon launch contract, path pointers, logging, secrets, and the
+provider/OTel SDK contracts — are intentionally *not* part of this layer.
+```

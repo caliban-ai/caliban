@@ -400,6 +400,30 @@ pub struct StorageConfig {
     pub remote: Option<RemoteStorageConfig>,
 }
 
+/// A single environment-sourced settings override that was actually applied.
+///
+/// Records which settings key an environment variable set, so the load outcome
+/// can attribute env-sourced values in `caliban config print` / the `/config`
+/// overlay (#538) — closing the provenance gap where env silently overrode the
+/// file with no way to say so (#463).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EnvOverride {
+    /// Dotted settings path the variable set (e.g. `storage.substrate`).
+    pub key_path: String,
+    /// The environment variable that supplied the value (e.g.
+    /// `CALIBAN_STORAGE_SUBSTRATE`).
+    pub env_var: String,
+}
+
+impl EnvOverride {
+    fn new(key_path: &str, env_var: &str) -> Self {
+        Self {
+            key_path: key_path.to_string(),
+            env_var: env_var.to_string(),
+        }
+    }
+}
+
 /// Environment variable that overrides `storage.substrate` (#659).
 pub const ENV_STORAGE_SUBSTRATE: &str = "CALIBAN_STORAGE_SUBSTRATE";
 /// Environment variable that overrides `storage.remote.url` (#659).
@@ -439,10 +463,14 @@ impl StorageConfig {
     /// # Errors
     /// Returns a human-facing message naming `CALIBAN_STORAGE_SUBSTRATE` when it
     /// holds an unrecognized substrate. The struct is not mutated on error.
+    ///
+    /// Returns the list of [`EnvOverride`]s actually applied, so the caller can
+    /// attribute env-sourced values in `/config` (#538).
     pub fn apply_env_overrides(
         &mut self,
         lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<EnvOverride>, String> {
+        let mut applied = Vec::new();
         // Resolve the substrate first (fallible) before mutating anything, so an
         // invalid substrate leaves the struct untouched.
         let new_substrate = match lookup(ENV_STORAGE_SUBSTRATE) {
@@ -458,6 +486,7 @@ impl StorageConfig {
         };
         if let Some(s) = new_substrate {
             self.substrate = s;
+            applied.push(EnvOverride::new("storage.substrate", ENV_STORAGE_SUBSTRATE));
         }
         if let Some(raw) = lookup(ENV_STORAGE_REMOTE_URL) {
             let url = raw.trim();
@@ -465,6 +494,10 @@ impl StorageConfig {
                 self.remote
                     .get_or_insert_with(RemoteStorageConfig::default)
                     .url = url.to_string();
+                applied.push(EnvOverride::new(
+                    "storage.remote.url",
+                    ENV_STORAGE_REMOTE_URL,
+                ));
             }
         }
         if let Some(raw) = lookup(ENV_STORAGE_REMOTE_TOKEN_ENV) {
@@ -473,9 +506,43 @@ impl StorageConfig {
                 self.remote
                     .get_or_insert_with(RemoteStorageConfig::default)
                     .token_env = Some(name.to_string());
+                applied.push(EnvOverride::new(
+                    "storage.remote.token_env",
+                    ENV_STORAGE_REMOTE_TOKEN_ENV,
+                ));
             }
         }
-        Ok(())
+        Ok(applied)
+    }
+}
+
+impl Settings {
+    /// Apply all `CALIBAN_*` environment overrides on top of the loaded
+    /// settings — **env wins** over the settings file (#538). `lookup` resolves a
+    /// variable name to its value (production passes `|k| std::env::var(k).ok()`;
+    /// tests pass a map), so the whole env layer is pure and testable without
+    /// mutating the process environment.
+    ///
+    /// This is the single aggregation point for the environment settings layer:
+    /// new `CALIBAN_*` → setting bindings are registered here, and the storage
+    /// trio (#659) is the reference binding. It returns every [`EnvOverride`]
+    /// actually applied, in application order, so the loader can attribute
+    /// env-sourced values in `caliban config print` / `/config`.
+    ///
+    /// # Errors
+    /// Propagates a human-facing message from any binding whose value is invalid
+    /// (e.g. an unknown `CALIBAN_STORAGE_SUBSTRATE`). Overrides applied before
+    /// the error stand; the erroring binding leaves its target unchanged.
+    pub fn apply_env_overrides(
+        &mut self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Vec<EnvOverride>, String> {
+        let mut applied = Vec::new();
+        applied.extend(self.storage.apply_env_overrides(&lookup)?);
+        // Additional `CALIBAN_*` → setting bindings append here as the env layer
+        // grows to cover the Bucket-A settings-shadowing variables (#538
+        // follow-up: the full registry + a CI lint banning ad-hoc env reads).
+        Ok(applied)
     }
 }
 
@@ -1936,6 +2003,31 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
             s.apply_env_overrides(|_| None).unwrap();
             assert_eq!(s.substrate, StorageSubstrate::Remote);
             assert_eq!(s.remote.unwrap().url, "http://f:1");
+        }
+
+        #[test]
+        fn settings_env_layer_reports_applied_overrides() {
+            // #538: the Settings-level env layer applies overrides and reports
+            // which settings key each CALIBAN_* var set, for /config provenance.
+            // Injectable lookup ⇒ no process-env mutation.
+            let mut s = Settings::default();
+            let applied = s
+                .apply_env_overrides(env(&[
+                    (ENV_STORAGE_SUBSTRATE, "remote"),
+                    (ENV_STORAGE_REMOTE_URL, "http://gonzalod:8080"),
+                ]))
+                .unwrap();
+            assert_eq!(s.storage.substrate, StorageSubstrate::Remote);
+            let keys: Vec<&str> = applied.iter().map(|o| o.key_path.as_str()).collect();
+            assert_eq!(keys, ["storage.substrate", "storage.remote.url"]);
+            assert_eq!(applied[0].env_var, ENV_STORAGE_SUBSTRATE);
+        }
+
+        #[test]
+        fn settings_env_layer_is_empty_without_env() {
+            let mut s = Settings::default();
+            let applied = s.apply_env_overrides(env(&[])).unwrap();
+            assert!(applied.is_empty(), "no env vars ⇒ no overrides reported");
         }
     }
 
