@@ -99,12 +99,9 @@ If caliban finds both `settings.toml` and `settings.json` in the same scope dire
 
 ---
 
-## Live reload and restart-required keys
+## Applying changed settings
 
-Most settings changes take effect immediately via the file watcher (250 ms debounce). A subset of keys require a full restart:
-
-- **Restart-required:** `model`, `fallback_model`, `agent`, `router`, `mcp_servers`, `memory`, `output_style`
-
-When a restart-required key changes on disk while caliban is running, caliban logs a `WARN` and shows a "restart required" badge in the `/config` TUI overlay. The new value will be used the next time you launch `caliban`.
-
-All other settings — permissions, hooks, `api_key_helper`, UI keys, `env` — are treated as live-reloadable and take effect within one debounce cycle without restarting.
+Settings are read **once at startup**, so a change to any settings file takes
+effect the next time you launch `caliban` — there is no live reload today. See
+[Applying changed settings](./settings-layering.md#applying-changed-settings) for
+why (the file watcher is scaffolded but not wired into the binary).

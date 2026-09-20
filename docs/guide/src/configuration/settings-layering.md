@@ -83,14 +83,21 @@ caliban --setting-sources project
 
 An unknown scope name is a fatal error (`exit 78`) rather than a silent no-op.
 
-## Live reload
+## Applying changed settings
 
-A file watcher monitors each scope's path with a 250 ms debounce. When a file changes, caliban re-loads and re-merges all scopes atomically and fires a `ConfigChange` hook event. Most keys take effect immediately:
+Settings are loaded and merged **once, at startup**. Editing a settings file while
+caliban is running has no effect on the running process — **every** key is
+effectively restart-required. Relaunch `caliban` to pick up a change.
 
-- **Restart-required:** `model`, `fallback_model`, `agent`, `router`, `mcp_servers`, `memory`, `output_style`
-- **Everything else** is treated as live-reloadable (for example `permissions.*`, `hooks.*`, `api_key_helper`, `statusLine`, `env`, `additional_directories`, `claude_md_excludes`)
-
-Restart-required keys log a `WARN` on change and take effect on the next `caliban` invocation. The `/config` TUI overlay shows a "restart required" badge next to changed restart-required keys.
+```admonish note title="Live reload is scaffolded but not yet wired"
+The building blocks for live reload exist in `caliban-settings` — a file watcher,
+a `ConfigChange` hook event, and a per-key restart-impact classification — but the
+binary does not construct the watcher, so on-disk changes are not re-merged at
+runtime and the `ConfigChange` hook does not fire. Until the watcher is wired into
+startup (it sits behind the settings dependency-inversion work,
+[#539](https://github.com/caliban-ai/caliban/issues/539)), treat all keys as
+restart-required.
+```
 
 ```admonish tip title="Inspecting the effective result"
 Run `caliban config print` to see the fully-merged settings with per-key scope annotations, without starting a session.

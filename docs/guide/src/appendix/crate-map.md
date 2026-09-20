@@ -15,7 +15,7 @@ Shared types, abstractions, and utilities that every other layer depends on.
 | Crate | Purpose |
 |---|---|
 | `caliban-common` | Provider-neutral message IR, shared error types, and cross-crate utilities |
-| `caliban-settings` | Unified settings hierarchy (managed > user > project > local); file loading, schema validation, live reload, `apiKeyHelper` pool |
+| `caliban-settings` | Unified settings hierarchy (managed > user > project > local); file loading, schema validation, `apiKeyHelper` pool; live-reload watcher module (scaffolded, not yet wired) |
 
 ## Layer 2 — Providers
 
