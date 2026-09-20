@@ -644,6 +644,8 @@ pub(crate) fn build_registry(
         plan_mode,
         web_client: web_fetch_client(),
         bash_sandbox,
+        // #694: global settings.env overrides flow to Bash-spawned processes.
+        bash_env: settings_snapshot.env.clone(),
         topic_backend: Arc::clone(topic_backend),
         // ADR 0035 kill switch; the skill body documents the memory protocol,
         // so tools + skill gate together (skills handled just below).
@@ -1931,6 +1933,11 @@ fn apply_memory_settings(
     mut cfg: caliban_memory::MemoryConfig,
     settings_snapshot: &caliban_settings::Settings,
 ) -> caliban_memory::MemoryConfig {
+    // #694: `claude_md_excludes` is a top-level settings field (not under
+    // `[memory]`), and was previously dropped — the loader only saw the
+    // env-derived set. Union the settings patterns in here, before the
+    // `[memory]` early-return so it applies even when `[memory]` is absent.
+    cfg = cfg.with_extra_claude_md_excludes(settings_snapshot.claude_md_excludes.iter().cloned());
     let Some(memory) = settings_snapshot.memory.as_ref() else {
         return cfg;
     };

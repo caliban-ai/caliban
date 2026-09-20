@@ -34,6 +34,13 @@ pub struct MemoryConfig {
     /// Gitignore-style patterns evaluated against paths relative to
     /// `project_walk_root` to skip CLAUDE.md / AGENTS.md / `.caliban.md` files.
     pub claude_md_excludes: GlobSet,
+    /// The raw exclude patterns backing [`Self::claude_md_excludes`], retained
+    /// so settings-layer patterns can be *unioned* in via
+    /// [`Self::with_extra_claude_md_excludes`] (`GlobSet` is match-only and
+    /// cannot be introspected). Kept in sync with the compiled set. `pub(crate)`
+    /// (not `pub`) so same-crate `..MemoryConfig::for_test()` struct-update still
+    /// works while the raw patterns stay an internal detail.
+    pub(crate) claude_md_exclude_patterns: Vec<String>,
     /// `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD` — load CLAUDE.md from
     /// `--add-dir` paths too.
     pub additional_directories_claude_md: bool,
@@ -123,8 +130,9 @@ impl MemoryConfig {
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
 
-        let claude_md_excludes =
-            parse_exclude_patterns(std::env::var("CALIBAN_CLAUDE_MD_EXCLUDES").ok().as_deref());
+        let claude_md_exclude_patterns =
+            split_exclude_patterns(std::env::var("CALIBAN_CLAUDE_MD_EXCLUDES").ok().as_deref());
+        let claude_md_excludes = compile_exclude_patterns(&claude_md_exclude_patterns);
 
         let imports_allowlist_path = caliban_common::paths::platform_state_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -138,6 +146,7 @@ impl MemoryConfig {
             project_walk_stop: WalkStop::default(),
             additional_dirs: Vec::new(),
             claude_md_excludes,
+            claude_md_exclude_patterns,
             additional_directories_claude_md: env_truthy(
                 "CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
             ),
@@ -168,6 +177,7 @@ impl MemoryConfig {
             project_walk_stop: WalkStop::default(),
             additional_dirs: Vec::new(),
             claude_md_excludes: GlobSet::empty(),
+            claude_md_exclude_patterns: Vec::new(),
             additional_directories_claude_md: false,
             disable_walk: true, // tests opt out of the walk by default
             approve_imports: false,
@@ -179,6 +189,26 @@ impl MemoryConfig {
             cap_tokens_claude_md: None,
             disable_auto: false,
         }
+    }
+
+    /// Union additional CLAUDE.md exclude patterns (typically from the settings
+    /// layer's `claude_md_excludes`) with the env-derived set and recompile the
+    /// matcher (ADR — #694). Additive: both the `CALIBAN_CLAUDE_MD_EXCLUDES` env
+    /// patterns and the settings patterns apply. A no-op when `extra` is empty,
+    /// so the default (env-only) behavior is preserved.
+    #[must_use]
+    pub fn with_extra_claude_md_excludes<I, S>(mut self, extra: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let before = self.claude_md_exclude_patterns.len();
+        self.claude_md_exclude_patterns
+            .extend(extra.into_iter().map(Into::into));
+        if self.claude_md_exclude_patterns.len() != before {
+            self.claude_md_excludes = compile_exclude_patterns(&self.claude_md_exclude_patterns);
+        }
+        self
     }
 
     /// Builder-style setter for the per-scope auto-tier cap. Allows callers
@@ -226,16 +256,26 @@ fn env_truthy(key: &str) -> bool {
 
 /// Parse a colon-or-newline-separated list of gitignore-style patterns into a
 /// `GlobSet`. Invalid patterns are dropped with a `warn!` log.
-fn parse_exclude_patterns(raw: Option<&str>) -> GlobSet {
-    let mut builder = GlobSetBuilder::new();
+/// Split a raw `CALIBAN_CLAUDE_MD_EXCLUDES`-style string (newline- or
+/// colon-separated) into trimmed, non-empty pattern strings.
+fn split_exclude_patterns(raw: Option<&str>) -> Vec<String> {
     let Some(s) = raw else {
-        return GlobSet::empty();
+        return Vec::new();
     };
-    for raw in s.split(['\n', ':']) {
-        let pat = raw.trim();
-        if pat.is_empty() {
-            continue;
-        }
+    s.split(['\n', ':'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Compile exclude patterns into a `GlobSet`, **skipping** (with a warning) any
+/// individual pattern that fails to parse, rather than failing the whole set —
+/// the lenient behavior the env/settings excludes rely on. (Contrast
+/// [`build_excludes`], which surfaces the first error.)
+fn compile_exclude_patterns(patterns: &[String]) -> GlobSet {
+    let mut builder = GlobSetBuilder::new();
+    for pat in patterns {
         match Glob::new(pat) {
             Ok(g) => {
                 builder.add(g);
@@ -256,6 +296,14 @@ fn parse_exclude_patterns(raw: Option<&str>) -> GlobSet {
         );
         GlobSet::empty()
     })
+}
+
+/// Convenience wrapper (split + compile) exercising the combined path. Now that
+/// `from_env` splits and compiles separately (to retain the raw patterns for
+/// [`MemoryConfig::with_extra_claude_md_excludes`]), this is only used by tests.
+#[cfg(test)]
+fn parse_exclude_patterns(raw: Option<&str>) -> GlobSet {
+    compile_exclude_patterns(&split_exclude_patterns(raw))
 }
 
 /// Public helper: build a `GlobSet` from an iterable of patterns. Used by
@@ -351,6 +399,30 @@ mod tests {
         assert!(g.is_empty());
         let g2 = parse_exclude_patterns(None);
         assert!(g2.is_empty());
+    }
+
+    #[test]
+    fn with_extra_claude_md_excludes_unions_with_env_derived() {
+        // Simulate an env-derived config, then union settings-layer patterns.
+        let mut cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m"));
+        cfg.claude_md_exclude_patterns = vec!["env_dir/**".to_owned()];
+        cfg.claude_md_excludes = compile_exclude_patterns(&cfg.claude_md_exclude_patterns);
+        assert!(cfg.claude_md_excludes.is_match("env_dir/x/CLAUDE.md"));
+        assert!(!cfg.claude_md_excludes.is_match("settings_dir/x/CLAUDE.md"));
+
+        let cfg = cfg.with_extra_claude_md_excludes(["settings_dir/**".to_owned()]);
+        // Both env and settings patterns now apply (union, not replace).
+        assert!(cfg.claude_md_excludes.is_match("env_dir/x/CLAUDE.md"));
+        assert!(cfg.claude_md_excludes.is_match("settings_dir/x/CLAUDE.md"));
+    }
+
+    #[test]
+    fn with_extra_claude_md_excludes_empty_is_noop() {
+        let cfg = MemoryConfig::for_test(PathBuf::from("/tmp/m"));
+        let empty: Vec<String> = Vec::new();
+        let cfg = cfg.with_extra_claude_md_excludes(empty);
+        assert!(cfg.claude_md_excludes.is_empty());
+        assert!(cfg.claude_md_exclude_patterns.is_empty());
     }
 
     #[test]

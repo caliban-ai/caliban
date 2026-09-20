@@ -303,12 +303,16 @@ pub fn build_config_hooks(
                         tracing::warn!(event = %event_name, "command hook missing `command`; skipping");
                         continue;
                     };
+                    // #694: global `settings.env` overrides apply to command
+                    // hooks, with the per-hook `env` taking precedence.
+                    let mut env = cfg.global_env.clone();
+                    env.extend(h.env.iter().map(|(k, v)| (k.clone(), v.clone())));
                     out.push(std::sync::Arc::new(ExternalHook {
                         transport: std::sync::Arc::new(ShellCommandHook {
                             command,
                             args: h.args.clone(),
                             timeout: h.timeout,
-                            env: h.env.clone(),
+                            env,
                             gate: HookGate {
                                 event_name: event_name.clone(),
                                 matcher: h.matcher.clone(),

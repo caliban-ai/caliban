@@ -407,6 +407,18 @@ pub(super) fn build_shell(
     Ok(shell)
 }
 
+/// Apply global child-process env overrides (`settings.env`, #694) to `cmd` on
+/// top of the inherited process environment — each `(key, value)` sets/overrides
+/// that variable for the spawned shell. A no-op for an empty map.
+pub(super) fn apply_env(
+    cmd: &mut tokio::process::Command,
+    env: &std::collections::BTreeMap<String, String>,
+) {
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+}
+
 /// Spawn `command` as a background shell, enrolling it in `registry`. Returns
 /// the shell id. The shell runs in `cwd` and inherits no stdin; stdout/stderr
 /// are piped into the job's ring buffers, and the OS sandbox (when active) is
@@ -423,6 +435,7 @@ pub fn spawn_background(
     command: String,
     cwd: &std::path::Path,
     sandbox: Option<&Arc<SandboxedShim>>,
+    env: &std::collections::BTreeMap<String, String>,
 ) -> Result<String, ToolError> {
     let id = new_shell_id();
     let cap = registry.cap_bytes();
@@ -431,6 +444,8 @@ pub fn spawn_background(
     // sandbox-wrapped identically to the foreground path (#160) — previously
     // it spawned `/bin/sh` directly and skipped the OS-sandbox wrap entirely.
     let mut shell = build_shell(&command, cwd, sandbox)?;
+    // #694: apply global settings.env overrides on top of inherited env.
+    apply_env(&mut shell, env);
 
     let mut child = shell.spawn().map_err(ToolError::execution)?;
     let pid = child.id();
@@ -821,6 +836,7 @@ mod tests {
             "sleep 5".into(),
             &std::env::current_dir().unwrap(),
             None,
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         // The call must not block — well under 1s.
@@ -843,6 +859,7 @@ mod tests {
             "printf 'hello'; sleep 30".into(),
             &std::env::current_dir().unwrap(),
             None,
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         // Give the drainer a moment.
@@ -875,6 +892,7 @@ mod tests {
             "printf 'aaaaa'; sleep 30".into(),
             &std::env::current_dir().unwrap(),
             None,
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         // Wait until we have 5 bytes.
@@ -907,6 +925,7 @@ mod tests {
             "sleep 60".into(),
             &std::env::current_dir().unwrap(),
             None,
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(reg.running_count(), 1);
@@ -939,6 +958,7 @@ mod tests {
                     "sleep 60".into(),
                     &std::env::current_dir().unwrap(),
                     None,
+                    &std::collections::BTreeMap::new(),
                 )
                 .unwrap()
             })
