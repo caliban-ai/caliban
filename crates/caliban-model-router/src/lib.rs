@@ -60,6 +60,7 @@ pub use capabilities::{CandidateAnnotation, CandidateOrigin, DerivedNeeds};
 pub use config::{
     BreakerPolicy, CalibanConfig, CapabilityRequirements, EffortLevel, EffortMap, HedgePolicy,
     ProviderBlock, RouteEntry, RouterConfig, parse_caliban_config, parse_router_config,
+    router_config_from_value,
 };
 pub use discovery::{DiscoveredConfig, DiscoveryError, discover_caliban_toml};
 pub use effort::{effective_effort_for, effort_knob_for};

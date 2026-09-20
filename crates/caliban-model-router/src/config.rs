@@ -534,6 +534,24 @@ pub fn parse_router_config(body: &str) -> Result<Option<RouterConfig>, toml::de:
     Ok(file.router.map(RouterConfig::from_section))
 }
 
+/// Build a [`RouterConfig`] from the settings-layer `router` value.
+///
+/// The settings crate carries the `[router]` section as an opaque
+/// `serde_json::Value` (it deliberately does not depend on this crate's schema);
+/// the caliban binary calls this to type it. The value has the same shape as the
+/// `[router]` table of `caliban.toml` (`default_purpose`, `[[route]]`, and the
+/// `breaker`/`hedge` defaults).
+///
+/// # Errors
+/// Returns a `serde_json::Error` if the value doesn't match the `[router]`
+/// schema (e.g. a missing `default_purpose` or a malformed route).
+pub fn router_config_from_value(
+    value: &serde_json::Value,
+) -> Result<RouterConfig, serde_json::Error> {
+    let section: RouterSection = serde_json::from_value(value.clone())?;
+    Ok(RouterConfig::from_section(section))
+}
+
 /// Parse a `caliban.toml` body into the full caliban-config view.
 ///
 /// # Errors
@@ -654,6 +672,31 @@ model = "claude-3-5-sonnet"
         assert_eq!(cfg.routes[0].id, "anthropic:claude-3-5-sonnet:main_loop");
         assert!(cfg.routes[0].breaker.is_disabled());
         assert!(matches!(cfg.routes[0].hedge, HedgePolicy::Disabled));
+    }
+
+    #[test]
+    fn router_config_from_value_matches_toml_shape() {
+        // #540: the settings layer carries `[router]` as a JSON value; typing it
+        // must yield the same RouterConfig as the equivalent caliban.toml.
+        let value = serde_json::json!({
+            "default_purpose": "main_loop",
+            "route": [
+                { "purpose": "main_loop", "provider": "anthropic", "model": "claude-3-5-sonnet" }
+            ]
+        });
+        let cfg = router_config_from_value(&value).unwrap();
+        assert_eq!(cfg.default_purpose, RequestPurpose::MainLoop);
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].provider, "anthropic");
+        assert_eq!(cfg.routes[0].id, "anthropic:claude-3-5-sonnet:main_loop");
+    }
+
+    #[test]
+    fn router_config_from_value_rejects_malformed() {
+        // Missing the required `default_purpose` is a hard error, not a silent
+        // empty config — settings-sourced router config is validated.
+        let value = serde_json::json!({ "route": [] });
+        assert!(router_config_from_value(&value).is_err());
     }
 
     #[test]
