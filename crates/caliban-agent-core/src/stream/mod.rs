@@ -531,6 +531,12 @@ pub enum StopCondition {
     /// stops with whatever it has produced so far. Independent of the turn
     /// budget and the stream watchdogs. Carries the configured budget.
     TimeBudgetExceeded(std::time::Duration),
+    /// The configured **cost budget** (`AgentConfig::cost_budget_usd`, priced by
+    /// the injected [`crate::CostModel`]) was reached (ADR 0058, B3 · #663).
+    /// Checked at the top of each turn against the run's accumulated usage; a
+    /// graceful bound like [`Self::TimeBudgetExceeded`], not a failure. Carries
+    /// the configured cap in USD.
+    CostBudgetExceeded(f64),
 }
 
 impl StopCondition {
@@ -571,6 +577,9 @@ impl StopCondition {
                 format!("time budget ({}s) exceeded", d.as_secs()),
                 StopLevel::Info,
             ),
+            Self::CostBudgetExceeded(usd) => {
+                (format!("cost budget (${usd:.2}) exceeded"), StopLevel::Info)
+            }
             Self::Cancelled => ("cancelled".to_string(), StopLevel::Info),
             Self::MaxTokensExhausted => (
                 "max-tokens recovery exhausted \u{2014} try /effort low to reduce reasoning budget"
@@ -1463,6 +1472,12 @@ impl Agent {
             let time_budget = self.config.time_budget;
             let run_started = std::time::Instant::now();
 
+            // B3 (#663) — cost budget. Enforced only when both a cap and an
+            // injected CostModel are present; `total_usage` carries accumulated
+            // usage from completed turns, priced at the top of each turn.
+            let cost_budget_usd = self.config.cost_budget_usd;
+            let cost_model = self.cost_model.clone();
+
             'outer: for turn_index in 0..max_turns {
                 // #245: bounded budget to re-issue THIS turn when the provider
                 // stream is interrupted *before any content is emitted*. Fresh
@@ -1488,6 +1503,18 @@ impl Agent {
                     && run_started.elapsed() >= budget
                 {
                     stopped_for = StopCondition::TimeBudgetExceeded(budget);
+                    break 'outer;
+                }
+
+                // ---- Cost budget (B3 · #663) ----
+                // Same graceful-bound posture as the time budget: price the
+                // usage accumulated over completed turns and stop before
+                // starting another turn once the cap is reached.
+                if let Some(budget) = cost_budget_usd
+                    && let Some(model) = cost_model.as_ref()
+                    && model.cost_usd(&total_usage) >= budget
+                {
+                    stopped_for = StopCondition::CostBudgetExceeded(budget);
                     break 'outer;
                 }
 

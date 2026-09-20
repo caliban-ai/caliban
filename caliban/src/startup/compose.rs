@@ -1492,6 +1492,40 @@ fn select_compactor(
     }
 }
 
+/// Prices accumulated token usage against `caliban-telemetry`'s rate card so the
+/// agent-loop cost budget (ADR 0058, B3 · #663) can enforce a dollar cap. Lets
+/// `caliban-agent-core` stay free of a pricing dependency: it owns the
+/// [`caliban_agent_core::CostModel`] trait; the binary owns the rate card.
+struct RateCardCostModel {
+    accumulator: caliban_telemetry::CostAccumulator,
+    provider: String,
+    model: String,
+}
+
+impl caliban_agent_core::CostModel for RateCardCostModel {
+    fn cost_usd(&self, usage: &caliban_provider::Usage) -> f64 {
+        let today = chrono::Utc::now().date_naive();
+        self.accumulator
+            .price_f64(&self.provider, &self.model, usage, today)
+    }
+}
+
+/// Build the cost model backing the agent-loop cost budget for `(provider,
+/// model)`, or `None` when the rate card cannot be loaded (pricing would be
+/// `$0.00` anyway, so the cap would be inert). Honors `CALIBAN_RATES_YAML`,
+/// matching the rest of the cost pipeline.
+fn build_cost_model(provider: &str, model: &str) -> Option<Arc<dyn caliban_agent_core::CostModel>> {
+    let card = match std::env::var("CALIBAN_RATES_YAML") {
+        Ok(p) if !p.is_empty() => caliban_telemetry::RateCard::from_path(&p).ok()?,
+        _ => caliban_telemetry::RateCard::embedded().ok()?,
+    };
+    Some(Arc::new(RateCardCostModel {
+        accumulator: caliban_telemetry::CostAccumulator::new(card),
+        provider: provider.to_string(),
+        model: model.to_string(),
+    }))
+}
+
 /// Build the agent: wire the provider + registry, install the output-
 /// style post-processor when the `Learning` style is active, compose the
 /// hook chain (`HeadlessHookSink` + `PermissionsHook`), and apply the
@@ -1566,6 +1600,12 @@ pub(crate) fn build_agent(
         Arc::clone(&provider),
         model,
     );
+    // B3 (#663): inject a cost model only when a cost budget is configured, so
+    // the loop can price accumulated usage against the rate card. `provider` and
+    // `cfg` are still owned here (both are moved into the builder below).
+    let cost_model = cfg
+        .cost_budget_usd
+        .and_then(|_| build_cost_model(provider.name(), model));
     let mut builder = Agent::builder()
         .provider(provider)
         .compactor(compactor)
@@ -1576,6 +1616,9 @@ pub(crate) fn build_agent(
         .plan_mode(Arc::clone(plan_mode))
         .mcp_active(mcp_active)
         .mcp_eager_servers(mcp_eager_servers);
+    if let Some(model) = cost_model {
+        builder = builder.cost_model(model);
+    }
     // Install the output-style post-processor. Today only the `Learning`
     // style mutates assistant text; everything else uses the identity
     // post-processor (which the agent core already defaults to).

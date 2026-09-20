@@ -153,7 +153,7 @@ Non-fatal informational frames that do not terminate the run. Currently emitted 
 | `error` | Provider error, hook denial, tool crash, or schema validation failure | `error`, `last_assistant_text`, `tool_calls_seen` |
 | `max_turns` | `--max-turns` was reached (exit 75) | `last_assistant_text`, `tool_calls_seen` |
 | `time_budget` | The `[agent_loop]` wall-clock time budget elapsed (exit 75) | `last_assistant_text`, `tool_calls_seen` |
-| `budget_exceeded` | `--max-budget-usd` was reached (exit 137) | `last_assistant_text`, `tool_calls_seen` |
+| `budget_exceeded` | A cost budget was reached — `--max-budget-usd` or the `[agent_loop] cost_budget_usd` cap (exit 137) | `last_assistant_text`, `tool_calls_seen` |
 | `cancelled` | Run was cancelled by Ctrl-C / SIGTERM (exit 124) | `last_assistant_text`, `tool_calls_seen` |
 | `max_tokens` | Per-turn output token budget exhausted | `last_assistant_text`, `tool_calls_seen` |
 

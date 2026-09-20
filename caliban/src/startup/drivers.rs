@@ -173,6 +173,9 @@ pub(crate) fn stop_condition_exit_code(stop: &caliban_agent_core::StopCondition)
         // Wall-clock time budget shares the max-turns EX_TEMPFAIL code (#662):
         // both are graceful bound-reached stops, not failures.
         StopCondition::MaxTurnsReached(_) | StopCondition::TimeBudgetExceeded(_) => 75,
+        // Cost budget shares the `--max-budget-usd` code (137) — same cost
+        // semantics as the headless dollar budget (#663).
+        StopCondition::CostBudgetExceeded(_) => 137,
         StopCondition::Cancelled => 124,
         StopCondition::ProviderError(_)
         | StopCondition::HookDenied(_)

@@ -28,7 +28,9 @@ pub mod tool;
 pub mod turn;
 pub mod wire_filter;
 
-pub use agent::{Agent, AgentBuilder, AgentConfig, ModelSwapError, default_parallel_tool_limit};
+pub use agent::{
+    Agent, AgentBuilder, AgentConfig, CostModel, ModelSwapError, default_parallel_tool_limit,
+};
 pub use auto_mode::{
     AutoModeClassifier, AutoModeConfig, AutoModeDecision, AutoVerdict, CLASSIFIER_INPUT_CAP,
     DEFAULTS_TOKEN, DecisionSource, DefaultsKind, build_prompt as auto_mode_build_prompt,
