@@ -274,6 +274,11 @@ pub struct AgentLoopConfig {
     /// terminates with `ThinkingBudgetExhausted` (#62). `None` keeps the
     /// default (262144); `0` disables the guard.
     pub max_turn_thinking_chars: Option<usize>,
+    /// Wall-clock **time budget** for the whole agent loop, in seconds (ADR
+    /// 0058, B2 · #662). `None`/unset and `0` both mean *no deadline* (today's
+    /// behavior); any positive value ends the run with `TimeBudgetExceeded`
+    /// once that many seconds of wall-clock elapse.
+    pub time_budget_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +802,12 @@ impl Settings {
         if let Some(v) = al.max_turn_thinking_chars {
             cfg.max_turn_thinking_chars = v;
         }
+        // B2 (#662): a positive value sets the wall-clock deadline; `0` means
+        // "no deadline" (disabled) so a config value cannot accidentally set a
+        // zero-second budget that terminates before the first turn.
+        if let Some(secs) = al.time_budget_secs {
+            cfg.time_budget = (secs > 0).then(|| std::time::Duration::from_secs(secs));
+        }
     }
 
     /// The `[agent_loop] max_turns` value, if set. The caller layers CLI over
@@ -1125,7 +1136,8 @@ mod tests {
                 "max_turns": 120,
                 "no_edit_nudge_threshold": 4,
                 "empty_turn_nudge_max": 1,
-                "max_turn_thinking_chars": 9999
+                "max_turn_thinking_chars": 9999,
+                "time_budget_secs": 600
             }
         }"#;
         let s: Settings = serde_json::from_str(raw).unwrap();
@@ -1134,7 +1146,26 @@ mod tests {
         assert_eq!(al.no_edit_nudge_threshold, Some(4));
         assert_eq!(al.empty_turn_nudge_max, Some(1));
         assert_eq!(al.max_turn_thinking_chars, Some(9999));
+        assert_eq!(al.time_budget_secs, Some(600));
         assert_eq!(s.agent_loop_max_turns(), Some(120));
+    }
+
+    #[test]
+    fn apply_agent_loop_time_budget_positive_sets_and_zero_disables() {
+        // A positive value becomes a Duration deadline.
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"time_budget_secs": 300}}"#).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        assert_eq!(cfg.time_budget, None, "default is no deadline");
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.time_budget, Some(std::time::Duration::from_mins(5)));
+
+        // `0` explicitly disables (maps to None), never a zero-second budget.
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"time_budget_secs": 0}}"#).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.time_budget, None);
     }
 
     #[test]

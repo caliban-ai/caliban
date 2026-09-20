@@ -123,6 +123,18 @@ pub struct AgentConfig {
     /// Default `262_144` (≈ 65k tokens) — a backstop far above any legitimate
     /// single-turn reasoning, so it never trips in normal use.
     pub max_turn_thinking_chars: usize,
+    // ── ADR 0058 / #662 (agent-loop wall-clock time budget) ──────
+    /// Optional wall-clock **time budget** for the whole agent loop. `None`
+    /// (default) means no deadline — today's behavior. When set, the loop stops
+    /// with [`crate::StopCondition::TimeBudgetExceeded`] at the top of the first
+    /// turn that starts at or after the deadline (a graceful bound, like
+    /// `max_turns`, independent of the turn budget and the stream watchdogs).
+    /// The second half of #239: time-box environment/build setup so the loop
+    /// falls back to the minimal edit rather than looping on setup. `Some(ZERO)`
+    /// is "already over budget" (fires before the first turn); the settings
+    /// layer maps `time_budget_secs = 0` to `None` (disabled) so a config value
+    /// cannot accidentally do that.
+    pub time_budget: Option<std::time::Duration>,
 }
 
 impl Default for AgentConfig {
@@ -165,6 +177,8 @@ impl Default for AgentConfig {
             empty_turn_nudge_max: 2,
             // #62
             max_turn_thinking_chars: 262_144,
+            // ADR 0058 / #662 — no wall-clock deadline by default.
+            time_budget: None,
         }
     }
 }
@@ -187,6 +201,8 @@ mod recovery_config_tests {
         assert_eq!(cfg.no_edit_nudge_threshold, 10);
         assert_eq!(cfg.empty_turn_nudge_max, 2);
         assert_eq!(cfg.max_turn_thinking_chars, 262_144);
+        // ADR 0058 / #662 — no wall-clock deadline by default.
+        assert_eq!(cfg.time_budget, None);
     }
 }
 

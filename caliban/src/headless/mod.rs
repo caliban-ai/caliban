@@ -49,6 +49,12 @@ pub(crate) enum HeadlessError {
     /// `--max-turns` exceeded.
     #[error("max turns ({0}) exceeded")]
     MaxTurnsExceeded(u32),
+    /// The `[agent_loop]` wall-clock time budget elapsed (ADR 0058, B2 · #662).
+    #[error("time budget ({}s) exceeded", limit.as_secs())]
+    TimeBudgetExceeded {
+        /// The configured wall-clock budget.
+        limit: std::time::Duration,
+    },
     /// `--max-budget-usd` exceeded.
     #[error("max budget exceeded (configured: {limit:?} USD)")]
     BudgetExceeded {
@@ -106,7 +112,9 @@ pub(crate) enum HeadlessError {
 #[must_use]
 pub(crate) fn exit_code_for(err: &HeadlessError) -> i32 {
     match err {
-        HeadlessError::MaxTurnsExceeded(_) => 75,
+        // A wall-clock budget stop is a graceful bound like max-turns, so both
+        // share `75` (`EX_TEMPFAIL`) — not the cost-budget `137` (#662).
+        HeadlessError::MaxTurnsExceeded(_) | HeadlessError::TimeBudgetExceeded { .. } => 75,
         HeadlessError::BudgetExceeded { .. } => 137,
         HeadlessError::StdinTooLarge { .. } | HeadlessError::Configuration(_) => 78,
         HeadlessError::ResumeNotFound(_)
@@ -167,6 +175,7 @@ pub(crate) fn emit_preflight_error(format: OutputFormat, message: &str) {
 pub(crate) fn text_mode_stop_note(subtype: ResultSubtype, turns: u32) -> Option<String> {
     match subtype {
         ResultSubtype::MaxTurns => Some(format!("[caliban: max-turns ({turns}) reached]")),
+        ResultSubtype::TimeBudget => Some("[caliban: time budget exceeded]".to_string()),
         ResultSubtype::Cancelled => Some("[caliban: cancelled]".to_string()),
         ResultSubtype::BudgetExceeded => Some("[caliban: budget exceeded]".to_string()),
         ResultSubtype::MaxTokens => Some(
@@ -373,6 +382,9 @@ pub(crate) struct HeadlessDriver<W: Write> {
 enum TerminalStop {
     /// `--max-turns` (or the agent's own cap) was reached.
     MaxTurns(u32),
+    /// The `[agent_loop]` wall-clock time budget elapsed (ADR 0058, B2 · #662).
+    /// A graceful bound like `MaxTurns`; carries the configured budget.
+    TimeBudget(std::time::Duration),
     /// Run was cancelled (Ctrl-C / SIGTERM).
     Cancelled,
     /// Provider error / hook denial / compaction failure surfaced as
@@ -754,6 +766,9 @@ impl<W: Write> HeadlessDriver<W> {
                     StopCondition::MaxTurnsReached(n) => {
                         return Ok(Some(TerminalStop::MaxTurns(n)));
                     }
+                    StopCondition::TimeBudgetExceeded(d) => {
+                        return Ok(Some(TerminalStop::TimeBudget(d)));
+                    }
                     StopCondition::Cancelled => {
                         return Ok(Some(TerminalStop::Cancelled));
                     }
@@ -887,6 +902,7 @@ impl<W: Write> HeadlessDriver<W> {
         let total_cost_usd = self.config.budget.total_cost_usd();
         let (subtype, error) = match stop {
             TerminalStop::MaxTurns(_) => (ResultSubtype::MaxTurns, None),
+            TerminalStop::TimeBudget(_) => (ResultSubtype::TimeBudget, None),
             TerminalStop::Cancelled => (ResultSubtype::Cancelled, None),
             TerminalStop::RunError(msg) => (ResultSubtype::Error, Some(msg.clone())),
             TerminalStop::BudgetExceeded => (ResultSubtype::BudgetExceeded, None),
@@ -912,6 +928,7 @@ impl<W: Write> HeadlessDriver<W> {
         self.emit_result(&summary)?;
         match stop {
             TerminalStop::MaxTurns(n) => Err(HeadlessError::MaxTurnsExceeded(*n)),
+            TerminalStop::TimeBudget(d) => Err(HeadlessError::TimeBudgetExceeded { limit: *d }),
             TerminalStop::Cancelled => Err(HeadlessError::Cancelled),
             TerminalStop::RunError(msg) => Err(HeadlessError::Run(msg.clone())),
             TerminalStop::BudgetExceeded => Err(HeadlessError::BudgetExceeded {
