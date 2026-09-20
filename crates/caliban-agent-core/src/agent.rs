@@ -30,6 +30,19 @@ pub fn default_parallel_tool_limit() -> NonZeroUsize {
     NonZeroUsize::new(n).expect("max(1) guarantees nonzero")
 }
 
+/// Prices the run's accumulated token usage in USD (ADR 0058, B3 · #662/#663).
+///
+/// agent-core owns no rate card — pricing lives in `caliban-telemetry`. The
+/// binary injects an implementation (via [`AgentBuilder::cost_model`]) that
+/// closes over the provider, model, and rate card, so the loop can enforce a
+/// [`AgentConfig::cost_budget_usd`] cap without agent-core taking a pricing
+/// dependency. This mirrors how `dyn Provider` / `dyn Compactor` / `dyn Hooks`
+/// keep concrete backends out of the core crate.
+pub trait CostModel: Send + Sync {
+    /// Estimated cumulative cost, in USD, for the accumulated `usage` so far.
+    fn cost_usd(&self, usage: &caliban_provider::Usage) -> f64;
+}
+
 /// Per-turn settings that control how the agent interacts with the provider.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -135,6 +148,17 @@ pub struct AgentConfig {
     /// layer maps `time_budget_secs = 0` to `None` (disabled) so a config value
     /// cannot accidentally do that.
     pub time_budget: Option<std::time::Duration>,
+    // ── ADR 0058 / #663 (agent-loop cost budget) ─────────────────
+    /// Optional **cost budget** in USD for the whole agent loop. `None`
+    /// (default) means no cost cap. When set *and* a [`CostModel`] is provided
+    /// (via [`AgentBuilder::cost_model`]), the loop stops with
+    /// [`crate::StopCondition::CostBudgetExceeded`] at the top of the first turn
+    /// whose accumulated estimated cost is at or above the cap — a graceful
+    /// bound, like `max_turns` and `time_budget`. Without a `CostModel` the cap
+    /// is inert (nothing can price the usage). Primarily a cloud-default bound
+    /// (B6). Eval sub-project A showed verification raises cost ~1.8×, making a
+    /// dollar cap an active constraint on hard cloud instances.
+    pub cost_budget_usd: Option<f64>,
 }
 
 impl Default for AgentConfig {
@@ -179,6 +203,8 @@ impl Default for AgentConfig {
             max_turn_thinking_chars: 262_144,
             // ADR 0058 / #662 — no wall-clock deadline by default.
             time_budget: None,
+            // ADR 0058 / #663 — no cost cap by default.
+            cost_budget_usd: None,
         }
     }
 }
@@ -203,6 +229,8 @@ mod recovery_config_tests {
         assert_eq!(cfg.max_turn_thinking_chars, 262_144);
         // ADR 0058 / #662 — no wall-clock deadline by default.
         assert_eq!(cfg.time_budget, None);
+        // ADR 0058 / #663 — no cost cap by default.
+        assert_eq!(cfg.cost_budget_usd, None);
     }
 }
 
@@ -225,6 +253,11 @@ pub struct Agent {
     pub(crate) compactor: Arc<dyn crate::compact::Compactor + Send + Sync>,
     pub(crate) retry: crate::retry::RetryPolicy,
     pub(crate) hooks: Arc<dyn Hooks + Send + Sync>,
+    /// Prices accumulated usage for the [`AgentConfig::cost_budget_usd`] cap
+    /// (ADR 0058, B3 · #663). `None` (default) leaves the cap inert. Injected
+    /// by the binary, which owns the rate card; kept out of `AgentConfig` (a
+    /// `Debug + Clone` data struct) alongside the other `dyn` backends.
+    pub(crate) cost_model: Option<Arc<dyn CostModel>>,
     /// When true, mark the last system text block + last tool def with
     /// Anthropic-style `cache_control: Ephemeral`. No-op for other providers.
     pub(crate) prompt_cache: bool,
@@ -388,6 +421,7 @@ pub struct AgentBuilder {
     compactor: Option<Arc<dyn crate::compact::Compactor + Send + Sync>>,
     retry: Option<crate::retry::RetryPolicy>,
     hooks: Option<Arc<dyn Hooks + Send + Sync>>,
+    cost_model: Option<Arc<dyn CostModel>>,
     prompt_cache: bool,
     parallel_tools: bool,
     parallel_tool_limit: NonZeroUsize,
@@ -406,6 +440,7 @@ impl Default for AgentBuilder {
             compactor: None,
             retry: None,
             hooks: None,
+            cost_model: None,
             // Prompt caching is default-on. Anthropic users get cache hits
             // from turn 2 onward; non-Anthropic providers ignore the markers.
             prompt_cache: true,
@@ -438,6 +473,14 @@ impl AgentBuilder {
     #[must_use]
     pub fn config(mut self, cfg: AgentConfig) -> Self {
         self.config = cfg;
+        self
+    }
+
+    /// Inject the [`CostModel`] used to enforce [`AgentConfig::cost_budget_usd`]
+    /// (ADR 0058, B3 · #663). Without it, a configured cost budget is inert.
+    #[must_use]
+    pub fn cost_model(mut self, model: Arc<dyn CostModel>) -> Self {
+        self.cost_model = Some(model);
         self
     }
 
@@ -603,6 +646,7 @@ impl AgentBuilder {
                 .unwrap_or_else(|| Arc::new(crate::compact::NoopCompactor)),
             retry: self.retry.unwrap_or_default(),
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoopHooks)),
+            cost_model: self.cost_model,
             prompt_cache: self.prompt_cache,
             parallel_tools: self.parallel_tools,
             parallel_tool_limit: self.parallel_tool_limit,

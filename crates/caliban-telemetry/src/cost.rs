@@ -274,6 +274,16 @@ impl CostAccumulator {
         compute_usd(rule, usage)
     }
 
+    /// [`Self::price`] as an `f64`. A stateless convenience for callers that
+    /// work in floats (e.g. the agent-loop cost budget, ADR 0058 · #663) and do
+    /// not want a `rust_decimal` dependency. Returns `0.0` when no rule matches.
+    #[must_use]
+    pub fn price_f64(&self, provider: &str, model: &str, usage: &Usage, as_of: NaiveDate) -> f64 {
+        self.price(provider, model, usage, as_of)
+            .to_f64()
+            .unwrap_or(0.0)
+    }
+
     /// Record one provider response. The price is computed against the
     /// vendored rate card; if no rule matches, contributes `$0.00` and emits
     /// a debounced warning the first time the (provider, model) pair is seen.

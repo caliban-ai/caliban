@@ -252,7 +252,8 @@ pub struct ToolsConfig {
 ///
 /// Every field is `Option` so an unset key leaves the corresponding
 /// [`caliban_agent_core::AgentConfig`] default untouched (behavior-preserving).
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+// No `Eq`: `cost_budget_usd` is `f64` (only `PartialEq`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentLoopConfig {
     /// Hard cap on agent-loop iterations. `None` keeps the built-in default
@@ -279,6 +280,12 @@ pub struct AgentLoopConfig {
     /// behavior); any positive value ends the run with `TimeBudgetExceeded`
     /// once that many seconds of wall-clock elapse.
     pub time_budget_secs: Option<u64>,
+    /// **Cost budget** for the whole agent loop, in USD (ADR 0058, B3 · #663).
+    /// `None`/unset and any value `<= 0` mean *no cost cap*; a positive value
+    /// ends the run with `CostBudgetExceeded` once the run's accumulated
+    /// estimated cost reaches it. Enforced only when the binary has a rate card
+    /// to price usage (it injects the cost model); inert otherwise.
+    pub cost_budget_usd: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +815,13 @@ impl Settings {
         if let Some(secs) = al.time_budget_secs {
             cfg.time_budget = (secs > 0).then(|| std::time::Duration::from_secs(secs));
         }
+        // B3 (#663): a positive value sets the cost cap; `<= 0` disables it so a
+        // config value cannot impose a zero-dollar budget that stops every run.
+        // Enforcement additionally requires an injected cost model (the binary
+        // supplies one); the cap is inert without pricing.
+        if let Some(usd) = al.cost_budget_usd {
+            cfg.cost_budget_usd = (usd > 0.0).then_some(usd);
+        }
     }
 
     /// The `[agent_loop] max_turns` value, if set. The caller layers CLI over
@@ -1137,7 +1151,8 @@ mod tests {
                 "no_edit_nudge_threshold": 4,
                 "empty_turn_nudge_max": 1,
                 "max_turn_thinking_chars": 9999,
-                "time_budget_secs": 600
+                "time_budget_secs": 600,
+                "cost_budget_usd": 2.5
             }
         }"#;
         let s: Settings = serde_json::from_str(raw).unwrap();
@@ -1147,7 +1162,25 @@ mod tests {
         assert_eq!(al.empty_turn_nudge_max, Some(1));
         assert_eq!(al.max_turn_thinking_chars, Some(9999));
         assert_eq!(al.time_budget_secs, Some(600));
+        assert_eq!(al.cost_budget_usd, Some(2.5));
         assert_eq!(s.agent_loop_max_turns(), Some(120));
+    }
+
+    #[test]
+    fn apply_agent_loop_cost_budget_positive_sets_and_nonpositive_disables() {
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"cost_budget_usd": 1.25}}"#).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        assert_eq!(cfg.cost_budget_usd, None, "default is no cost cap");
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.cost_budget_usd, Some(1.25));
+
+        // `0` (or negative) disables — never a zero-dollar budget.
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"cost_budget_usd": 0}}"#).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.cost_budget_usd, None);
     }
 
     #[test]

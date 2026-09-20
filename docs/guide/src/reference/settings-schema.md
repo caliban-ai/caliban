@@ -247,12 +247,13 @@ no_edit_nudge_threshold = 8
 | `empty_turn_nudge_max` | `integer` (≥ 0) | `2` | Maximum consecutive degenerate (output-but-no-work) turns the loop nudges before letting the run end (#249). `0` disables the guard. |
 | `max_turn_thinking_chars` | `integer` (≥ 0) | `262144` | Per-turn cap on cumulative *thinking* characters before the run stops with `ThinkingBudgetExhausted` (#62). `0` disables the guard. A backstop far above any legitimate single-turn reasoning. |
 | `time_budget_secs` | `integer` (≥ 0) | `0` | Wall-clock **time budget** for the whole agent loop, in seconds. `0`/unset means *no deadline* (today's behavior). A positive value ends the run with `TimeBudgetExceeded` once that many seconds elapse — checked at the top of each turn, so the loop stops between turns rather than mid-turn. Headless: `subtype=time_budget`, exit code `75` (same graceful-bound class as max-turns). |
+| `cost_budget_usd` | `number` (≥ 0) | *(none)* | **Cost budget** for the whole agent loop, in USD. Unset or `≤ 0` means *no cost cap*. A positive value ends the run with `CostBudgetExceeded` once the run's accumulated estimated cost (usage × the rate card in `caliban-telemetry`) reaches it — checked between turns. Works in TUI and headless (unlike the CLI-only `--max-budget-usd`). Headless: `subtype=budget_exceeded`, exit code `137`. Cost is `$0.00` (cap inert) for a model with no rate-card entry. |
 
 > `max_turns` and the three guards are the existing loop knobs, now discoverable
-> and adjustable; `time_budget_secs` is the first new budget (B2, #662). Further
-> agent-loop policy — a cost budget, a wrong-path/divergence guard, and a
-> verification-guidance knob with context-adaptive defaults — is tracked under
-> epic #259 and will extend this same group.
+> and adjustable; `time_budget_secs` (B2, #662) and `cost_budget_usd` (B3, #663)
+> are the new budgets. Further agent-loop policy — a wrong-path/divergence guard
+> and a verification-guidance knob with context-adaptive defaults — is tracked
+> under epic #259 and will extend this same group.
 
 ---
 

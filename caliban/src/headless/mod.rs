@@ -385,6 +385,10 @@ enum TerminalStop {
     /// The `[agent_loop]` wall-clock time budget elapsed (ADR 0058, B2 · #662).
     /// A graceful bound like `MaxTurns`; carries the configured budget.
     TimeBudget(std::time::Duration),
+    /// The `[agent_loop]` cost budget was reached (ADR 0058, B3 · #663). Shares
+    /// the cost `budget_exceeded` subtype + exit 137 with `--max-budget-usd`,
+    /// but carries the agent-loop cap so the error reports the right limit.
+    CostBudget(f64),
     /// Run was cancelled (Ctrl-C / SIGTERM).
     Cancelled,
     /// Provider error / hook denial / compaction failure surfaced as
@@ -769,6 +773,9 @@ impl<W: Write> HeadlessDriver<W> {
                     StopCondition::TimeBudgetExceeded(d) => {
                         return Ok(Some(TerminalStop::TimeBudget(d)));
                     }
+                    StopCondition::CostBudgetExceeded(usd) => {
+                        return Ok(Some(TerminalStop::CostBudget(usd)));
+                    }
                     StopCondition::Cancelled => {
                         return Ok(Some(TerminalStop::Cancelled));
                     }
@@ -905,7 +912,11 @@ impl<W: Write> HeadlessDriver<W> {
             TerminalStop::TimeBudget(_) => (ResultSubtype::TimeBudget, None),
             TerminalStop::Cancelled => (ResultSubtype::Cancelled, None),
             TerminalStop::RunError(msg) => (ResultSubtype::Error, Some(msg.clone())),
-            TerminalStop::BudgetExceeded => (ResultSubtype::BudgetExceeded, None),
+            // Both cost budgets (`--max-budget-usd` and `[agent_loop]
+            // cost_budget_usd`) surface as the same subtype (#663).
+            TerminalStop::CostBudget(_) | TerminalStop::BudgetExceeded => {
+                (ResultSubtype::BudgetExceeded, None)
+            }
             // MaxTokens emits the partial output we collected (via `final_text`)
             // and uses a dedicated subtype so the TUI/statusline can tell a
             // budget blowout from a clean end-of-turn. No `error` field.
@@ -929,6 +940,9 @@ impl<W: Write> HeadlessDriver<W> {
         match stop {
             TerminalStop::MaxTurns(n) => Err(HeadlessError::MaxTurnsExceeded(*n)),
             TerminalStop::TimeBudget(d) => Err(HeadlessError::TimeBudgetExceeded { limit: *d }),
+            TerminalStop::CostBudget(usd) => {
+                Err(HeadlessError::BudgetExceeded { limit: Some(*usd) })
+            }
             TerminalStop::Cancelled => Err(HeadlessError::Cancelled),
             TerminalStop::RunError(msg) => Err(HeadlessError::Run(msg.clone())),
             TerminalStop::BudgetExceeded => Err(HeadlessError::BudgetExceeded {
