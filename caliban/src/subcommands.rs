@@ -132,10 +132,23 @@ fn config_print_envelope(outcome: &caliban_settings::LoadOutcome) -> Result<serd
             )
         })
         .collect();
+    let env_overrides_json: Vec<_> = outcome
+        .env_overrides
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "key": o.key_path,
+                "env": o.env_var,
+            })
+        })
+        .collect();
     Ok(serde_json::json!({
         "settings": settings_json,
         "_sources": sources_json,
         "_provenance": provenance_json,
+        // Env-sourced overrides that won over the file (#538): each names the
+        // settings key and the CALIBAN_* variable that set it.
+        "_env_overrides": env_overrides_json,
     }))
 }
 
@@ -222,6 +235,7 @@ mod tests {
                 ("max_tokens".to_string(), caliban_settings::Scope::Project),
             ]),
             validation_warnings: Vec::new(),
+            env_overrides: Vec::new(),
         };
         let env = config_print_envelope(&outcome).expect("envelope builds");
         let prov = env

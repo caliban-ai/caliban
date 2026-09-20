@@ -17,7 +17,7 @@ use thiserror::Error;
 use crate::merge::merge_values;
 use crate::schema::validate_value;
 use crate::scope::{Scope, ScopePaths};
-use crate::settings::Settings;
+use crate::settings::{EnvOverride, Settings};
 
 /// Emit a tracing WARN at most once per unique message for the lifetime of
 /// the process.  Prevents log spam when `load_settings` is called in a
@@ -151,6 +151,11 @@ pub struct LoadOutcome {
     /// Schema-validation warnings collected per scope (empty when
     /// valid).
     pub validation_warnings: Vec<String>,
+    /// Environment-sourced overrides actually applied on top of the merged
+    /// files, in application order (#538). Env wins over the file; each entry
+    /// names the settings key and the `CALIBAN_*` variable that set it, so
+    /// `caliban config print` / `/config` can attribute env-sourced values.
+    pub env_overrides: Vec<EnvOverride>,
 }
 
 /// Errors emitted by the loader.
@@ -232,8 +237,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         // an explicit operator gesture (like the other CALIBAN_* env vars caliban
         // honors regardless of on-disk config), not file configuration (#659).
         let mut settings = Settings::default();
-        settings
-            .storage
+        let env_overrides = settings
             .apply_env_overrides(|k| std::env::var(k).ok())
             .map_err(LoadError::EnvOverride)?;
         return Ok(LoadOutcome {
@@ -241,6 +245,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
             sources: Vec::new(),
             provenance: BTreeMap::new(),
             validation_warnings: Vec::new(),
+            env_overrides,
         });
     }
 
@@ -451,8 +456,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
     // loaded file settings so caliban-operator can point an agent pod at a
     // remote gonzalod (and name its token var via `token_env`) without
     // generating a caliban settings file (caliban-operator ADR 0005).
-    settings
-        .storage
+    let env_overrides = settings
         .apply_env_overrides(|k| std::env::var(k).ok())
         .map_err(LoadError::EnvOverride)?;
 
@@ -477,6 +481,7 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
         sources,
         provenance,
         validation_warnings: warnings,
+        env_overrides,
     })
 }
 
