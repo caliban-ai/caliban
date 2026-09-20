@@ -149,8 +149,10 @@ pub struct CalibandLaunch {
     pub tls: Option<CalibandTls>,
     /// Control-plane bearer token (`--token` / `CALIBAN_DAEMON_TOKEN`).
     pub token: Option<String>,
-    /// Model-router config JSON, passed to the worker via env only
-    /// (`CALIBAN_ROUTER_CONFIG`).
+    /// Filesystem **path** to a model-router / `caliban.toml` config file,
+    /// forwarded to the worker via env only (`CALIBAN_ROUTER_CONFIG`, no flag).
+    /// caliban reads this variable as a path to the config file, not inline
+    /// JSON — the operator mounts a `ConfigMap` and passes the mounted file path.
     pub router_config: Option<String>,
 }
 
@@ -310,14 +312,17 @@ mod tests {
             listen: Some("0.0.0.0:7070".into()),
             agent_port_base: Some(7100),
             token: Some("s3cret".into()),
-            router_config: Some("{}".into()),
+            router_config: Some("/etc/caliban/router.toml".into()),
             ..CalibandLaunch::new("/repo")
         };
         let env: std::collections::HashMap<_, _> = launch.env().into_iter().collect();
         assert_eq!(env.get(ENV_DAEMON_LISTEN).unwrap(), "0.0.0.0:7070");
         assert_eq!(env.get(ENV_DAEMON_AGENT_PORT_BASE).unwrap(), "7100");
         assert_eq!(env.get(ENV_DAEMON_TOKEN).unwrap(), "s3cret");
-        assert_eq!(env.get(ENV_ROUTER_CONFIG).unwrap(), "{}");
+        assert_eq!(
+            env.get(ENV_ROUTER_CONFIG).unwrap(),
+            "/etc/caliban/router.toml"
+        );
         // workspace_root and socket_path have no env fallback in caliband.
         assert!(
             !env.keys()
