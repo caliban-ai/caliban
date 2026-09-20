@@ -692,11 +692,20 @@ impl Settings {
                         .iter()
                         .map(|a| expand_mcp_field(&ctx, name, "args", a))
                         .collect(),
-                    env: s
-                        .env
-                        .iter()
-                        .map(|(k, v)| (k.clone(), expand_mcp_field(&ctx, name, "env", v)))
-                        .collect(),
+                    // #694: the global `settings.env` (env overrides for child
+                    // processes) applies to spawned MCP servers, with the
+                    // per-server `env` taking precedence over it.
+                    env: {
+                        let mut merged: std::collections::BTreeMap<String, String> = self
+                            .env
+                            .iter()
+                            .map(|(k, v)| (k.clone(), expand_mcp_field(&ctx, name, "env", v)))
+                            .collect();
+                        for (k, v) in &s.env {
+                            merged.insert(k.clone(), expand_mcp_field(&ctx, name, "env", v));
+                        }
+                        merged
+                    },
                     cwd: s.cwd.clone(),
                     url,
                     headers: s
@@ -813,6 +822,8 @@ impl Settings {
             http_hook_allowed_env_vars: self.http_hook_allowed_env_vars.clone(),
             allow_local_http_hook_targets: self.allow_local_http_hook_targets.unwrap_or(false),
             events: std::collections::BTreeMap::new(),
+            // #694: global env overrides flow to command hooks (per-hook wins).
+            global_env: self.env.clone(),
         }
     }
 
@@ -1561,6 +1572,54 @@ mod tests {
         let cfg = s.mcp_config();
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers["linear"].command, "npx");
+    }
+
+    #[test]
+    fn mcp_config_merges_global_env_under_per_server_env() {
+        // #694: settings.env applies to MCP servers; per-server env wins.
+        let mut srv = BTreeMap::new();
+        let mut server_env = BTreeMap::new();
+        server_env.insert("SHARED".to_string(), "from-server".to_string());
+        srv.insert(
+            "s".to_string(),
+            McpServerSetting {
+                command: "x".into(),
+                env: server_env,
+                ..Default::default()
+            },
+        );
+        let mut global = BTreeMap::new();
+        global.insert("GLOBAL_ONLY".to_string(), "g".to_string());
+        global.insert("SHARED".to_string(), "from-global".to_string());
+        let s = Settings {
+            env: global,
+            mcp_servers: srv,
+            ..Default::default()
+        };
+        let env = &s.mcp_config().servers["s"].env;
+        assert_eq!(env.get("GLOBAL_ONLY").map(String::as_str), Some("g"));
+        assert_eq!(
+            env.get("SHARED").map(String::as_str),
+            Some("from-server"),
+            "per-server env must override settings.env"
+        );
+    }
+
+    #[test]
+    fn hook_config_carries_global_env_from_settings_env() {
+        // #694: settings.env flows to command hooks via HooksConfig.global_env.
+        let mut global = BTreeMap::new();
+        global.insert("K".to_string(), "v".to_string());
+        let s = Settings {
+            env: global,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.hook_config().global_env.get("K").map(String::as_str),
+            Some("v")
+        );
+        // Absent settings.env → empty global_env (behavior-preserving).
+        assert!(Settings::default().hook_config().global_env.is_empty());
     }
 
     // PR-T3-B: Verify the new Settings accessors produce shapes equivalent to

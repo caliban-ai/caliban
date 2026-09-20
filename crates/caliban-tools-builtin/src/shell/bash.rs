@@ -25,6 +25,10 @@ pub struct BashTool {
     schema: OnceLock<Value>,
     sandbox: Option<Arc<SandboxedShim>>,
     bg_registry: Arc<BashBgRegistry>,
+    /// Global child-process env overrides (`settings.env`, #694), applied to
+    /// every spawned shell (foreground and background) on top of the inherited
+    /// process environment. Empty by default.
+    env: std::collections::BTreeMap<String, String>,
 }
 
 impl BashTool {
@@ -37,6 +41,7 @@ impl BashTool {
             schema: OnceLock::new(),
             sandbox: None,
             bg_registry: global_registry(),
+            env: std::collections::BTreeMap::new(),
         }
     }
 
@@ -50,7 +55,17 @@ impl BashTool {
             schema: OnceLock::new(),
             sandbox,
             bg_registry: global_registry(),
+            env: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Set the global child-process env overrides (`settings.env`, #694) applied
+    /// to every spawned shell. Values override the inherited process env for the
+    /// same key. Empty (the default) preserves plain inheritance.
+    #[must_use]
+    pub fn with_env(mut self, env: std::collections::BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
     }
 
     /// Attach a custom background registry (tests use this to avoid the
@@ -193,6 +208,7 @@ impl Tool for BashTool {
                 parsed.command.clone(),
                 &cwd,
                 self.sandbox.as_ref(),
+                &self.env,
             )?;
             return Ok(vec![ContentBlock::Text(TextBlock {
                 text: format!(
@@ -211,6 +227,8 @@ impl Tool for BashTool {
         // sandbox wrap (ADR 0032). Shared with the background path via
         // `build_shell` so both are sandboxed identically.
         let mut shell = super::bash_bg::build_shell(&parsed.command, &cwd, self.sandbox.as_ref())?;
+        // #694: apply global settings.env overrides on top of inherited env.
+        super::bash_bg::apply_env(&mut shell, &self.env);
 
         let mut child = shell.spawn().map_err(ToolError::execution)?;
         // Capture the PID now while we still have access to the Child.
@@ -341,6 +359,27 @@ mod tests {
         };
         assert!(t.text.contains("hi"), "output: {}", t.text);
         assert!(t.text.contains("Exit code: 0"), "output: {}", t.text);
+    }
+
+    #[tokio::test]
+    async fn with_env_applies_settings_env_to_the_shell() {
+        // #694: settings.env overrides reach spawned shells.
+        let tmp = TempDir::new().unwrap();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CALIBAN_ENV694".to_string(), "wired".to_string());
+        let tool = BashTool::new(WorkspaceRoot::new(tmp.path())).with_env(env);
+        let out = tool
+            .invoke(json!({"command": "echo \"$CALIBAN_ENV694\""}), ctx())
+            .await
+            .unwrap();
+        let ContentBlock::Text(t) = &out[0] else {
+            panic!("expected Text block")
+        };
+        assert!(
+            t.text.contains("wired"),
+            "env not applied; output: {}",
+            t.text
+        );
     }
 
     #[tokio::test]

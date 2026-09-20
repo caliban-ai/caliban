@@ -282,5 +282,5 @@ Precedence: an explicit knob (e.g. `verification_guidance`) **>** the named `pro
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `additional_directories` | `string[]` | `[]` | Extra workspace roots to consult for CLAUDE.md and skills. |
-| `claude_md_excludes` | `string[]` | `[]` | Glob patterns to exclude from CLAUDE.md discovery (`claudeMdExcludes`). |
-| `env` | `{ string → string }` | `{}` | Environment-variable overrides applied to child processes spawned by caliban. |
+| `claude_md_excludes` | `string[]` | `[]` | Glob patterns to exclude from CLAUDE.md/AGENTS.md discovery (`claudeMdExcludes`). **Unioned** with the `CALIBAN_CLAUDE_MD_EXCLUDES` env var — both sets apply (#694). |
+| `env` | `{ string → string }` | `{}` | Environment-variable overrides applied to child processes caliban spawns — Bash commands, stdio MCP servers, and command hooks (#694). Precedence: a more-specific per-item env (an MCP server's `env`, a hook's `env`) wins over these, which in turn override the inherited process environment. |

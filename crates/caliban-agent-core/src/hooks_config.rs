@@ -136,6 +136,10 @@ pub struct HooksConfig {
     /// Event-name → ordered handler list. Event names are the `PascalCase`
     /// taxonomy from the ADR (e.g. `"SessionStart"`).
     pub events: BTreeMap<String, Vec<HookHandlerConfig>>,
+    /// Global child-process env overrides (`settings.env`, #694) applied to
+    /// every command hook's environment, **under** the hook's own `env` (the
+    /// per-hook value wins). Empty by default.
+    pub global_env: BTreeMap<String, String>,
 }
 
 impl HooksConfig {
@@ -201,6 +205,9 @@ impl HooksConfig {
             http_hook_allowed_env_vars: raw.http_hook_allowed_env_vars,
             allow_local_http_hook_targets: raw.allow_local_http_hook_targets,
             events: BTreeMap::new(),
+            // Legacy hooks.toml loader has no settings.env; global_env is set
+            // only via the caliban-settings projection (#694).
+            global_env: BTreeMap::new(),
         };
         for (event_name, groups) in raw.hooks {
             let mut out: Vec<HookHandlerConfig> = Vec::new();

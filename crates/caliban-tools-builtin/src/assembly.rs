@@ -49,6 +49,9 @@ pub struct ToolBuildCtx {
     /// Resolved Bash sandbox: `Some` wraps each command in the OS write-fence;
     /// `None` runs Bash unfenced (equivalent to `BashTool::new`).
     pub bash_sandbox: Option<Arc<SandboxedShim>>,
+    /// Global child-process env overrides (`settings.env`, #694) applied to
+    /// spawned shells on top of the inherited env. Empty by default.
+    pub bash_env: std::collections::BTreeMap<String, String>,
     /// Backend for the auto-memory topic tools.
     pub topic_backend: Arc<dyn TopicBackend>,
     /// Whether the auto-memory tools are enabled (kill switch off, ADR 0035).
@@ -106,10 +109,10 @@ pub fn builtin_tool_descriptors() -> Vec<BuiltinToolDescriptor> {
             // can't contain an arbitrary shell command (ADR 0032, #328). The
             // caller resolves the fence into `bash_sandbox`; `None` == unfenced.
             build: |c| {
-                vec![Arc::new(BashTool::with_sandbox(
-                    c.root.clone(),
-                    c.bash_sandbox.clone(),
-                ))]
+                vec![Arc::new(
+                    BashTool::with_sandbox(c.root.clone(), c.bash_sandbox.clone())
+                        .with_env(c.bash_env.clone()),
+                )]
             },
         },
         BuiltinToolDescriptor {
@@ -193,6 +196,7 @@ mod tests {
             plan_mode: caliban_agent_core::new_shared_plan_mode(),
             web_client: reqwest::Client::new(),
             bash_sandbox: None,
+            bash_env: std::collections::BTreeMap::new(),
             topic_backend: Arc::new(caliban_memory::FsTopicBackend::new(PathBuf::from("."))),
             auto_memory_enabled,
             bare,
