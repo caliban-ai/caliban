@@ -65,9 +65,10 @@ pub use provenance::{RuleProvenance, load_rules_with_provenance};
 pub use schema::{SCHEMA_JSON, validate_value};
 pub use scope::{Scope, ScopePaths};
 pub use settings::{
-    ApiKeyHelperRaw, ENV_STORAGE_REMOTE_TOKEN_ENV, ENV_STORAGE_REMOTE_URL, ENV_STORAGE_SUBSTRATE,
-    McpServerSetting, ModelSelector, Permissions, RemoteStorageConfig, RuleSpec, SandboxNetwork,
-    SandboxSettings, Settings, StorageConfig, StorageSubstrate, VerificationGuidance,
+    AgentLoopProfile, ApiKeyHelperRaw, ENV_STORAGE_REMOTE_TOKEN_ENV, ENV_STORAGE_REMOTE_URL,
+    ENV_STORAGE_SUBSTRATE, McpServerSetting, ModelSelector, Permissions, RemoteStorageConfig,
+    RuleSpec, SandboxNetwork, SandboxSettings, Settings, StorageConfig, StorageSubstrate,
+    VerificationGuidance,
 };
 pub use statusline::{StatuslineConfig, StatuslineContext, StatuslineRunner};
 pub use watcher::{SettingsWatcher, WatcherEvent, is_settings_path, watch_paths_from_sources};

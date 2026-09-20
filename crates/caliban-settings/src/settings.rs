@@ -270,6 +270,47 @@ pub enum VerificationGuidance {
     Full,
 }
 
+/// A named agent-loop **policy profile** (ADR 0058, B6 · #666). Bundles the
+/// B2–B5 knobs into a coherent posture, so operators pick an intent rather than
+/// tuning each knob. The default profile is chosen from execution context
+/// (local vs cloud) and is always overridable by naming one explicitly.
+///
+/// The profiles differ primarily on the **verification** lever — the one eval
+/// sub-project A proved load-bearing, whose sign flips with model strength.
+/// Budgets (turn/time/cost) stay opt-in: a profile never imposes a surprising
+/// hard cap; set those knobs explicitly when a run needs them.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLoopProfile {
+    /// Cloud default: cost-conservative. Verification off — verification costs
+    /// ~1.8× (eval sub-project A), so the cheapest safe posture skips it. A user
+    /// who wants a strong cloud model's +8pt self-correction picks
+    /// `quality-first` explicitly.
+    CostOptimized,
+    /// Quality over cost, for a strong model: full verification, no cost cap.
+    /// The explicit choice for a capable model where correctness dominates.
+    QualityFirst,
+    /// Local default: quality-first *paired with a tight divergence guard*.
+    /// Local generation is ~free, so verify-when-cheap is on; the divergence
+    /// guard (B4, #664) contains the weak-model churn that verification can
+    /// otherwise induce. The guard is eval-gated and not yet shipped, so this
+    /// profile currently sets `verify-when-cheap` and will enable the guard once
+    /// B4 lands.
+    LocalGuarded,
+}
+
+impl AgentLoopProfile {
+    /// The profile's verification-guidance default (ADR 0058, B5 lever).
+    #[must_use]
+    pub fn verification_guidance(self) -> VerificationGuidance {
+        match self {
+            Self::CostOptimized => VerificationGuidance::Off,
+            Self::QualityFirst => VerificationGuidance::Full,
+            Self::LocalGuarded => VerificationGuidance::VerifyWhenCheap,
+        }
+    }
+}
+
 /// Every field is `Option` so an unset key leaves the corresponding
 /// [`caliban_agent_core::AgentConfig`] default untouched (behavior-preserving).
 // No `Eq`: `cost_budget_usd` is `f64` (only `PartialEq`).
@@ -307,9 +348,14 @@ pub struct AgentLoopConfig {
     /// to price usage (it injects the cost model); inert otherwise.
     pub cost_budget_usd: Option<f64>,
     /// How much the system prompt encourages self-verification (ADR 0058, B5 ·
-    /// #665). `None`/unset behaves like `off` — no guidance injected (today's
-    /// behavior). Its effective default is set per named profile by B6.
+    /// #665). When set, it wins over the profile's default (explicit knob >
+    /// profile > context). When unset, the effective value comes from the
+    /// resolved profile (B6).
     pub verification_guidance: Option<VerificationGuidance>,
+    /// Named policy profile (ADR 0058, B6 · #666). When set, it overrides the
+    /// context-adaptive default (local vs cloud). When unset, the profile is
+    /// chosen from execution context.
+    pub profile: Option<AgentLoopProfile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +916,41 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Resolve the effective agent-loop profile (ADR 0058, B6 · #666): an
+    /// explicitly-named `[agent_loop] profile` wins; otherwise it is chosen from
+    /// execution context — `local_execution` selects [`AgentLoopProfile::LocalGuarded`]
+    /// (quality-first + divergence guard), cloud selects
+    /// [`AgentLoopProfile::CostOptimized`] (cost-conservative). Cloud is the safe
+    /// fallback when context is uncertain.
+    #[must_use]
+    pub fn resolve_agent_loop_profile(&self, local_execution: bool) -> AgentLoopProfile {
+        if let Some(p) = self.agent_loop.as_ref().and_then(|al| al.profile) {
+            return p;
+        }
+        if local_execution {
+            AgentLoopProfile::LocalGuarded
+        } else {
+            AgentLoopProfile::CostOptimized
+        }
+    }
+
+    /// The effective verification guidance with full precedence (ADR 0058, B6):
+    /// an explicit `[agent_loop] verification_guidance` wins; otherwise the
+    /// resolved profile's default applies. `local_execution` only matters when
+    /// no explicit profile is named.
+    #[must_use]
+    pub fn effective_verification_guidance(&self, local_execution: bool) -> VerificationGuidance {
+        if let Some(vg) = self
+            .agent_loop
+            .as_ref()
+            .and_then(|al| al.verification_guidance)
+        {
+            return vg;
+        }
+        self.resolve_agent_loop_profile(local_execution)
+            .verification_guidance()
+    }
+
     /// When `settings.hooks` contains the legacy-compat sentinel written by
     /// [`crate::compat::maybe_load_legacy_hooks`], extract the handler-count
     /// for diagnostics. Returns `None` when no sentinel is present.
@@ -1221,6 +1302,81 @@ mod tests {
             let s: Settings = serde_json::from_str(&json).unwrap();
             assert_eq!(s.agent_loop_verification_guidance(), want, "value {raw}");
         }
+    }
+
+    #[test]
+    fn profile_resolution_is_context_adaptive_and_overridable() {
+        // No profile set → context picks it: local→LocalGuarded, cloud→CostOptimized.
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        assert_eq!(
+            s.resolve_agent_loop_profile(true),
+            AgentLoopProfile::LocalGuarded
+        );
+        assert_eq!(
+            s.resolve_agent_loop_profile(false),
+            AgentLoopProfile::CostOptimized
+        );
+
+        // Explicit profile overrides context (both directions).
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"profile": "quality-first"}}"#).unwrap();
+        assert_eq!(
+            s.resolve_agent_loop_profile(true),
+            AgentLoopProfile::QualityFirst
+        );
+        assert_eq!(
+            s.resolve_agent_loop_profile(false),
+            AgentLoopProfile::QualityFirst
+        );
+    }
+
+    #[test]
+    fn effective_verification_guidance_precedence_explicit_over_profile_over_context() {
+        // Context default: cloud→off, local→verify-when-cheap.
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        assert_eq!(
+            s.effective_verification_guidance(false),
+            VerificationGuidance::Off
+        );
+        assert_eq!(
+            s.effective_verification_guidance(true),
+            VerificationGuidance::VerifyWhenCheap
+        );
+
+        // Named profile beats context: quality-first → full, regardless of local.
+        let s: Settings =
+            serde_json::from_str(r#"{"agent_loop": {"profile": "quality-first"}}"#).unwrap();
+        assert_eq!(
+            s.effective_verification_guidance(false),
+            VerificationGuidance::Full
+        );
+
+        // Explicit verification_guidance beats the profile.
+        let s: Settings = serde_json::from_str(
+            r#"{"agent_loop": {"profile": "quality-first", "verification_guidance": "off"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.effective_verification_guidance(true),
+            VerificationGuidance::Off,
+            "explicit knob must win over the profile"
+        );
+    }
+
+    #[test]
+    fn agent_loop_profile_maps_to_verification_guidance() {
+        assert_eq!(
+            AgentLoopProfile::CostOptimized.verification_guidance(),
+            VerificationGuidance::Off
+        );
+        assert_eq!(
+            AgentLoopProfile::QualityFirst.verification_guidance(),
+            VerificationGuidance::Full
+        );
+        assert_eq!(
+            AgentLoopProfile::LocalGuarded.verification_guidance(),
+            VerificationGuidance::VerifyWhenCheap
+        );
     }
 
     #[test]

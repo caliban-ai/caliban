@@ -217,6 +217,52 @@ fn build_anthropic(
     }
 }
 
+/// Is `host` a loopback / private-network / link-local address, or a bareword
+/// hostname (no dots — a LAN name like `mlx-box`)? Used to classify an
+/// OpenAI-compatible endpoint as *local* for the adaptive profile default
+/// (ADR 0058, B6 · #666). Conservative: a public host is not local, so an
+/// uncertain endpoint stays cloud (cost-conservative).
+fn host_is_local(host: &str) -> bool {
+    // Strip IPv6 brackets and normalize case for hostname comparisons.
+    let stripped = host.trim_start_matches('[').trim_end_matches(']');
+    let h = stripped.to_ascii_lowercase();
+    let h = h.as_str();
+    if h == "localhost" {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            // Only stable `Ipv6Addr` predicates: `is_loopback` (`::1`). ULA /
+            // link-local IPv6 detection is still unstable; a local IPv6 server
+            // beyond `::1` should name a profile explicitly.
+            std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        };
+    }
+    // A bareword LAN name (no dots, e.g. `mlx-box`) or an mDNS `*.local` name is
+    // local; any other FQDN is treated as public (cloud).
+    !h.contains('.') || h.rsplit('.').next() == Some("local")
+}
+
+/// Whether the run's execution context is *local* (ADR 0058, B6 · #666): an
+/// OpenAI-compatible provider pointed at a loopback/private/LAN host via
+/// `OPENAI_BASE_URL`. First-party cloud providers (anthropic/google/bedrock/
+/// vertex) and `OpenAI` at its default public endpoint are *cloud*. A local setup
+/// behind a non-OpenAI adapter should name a profile explicitly (the ADR's
+/// override escape hatch).
+fn execution_context_is_local(provider_name: &str) -> bool {
+    if provider_name != "openai" {
+        return false;
+    }
+    match std::env::var("OPENAI_BASE_URL") {
+        Ok(raw) if !raw.is_empty() => url::Url::parse(&raw)
+            .ok()
+            .and_then(|u| u.host_str().map(host_is_local))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 fn build_openai(
     pool: &Arc<caliban_settings::ApiKeyHelperPool>,
 ) -> Result<Arc<dyn Provider + Send + Sync>> {
@@ -1777,12 +1823,16 @@ pub(crate) async fn resolve_system_prompt(
     // custom), so it survives output-style/memory layering.
     let skill_names = proactive_skill_names(agent, settings_snapshot);
 
+    // B6 (#666): resolve the effective verification guidance through the
+    // adaptive profile — explicit knob > named profile > context (local vs
+    // cloud). `local` is detected from the provider + OPENAI_BASE_URL host.
+    let local_execution = execution_context_is_local(agent.provider().name());
+    let verification_guidance = settings_snapshot.effective_verification_guidance(local_execution);
+
     if !default_prompt_in_effect {
         let with_skills = system_prompt::append_skills_block(&body, &skill_names);
-        let with_verify = system_prompt::append_verification_guidance_block(
-            &with_skills,
-            settings_snapshot.agent_loop_verification_guidance(),
-        );
+        let with_verify =
+            system_prompt::append_verification_guidance_block(&with_skills, verification_guidance);
         return Ok(Some(system_prompt::append_session_context_block(
             &with_verify,
             session_context,
@@ -1840,10 +1890,8 @@ pub(crate) async fn resolve_system_prompt(
         }
     };
     let with_skills = system_prompt::append_skills_block(&final_prompt, &skill_names);
-    let with_verify = system_prompt::append_verification_guidance_block(
-        &with_skills,
-        settings_snapshot.agent_loop_verification_guidance(),
-    );
+    let with_verify =
+        system_prompt::append_verification_guidance_block(&with_skills, verification_guidance);
     Ok(Some(system_prompt::append_session_context_block(
         &with_verify,
         session_context,
@@ -1907,11 +1955,47 @@ fn apply_memory_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        debug_enabled, default_debug_filter, missing_key_err, resolve_debug_log_path,
-        resolve_max_turns, sub_agent_config, workspace_fence_policy,
+        debug_enabled, default_debug_filter, execution_context_is_local, host_is_local,
+        missing_key_err, resolve_debug_log_path, resolve_max_turns, sub_agent_config,
+        workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
+
+    #[test]
+    fn host_is_local_classifies_loopback_private_and_lan_names() {
+        for h in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "10.1.2.3",
+            "172.16.5.9",
+            "192.168.1.240",
+            "169.254.0.5",
+            "mlx-box", // bareword LAN name
+            "printer.local",
+        ] {
+            assert!(host_is_local(h), "{h} should be local");
+        }
+        for h in [
+            "api.openai.com",
+            "openrouter.ai",
+            "8.8.8.8",
+            "example.com",
+            "gateway.corp.example.com",
+        ] {
+            assert!(!host_is_local(h), "{h} should NOT be local");
+        }
+    }
+
+    #[test]
+    fn execution_context_is_local_is_false_for_cloud_providers() {
+        // First-party cloud providers are never local, regardless of env.
+        for p in ["anthropic", "google", "bedrock", "vertex"] {
+            assert!(!execution_context_is_local(p));
+        }
+    }
 
     #[test]
     fn resolve_max_turns_precedence_cli_over_settings_over_default() {

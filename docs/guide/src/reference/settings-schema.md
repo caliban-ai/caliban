@@ -248,13 +248,24 @@ no_edit_nudge_threshold = 8
 | `max_turn_thinking_chars` | `integer` (≥ 0) | `262144` | Per-turn cap on cumulative *thinking* characters before the run stops with `ThinkingBudgetExhausted` (#62). `0` disables the guard. A backstop far above any legitimate single-turn reasoning. |
 | `time_budget_secs` | `integer` (≥ 0) | `0` | Wall-clock **time budget** for the whole agent loop, in seconds. `0`/unset means *no deadline* (today's behavior). A positive value ends the run with `TimeBudgetExceeded` once that many seconds elapse — checked at the top of each turn, so the loop stops between turns rather than mid-turn. Headless: `subtype=time_budget`, exit code `75` (same graceful-bound class as max-turns). |
 | `cost_budget_usd` | `number` (≥ 0) | *(none)* | **Cost budget** for the whole agent loop, in USD. Unset or `≤ 0` means *no cost cap*. A positive value ends the run with `CostBudgetExceeded` once the run's accumulated estimated cost (usage × the rate card in `caliban-telemetry`) reaches it — checked between turns. Works in TUI and headless (unlike the CLI-only `--max-budget-usd`). Headless: `subtype=budget_exceeded`, exit code `137`. Cost is `$0.00` (cap inert) for a model with no rate-card entry. |
-| `verification_guidance` | `"off" \| "verify-when-cheap" \| "full"` | `"off"` | How much the system prompt **encourages the model to verify its own work**. `off` injects no guidance (today's behavior). `verify-when-cheap` encourages writing/running a quick reproduction when it is cheap. `full` strongly encourages reproduce-then-confirm. caliban never runs tests for the model — this only shapes the prompt. The lever's sign flips with model strength (eval sub-project A: +8pt strong / −16pt weak), so B6 sets the per-profile default. |
+| `verification_guidance` | `"off" \| "verify-when-cheap" \| "full"` | *(from profile)* | How much the system prompt **encourages the model to verify its own work**. `off` injects no guidance. `verify-when-cheap` encourages a quick reproduction when cheap. `full` strongly encourages reproduce-then-confirm. caliban never runs tests for the model — this only shapes the prompt. When unset, the effective value comes from the resolved **profile** (below); when set, it wins over the profile. |
+| `profile` | `"cost-optimized" \| "quality-first" \| "local-guarded"` | *(adaptive)* | Named policy profile bundling the loop knobs (ADR 0058, B6). When unset, the default is chosen from **execution context**: a **local** provider (an OpenAI-compatible endpoint on a loopback/private/LAN host via `OPENAI_BASE_URL`) → `local-guarded`; **cloud** (first-party providers, or OpenAI at its public endpoint) → `cost-optimized`. Naming a profile overrides the context default. |
 
-> `max_turns` and the three guards are the existing loop knobs, now discoverable
-> and adjustable; `time_budget_secs` (B2, #662), `cost_budget_usd` (B3, #663),
-> and `verification_guidance` (B5, #665) are the new knobs. The last piece of
-> agent-loop policy — a wrong-path/divergence guard and context-adaptive
-> per-profile defaults — is tracked under epic #259 and will extend this group.
+**Profiles.** Each profile sets a coherent verification posture (the lever eval sub-project A proved load-bearing, whose sign flips with model strength: +8pt on a strong cloud model, −16pt on a weak local one). Budgets (`max_turns` / `time_budget_secs` / `cost_budget_usd`) stay opt-in — a profile never imposes a surprising hard cap.
+
+| Profile | `verification_guidance` | Intent |
+|---------|-------------------------|--------|
+| `cost-optimized` | `off` | Cloud default: cost-conservative (verification costs ~1.8×, so skip it). |
+| `quality-first` | `full` | For a strong model: correctness over cost. |
+| `local-guarded` | `verify-when-cheap` | Local default: verify (generation is ~free), paired with the wrong-path/divergence guard once that ships (B4, #664). |
+
+Precedence: an explicit knob (e.g. `verification_guidance`) **>** the named `profile` **>** the context-adaptive default.
+
+> `max_turns` and the three guards were the existing loop knobs; `time_budget_secs`
+> (B2, #662), `cost_budget_usd` (B3, #663), `verification_guidance` (B5, #665),
+> and `profile` + adaptive defaults (B6, #666) are the additions. The remaining
+> child — the eval-gated wrong-path/divergence guard (B4, #664) — will complete
+> the `local-guarded` pairing when it lands.
 
 ---
 
