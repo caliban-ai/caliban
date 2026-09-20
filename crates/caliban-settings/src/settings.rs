@@ -235,6 +235,48 @@ pub struct ToolsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// agent_loop — agent-loop policy surface (ADR 0058, B1 · #661)
+// ---------------------------------------------------------------------------
+
+/// The `[agent_loop]` configuration group: a coherent home for agent-loop
+/// **policy** knobs — the turn budget and the spiral-containment guards — as
+/// distinct from the model-inference knobs (`effort`, `thinking`) that govern a
+/// single call. See ADR 0058.
+///
+/// B1 (#661) gathers the previously hard-coded guards
+/// (`no_edit_nudge_threshold`, `empty_turn_nudge_max`, `max_turn_thinking_chars`)
+/// plus the existing turn budget (`max_turns`) under this one surface, without
+/// changing any default. Later children add the new budgets and guards (B2 time
+/// budget, B3 cost budget, B4 divergence guard, B5 verification policy, B6
+/// adaptive defaults + named profiles).
+///
+/// Every field is `Option` so an unset key leaves the corresponding
+/// [`caliban_agent_core::AgentConfig`] default untouched (behavior-preserving).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLoopConfig {
+    /// Hard cap on agent-loop iterations. `None` keeps the built-in default
+    /// (50). The `--max-turns` CLI flag takes precedence over this
+    /// (CLI > settings > default); the precedence is resolved by the caller
+    /// (`startup::compose`), not by [`Settings::apply_agent_loop`], because the
+    /// CLI flag must win — the same reason `max_tokens_recovery` is resolved
+    /// inline rather than via an `apply_*` overlay.
+    pub max_turns: Option<u32>,
+    /// Consecutive zero-edit turns after which the loop injects a single
+    /// neutral "make the edit" nudge (#239). `None` keeps the default (10);
+    /// `0` disables the nudge.
+    pub no_edit_nudge_threshold: Option<u32>,
+    /// Maximum consecutive degenerate (output-but-no-work) turns the loop will
+    /// nudge before letting the run end (#249). `None` keeps the default (2);
+    /// `0` disables the guard.
+    pub empty_turn_nudge_max: Option<u32>,
+    /// Per-turn cap on cumulative *thinking* characters before the run
+    /// terminates with `ThinkingBudgetExhausted` (#62). `None` keeps the
+    /// default (262144); `0` disables the guard.
+    pub max_turn_thinking_chars: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
 // storage — memory storage substrate selection (#473)
 // ---------------------------------------------------------------------------
 
@@ -483,6 +525,12 @@ pub struct Settings {
     /// Lazy MCP tool loading knobs. Default off in v1.
     pub tools: Option<ToolsConfig>,
 
+    // ----- agent-loop policy (ADR 0058, B1 · #661) --------------------------
+    /// The `[agent_loop]` policy group — turn budget + spiral-containment
+    /// guards, gathered under one surface. Every field is optional and
+    /// defaults to today's hard-coded value (behavior-preserving).
+    pub agent_loop: Option<AgentLoopConfig>,
+
     // ----- managed-scope escape hatch ---------------------------------------
     /// When set in the managed scope, flips the managed layer to the top
     /// of the merge chain (enterprise lockdown). The string value
@@ -723,6 +771,41 @@ impl Settings {
         if let Some(v) = self.stream_prefill_timeout_ms {
             cfg.stream_prefill_timeout_ms = v;
         }
+    }
+
+    /// Apply the `[agent_loop]` spiral-containment guards onto a fresh
+    /// [`caliban_agent_core::AgentConfig`] (ADR 0058, B1 · #661). Only fields
+    /// explicitly set in settings override the defaults; everything else is
+    /// left at the upstream default (see `AgentConfig::default()`), so an
+    /// absent group is behavior-preserving.
+    ///
+    /// **`max_turns` is intentionally not applied here.** It carries a CLI flag
+    /// (`--max-turns`) that must win over settings, so the caller
+    /// (`startup::compose`) resolves it with the CLI > settings > default idiom
+    /// via [`Self::agent_loop_max_turns`]. Folding it into this overlay would let
+    /// a settings value silently override an explicit CLI flag.
+    pub fn apply_agent_loop(&self, cfg: &mut caliban_agent_core::AgentConfig) {
+        let Some(al) = self.agent_loop.as_ref() else {
+            return;
+        };
+        if let Some(v) = al.no_edit_nudge_threshold {
+            cfg.no_edit_nudge_threshold = v;
+        }
+        if let Some(v) = al.empty_turn_nudge_max {
+            cfg.empty_turn_nudge_max = v;
+        }
+        if let Some(v) = al.max_turn_thinking_chars {
+            cfg.max_turn_thinking_chars = v;
+        }
+    }
+
+    /// The `[agent_loop] max_turns` value, if set. The caller layers CLI over
+    /// this over the built-in default (CLI > settings > default); see
+    /// [`Self::apply_agent_loop`] for why `max_turns` is resolved by the caller
+    /// rather than overlaid.
+    #[must_use]
+    pub fn agent_loop_max_turns(&self) -> Option<u32> {
+        self.agent_loop.as_ref().and_then(|al| al.max_turns)
     }
 
     /// When `settings.hooks` contains the legacy-compat sentinel written by
@@ -1033,6 +1116,92 @@ mod tests {
         assert_eq!(cfg.micro_compact_enabled, snap_micro);
         assert_eq!(cfg.tool_result_cap_chars, snap_cap);
         assert_eq!(cfg.min_cache_block_tokens, snap_min);
+    }
+
+    #[test]
+    fn agent_loop_config_roundtrip() {
+        let raw = r#"{
+            "agent_loop": {
+                "max_turns": 120,
+                "no_edit_nudge_threshold": 4,
+                "empty_turn_nudge_max": 1,
+                "max_turn_thinking_chars": 9999
+            }
+        }"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let al = s.agent_loop.clone().expect("agent_loop should parse");
+        assert_eq!(al.max_turns, Some(120));
+        assert_eq!(al.no_edit_nudge_threshold, Some(4));
+        assert_eq!(al.empty_turn_nudge_max, Some(1));
+        assert_eq!(al.max_turn_thinking_chars, Some(9999));
+        assert_eq!(s.agent_loop_max_turns(), Some(120));
+    }
+
+    #[test]
+    fn agent_loop_absent_leaves_field_none() {
+        let s: Settings = serde_json::from_str(r#"{"model": "test"}"#).unwrap();
+        assert!(s.agent_loop.is_none());
+        assert_eq!(s.agent_loop_max_turns(), None);
+    }
+
+    #[test]
+    fn apply_agent_loop_overrides_each_guard() {
+        // Every guard set to a non-default value is copied onto a fresh
+        // AgentConfig. max_turns is deliberately NOT applied by this overlay
+        // (CLI precedence — see apply_agent_loop docs), so it stays default.
+        let raw = r#"{
+            "agent_loop": {
+                "max_turns": 7,
+                "no_edit_nudge_threshold": 4,
+                "empty_turn_nudge_max": 1,
+                "max_turn_thinking_chars": 9999
+            }
+        }"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        let default_max_turns = cfg.max_turns;
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.no_edit_nudge_threshold, 4);
+        assert_eq!(cfg.empty_turn_nudge_max, 1);
+        assert_eq!(cfg.max_turn_thinking_chars, 9999);
+        // max_turns is resolved by the caller, not this overlay.
+        assert_eq!(cfg.max_turns, default_max_turns);
+    }
+
+    #[test]
+    fn apply_agent_loop_leaves_defaults_when_unset() {
+        // No agent_loop group → AgentConfig::default() guards survive untouched.
+        let s: Settings = serde_json::from_str(r"{}").unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        let snap_no_edit = cfg.no_edit_nudge_threshold;
+        let snap_empty = cfg.empty_turn_nudge_max;
+        let snap_thinking = cfg.max_turn_thinking_chars;
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.no_edit_nudge_threshold, snap_no_edit);
+        assert_eq!(cfg.empty_turn_nudge_max, snap_empty);
+        assert_eq!(cfg.max_turn_thinking_chars, snap_thinking);
+    }
+
+    #[test]
+    fn apply_agent_loop_partial_leaves_unset_guards_at_default() {
+        // Only one guard set; the others keep their AgentConfig defaults.
+        let raw = r#"{"agent_loop": {"no_edit_nudge_threshold": 0}}"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        let mut cfg = caliban_agent_core::AgentConfig::default();
+        let snap_empty = cfg.empty_turn_nudge_max;
+        let snap_thinking = cfg.max_turn_thinking_chars;
+        s.apply_agent_loop(&mut cfg);
+        assert_eq!(cfg.no_edit_nudge_threshold, 0);
+        assert_eq!(cfg.empty_turn_nudge_max, snap_empty);
+        assert_eq!(cfg.max_turn_thinking_chars, snap_thinking);
+    }
+
+    #[test]
+    fn agent_loop_rejects_unknown_key() {
+        // deny_unknown_fields catches a typo'd knob rather than silently
+        // dropping it.
+        let raw = r#"{"agent_loop": {"no_edit_nudge": 4}}"#;
+        assert!(serde_json::from_str::<Settings>(raw).is_err());
     }
 
     #[test]

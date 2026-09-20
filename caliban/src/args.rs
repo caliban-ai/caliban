@@ -16,6 +16,13 @@ use clap::{Parser, ValueEnum};
 use crate::headless;
 use crate::router;
 
+/// Built-in agent-loop turn cap applied when neither `--max-turns` nor
+/// `[agent_loop] max_turns` is set. Mirrors
+/// `caliban_agent_core::AgentConfig::default().max_turns` (the authoritative
+/// value the agent loop actually enforces); kept here as a plain const for the
+/// CLI-side display and `/loop` bound, which do not consult settings.
+pub(crate) const DEFAULT_MAX_TURNS: u32 = 50;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProviderKind {
     Anthropic,
@@ -285,9 +292,11 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 8192, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) max_tokens: u32,
 
-    /// Maximum agent loop iterations
-    #[arg(long, default_value_t = 50)]
-    pub(crate) max_turns: u32,
+    /// Maximum agent loop iterations. Overrides `[agent_loop] max_turns` in
+    /// settings; when neither is set the built-in default (50) applies
+    /// (precedence: CLI > settings > default).
+    #[arg(long)]
+    pub(crate) max_turns: Option<u32>,
 
     /// Enable Stage A budget escalation + Stage B meta-continuation when a
     /// turn ends in `MaxTokens` (the "max-tokens recovery" two-stage flow).

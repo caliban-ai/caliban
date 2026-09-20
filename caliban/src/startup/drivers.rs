@@ -541,7 +541,12 @@ pub(crate) async fn run_headless(
         // auto-headless). Gating on `-p`/`--output-format` alone left the
         // auto-headless path without the clean `--max-turns 0` short-circuit,
         // so identical commands diverged on whether `-p` was typed (#184 HL2).
-        max_turns: Some(args.max_turns),
+        // Pass the CLI flag through as-is (both are `Option<u32>`). `None`
+        // (flag not given) makes `RunConfig.max_turns` defer to the agent's
+        // `AgentConfig.max_turns`, which `compose::build_agent` has already
+        // resolved with CLI > settings > default (ADR 0058, B1 · #661); an
+        // explicit `--max-turns 0` still short-circuits.
+        max_turns: args.max_turns,
         budget: Arc::clone(&budget),
         json_schema,
         include_partial_messages: args.include_partial_messages,

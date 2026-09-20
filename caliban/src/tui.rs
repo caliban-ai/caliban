@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn loop_command_bounded_by_max_turns() {
         let mut app = make_test_app();
-        app.args.max_turns = 5;
+        app.args.max_turns = Some(5);
         dispatch_slash(&mut app, "/loop --n=100");
         let msg = last_info(&app).expect("status line");
         assert!(msg.contains("bounded to 5"), "msg: {msg}");
