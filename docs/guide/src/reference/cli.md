@@ -89,7 +89,7 @@ These flags activate and configure non-interactive (`-p`) mode. See [Print Mode]
 | `--model <MODEL>` | Provider default (see table below) | Model name. |
 | `--fallback-model <MODEL>` | From settings | Fallback model when the primary errors (ADR 0038). |
 | `--max-tokens <N>` | `8192` | Per-turn output token limit (must be ≥ 1). |
-| `--max-turns <N>` | `50` | Maximum agent loop iterations. |
+| `--max-turns <N>` | `50` | Maximum agent loop iterations. Overrides `[agent_loop] max_turns` in settings (precedence: CLI > settings > default). |
 | `--temperature <F>` | — | Sampling temperature in `[0.0, 2.0]`. |
 | `--max-tokens-recovery[=BOOL]` | `true` | Recover from a `max_tokens` stop by continuing the turn. Precedence: this flag, then the `max_tokens_recovery` setting, then the default. |
 

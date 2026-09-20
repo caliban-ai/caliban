@@ -535,7 +535,13 @@ pub(crate) fn config_lines(app: &App) -> Vec<Line<'_>> {
     out.push(kv("Provider", provider.to_string()));
     out.push(kv("Model", model));
     out.push(kv("Max tokens", app.args.max_tokens.to_string()));
-    out.push(kv("Max turns", app.args.max_turns.to_string()));
+    out.push(kv(
+        "Max turns",
+        app.args
+            .max_turns
+            .unwrap_or(crate::args::DEFAULT_MAX_TURNS)
+            .to_string(),
+    ));
     out.push(kv("Temperature", temperature_line));
     out.push(Line::raw(""));
     out.push(kv("Workspace root", workspace));

@@ -96,7 +96,11 @@ impl SlashCommand for LoopCommand {
             .get("interval")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(15);
-        let max_turns = ctx.app.args.max_turns;
+        let max_turns = ctx
+            .app
+            .args
+            .max_turns
+            .unwrap_or(crate::args::DEFAULT_MAX_TURNS);
         let bounded = std::cmp::min(n, max_turns);
         ctx.app.transcript.push(TranscriptLine::Info(format!(
             "/loop \u{2014} planned {n} repeats every {interval}s; bounded to {bounded} by --max-turns={max_turns} (execution lands with the polling scheduler spec)",

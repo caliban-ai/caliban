@@ -831,6 +831,15 @@ pub(crate) fn install_tool_search(
     registry.register(Arc::new(tool));
 }
 
+/// Resolve the agent-loop turn cap with **CLI > settings > built-in default**
+/// precedence (ADR 0058, B1 · #661). `cli` is `--max-turns`; `settings` is
+/// `[agent_loop] max_turns`; the fallback is the authoritative
+/// `AgentConfig::default().max_turns`.
+pub(crate) fn resolve_max_turns(cli: Option<u32>, settings: Option<u32>) -> u32 {
+    cli.or(settings)
+        .unwrap_or_else(|| caliban_agent_core::AgentConfig::default().max_turns)
+}
+
 /// Assemble the [`caliban_agent_core::AgentConfig`] for a spawned sub-agent.
 ///
 /// Sets the fields the factory passes through from the parent (model, tokens,
@@ -858,6 +867,10 @@ fn sub_agent_config(
     };
     settings.apply_context_management(&mut cfg);
     settings.apply_stream_watchdog(&mut cfg);
+    // Guards apply to sub-agents too (ADR 0058, B1 · #661). max_turns is left at
+    // the sub-agent's own tighter budget (20) — the `[agent_loop] max_turns`
+    // run knob governs the top-level loop, not spawned sub-agents.
+    settings.apply_agent_loop(&mut cfg);
     cfg
 }
 
@@ -1516,10 +1529,14 @@ pub(crate) fn build_agent(
         .max_tokens_recovery
         .or(settings_snapshot.max_tokens_recovery)
         .unwrap_or_else(|| caliban_agent_core::AgentConfig::default().max_tokens_recovery);
+    // CLI > settings (`[agent_loop] max_turns`) > built-in default (ADR 0058,
+    // B1 · #661). Resolved inline rather than via `apply_agent_loop` because the
+    // `--max-turns` flag must win over settings.
+    let max_turns = resolve_max_turns(args.max_turns, settings_snapshot.agent_loop_max_turns());
     let mut cfg = caliban_agent_core::AgentConfig {
         model: model.to_string(),
         max_tokens: args.max_tokens,
-        max_turns: args.max_turns,
+        max_turns,
         max_tokens_recovery,
         lazy_mcp,
         max_active_schemas,
@@ -1536,6 +1553,10 @@ pub(crate) fn build_agent(
     // stream_prefill_timeout_ms (#263 / #254). Same wire-or-it-never-arrives
     // caveat as apply_context_management above.
     settings_snapshot.apply_stream_watchdog(&mut cfg);
+    // Agent-loop spiral-containment guards from Settings — no_edit_nudge,
+    // empty_turn_nudge, thinking-spiral (ADR 0058, B1 · #661). max_turns is
+    // already resolved above (CLI precedence), so this overlay leaves it alone.
+    settings_snapshot.apply_agent_loop(&mut cfg);
     // #292: wire a real history compactor. Without this the builder default
     // (`NoopCompactor`) leaves `/compact` and threshold-autocompact as no-ops.
     // The `SummarizingCompactor` needs the provider, so clone before the Arc
@@ -1836,10 +1857,25 @@ fn apply_memory_settings(
 mod tests {
     use super::{
         debug_enabled, default_debug_filter, missing_key_err, resolve_debug_log_path,
-        sub_agent_config, workspace_fence_policy,
+        resolve_max_turns, sub_agent_config, workspace_fence_policy,
     };
     use crate::args::Args;
     use clap::Parser as _;
+
+    #[test]
+    fn resolve_max_turns_precedence_cli_over_settings_over_default() {
+        let default = caliban_agent_core::AgentConfig::default().max_turns;
+        // CLI wins over settings.
+        assert_eq!(resolve_max_turns(Some(7), Some(99)), 7);
+        // CLI alone.
+        assert_eq!(resolve_max_turns(Some(7), None), 7);
+        // Settings when no CLI flag.
+        assert_eq!(resolve_max_turns(None, Some(99)), 99);
+        // Neither → built-in default.
+        assert_eq!(resolve_max_turns(None, None), default);
+        // An explicit CLI 0 (deterministic max-turns) still wins over settings.
+        assert_eq!(resolve_max_turns(Some(0), Some(99)), 0);
+    }
 
     #[test]
     fn workspace_fence_policy_confines_writes_but_keeps_reads_and_net() {

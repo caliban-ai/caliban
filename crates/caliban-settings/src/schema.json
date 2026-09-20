@@ -184,6 +184,16 @@
       },
       "additionalProperties": false
     },
+    "agent_loop": {
+      "type": "object",
+      "properties": {
+        "max_turns":               { "type": "integer", "minimum": 0, "default": 50 },
+        "no_edit_nudge_threshold": { "type": "integer", "minimum": 0, "default": 10 },
+        "empty_turn_nudge_max":    { "type": "integer", "minimum": 0, "default": 2 },
+        "max_turn_thinking_chars": { "type": "integer", "minimum": 0, "default": 262144 }
+      },
+      "additionalProperties": false
+    },
     "statusLine": {
       "type": "object",
       "properties": {

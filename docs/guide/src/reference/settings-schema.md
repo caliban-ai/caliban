@@ -226,6 +226,34 @@ stall).
 
 ---
 
+## Agent-Loop Policy
+
+The `[agent_loop]` group gathers **agent-loop policy** — the turn budget and the
+spiral-containment guards — under one surface, distinct from the model-inference
+knobs (`effort`, `thinking`) that govern a single call (ADR 0058). Every key is
+optional and defaults to the value the loop has always used, so an absent group
+changes nothing.
+
+```toml
+[agent_loop]
+max_turns = 80              # or pass --max-turns (CLI wins)
+no_edit_nudge_threshold = 8
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_turns` | `integer` (≥ 0) | `50` | Hard cap on agent-loop iterations. The `--max-turns` CLI flag overrides this (**precedence: CLI > settings > default**). `0` is a deterministic immediate max-turns stop. |
+| `no_edit_nudge_threshold` | `integer` (≥ 0) | `10` | Consecutive zero-edit turns after which the loop injects one neutral "make the edit" nudge (#239). `0` disables the nudge. |
+| `empty_turn_nudge_max` | `integer` (≥ 0) | `2` | Maximum consecutive degenerate (output-but-no-work) turns the loop nudges before letting the run end (#249). `0` disables the guard. |
+| `max_turn_thinking_chars` | `integer` (≥ 0) | `262144` | Per-turn cap on cumulative *thinking* characters before the run stops with `ThinkingBudgetExhausted` (#62). `0` disables the guard. A backstop far above any legitimate single-turn reasoning. |
+
+> These are the existing loop knobs, now discoverable and adjustable. Later
+> agent-loop policy — wall-clock and cost budgets, a wrong-path/divergence
+> guard, and a verification-guidance knob with context-adaptive defaults — is
+> tracked under epic #259 and will extend this same group.
+
+---
+
 ## Enterprise (Managed Scope)
 
 | Key | Type | Default | Description |
