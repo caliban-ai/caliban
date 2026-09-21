@@ -317,9 +317,19 @@ impl SlashCommand for OutputStyleCommand {
             .clone()
             .unwrap_or_else(|| ctx.app.cwd.clone());
         let reg = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
-        let requested = caliban_output_styles::requested_from_env();
+        // The active style comes from the `output_style` setting, into which the
+        // env layer has already folded CALIBAN_OUTPUT_STYLE (#701).
+        let settings = ctx
+            .app
+            .settings_handle
+            .as_ref()
+            .map(caliban_settings::SettingsHandle::current);
+        let requested = caliban_output_styles::requested(
+            settings.as_deref().and_then(|s| s.output_style.as_deref()),
+        );
         ctx.app.transcript.push(TranscriptLine::Info(format!(
-            "active output style: {requested} (set via {} env var; full UI ships with ADR 0040)",
+            "active output style: {requested} (set via the output_style setting or the {} env var; \
+             full UI ships with ADR 0040)",
             caliban_output_styles::ACTIVE_STYLE_ENV,
         )));
         ctx.app.transcript.push(TranscriptLine::Info(format!(

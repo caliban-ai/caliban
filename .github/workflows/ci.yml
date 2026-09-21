@@ -67,6 +67,10 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: cargo fmt --all -- --check
 
+      - name: env-registry lint (no ad-hoc reads of migrated CALIBAN_* vars, #701)
+        if: steps.changes.outputs.code == 'true'
+        run: bash scripts/lint-env-registry.sh
+
       - name: cargo clippy
         if: steps.changes.outputs.code == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings

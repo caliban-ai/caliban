@@ -340,11 +340,11 @@ impl ProdAgentFactory {
         let (ask, perm_rx) = DriveAskHandler::pair();
 
         // Resolve the permission mode the way the interactive/headless
-        // entrypoint does: CLI flag > env > settings default.
-        let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
+        // entrypoint does: CLI flag > settings default (with
+        // CALIBAN_DEFAULT_PERMISSION_MODE already folded into the settings
+        // default by the env layer, #701).
         let initial_mode = caliban_agent_core::resolve_startup_mode(
             self.args.permission_mode.as_deref(),
-            env_perm.as_deref(),
             self.settings.permissions.default_mode.as_deref(),
             self.args.allow_dangerously_skip_permissions,
         )

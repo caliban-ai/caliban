@@ -42,7 +42,7 @@ Where a row below says "any non-empty value", read it as "a truthy value".
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_DEFAULT_PERMISSION_MODE` | `default` | Initial permission mode. Values: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. CLI `--permission-mode` wins when set. |
+| `CALIBAN_DEFAULT_PERMISSION_MODE` | `default` | Initial permission mode. Values: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. Folded into the `permissions.default_mode` setting by the env layer (env > file) and attributed in `caliban config print` `_env_overrides`; CLI `--permission-mode` still wins when set (#701). |
 | `CALIBAN_NO_PERMISSIONS` | — | Any non-empty value disables permission gating (all tool calls allowed). Conflicts with `--allow`, `--deny`, `--ask`, `--auto-allow`. |
 | `CALIBAN_AUTO_ALLOW` | — | **Dangerous.** Any non-empty value allows Ask-rule tools without prompting in non-interactive mode. |
 | `CALIBAN_DISABLE_AUTO_MODE` | — | Any non-empty value disables the auto-mode classifier; all calls fall through to Ask. |
@@ -165,7 +165,7 @@ token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_OUTPUT_STYLE` | — | Name of the active output style (see [Output Styles](../extending/output-styles.md)). |
+| `CALIBAN_OUTPUT_STYLE` | — | Name of the active output style (see [Output Styles](../extending/output-styles.md)). Folded into the `output_style` setting by the env layer (env > file) and attributed in `caliban config print` `_env_overrides` (#701). |
 | `CALIBAN_GRAPHICS` | — | Graphics capability hint (e.g. `kitty`, `sixel`). |
 
 ---

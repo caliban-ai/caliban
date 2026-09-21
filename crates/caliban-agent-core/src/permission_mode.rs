@@ -167,9 +167,14 @@ impl Default for SharedPermissionMode {
 /// precedence:
 ///
 /// 1. `--permission-mode <mode>` CLI value (when provided).
-/// 2. `CALIBAN_DEFAULT_PERMISSION_MODE` environment variable.
-/// 3. `permissions.default_mode` from the settings file.
-/// 4. Built-in [`PermissionMode::Default`].
+/// 2. `permissions.default_mode` from the settings layer.
+/// 3. Built-in [`PermissionMode::Default`].
+///
+/// The `CALIBAN_DEFAULT_PERMISSION_MODE` environment variable is **not** read
+/// here: the settings env layer folds it into `permissions.default_mode` at load
+/// time (env > file), so it participates as part of `settings_default_mode` while
+/// keeping the CLI flag highest-precedence (#701; env registry #538). This keeps
+/// the original CLI > env > file ordering with a single env-read site.
 ///
 /// Pass `bypass_latch = true` when `--allow-dangerously-skip-permissions`
 /// is on the command line. Without the latch, asking for
@@ -177,21 +182,17 @@ impl Default for SharedPermissionMode {
 ///
 /// # Errors
 /// Returns an error string when:
-/// - The CLI value or env var doesn't parse as a known mode.
+/// - The CLI value or the resolved settings mode doesn't parse as a known mode.
 /// - The resolved mode is [`PermissionMode::BypassPermissions`] without
 ///   `bypass_latch` set.
 pub fn resolve_startup_mode(
     cli: Option<&str>,
-    env_var: Option<&str>,
     settings_default_mode: Option<&str>,
     bypass_latch: bool,
 ) -> Result<PermissionMode, String> {
     let mode = if let Some(s) = cli {
         PermissionMode::parse(s)
             .map_err(|bad| format!("--permission-mode: unknown mode '{bad}'"))?
-    } else if let Some(s) = env_var {
-        PermissionMode::parse(s)
-            .map_err(|bad| format!("CALIBAN_DEFAULT_PERMISSION_MODE: unknown mode '{bad}'"))?
     } else if let Some(s) = settings_default_mode {
         PermissionMode::parse(s)
             .map_err(|bad| format!("permissions.default_mode: unknown mode '{bad}'"))?
