@@ -601,10 +601,13 @@ pub struct Settings {
     pub mcp_servers: BTreeMap<String, McpServerSetting>,
 
     // ----- router -----------------------------------------------------------
-    /// Router config (the `[router]` section). Kept as an opaque value because
-    /// the router crate owns the schema; the binary types it via
-    /// `caliban_model_router::router_config_from_value` and prefers it over
-    /// `caliban.toml` discovery (#540).
+    /// Router config (the `[router]` section, plus optional per-provider
+    /// `[router.provider.X]` blocks). Kept as an opaque value because the router
+    /// crate owns the schema; the binary types it via
+    /// `caliban_model_router::router_and_providers_from_value`. This is the
+    /// primary router-config source — an explicit `--config` /
+    /// `CALIBAN_ROUTER_CONFIG` file overrides it, and the walk-up/home
+    /// `caliban.toml` discovery was retired (#540, #699; ADR 0060).
     pub router: Option<serde_json::Value>,
 
     // ----- memory -----------------------------------------------------------

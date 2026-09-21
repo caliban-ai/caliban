@@ -658,9 +658,13 @@ pub(crate) struct Args {
     )]
     pub(crate) no_hooks: bool,
 
-    /// Explicit path to `caliban.toml` (overrides walk-up discovery).
-    /// When the file exists and declares `[router]`, the binary wires a
-    /// model router instead of the single-provider fallback (ADR 0038).
+    /// Explicit path to a `caliban.toml` router config. This is the
+    /// highest-precedence source: when set and it declares `[router]`, the
+    /// binary wires a model router from it, overriding the settings-layer
+    /// `[router]` section. When unset, router config resolves through the
+    /// settings layer (ADR 0038, ADR 0060). There is no implicit walk-up /
+    /// home-dir discovery (removed in #699); migrate a repo-root `caliban.toml`
+    /// with `caliban config import-router`.
     #[arg(long = "config", value_name = "PATH", env = "CALIBAN_ROUTER_CONFIG")]
     pub(crate) config_path: Option<PathBuf>,
 
@@ -982,6 +986,20 @@ pub(crate) enum ConfigCommand {
     /// are preserved; the migrated keys are merged on top.
     Migrate {
         /// Print the migration result to stdout without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Migrate a legacy `caliban.toml` router config into the settings layer
+    /// (#699). Reads `[router]` + `[provider.X]` from the source and writes them
+    /// into `<workspace>/.caliban/settings.toml` under `[router]` (with
+    /// `[provider.X]` relocated to `[router.provider.X]`). Existing keys in
+    /// `settings.toml` are preserved; only `[router]` is replaced.
+    ImportRouter {
+        /// Source `caliban.toml` (defaults to the nearest one found by walking
+        /// up from the cwd).
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+        /// Print the resulting `settings.toml` to stdout without writing.
         #[arg(long)]
         dry_run: bool,
     },

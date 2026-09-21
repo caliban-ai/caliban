@@ -8,7 +8,8 @@
 //! - Per-route circuit breakers ([`breaker`]).
 //! - Capability-based filtering ([`capabilities`]).
 //! - Prompt-cache marker stripping on cross-route hops ([`cache`]).
-//! - `caliban.toml` discovery ([`discovery`]).
+//! - Explicit `caliban.toml` loading ([`config_file`]) — config otherwise
+//!   resolves through the caliban settings layer (ADR 0060).
 //! - Effort-level resolution ([`effort`]).
 //!
 //! See `docs/superpowers/specs/2026-05-24-model-router-v2-design.md` and
@@ -42,7 +43,7 @@ mod builder;
 pub mod cache;
 pub mod capabilities;
 pub mod config;
-pub mod discovery;
+pub mod config_file;
 mod dispatch;
 pub mod effort;
 pub mod error;
@@ -60,9 +61,9 @@ pub use capabilities::{CandidateAnnotation, CandidateOrigin, DerivedNeeds};
 pub use config::{
     BreakerPolicy, CalibanConfig, CapabilityRequirements, EffortLevel, EffortMap, HedgePolicy,
     ProviderBlock, RouteEntry, RouterConfig, parse_caliban_config, parse_router_config,
-    router_config_from_value,
+    router_and_providers_from_value, router_config_from_value,
 };
-pub use discovery::{DiscoveredConfig, DiscoveryError, discover_caliban_toml};
+pub use config_file::{ConfigFileError, LoadedConfig, load_router_config_file};
 pub use effort::{effective_effort_for, effort_knob_for};
 pub use error::{Result, RouterError};
 pub use fallback::is_fatal_for_route;

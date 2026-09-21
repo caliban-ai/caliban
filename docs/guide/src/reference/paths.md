@@ -120,12 +120,14 @@ Both are now configured in `settings.toml` under `[hooks]` / `[permissions]`.
 
 ## Model Router Config
 
-| Scope | Path |
-|-------|------|
-| **Project** | `<workspace>/caliban.toml` (walk-up discovery) |
-| **User** | `$XDG_CONFIG_HOME/caliban/caliban.toml` (default `~/.config/caliban/caliban.toml`) |
+Router config lives in the [settings layer](./settings-schema.md#router) under `[router]`, so it uses the [settings scope paths](#settings-files) (`<workspace>/.caliban/settings.toml`, `$XDG_CONFIG_HOME/caliban/settings.toml`, …) — not a standalone file.
 
-Override with `--config <PATH>` or `CALIBAN_ROUTER_CONFIG`.
+| Source | Path |
+|--------|------|
+| **Explicit override** | `--config <PATH>` or `CALIBAN_ROUTER_CONFIG` (a standalone `caliban.toml`; highest precedence) |
+| **Settings layer** | `[router]` in any settings scope |
+
+The walk-up / `~/.config/caliban/caliban.toml` **discovery** was removed in #699; migrate a repo-root `caliban.toml` with `caliban config import-router`.
 
 ---
 

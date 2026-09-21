@@ -31,8 +31,16 @@ pub(crate) fn run_router_debug(
 ) -> Result<()> {
     match cmd {
         RouterCommand::Debug(dbg) => {
-            let cwd = std::env::current_dir().context("could not get cwd")?;
-            let out = router::run_debug(dbg, config_path, &cwd)?;
+            // Router debug resolves config the same way a real run does: an
+            // explicit --config file wins, else the settings-layer [router]
+            // section (#699 — discovery removed).
+            let workspace = std::env::current_dir().context("could not get cwd")?;
+            let mut opts = caliban_settings::LoadOptions::new(workspace);
+            opts.bare = false;
+            let outcome = caliban_settings::load_settings(&opts)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("load layered settings")?;
+            let out = router::run_debug(dbg, config_path, outcome.settings.router.as_ref())?;
             print!("{out}");
             Ok(())
         }
@@ -215,7 +223,68 @@ pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
             println!("migrated to {}: {}", dest.display(), touched.join(", "));
             Ok(0)
         }
+        ConfigCommand::ImportRouter { from, dry_run } => {
+            run_import_router(&workspace, from.as_deref(), *dry_run)
+        }
     }
+}
+
+/// Handle `caliban config import-router` (#699): migrate a legacy `caliban.toml`
+/// router config into `<workspace>/.caliban/settings.toml` `[router]` (moving
+/// top-level `[provider.X]` blocks under `[router.provider.X]`). Existing keys
+/// in `settings.toml` are preserved; only `[router]` is replaced.
+fn run_import_router(
+    workspace: &std::path::Path,
+    from: Option<&std::path::Path>,
+    dry_run: bool,
+) -> Result<i32> {
+    // Resolve the source caliban.toml: explicit --from, else the nearest one.
+    let source = match from {
+        Some(p) => p.to_path_buf(),
+        None => caliban_common::paths::walk_up_for_file(workspace, "caliban.toml")
+            .context("no caliban.toml found to migrate (pass --from <PATH>)")?,
+    };
+    let body = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+    let router_value = router::caliban_toml_to_settings_router(&body)
+        .with_context(|| format!("migrating {}", source.display()))?;
+
+    // Merge into <workspace>/.caliban/settings.toml, preserving other keys.
+    // Round-trip through the Settings type (which captures unknown keys in its
+    // `extra` flatten field) so the serializer emits tables in a valid order —
+    // a hand-merged toml::Table can hit TOML's "value after table" error when an
+    // existing scalar key sorts after `[router]`.
+    let dest_dir = workspace.join(".caliban");
+    let dest = dest_dir.join("settings.toml");
+    let mut settings: caliban_settings::Settings = if dest.is_file() {
+        toml::from_str(
+            &std::fs::read_to_string(&dest)
+                .with_context(|| format!("reading {}", dest.display()))?,
+        )
+        .with_context(|| format!("parsing existing {}", dest.display()))?
+    } else {
+        caliban_settings::Settings::default()
+    };
+    settings.router = Some(router_value);
+    let serialized = toml::to_string_pretty(&settings).context("serialize settings.toml")?;
+
+    if dry_run {
+        println!("{serialized}");
+        eprintln!(
+            "[caliban] dry-run; would migrate {} → {} [router]",
+            source.display(),
+            dest.display()
+        );
+        return Ok(0);
+    }
+    std::fs::create_dir_all(&dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
+    std::fs::write(&dest, serialized).with_context(|| format!("write {}", dest.display()))?;
+    println!(
+        "migrated {} → {} [router]",
+        source.display(),
+        dest.display()
+    );
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -253,5 +322,66 @@ mod tests {
         // The existing surfaces are still present.
         assert!(env.get("settings").is_some());
         assert!(env.get("_sources").is_some());
+    }
+
+    const CALIBAN_TOML: &str = r#"
+[router]
+default_purpose = "main_loop"
+
+[[router.route]]
+purpose = "main_loop"
+provider = "openai"
+model = "local"
+
+[provider.openai]
+base_url = "http://localhost:8080/v1"
+"#;
+
+    #[test]
+    fn import_router_merges_into_settings_preserving_keys() {
+        // #699: `config import-router` migrates a caliban.toml into the settings
+        // [router] section (nesting [provider.X] under [router.provider.X]) while
+        // preserving other settings keys and producing valid TOML.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("caliban.toml"), CALIBAN_TOML).unwrap();
+        std::fs::create_dir_all(ws.join(".caliban")).unwrap();
+        // A pre-existing scalar key (`view_mode`) that sorts AFTER `router`,
+        // which is exactly the TOML "value after table" ordering hazard.
+        std::fs::write(
+            ws.join(".caliban/settings.toml"),
+            "model = \"claude-opus-4-8\"\nview_mode = \"compact\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(run_import_router(ws, None, false).unwrap(), 0);
+
+        let written = std::fs::read_to_string(ws.join(".caliban/settings.toml")).unwrap();
+        let settings: caliban_settings::Settings = toml::from_str(&written).unwrap();
+        let router = settings.router.expect("router migrated");
+        assert_eq!(
+            router
+                .get("provider")
+                .and_then(|p| p.get("openai"))
+                .and_then(|o| o.get("base_url"))
+                .and_then(|u| u.as_str()),
+            Some("http://localhost:8080/v1"),
+            "provider block relocated under router.provider"
+        );
+        // Pre-existing keys survive the merge.
+        assert!(settings.model.is_some(), "pre-existing model preserved");
+        assert_eq!(settings.view_mode.as_deref(), Some("compact"));
+    }
+
+    #[test]
+    fn import_router_dry_run_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("caliban.toml"), CALIBAN_TOML).unwrap();
+        assert_eq!(run_import_router(ws, None, true).unwrap(), 0);
+        assert!(
+            !ws.join(".caliban/settings.toml").exists(),
+            "dry-run must not write settings.toml"
+        );
     }
 }

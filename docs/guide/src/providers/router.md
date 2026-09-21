@@ -29,7 +29,9 @@ Each internal request carries a `purpose` that the router uses for dispatch:
 
 ## Enabling the router
 
-Drop a `caliban.toml` file in your project root. Caliban discovers it by walking up from the current directory to the nearest git root or `$HOME`, then falls back to `~/.config/caliban/caliban.toml`. You can also point directly to a file:
+Router config lives in the [settings layer](../reference/settings-schema.md#router): add a `[router]` section to `.caliban/settings.toml` (project or user scope) and it flows through the normal settings precedence, showing up in `caliban config print` with its source scope like any other key.
+
+You can also point directly at a standalone `caliban.toml` file, which is the **highest-precedence** source and overrides the settings `[router]` section:
 
 ```bash
 caliban --config /path/to/caliban.toml "my prompt"
@@ -37,7 +39,11 @@ caliban --config /path/to/caliban.toml "my prompt"
 CALIBAN_ROUTER_CONFIG=/path/to/caliban.toml caliban "my prompt"
 ```
 
-Discovery order (highest priority first): `--config` flag → `CALIBAN_ROUTER_CONFIG` → walk-up from current directory → `~/.config/caliban/caliban.toml`.
+Resolution order (highest priority first): `--config` flag / `CALIBAN_ROUTER_CONFIG` → settings-layer `[router]` → single-provider fallback.
+
+```admonish warning title="Discovery removed (#699)"
+Earlier versions auto-discovered a `caliban.toml` by walking up from the current directory to the git root / `$HOME` and then checking `~/.config/caliban/caliban.toml`. That implicit discovery was **removed** — a repo-root `caliban.toml` is no longer picked up automatically. Migrate it into the settings layer with `caliban config import-router`, or pass it explicitly with `--config`.
+```
 
 ## Basic configuration
 
@@ -66,15 +72,23 @@ For a local model, use `provider = "openai"` with a `[provider.openai] base_url`
 
 ## Provider blocks
 
-Override the API key env var or base URL for a provider in `caliban.toml`:
+Override the API key env var or base URL for a provider. In the settings layer these nest under `[router.provider.X]`; in a standalone `caliban.toml` they are top-level `[provider.X]` blocks (`caliban config import-router` relocates them automatically):
 
 ```toml
-[provider.openai]
+# .caliban/settings.toml
+[router.provider.openai]
 api_key_env = "OPENAI_API_KEY_STAGING"
 base_url = "https://oai-staging.example.com/v1"
 
-[provider.google]
+[router.provider.google]
 base_url = "https://gemini-proxy.example.com/v1beta"
+```
+
+```toml
+# standalone caliban.toml (passed via --config)
+[provider.openai]
+api_key_env = "OPENAI_API_KEY_STAGING"
+base_url = "https://oai-staging.example.com/v1"
 ```
 
 For a local model, point `[provider.openai].base_url` at your engine's `/v1`

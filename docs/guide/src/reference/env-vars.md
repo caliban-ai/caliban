@@ -144,7 +144,7 @@ token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_ROUTER_CONFIG` | Walk-up discovery | Explicit path to `caliban.toml`. Also settable via `--config`. |
+| `CALIBAN_ROUTER_CONFIG` | Settings `[router]` | Explicit path to a standalone `caliban.toml` router config; highest-precedence source, overrides the settings `[router]` section. Also settable via `--config`. (Walk-up discovery was removed in #699.) |
 | `CALIBAN_STRICT_ROUTING` | — | Any non-empty value enables strict routing (no fallback to default route on unknown purpose). |
 | `CALIBAN_API_KEY_HELPER_TTL_MS` | — | TTL in milliseconds for API key helper subprocess cache. |
 

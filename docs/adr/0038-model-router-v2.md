@@ -7,6 +7,12 @@
 > **Amended by [0056](0056-deprecate-ollama-provider.md) (2026-09-12):** the `ollama`
 > provider was removed; the router's supported providers are `anthropic`, `openai`,
 > `google`. Local models are reached via `openai` + a per-route `base_url`.
+>
+> **Amended by [0060](0060-router-config-through-settings.md) (2026-09-20):** the
+> `caliban.toml` walk-up / home-dir **discovery** below was retired. Router config
+> now resolves through the settings layer (`[router]`, with `[router.provider.X]`
+> blocks), with an explicit `--config` / `CALIBAN_ROUTER_CONFIG` file as the
+> highest-precedence override. The rest of this ADR stands.
 - **Supersedes scope of:** ADR 0022 deferred items
 - **Author:** john.ford2002@gmail.com
 
@@ -81,6 +87,11 @@ call per candidate (already a HashMap lookup in the adapters); we accept
 the cost because the diagnostic value is large.
 
 ### `caliban.toml` discovery uses the CLAUDE.md walk algorithm
+
+> **Retired by [0060](0060-router-config-through-settings.md) (2026-09-20):** the
+> walk-up + home-dir discovery described here was removed. Router config now
+> resolves through the settings layer with an explicit `--config` file override;
+> see ADR 0060. The "unknown providers fail loudly at startup" rule still holds.
 
 Same ancestor-walk-up-to-git-root-or-`$HOME` as memory tier 0018, with a
 different filename predicate. Both walks share a `caliban-memory::walk_up`

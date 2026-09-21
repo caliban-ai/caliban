@@ -163,7 +163,7 @@ See [Permission Modes](../permissions/modes.md) and [Managing Rules](../permissi
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--config <PATH>` | Walk-up discovery | Explicit path to `caliban.toml`. When the file declares `[router]`, a model router is wired (ADR 0038). Env: `CALIBAN_ROUTER_CONFIG`. |
+| `--config <PATH>` | Settings `[router]` | Explicit path to a standalone `caliban.toml` router config; highest-precedence source, overrides the settings `[router]` section. When the file declares `[router]`, a model router is wired (ADR 0038, ADR 0060). Env: `CALIBAN_ROUTER_CONFIG`. |
 | `--settings <FILE_OR_JSON>` | — | Inject a virtual settings scope above local (ADR 0026). Accepts inline JSON or a path to `.json` / `.toml`. |
 | `--setting-sources <CSV>` | All scopes | Restrict which `settings.json` scopes are read. CSV of `managed,user,project,local`. |
 
@@ -218,6 +218,7 @@ Inspect and migrate settings (ADR 0026).
 |----------------|-------------|
 | `config print` | Print the merged effective settings as JSON, including the per-key scope chain. Honors `--settings` / `--setting-sources`. |
 | `config migrate [--dry-run]` | Round-trip legacy per-feature TOMLs (`permissions.toml`, `mcp.toml`, `hooks.toml`) into a single project-scope `settings.json` under `<workspace>/.caliban/`. |
+| `config import-router [--from <PATH>] [--dry-run]` | Migrate a legacy `caliban.toml` router config into `<workspace>/.caliban/settings.toml` `[router]` (relocating top-level `[provider.X]` blocks to `[router.provider.X]`). `--from` defaults to the nearest `caliban.toml`. Existing settings keys are preserved. |
 
 ---
 
