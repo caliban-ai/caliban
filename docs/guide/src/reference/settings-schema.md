@@ -10,10 +10,10 @@ Settings files are TOML by primary convention (`settings.toml` / `settings.local
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent` | `string` | — | Agent profile name (sub-agent dispatch hint). |
+| `agent` | `string` | — | Agent profile name (sub-agent dispatch hint). **Reserved — not yet consumed** by any dispatch path. |
 | `model` | `string \| { provider, name }` | — | Primary model. Bare string (e.g. `"claude-sonnet-4-6"`) or qualified object `{ provider = "anthropic", name = "..." }`. |
 | `fallback_model` | `string \| { provider, name }` | — | Fallback model when the primary errors. Same shapes as `model`. |
-| `model_overrides` | `{ string → string }` | `{}` | Per-route model overrides. Keys are router route names (e.g. `"fast-classifier"`); values are model ids. |
+| `model_overrides` | `{ string → string }` | `{}` | Per-route model overrides (keys are router route names). **Reserved — not yet consumed**: the router keys on route purpose, not this map. Router config now flows through the settings `[router]` section (#540); per-route overrides are folded in by #699. |
 | `effort` | `"low" \| "medium" \| "high" \| "max" \| "auto"` | — | Default reasoning effort level. |
 
 ---
@@ -176,7 +176,7 @@ Nested under `[memory]`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins` | object | — | Plugin manager knobs (schema owned by `caliban-plugins`). |
+| `plugins` | object | — | Plugin manager knobs (schema owned by `caliban-plugins`). **Reserved — not yet consumed**: the plugin manager currently reads its config from the environment (`PluginSettings::from_env`), not this key. |
 
 ---
 
@@ -184,13 +184,13 @@ Nested under `[memory]`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `output_style` | `string` | — | Active output-style name (see [Output Styles](../extending/output-styles.md)). |
-| `editor_mode` | `string` | — | Input editing mode: `"vim"` or `"emacs"`. |
-| `view_mode` | `string` | — | TUI layout mode: `"compact"` or `"expanded"`. |
+| `output_style` | `string` | `"default"` | Active output-style name (see [Output Styles](../extending/output-styles.md)). Precedence: the `CALIBAN_OUTPUT_STYLE` env var wins, then this setting, then `default` (#620). |
+| `editor_mode` | `string` | — | Input editing mode: `"vim"` or `"emacs"`. **Reserved — not yet consumed** (the vim/emacs editing feature is tracked by #11); setting it has no effect today. |
+| `view_mode` | `string` | — | TUI layout mode: `"compact"` or `"expanded"`. **Reserved — not yet consumed**; no layout switch exists yet. |
 | `statusLine.command` | `string` | — | **Required when `statusLine` is set.** Shell command whose stdout prefixes the status bar. |
 | `statusLine.timeout_ms` | `integer` (50–5000) | — | Maximum ms to wait for the status-line script. |
 | `statusLine.padding` | `integer` (0–8) | — | Spaces of padding around the custom segment. |
-| `tui` | object | — | TUI knobs. Known sub-key: `showCostInStatusline` (`boolean`). |
+| `tui` | object | — | TUI knobs. **Reserved — not yet consumed** (forward-compat placeholder; no sub-key is read today). |
 
 ```admonish tip title="statusLine casing"
 `statusLine` uses camelCase on disk for Claude Code compatibility. The TOML alias `status_line` is also accepted.
@@ -296,7 +296,7 @@ Precedence: an explicit knob (e.g. `verification_guidance`) **>** the named `pro
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `additional_directories` | `string[]` | `[]` | Extra workspace roots to consult for CLAUDE.md and skills. |
+| `additional_directories` | `string[]` | `[]` | Intended as extra workspace roots for file/shell tools. **Reserved — not yet consumed**: no tool path is gated on it today (workspace-scoping follow-ups are tracked by #324). Distinct from the env-driven CLAUDE.md search-root plumbing. |
 | `claude_md_excludes` | `string[]` | `[]` | Glob patterns to exclude from CLAUDE.md/AGENTS.md discovery (`claudeMdExcludes`). **Unioned** with the `CALIBAN_CLAUDE_MD_EXCLUDES` env var — both sets apply (#694). |
 | `env` | `{ string → string }` | `{}` | Environment-variable overrides applied to child processes caliban spawns — Bash commands, stdio MCP servers, and command hooks (#694). Precedence: a more-specific per-item env (an MCP server's `env`, a hook's `env`) wins over these, which in turn override the inherited process environment. |
 

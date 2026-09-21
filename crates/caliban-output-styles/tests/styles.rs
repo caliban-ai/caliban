@@ -579,3 +579,21 @@ fn env_var_selection_round_trip() {
         assert_eq!(from_env, "default");
     }
 }
+
+#[test]
+fn requested_falls_back_to_setting_then_default() {
+    // #620: the `output_style` setting is honored when the env var is unset.
+    // Guarded so a suite that set the env var doesn't spuriously fail — the env
+    // var, when present, wins over the setting (asserted end-to-end elsewhere).
+    if std::env::var("CALIBAN_OUTPUT_STYLE").ok().is_none() {
+        // setting present → used
+        assert_eq!(
+            caliban_output_styles::requested(Some("explanatory")),
+            "explanatory"
+        );
+        // blank setting → default
+        assert_eq!(caliban_output_styles::requested(Some("  ")), "default");
+        // no setting → default
+        assert_eq!(caliban_output_styles::requested(None), "default");
+    }
+}
