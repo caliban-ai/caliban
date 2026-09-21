@@ -558,13 +558,17 @@ impl Settings {
 #[serde(default)]
 pub struct Settings {
     // ----- model / agent ----------------------------------------------------
-    /// Agent profile name (sub-agent dispatch hint).
+    /// Agent profile name (sub-agent dispatch hint). Reserved — parsed but not
+    /// yet consumed by any dispatch path (#620).
     pub agent: Option<String>,
     /// Primary model.
     pub model: Option<ModelSelector>,
     /// Fallback model used when the primary errors.
     pub fallback_model: Option<ModelSelector>,
     /// Per-route model overrides (`{ "fast-classifier": "claude-haiku-4-7" }`).
+    /// Reserved — parsed but not yet consumed; the router keys on route purpose,
+    /// not this map. Router config now flows through the settings `[router]`
+    /// section (#540); folding per-route overrides in is tracked by #699.
     pub model_overrides: BTreeMap<String, String>,
 
     // ----- permissions ------------------------------------------------------
@@ -597,9 +601,10 @@ pub struct Settings {
     pub mcp_servers: BTreeMap<String, McpServerSetting>,
 
     // ----- router -----------------------------------------------------------
-    /// Router config; opaque blob passed through to
-    /// `caliban-model-router::discovery`. Kept untyped because the router
-    /// crate owns the schema.
+    /// Router config (the `[router]` section). Kept as an opaque value because
+    /// the router crate owns the schema; the binary types it via
+    /// `caliban_model_router::router_config_from_value` and prefers it over
+    /// `caliban.toml` discovery (#540).
     pub router: Option<serde_json::Value>,
 
     // ----- memory -----------------------------------------------------------
@@ -611,21 +616,27 @@ pub struct Settings {
     pub storage: StorageConfig,
 
     // ----- plugins ----------------------------------------------------------
-    /// Plugin manager knobs.
+    /// Plugin manager knobs. Reserved — parsed but not yet consumed; the plugin
+    /// manager currently reads its config from the environment
+    /// (`PluginSettings::from_env`), not this key (#620).
     pub plugins: Option<serde_json::Value>,
 
     // ----- UI ---------------------------------------------------------------
-    /// Active output-style name.
+    /// Active output-style name. Honored by `compose` with precedence
+    /// `CALIBAN_OUTPUT_STYLE` env > this setting > `default` (#620).
     pub output_style: Option<String>,
-    /// `vim` or `emacs`-flavored input editing.
+    /// `vim` or `emacs`-flavored input editing. Reserved — parsed but not yet
+    /// consumed; the editing feature is tracked by #11 (#620).
     pub editor_mode: Option<String>,
-    /// Compact vs. expanded TUI layout.
+    /// Compact vs. expanded TUI layout. Reserved — parsed but not yet consumed;
+    /// no layout switch exists yet (#620).
     pub view_mode: Option<String>,
     /// Custom statusline command. Uses Claude Code-compatible `statusLine`
     /// casing on disk; `status_line` is accepted as a TOML-friendly alias.
     #[serde(rename = "statusLine", alias = "status_line")]
     pub status_line: Option<StatuslineConfig>,
-    /// TUI knobs (theme, etc.). Opaque.
+    /// TUI knobs (theme, etc.). Opaque. Reserved — parsed but not yet consumed
+    /// (forward-compat placeholder; no sub-key is read today) (#620).
     pub tui: Option<serde_json::Value>,
 
     // ----- auth -------------------------------------------------------------
@@ -688,7 +699,9 @@ pub struct Settings {
     pub parent_settings_behavior: Option<String>,
 
     // ----- miscellaneous ----------------------------------------------------
-    /// Extra workspace roots to consult.
+    /// Intended as extra workspace roots for file/shell tools. Reserved —
+    /// parsed but not yet consumed; no tool path is gated on it today
+    /// (workspace-scoping follow-ups are tracked by #324) (#620).
     pub additional_directories: Vec<PathBuf>,
     /// `claudeMdExcludes` (passed to `caliban_memory`).
     pub claude_md_excludes: Vec<String>,

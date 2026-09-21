@@ -13,7 +13,7 @@ All fields are optional. Unknown top-level keys are tolerated for forward-compat
 | `agent` | `string` | — | Agent profile name used as a sub-agent dispatch hint |
 | `model` | `string` or `{ provider, name }` | provider default | Primary model. Bare string (e.g. `"claude-sonnet-4-7"`) or qualified object (e.g. `{ provider = "anthropic", name = "claude-sonnet-4-7" }`). CLI `--model` / `--provider` override this |
 | `fallback_model` | `string` or `{ provider, name }` | — | Model used when the primary returns an error. Wired through `caliban-model-router`. CLI `--fallback-model` overrides this |
-| `model_overrides` | `{ route → model }` | `{}` | Per-named-route model overrides passed to the router (e.g. `{ "fast-classifier" = "claude-haiku-4-7" }`) |
+| `model_overrides` | `{ route → model }` | `{}` | Per-named-route model overrides. **Reserved — not yet consumed** (the router keys on route purpose, not this map); folded in by #699 |
 
 For provider and model selection details see [Model Selection](../providers/models.md) and [The Model Router](../providers/router.md).
 
@@ -123,9 +123,9 @@ See [Memory Tiers](../memory/tiers.md) and [CLAUDE.md & Imports](../memory/claud
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `output_style` | `string` | `"default"` | Active output-style name. See [Output Styles](../extending/output-styles.md). **Restart-required** |
-| `editor_mode` | `"vim"` \| `"emacs"` | — | Input-line editing mode |
-| `view_mode` | `string` | — | Compact vs. expanded TUI layout |
+| `output_style` | `string` | `"default"` | Active output-style name. `CALIBAN_OUTPUT_STYLE` env wins, then this setting, then `default` (#620). See [Output Styles](../extending/output-styles.md). **Restart-required** |
+| `editor_mode` | `"vim"` \| `"emacs"` | — | Input-line editing mode. **Reserved — not yet consumed** (feature tracked by #11) |
+| `view_mode` | `string` | — | Compact vs. expanded TUI layout. **Reserved — not yet consumed** (no layout switch exists yet) |
 | `statusLine` | object | — | Custom statusline command. Also accepted as `status_line` (TOML-friendly alias) |
 | `tui` | object | — | TUI theme and layout knobs (e.g. `showCostInStatusline`) |
 

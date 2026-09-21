@@ -1676,7 +1676,7 @@ pub(crate) fn build_agent(
         });
         let style_reg =
             caliban_output_styles::OutputStylesRegistry::load(&workspace_root_for_style);
-        let requested = caliban_output_styles::requested_from_env();
+        let requested = caliban_output_styles::requested(settings_snapshot.output_style.as_deref());
         // v2: enabled_plugins is empty until ADR 0030 plugin system ships.
         let active = style_reg.select(&requested, &[]);
         if let Some(s) = active.as_ref()
@@ -1849,11 +1849,11 @@ pub(crate) async fn resolve_system_prompt(
     // Resolve the active output style. Selection precedence:
     //   1. `force_for_plugin` on a plugin-supplied style (v2 — inert
     //      until ADR 0030 plugin system lands).
-    //   2. `CALIBAN_OUTPUT_STYLE` env var (settings.json key with
-    //      ADR 0026).
-    //   3. Built-in `default` (no-op).
+    //   2. `CALIBAN_OUTPUT_STYLE` env var.
+    //   3. The `output_style` settings key (#620).
+    //   4. Built-in `default` (no-op).
     let style_registry = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
-    let requested = caliban_output_styles::requested_from_env();
+    let requested = caliban_output_styles::requested(settings_snapshot.output_style.as_deref());
     // v2: enabled_plugins is empty until ADR 0030 ships the plugin system.
     let enabled_plugins: Vec<String> = Vec::new();
     let active_style = style_registry.select(&requested, &enabled_plugins);
