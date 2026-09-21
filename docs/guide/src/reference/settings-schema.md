@@ -139,21 +139,37 @@ GONZALO_ROOT = "/path/to/graph-store"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `router` | object | — | Model-router config — the same shape as the `[router]` section of `caliban.toml` (`default_purpose` + `[[router.route]]`). Schema owned by `caliban-model-router`, so the settings layer carries it as an opaque object. |
+| `router` | object | — | Model-router config — the same shape as the `[router]` section of `caliban.toml` (`default_purpose` + `[[router.route]]`), plus optional per-provider `[router.provider.X]` blocks. Schema owned by `caliban-model-router`, so the settings layer carries it as an opaque object. |
 
-When a `router` value is present in settings, it is used in preference to a
-standalone `caliban.toml` — the router config then flows through the normal
-settings precedence and shows up in `caliban config print` with its source scope
-like any other key. If no `router` value is set, caliban falls back to
-`caliban.toml` discovery (`--config` / `CALIBAN_ROUTER_CONFIG` / walk-up / the
-user config dir), so existing `caliban.toml` files keep working unchanged.
+Router config resolves through the settings layer: the `router` value flows
+through the normal settings precedence and shows up in `caliban config print`
+with its source scope like any other key. The one exception is an explicit
+`--config <PATH>` / `CALIBAN_ROUTER_CONFIG` file, which is the highest-precedence
+source and overrides the settings `[router]` section when set. If neither is
+present, caliban uses the single-provider fallback.
 
-```admonish note
-Per-provider `[provider.X]` blocks (custom `api_key_env` / `base_url`) are not
-yet mirrored into the settings `router` object — routes configured via settings
-resolve provider keys from the default env vars. Set them via `caliban.toml` if
-you need per-provider overrides. (Full fold + `caliban.toml` retirement is
-tracked as a #540 follow-up.)
+Per-provider overrides (`api_key_env` / `base_url` — e.g. for a proxy or a
+keyless local endpoint) go under `[router.provider.X]`:
+
+```toml
+[router]
+default_purpose = "main_loop"
+
+[[router.route]]
+purpose = "main_loop"
+provider = "openai"
+model = "local-model"
+
+[router.provider.openai]
+base_url = "http://localhost:8080/v1"
+```
+
+```admonish note title="Migrating from caliban.toml"
+The walk-up / home-dir `caliban.toml` **discovery** was removed in #699 — a bare
+repo-root `caliban.toml` is no longer picked up automatically. Migrate an
+existing one into the settings layer with `caliban config import-router` (it
+moves top-level `[provider.X]` blocks under `[router.provider.X]`), or keep
+pointing at it explicitly with `--config`.
 ```
 
 ---

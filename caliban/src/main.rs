@@ -297,17 +297,19 @@ async fn main() -> Result<()> {
         };
     }
 
-    // Router v2: try caliban.toml first (--config flag or discovery), fall
-    // back to the single-provider construction when no router config is
-    // present (preserving v1 behavior). ADR 0038.
+    // Router v2: resolve router config through the settings layer, with an
+    // explicit `--config` file as the highest-precedence override; fall back to
+    // single-provider construction when neither is present (ADR 0038 wiring,
+    // ADR 0060 settings-sourced routing). The walk-up/home `caliban.toml`
+    // discovery was removed in #699 — warn if a now-orphaned file is present.
     let cwd_for_router = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    router::warn_if_orphaned_caliban_toml(&cwd_for_router, args.config_path.is_some());
     let provider: Arc<dyn Provider + Send + Sync> =
         preflight!((|| -> anyhow::Result<Arc<dyn Provider + Send + Sync>> {
             Ok(
-                match router::try_load_from_settings(
+                match router::wire_router(
                     settings_snapshot.router.as_ref(),
                     args.config_path.as_deref(),
-                    &cwd_for_router,
                     &helper_pool,
                 )? {
                     Some(wiring) => {
@@ -322,7 +324,7 @@ async fn main() -> Result<()> {
                                 target: caliban_common::tracing_targets::TARGET_ROUTER,
                                 path = %wiring.config_path.display(),
                                 routes = wiring.router.routes().len(),
-                                "model router wired from caliban.toml",
+                                "model router wired from the --config file",
                             );
                         }
                         wiring.router

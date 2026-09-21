@@ -58,7 +58,7 @@ conventions.
 | [0035](0035-auto-memory.md) | Auto-memory (model-written notes per project) | accepted |
 | [0036](0036-claudemd-ancestry-and-imports.md) | CLAUDE.md ancestor walk + `@`-imports | accepted |
 | [0037](0037-subagent-isolation-and-background-fleet.md) | Sub-agent worktree isolation + background fleet | accepted (runs-to-completion non-goal revised by [0047](0047-interactive-background-subagents.md); per-repo identity amended + worktree isolation wired by [0052](0052-workspace-scoped-caliband.md)) |
-| [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted (provider set amended by [0056](0056-deprecate-ollama-provider.md)) |
+| [0038](0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted (provider set amended by [0056](0056-deprecate-ollama-provider.md); `caliban.toml` discovery retired by [0060](0060-router-config-through-settings.md)) |
 | [0039](0039-image-and-vision-input.md) | Image / vision input | accepted |
 | [0040](0040-slash-command-registry.md) | Slash command registry (extensible `SlashCommand` trait) | accepted |
 | [0041](0041-tui-redraw-tick-closeout.md) | TUI redraw tick — close-out (resolves 0014 open question) | accepted |
@@ -80,6 +80,7 @@ conventions.
 | [0057](0057-agent-drain-checkpoint-resume.md) | Graceful drain / checkpoint / resume for daemon-managed agents — flushed session dir on the retained PVC is the checkpoint; operator finalizer + `idleTimeout`→suspend (builds on 0028/0037/0047/0051/0052) | accepted |
 | [0058](0058-agent-loop-policy-surface.md) | Agent-loop policy surface — model-adaptive turn/time/cost budgets, spiral + wrong-path containment, and verification guidance; defaults keyed on cloud-vs-local execution context with an explicit profile override (builds on 0009) | accepted |
 | [0059](0059-acp-over-network-and-permission-posture.md) | ACP over the network — the per-agent worker speaks ACP on its TLS+token listener (reusing the drive core + #527 gate) + per-session permission posture (supervised via #528 / authorized bypass profile); amends 0055 | accepted |
+| [0060](0060-router-config-through-settings.md) | Router config resolves through the settings layer (`[router]` + `[router.provider.X]`) with an explicit `--config` override; `caliban.toml` walk-up/home discovery retired; `caliban config import-router` migration (amends 0038) | accepted |
 
 ## Adding a new ADR
 

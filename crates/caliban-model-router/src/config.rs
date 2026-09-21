@@ -552,6 +552,40 @@ pub fn router_config_from_value(
     Ok(RouterConfig::from_section(section))
 }
 
+/// The settings-layer `router` value: the `[router]` section plus optional
+/// per-provider `[router.provider.X]` blocks (#699).
+#[derive(Debug, Deserialize)]
+struct RouterSettingsValue {
+    #[serde(flatten)]
+    section: RouterSection,
+    #[serde(default)]
+    provider: HashMap<String, ProviderBlock>,
+}
+
+/// Build a [`RouterConfig`] **and its per-provider blocks** from the
+/// settings-layer `router` value.
+///
+/// Extends [`router_config_from_value`] to also carry `[router.provider.X]`
+/// blocks (`api_key_env` / `base_url`), so a settings-sourced router can point
+/// at proxies or keyless local endpoints — parity with `caliban.toml`'s
+/// top-level `[provider.X]`. Before #699 the settings path built providers with
+/// the adapter defaults only, so per-provider overrides required an on-disk
+/// `caliban.toml`.
+///
+/// The value has the same shape as [`router_config_from_value`] accepts, with
+/// an optional `provider` sub-table (`{ "provider": { "openai": { "base_url":
+/// "…" } } }`).
+///
+/// # Errors
+/// Returns a `serde_json::Error` if the value doesn't match the schema (e.g. a
+/// missing `default_purpose`, a malformed route, or a bad provider block).
+pub fn router_and_providers_from_value(
+    value: &serde_json::Value,
+) -> Result<(RouterConfig, HashMap<String, ProviderBlock>), serde_json::Error> {
+    let parsed: RouterSettingsValue = serde_json::from_value(value.clone())?;
+    Ok((RouterConfig::from_section(parsed.section), parsed.provider))
+}
+
 /// Parse a `caliban.toml` body into the full caliban-config view.
 ///
 /// # Errors
@@ -697,6 +731,49 @@ model = "claude-3-5-sonnet"
         // empty config — settings-sourced router config is validated.
         let value = serde_json::json!({ "route": [] });
         assert!(router_config_from_value(&value).is_err());
+    }
+
+    #[test]
+    fn router_and_providers_from_value_carries_provider_blocks() {
+        // #699: the settings `router` value can nest `[router.provider.X]`
+        // blocks, so a settings-sourced router expresses per-provider
+        // api_key_env / base_url overrides (parity with caliban.toml).
+        let value = serde_json::json!({
+            "default_purpose": "main_loop",
+            "route": [
+                { "purpose": "main_loop", "provider": "openai", "model": "x" }
+            ],
+            "provider": {
+                "openai": { "base_url": "http://localhost:8080/v1" }
+            }
+        });
+        let (cfg, providers) = router_and_providers_from_value(&value).unwrap();
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(
+            providers.get("openai").and_then(|b| b.base_url.as_deref()),
+            Some("http://localhost:8080/v1")
+        );
+    }
+
+    #[test]
+    fn router_and_providers_from_value_defaults_empty_providers() {
+        // The `provider` sub-table is optional — absent means "adapter
+        // defaults", exactly as before #699.
+        let value = serde_json::json!({
+            "default_purpose": "main_loop",
+            "route": [
+                { "purpose": "main_loop", "provider": "anthropic", "model": "x" }
+            ]
+        });
+        let (cfg, providers) = router_and_providers_from_value(&value).unwrap();
+        assert_eq!(cfg.routes.len(), 1);
+        assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn router_and_providers_from_value_rejects_malformed() {
+        let value = serde_json::json!({ "route": [] });
+        assert!(router_and_providers_from_value(&value).is_err());
     }
 
     #[test]

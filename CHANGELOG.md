@@ -9,6 +9,26 @@ the patch version for fixes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Router config now resolves through the settings layer** (#699): the model
+  router reads its config from `[router]` in `.caliban/settings.toml` (with
+  optional per-provider `[router.provider.X]` blocks for `api_key_env` /
+  `base_url`), flowing through the normal settings precedence and provenance. An
+  explicit `--config <PATH>` / `CALIBAN_ROUTER_CONFIG` file is the
+  highest-precedence override. **Breaking:** the walk-up / `~/.config/caliban/caliban.toml`
+  **discovery** was removed — a bare repo-root `caliban.toml` is no longer
+  auto-loaded. Migrate one with the new `caliban config import-router` (a
+  startup warning points the way), or pass it via `--config`. (ADR 0060, amends
+  ADR 0038.)
+
+### Added
+
+- **`caliban config import-router [--from <PATH>] [--dry-run]`** (#699): migrate
+  a legacy `caliban.toml` router config into `.caliban/settings.toml` `[router]`,
+  relocating top-level `[provider.X]` blocks to `[router.provider.X]` and
+  preserving existing settings keys.
+
 ## [0.14.0] - 2026-09-19
 
 The ACP-over-network release. Following [ADR 0059](docs/adr/0059-acp-over-network-and-permission-posture.md),
