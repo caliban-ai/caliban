@@ -1849,9 +1849,9 @@ pub(crate) async fn resolve_system_prompt(
     // Resolve the active output style. Selection precedence:
     //   1. `force_for_plugin` on a plugin-supplied style (v2 — inert
     //      until ADR 0030 plugin system lands).
-    //   2. `CALIBAN_OUTPUT_STYLE` env var.
-    //   3. The `output_style` settings key (#620).
-    //   4. Built-in `default` (no-op).
+    //   2. The `output_style` settings key — the `CALIBAN_OUTPUT_STYLE` env var
+    //      is folded into it (env > file) by the settings env layer (#620, #701).
+    //   3. Built-in `default` (no-op).
     let style_registry = caliban_output_styles::OutputStylesRegistry::load(&workspace_root);
     let requested = caliban_output_styles::requested(settings_snapshot.output_style.as_deref());
     // v2: enabled_plugins is empty until ADR 0030 ships the plugin system.

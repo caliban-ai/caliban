@@ -430,6 +430,30 @@ pub const ENV_STORAGE_SUBSTRATE: &str = "CALIBAN_STORAGE_SUBSTRATE";
 pub const ENV_STORAGE_REMOTE_URL: &str = "CALIBAN_STORAGE_REMOTE_URL";
 /// Environment variable that overrides `storage.remote.token_env` (#659).
 pub const ENV_STORAGE_REMOTE_TOKEN_ENV: &str = "CALIBAN_STORAGE_REMOTE_TOKEN_ENV";
+/// Environment variable that overrides `output_style` (#701).
+pub const ENV_OUTPUT_STYLE: &str = "CALIBAN_OUTPUT_STYLE";
+/// Environment variable that overrides `permissions.default_mode` (#701).
+pub const ENV_DEFAULT_PERMISSION_MODE: &str = "CALIBAN_DEFAULT_PERMISSION_MODE";
+
+/// Fold a plain-string `CALIBAN_*` override into an `Option<String>` settings
+/// field — **env wins**, blank (empty / whitespace-only) values are ignored so
+/// the file setting stands. Records the [`EnvOverride`] when applied. Shared by
+/// the string-valued Bucket-A bindings (#701).
+fn apply_string_env_override(
+    target: &mut Option<String>,
+    key_path: &str,
+    env_var: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+    applied: &mut Vec<EnvOverride>,
+) {
+    if let Some(raw) = lookup(env_var) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            *target = Some(trimmed.to_string());
+            applied.push(EnvOverride::new(key_path, env_var));
+        }
+    }
+}
 
 /// Parse a substrate token using the **same lowercase vocabulary the settings
 /// file accepts** (`fs`/`remote`/`git`/`s3`), by round-tripping through the
@@ -539,9 +563,26 @@ impl Settings {
     ) -> Result<Vec<EnvOverride>, String> {
         let mut applied = Vec::new();
         applied.extend(self.storage.apply_env_overrides(&lookup)?);
-        // Additional `CALIBAN_*` → setting bindings append here as the env layer
-        // grows to cover the Bucket-A settings-shadowing variables (#538
-        // follow-up: the full registry + a CI lint banning ad-hoc env reads).
+        // Bucket-A settings-shadowing bindings (#701, epic). Each fold removes an
+        // ad-hoc `std::env::var` reader elsewhere and is enforced by the
+        // env-registry CI lint. `permissions.default_mode` / `output_style` are
+        // stored raw; the invalid-value error surfaces at the consumer
+        // (`resolve_startup_mode` / output-style resolution), same as the file
+        // value.
+        apply_string_env_override(
+            &mut self.output_style,
+            "output_style",
+            ENV_OUTPUT_STYLE,
+            &lookup,
+            &mut applied,
+        );
+        apply_string_env_override(
+            &mut self.permissions.default_mode,
+            "permissions.default_mode",
+            ENV_DEFAULT_PERMISSION_MODE,
+            &lookup,
+            &mut applied,
+        );
         Ok(applied)
     }
 }
@@ -1860,8 +1901,9 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
     #[cfg(test)]
     mod storage_config_tests {
         use super::{
-            ENV_STORAGE_REMOTE_TOKEN_ENV, ENV_STORAGE_REMOTE_URL, ENV_STORAGE_SUBSTRATE,
-            RemoteStorageConfig, Settings, StorageConfig, StorageSubstrate,
+            ENV_DEFAULT_PERMISSION_MODE, ENV_OUTPUT_STYLE, ENV_STORAGE_REMOTE_TOKEN_ENV,
+            ENV_STORAGE_REMOTE_URL, ENV_STORAGE_SUBSTRATE, EnvOverride, RemoteStorageConfig,
+            Settings, StorageConfig, StorageSubstrate,
         };
         use std::collections::HashMap;
 
@@ -2044,6 +2086,55 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
             let mut s = Settings::default();
             let applied = s.apply_env_overrides(env(&[])).unwrap();
             assert!(applied.is_empty(), "no env vars ⇒ no overrides reported");
+        }
+
+        // ----- #701 Bucket-A pilot: output_style + permissions.default_mode ----
+
+        #[test]
+        fn env_output_style_overrides_file_and_is_attributed() {
+            let mut s = Settings {
+                output_style: Some("file-style".to_string()),
+                ..Default::default()
+            };
+            let applied = s
+                .apply_env_overrides(env(&[(ENV_OUTPUT_STYLE, "explanatory")]))
+                .unwrap();
+            assert_eq!(s.output_style.as_deref(), Some("explanatory"), "env wins");
+            assert!(
+                applied.contains(&EnvOverride::new("output_style", ENV_OUTPUT_STYLE)),
+                "override attributed for /config: {applied:?}"
+            );
+        }
+
+        #[test]
+        fn env_default_permission_mode_overrides_file() {
+            let mut s = Settings::default();
+            s.permissions.default_mode = Some("plan".to_string());
+            let applied = s
+                .apply_env_overrides(env(&[(ENV_DEFAULT_PERMISSION_MODE, "acceptEdits")]))
+                .unwrap();
+            assert_eq!(s.permissions.default_mode.as_deref(), Some("acceptEdits"));
+            assert!(applied.contains(&EnvOverride::new(
+                "permissions.default_mode",
+                ENV_DEFAULT_PERMISSION_MODE
+            )));
+        }
+
+        #[test]
+        fn blank_string_env_override_is_ignored() {
+            let mut s = Settings {
+                output_style: Some("keep-me".to_string()),
+                ..Default::default()
+            };
+            let applied = s
+                .apply_env_overrides(env(&[(ENV_OUTPUT_STYLE, "   ")]))
+                .unwrap();
+            assert_eq!(
+                s.output_style.as_deref(),
+                Some("keep-me"),
+                "blank env value must not clobber the file setting"
+            );
+            assert!(applied.is_empty(), "blank value ⇒ no override reported");
         }
     }
 

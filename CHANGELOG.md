@@ -28,6 +28,13 @@ the patch version for fixes.
   a legacy `caliban.toml` router config into `.caliban/settings.toml` `[router]`,
   relocating top-level `[provider.X]` blocks to `[router.provider.X]` and
   preserving existing settings keys.
+- **`CALIBAN_OUTPUT_STYLE` and `CALIBAN_DEFAULT_PERMISSION_MODE` now flow through
+  the settings env layer** (#701, first cluster of the env-as-a-layer epic):
+  their values are folded into the `output_style` / `permissions.default_mode`
+  settings keys at load (env > file), attributed in `caliban config print`
+  `_env_overrides`, with the ad-hoc `std::env::var` readers removed. `--permission-mode`
+  still wins over the env value. A new CI lint (`scripts/lint-env-registry.sh`)
+  bans ad-hoc reads of migrated Bucket-A `CALIBAN_*` vars.
 
 ## [0.14.0] - 2026-09-19
 

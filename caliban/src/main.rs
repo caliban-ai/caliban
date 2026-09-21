@@ -342,12 +342,12 @@ async fn main() -> Result<()> {
     );
 
     // Resolve the initial permission mode (ADR 0029). CLI flag wins over
-    // env; bypass mode requires --allow-dangerously-skip-permissions.
-    let env_perm = std::env::var("CALIBAN_DEFAULT_PERMISSION_MODE").ok();
+    // the settings default; CALIBAN_DEFAULT_PERMISSION_MODE has already been
+    // folded into that settings default by the env layer (#701). Bypass mode
+    // requires --allow-dangerously-skip-permissions.
     let initial_perm_mode = preflight!(
         caliban_agent_core::resolve_startup_mode(
             args.permission_mode.as_deref(),
-            env_perm.as_deref(),
             settings_snapshot.permissions.default_mode.as_deref(),
             args.allow_dangerously_skip_permissions,
         )
