@@ -9,32 +9,62 @@ the patch version for fixes.
 
 ## [Unreleased]
 
-### Changed
+## [0.15.0] - 2026-09-21
 
-- **Router config now resolves through the settings layer** (#699): the model
-  router reads its config from `[router]` in `.caliban/settings.toml` (with
-  optional per-provider `[router.provider.X]` blocks for `api_key_env` /
-  `base_url`), flowing through the normal settings precedence and provenance. An
-  explicit `--config <PATH>` / `CALIBAN_ROUTER_CONFIG` file is the
-  highest-precedence override. **Breaking:** the walk-up / `~/.config/caliban/caliban.toml`
-  **discovery** was removed — a bare repo-root `caliban.toml` is no longer
-  auto-loaded. Migrate one with the new `caliban config import-router` (a
-  startup warning points the way), or pass it via `--config`. (ADR 0060, amends
-  ADR 0038.)
+The config-layer release. Two threads land together: the **agent-loop policy
+surface** ([ADR 0058](docs/adr/0058-agent-loop-policy-surface.md) B-series) gives
+the loop model-adaptive turn/time/cost budgets, verification guidance, and named
+profiles; and a broad push makes **configuration actually flow through the
+settings layer** — an environment layer with provenance, router config unified
+onto settings (retiring `caliban.toml` discovery), and several keys that were
+parsed-but-ignored now honored, with the doc drift around all of it corrected.
 
 ### Added
 
-- **`caliban config import-router [--from <PATH>] [--dry-run]`** (#699): migrate
-  a legacy `caliban.toml` router config into `.caliban/settings.toml` `[router]`,
-  relocating top-level `[provider.X]` blocks to `[router.provider.X]` and
-  preserving existing settings keys.
-- **`CALIBAN_OUTPUT_STYLE` and `CALIBAN_DEFAULT_PERMISSION_MODE` now flow through
-  the settings env layer** (#701, first cluster of the env-as-a-layer epic):
-  their values are folded into the `output_style` / `permissions.default_mode`
-  settings keys at load (env > file), attributed in `caliban config print`
-  `_env_overrides`, with the ad-hoc `std::env::var` readers removed. `--permission-mode`
-  still wins over the env value. A new CI lint (`scripts/lint-env-registry.sh`)
-  bans ad-hoc reads of migrated Bucket-A `CALIBAN_*` vars.
+- **Agent-loop policy surface** ([ADR 0058](docs/adr/0058-agent-loop-policy-surface.md)):
+  a `[agent_loop]` config surface (#661, #687), a wall-clock time budget
+  (#662, #688), a cost budget via an injected cost model (#663, #691), a
+  `verification_guidance` knob (#665, #692), and adaptive local/cloud defaults
+  with named profiles (#666, #693).
+- **Environment settings layer with provenance** (#538, #702): `CALIBAN_*`
+  overrides fold into the loaded settings (env > file) through a single
+  aggregation point and are attributed in `caliban config print` via
+  `_env_overrides`, closing the gap where env silently overrode the file. The
+  first migrated cluster folds `CALIBAN_OUTPUT_STYLE` and
+  `CALIBAN_DEFAULT_PERMISSION_MODE` into their settings keys and removes the
+  ad-hoc `std::env::var` readers, with a CI lint (`scripts/lint-env-registry.sh`)
+  banning new ad-hoc reads of migrated variables (#705, #706).
+- **Settings-layer `[router]` section**, preferred over `caliban.toml` and typed
+  binary-side, with per-provider `[router.provider.X]` blocks for
+  `api_key_env` / `base_url` (#540, #700; completed by #699).
+- **`caliban config import-router [--from <PATH>] [--dry-run]`** to migrate a
+  legacy `caliban.toml` router config into `.caliban/settings.toml` `[router]`,
+  relocating top-level `[provider.X]` blocks to `[router.provider.X]` (#699, #704).
+
+### Changed
+
+- **Breaking:** router config now resolves through the settings layer with an
+  explicit `--config` / `CALIBAN_ROUTER_CONFIG` file as the highest-precedence
+  override; the walk-up / `~/.config/caliban/caliban.toml` **discovery** was
+  removed, so a bare repo-root `caliban.toml` is no longer auto-loaded (a startup
+  warning points at `caliban config import-router`) (#699, #704;
+  [ADR 0060](docs/adr/0060-router-config-through-settings.md), amends ADR 0038).
+- Honor the `output_style` setting and mark the remaining parsed-but-inert
+  settings keys as reserved, rather than implying they take effect (#620, #703).
+- Prune inert telemetry knobs from `[telemetry]` and correct the observability
+  documentation that oversold them (#499, #697).
+
+### Fixed
+
+- Honor `claude_md_excludes` and the env-backed settings that were parsed but
+  silently dropped on load (#694, #695).
+
+### Documentation
+
+- The `caliban-contract` `router_config` field carries a config-file **path**,
+  not inline JSON (#690, #696).
+- Stop promising live settings reload — settings are read once at startup; the
+  `SettingsWatcher` scaffolding is unwired (#617, #698).
 
 ## [0.14.0] - 2026-09-19
 
@@ -1006,7 +1036,8 @@ context detection, and a more robust streaming/permissions layer.
 
 Initial public release.
 
-[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/caliban-ai/caliban/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/caliban-ai/caliban/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/caliban-ai/caliban/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/caliban-ai/caliban/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/caliban-ai/caliban/compare/v0.11.0...v0.12.0
