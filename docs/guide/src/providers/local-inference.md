@@ -61,6 +61,19 @@ differ in how they treat it:
   mlx-lm must be keyed by the repo id.
 ```
 
+```admonish note title="A local endpoint changes the agent-loop profile"
+Pointing the OpenAI provider at a loopback, private-range, or bareword-LAN host
+also classifies the run as **local** for the adaptive
+[agent-loop profile](../reference/settings-schema.md#agent-loop-policy) — so the
+default profile becomes `local-guarded`, which turns verification guidance on at
+`verify-when-cheap` instead of leaving it `off`. That is deliberate: a weaker
+local model benefits from being nudged to check its own work. Set
+`[agent_loop] profile` or `[agent_loop] verification_guidance` explicitly to opt
+out. Note the detection only recognizes a local setup behind the
+OpenAI-compatible adapter via `OPENAI_BASE_URL`; a local model reached any other
+way should name a profile explicitly.
+```
+
 ## Engine setup
 
 Standing up llama.cpp (`llama serve`), `mlx_lm.server`, and `llama-swap` (a proxy

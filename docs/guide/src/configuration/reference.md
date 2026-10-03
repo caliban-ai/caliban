@@ -186,6 +186,43 @@ See [The OS Sandbox](../tools/sandbox.md).
 
 ---
 
+## Agent-Loop Policy
+
+Keys in the `[agent_loop]` table (ADR 0058). Every key is optional, and an unset
+key preserves existing behavior.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `agent_loop.max_turns` | `integer` | `50` | Hard cap on agent-loop iterations. `--max-turns` overrides it (CLI > settings > default). `0` stops immediately |
+| `agent_loop.no_edit_nudge_threshold` | `integer` | `10` | Consecutive zero-edit turns before the loop injects one neutral "make the edit" nudge. `0` disables |
+| `agent_loop.empty_turn_nudge_max` | `integer` | `2` | Consecutive degenerate (output-but-no-work) turns nudged before the run may end. `0` disables |
+| `agent_loop.max_turn_thinking_chars` | `integer` | `262144` | Per-turn cap on cumulative thinking characters; exceeding it fails the run. `0` disables |
+| `agent_loop.time_budget_secs` | `integer` | `0` (no deadline) | Wall-clock budget for the whole loop, in seconds. Checked between turns; a positive value stops the run gracefully |
+| `agent_loop.cost_budget_usd` | `number` | — (no cap) | USD budget for the whole loop. Checked between turns. Unset or `≤ 0` disables |
+| `agent_loop.verification_guidance` | `"off"` \| `"verify-when-cheap"` \| `"full"` | from the resolved profile | How strongly the system prompt encourages the model to verify its own work. Caliban never runs tests for the model — this only shapes the prompt |
+| `agent_loop.profile` | `"cost-optimized"` \| `"quality-first"` \| `"local-guarded"` | adaptive | Named policy profile. Unset, it is chosen from execution context: a local OpenAI-compatible endpoint selects `local-guarded`, cloud providers select `cost-optimized` |
+
+```toml
+# .caliban/settings.toml
+[agent_loop]
+max_turns = 80
+time_budget_secs = 1800
+profile = "quality-first"
+```
+
+```admonish warning title="`[agent_loop]` rejects unknown keys"
+Unlike unknown *top-level* keys, which are tolerated for forward-compatibility,
+an unrecognized key **inside** `[agent_loop]` is a parse error. Check spelling
+if a settings file suddenly fails to load.
+```
+
+Precedence for the verification posture is: an explicit `verification_guidance`
+> the named `profile` > the context-adaptive default. For the per-profile
+mapping and the full semantics of each key, see
+[Settings Schema](../reference/settings-schema.md#agent-loop-policy).
+
+---
+
 ## Context-Window Management
 
 | Key | Type | Default | Description |

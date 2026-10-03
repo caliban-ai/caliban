@@ -63,11 +63,11 @@ caliban --bare -p "count lines of code"
 | 2 | Schema validation failed (`--json-schema`) |
 | 64 | Bad flags / malformed stream-json input (`EX_USAGE`) |
 | 66 | `--resume <name>` not found, or empty stream-json stdin (`EX_NOINPUT`) |
-| 75 | `--max-turns` exceeded (`EX_TEMPFAIL`) |
+| 75 | A graceful bound was reached (`EX_TEMPFAIL`): `--max-turns` / `[agent_loop] max_turns`, or the `[agent_loop] time_budget_secs` wall-clock budget |
 | 78 | Config error — settings parse failure, stdin > 10 MB (`EX_CONFIG`) |
 | 124 | Cancelled (Ctrl-C / SIGTERM from the agent loop) |
 | 130 | Real SIGINT — second Ctrl-C reaching the harness |
-| 137 | `--max-budget-usd` exceeded |
+| 137 | A cost budget was reached: `--max-budget-usd` or `[agent_loop] cost_budget_usd` |
 
 CI scripts can distinguish budget exhaustion from genuine failures without parsing stdout: `$?` carries the signal.
 

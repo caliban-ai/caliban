@@ -100,6 +100,54 @@ See [Headless & Audit](./permissions/headless-and-audit.md) for the full headles
 
 ---
 
+## A run stopped early on a budget
+
+If a run ends sooner than you expected with one of these lines, it hit an
+[agent-loop budget](./reference/settings-schema.md#agent-loop-policy) — not an
+error:
+
+```text
+[caliban: max-turns (50) reached]
+[caliban: time budget (1800s) exceeded]
+[caliban: cost budget ($5.00) exceeded]
+```
+
+All three are **graceful stops**, checked between turns, so the run keeps
+whatever it already produced and never breaks off mid-tool. Headless exit codes
+are `75` for max-turns and the time budget, `137` for the cost budget, and the
+`result` frame carries `subtype` `max_turns`, `time_budget`, or
+`budget_exceeded`.
+
+**Fix:** raise or clear the relevant key in `[agent_loop]` — `max_turns`,
+`time_budget_secs`, `cost_budget_usd` (`0` or unset disables either budget).
+
+```admonish note title="A cost budget can't stop an unpriced model"
+The cost budget compares against an estimate from caliban's rate card. A model
+with no rate-card entry prices at `$0.00`, so the cap never trips — common for a
+local model behind the OpenAI-compatible adapter. Use `time_budget_secs` or
+`max_turns` to bound those runs instead.
+```
+
+---
+
+## The model keeps writing its own tests
+
+If runs started adding verification steps you did not ask for, the agent loop's
+`verification_guidance` is likely on. It is selected by the resolved
+[agent-loop profile](./reference/settings-schema.md#agent-loop-policy), and
+pointing the OpenAI provider at a local endpoint flips the adaptive default to
+`local-guarded`, which sets `verify-when-cheap`.
+
+**Fix:** set it explicitly — an explicit knob beats the profile:
+
+```toml
+# .caliban/settings.toml
+[agent_loop]
+verification_guidance = "off"
+```
+
+---
+
 ## `--debug` file logging
 
 Pass `--debug` (or set `CALIBAN_DEBUG=1`) to write a detailed event + render log to disk. This is useful when diagnosing silent failures, unexpected tool behaviour, or TUI rendering issues.
