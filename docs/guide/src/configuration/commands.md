@@ -4,19 +4,31 @@ Caliban ships two subcommand families for inspecting and managing settings: `cal
 
 ## `caliban config print`
 
-Prints the fully-merged effective settings as JSON, annotated with the scope each value came from. Honors `--settings` and `--setting-sources` so you can preview what a CI run or a different scope combination would see.
+Prints the fully-merged effective settings as JSON, annotated with the scope each value came from.
 
 ```bash
 caliban config print
-
-# Show only project + user scopes (skip local)
-caliban --setting-sources user,project config print
-
-# Preview with a CLI overlay applied
-caliban --settings '{"model": "claude-opus-4-7"}' config print
 ```
 
-The output shows the merged `Settings` object. Each top-level key lists the scope that contributed the winning value. This is the headless equivalent of the read-only `Effective` tab in the `/config` TUI overlay.
+The output is an envelope with four keys:
+
+| Key | Contents |
+|---|---|
+| `settings` | the merged `Settings` object |
+| `_sources` | each settings file that was loaded, with its scope, path, and format |
+| `_provenance` | per top-level key, the scope that contributed the winning value |
+| `_env_overrides` | each [environment-layer](./settings-layering.md#the-environment-layer) override that won over the file, naming both the settings key and the `CALIBAN_*` variable that set it |
+
+This is the headless equivalent of the read-only `Effective` tab in the `/config` TUI overlay.
+
+```admonish warning title="`config print` ignores `--settings` and `--setting-sources`"
+The command loads the scopes that a normal run would discover on disk, but it
+does **not** apply a `--settings` overlay or honor a `--setting-sources`
+filter — passing either alongside `config print` changes nothing in the output.
+To preview a CI overlay you currently have to start a session with it. (The
+subcommand's own `--help` text still claims otherwise; the behavior above is
+what the code does.)
+```
 
 ## `caliban config migrate`
 
@@ -41,6 +53,31 @@ After migration the per-feature files are no longer read (caliban checks for the
 ```admonish tip title="When to migrate"
 Run `caliban config migrate` once after upgrading to a version that shipped ADR 0026. It is safe to run multiple times — the command is idempotent.
 ```
+
+## `caliban config import-router`
+
+Migrates a legacy standalone `caliban.toml` router config into the project-scope
+`.caliban/settings.toml` as a `[router]` section, relocating top-level
+`[provider.X]` blocks to `[router.provider.X]` on the way. Router config is no
+longer auto-discovered, so this is how an existing `caliban.toml` keeps working
+([ADR 0060](../adr/0060-router-config-through-settings.md)).
+
+```bash
+# Preview the merge (nothing is written)
+caliban config import-router --dry-run
+
+# Migrate the nearest caliban.toml
+caliban config import-router
+
+# Migrate a specific file
+caliban config import-router --from ./config/router.toml
+```
+
+`--from` defaults to the nearest `caliban.toml` found by walking up from the
+current directory, and the command errors if there is none. Settings keys other
+than `[router]` are preserved, and the result is validated before being written.
+
+See [The Model Router](../providers/router.md) for the resulting section's shape.
 
 ## `caliban settings import`
 

@@ -57,6 +57,20 @@ Caliban still loads standalone per-feature TOML files during the current compati
 Per-feature TOML files are deprecated. Caliban logs a `WARN` when it falls back to them. After two minor releases the warning becomes an error. Run `caliban config migrate` to consolidate them into a single `settings.toml`.
 ```
 
+## Not on this list: router config and the environment layer
+
+Two things that affect the effective configuration do not come from the scope
+files above:
+
+- **Router config.** A standalone `caliban.toml` is no longer discovered by
+  walking up the tree. Router config lives in the `[router]` section of the
+  scope files above, or in a file named explicitly with `--config` /
+  `CALIBAN_ROUTER_CONFIG`. See [The Model Router](../providers/router.md) and
+  [Files & Directories](../reference/paths.md).
+- **The environment layer.** A fixed set of `CALIBAN_*` variables overrides the
+  merged result of all four on-disk scopes. See
+  [Settings Layering](./settings-layering.md#the-environment-layer).
+
 ## TOML vs JSON
 
 TOML is the canonical write format. JSON is accepted on read as a legacy/import path:

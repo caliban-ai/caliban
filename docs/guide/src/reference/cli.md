@@ -216,7 +216,7 @@ Inspect and migrate settings (ADR 0026).
 
 | Sub-subcommand | Description |
 |----------------|-------------|
-| `config print` | Print the merged effective settings as JSON, including the per-key scope chain. Honors `--settings` / `--setting-sources`. |
+| `config print` | Print the merged effective settings as JSON, with the per-key scope chain (`_provenance`), the loaded files (`_sources`), and the environment-layer overrides that won (`_env_overrides`). Does **not** apply `--settings` or `--setting-sources`. |
 | `config migrate [--dry-run]` | Round-trip legacy per-feature TOMLs (`permissions.toml`, `mcp.toml`, `hooks.toml`) into a single project-scope `settings.json` under `<workspace>/.caliban/`. |
 | `config import-router [--from <PATH>] [--dry-run]` | Migrate a legacy `caliban.toml` router config into `<workspace>/.caliban/settings.toml` `[router]` (relocating top-level `[provider.X]` blocks to `[router.provider.X]`). `--from` defaults to the nearest `caliban.toml`. Existing settings keys are preserved. |
 
