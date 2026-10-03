@@ -26,7 +26,7 @@ adapters exist as library crates but are not wired into the binary; see
 
 ```admonish tip title="Provider-agnostic by design"
 Because Caliban normalizes all providers to a single internal IR, you can switch models or
-providers with a single flag (`--provider`, `--model`) or a `caliban.toml` router config,
+providers with a single flag (`--provider`, `--model`) or a declarative `[router]` config,
 without changing your workflow.
 ```
 

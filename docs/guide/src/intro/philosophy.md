@@ -7,7 +7,7 @@ state is stored. The design is a direct response to those constraints.
 ## Operator control
 
 You decide what model handles each task, what context goes into the prompt, and which tools
-the model is allowed to call. Routing is declarative (`caliban.toml`); settings layer at
+the model is allowed to call. Routing is declarative (a `[router]` section in the settings layer); settings layer at
 four scopes (managed, user, project, local) with deep-merge semantics; permissions are
 first-class and auditable. Nothing is hardwired to a service the operator does not control.
 

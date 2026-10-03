@@ -36,10 +36,13 @@ export OPENAI_BASE_URL="http://192.168.1.240:9292/v1"
 caliban --provider openai --model <model-name> "…"
 ```
 
-**Router route (per-model / per-host), in `caliban.toml`:**
+**Router route (per-model / per-host), in `.caliban/settings.toml`:**
 
 ```toml
-[provider.openai]
+[router]
+default_purpose = "main_loop"
+
+[router.provider.openai]
 base_url = "http://192.168.1.240:9292/v1"
 
 [[router.route]]
@@ -47,6 +50,10 @@ purpose = "main_loop"
 provider = "openai"
 model = "<model-name>"
 ```
+
+A standalone `caliban.toml` is no longer discovered automatically — it nests
+provider blocks one level higher (`[provider.openai]`) and must be passed with
+`--config`. See [The Model Router](./router.md).
 
 ```admonish important title="The model name must be one the backend accepts"
 caliban sends the route's `model` field to the server **verbatim**. Engines
