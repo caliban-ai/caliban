@@ -81,6 +81,7 @@ conventions.
 | [0058](0058-agent-loop-policy-surface.md) | Agent-loop policy surface — model-adaptive turn/time/cost budgets, spiral + wrong-path containment, and verification guidance; defaults keyed on cloud-vs-local execution context with an explicit profile override (builds on 0009) | accepted |
 | [0059](0059-acp-over-network-and-permission-posture.md) | ACP over the network — the per-agent worker speaks ACP on its TLS+token listener (reusing the drive core + #527 gate) + per-session permission posture (supervised via #528 / authorized bypass profile); amends 0055 | accepted |
 | [0060](0060-router-config-through-settings.md) | Router config resolves through the settings layer (`[router]` + `[router.provider.X]`) with an explicit `--config` override; `caliban.toml` walk-up/home discovery retired; `caliban config import-router` migration (amends 0038) | accepted |
+| [0061](0061-config-types-leaf-crate.md) | Shared `caliban-config-types` leaf crate inverts `caliban-settings`' upward dependency on `caliban-agent-core`/`caliban-mcp-client` (epic #539, part of #546; builds on 0026) | accepted |
 
 ## Adding a new ADR
 

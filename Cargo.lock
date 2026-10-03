@@ -1133,6 +1133,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-config-types"
+version = "0.15.0"
+dependencies = [
+ "serde",
+ "url",
+]
+
+[[package]]
 name = "caliban-contract"
 version = "0.15.0"
 dependencies = [
@@ -1184,6 +1192,7 @@ dependencies = [
  "base64 0.22.1",
  "caliban-agent-core",
  "caliban-common",
+ "caliban-config-types",
  "caliban-provider",
  "chrono",
  "dirs",
