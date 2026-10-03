@@ -1,6 +1,6 @@
 # Crate Map
 
-The caliban workspace is organised into ~24 crates across four main layers. This page gives an operator-facing orientation — enough to know which crate to look at when reading a log line, error message, or ADR. For architecture rationale, see [Architecture & ADRs](./adrs.md).
+The caliban workspace is organised into ~25 crates across four main layers. This page gives an operator-facing orientation — enough to know which crate to look at when reading a log line, error message, or ADR. For architecture rationale, see [Architecture & ADRs](./adrs.md).
 
 ```admonish note
 This map is for the curious. You do not need to know these crates to use caliban — they are implementation details that surface only in debug logs, error messages, and ADR references.
@@ -15,6 +15,7 @@ Shared types, abstractions, and utilities that every other layer depends on.
 | Crate | Purpose |
 |---|---|
 | `caliban-common` | Provider-neutral message IR, shared error types, and cross-crate utilities |
+| `caliban-contract` | Caliban's launch and control-plane contract: the `CalibandLaunch` builder (flag/env name constants), provider credential-env helpers, and the supervisor wire types. Dependency-light (serde only, no daemon internals) so out-of-tree drivers — prospero, caliban-operator — can depend on it instead of hand-copying names (ADR 0059) |
 | `caliban-settings` | Unified settings hierarchy (managed > user > project > local); file loading, schema validation, `apiKeyHelper` pool; live-reload watcher module (scaffolded, not yet wired) |
 
 ## Layer 2 — Providers
@@ -57,8 +58,8 @@ Persistence, memory, observability, and the background fleet.
 | `caliban-output-styles` | Built-in and custom output style loading and activation (ADR 0031) |
 | `caliban-telemetry` | OpenTelemetry export, cost accounting, metric emission (ADR 0033) |
 | `caliban-worktrees` | Git worktree creation and lifecycle management for sub-agent isolation (ADR 0037) |
-| `caliban-supervisor` | Background agent fleet and `caliband` supervisor daemon, including the network session plane and graceful drain/resume of daemon agents (ADR 0037, 0042, 0051, 0057) |
-| `caliban-drive` | Transport-agnostic drive core (run / stream / status / input) behind `caliban mcp serve`, `acp serve`, and `http serve` (ADR 0055) |
+| `caliban-supervisor` | Background agent fleet and `caliband` supervisor daemon, including the network session plane and graceful drain/resume of daemon agents. Re-exports its wire types from `caliban-contract`, so there is a single definition (ADR 0037, 0042, 0051, 0057, 0059) |
+| `caliban-drive` | Transport-agnostic drive core (run / stream / status / input) behind `caliban mcp serve`, `acp serve`, and `http serve`, and behind a fleet worker's networked ACP endpoint (ADR 0055, 0059) |
 
 ## The binary
 

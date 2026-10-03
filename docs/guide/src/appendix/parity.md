@@ -22,7 +22,7 @@ Three-tier prompt prefix, CLAUDE.md ancestor walk + `@`-imports, auto-memory, `c
 
 ### D — Configuration / settings ✅
 
-Layered settings (managed > user > project > local), `/config` interactive editor, `apiKeyHelper` pool, and schema validation are shipped (ADR 0026 + 0045). Settings are read once at startup; live reload is scaffolded but not yet wired (#617). TOML is the primary write format; JSON is accepted on read.
+Layered settings (managed > user > project > local), `/config` interactive editor, `apiKeyHelper` pool, and schema validation are shipped (ADR 0026 + 0045), with a `CALIBAN_*` environment layer applied above all file scopes and attributed in `caliban config print` (#538). Settings are read once at startup; live reload is scaffolded but not yet wired (#617). TOML is the primary write format; JSON is accepted on read.
 
 ### E — TUI ergonomics 🟡
 
