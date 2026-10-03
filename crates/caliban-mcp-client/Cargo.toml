@@ -9,9 +9,10 @@ authors.workspace      = true
 rust-version.workspace = true
 
 [dependencies]
-caliban-common     = { workspace = true }
-caliban-agent-core = { workspace = true }
-caliban-provider   = { workspace = true }
+caliban-common       = { workspace = true }
+caliban-config-types = { workspace = true }
+caliban-agent-core   = { workspace = true }
+caliban-provider     = { workspace = true }
 async-trait        = { workspace = true }
 fs2                = { workspace = true }
 serde              = { workspace = true }

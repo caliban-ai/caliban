@@ -46,30 +46,10 @@ pub const REFRESH_MARGIN: Duration = Duration::from_mins(1);
 // Public data types
 // ---------------------------------------------------------------------------
 
-/// Manually-configured OAuth endpoints (per-server `[server.X.oauth]`
-/// block). Used in `oauth = "manual"` mode; `auto` discovers these from
-/// the server's well-known documents.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ManualOauthConfig {
-    /// Client identifier registered with the auth server.
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// Client secret (optional — PKCE flows are typically public).
-    #[serde(default)]
-    pub client_secret: Option<String>,
-    /// Authorization endpoint URL.
-    #[serde(default)]
-    pub auth_url: Option<String>,
-    /// Token endpoint URL.
-    #[serde(default)]
-    pub token_url: Option<String>,
-    /// Scopes to request (space-joined when sent).
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    /// Optional explicit `audience` claim (RFC 8707).
-    #[serde(default)]
-    pub audience: Option<String>,
-}
+// `ManualOauthConfig` is a plain config data type; it now lives in the
+// `caliban-config-types` leaf crate (epic #539 / ADR 0061). Re-exported here so
+// `caliban_mcp_client::oauth::ManualOauthConfig` keeps resolving unchanged.
+pub use caliban_config_types::mcp::ManualOauthConfig;
 
 /// Resolved OAuth endpoints, regardless of whether discovery or manual
 /// config produced them.
