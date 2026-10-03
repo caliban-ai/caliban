@@ -1,6 +1,6 @@
 # Project Status
 
-Caliban v0.12.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
+Caliban v0.15.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
 core agent loop, TUI, headless mode, sessions, permissions, tools, MCP, sub-agents, memory,
 sandbox, telemetry, and the driveable server surfaces are all shipped. A number of parity
 gaps with Claude Code remain. Per-release detail is in the [Changelog](../changelog.md).

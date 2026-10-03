@@ -22,7 +22,7 @@ between releases, where every commit on `main` otherwise reports the same
 semver:
 
 ```text
-caliban 0.12.0 (a97054d, 2026-09-13)
+caliban 0.15.0 (7403f1a, 2026-09-20)
 ```
 
 The parentheses carry the short commit SHA and that commit's date; an
