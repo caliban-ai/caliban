@@ -913,12 +913,12 @@ fn sub_agent_config(
         max_active_schemas,
         ..caliban_agent_core::AgentConfig::default()
     };
-    settings.apply_context_management(&mut cfg);
-    settings.apply_stream_watchdog(&mut cfg);
+    caliban_agent_core::apply_context_management(settings, &mut cfg);
+    caliban_agent_core::apply_stream_watchdog(settings, &mut cfg);
     // Guards apply to sub-agents too (ADR 0058, B1 · #661). max_turns is left at
     // the sub-agent's own tighter budget (20) — the `[agent_loop] max_turns`
     // run knob governs the top-level loop, not spawned sub-agents.
-    settings.apply_agent_loop(&mut cfg);
+    caliban_agent_core::apply_agent_loop(settings, &mut cfg);
     cfg
 }
 
@@ -1630,15 +1630,15 @@ pub(crate) fn build_agent(
     // agent (PR #60 introduced both the Settings fields and this helper but
     // the wiring step was missed). Spawned sub-agents get the same knobs via
     // `sub_agent_config` in `install_sub_agent` (#584).
-    settings_snapshot.apply_context_management(&mut cfg);
+    caliban_agent_core::apply_context_management(settings_snapshot, &mut cfg);
     // Stream-watchdog knobs from Settings — stream_idle_timeout_ms,
     // stream_prefill_timeout_ms (#263 / #254). Same wire-or-it-never-arrives
     // caveat as apply_context_management above.
-    settings_snapshot.apply_stream_watchdog(&mut cfg);
+    caliban_agent_core::apply_stream_watchdog(settings_snapshot, &mut cfg);
     // Agent-loop spiral-containment guards from Settings — no_edit_nudge,
     // empty_turn_nudge, thinking-spiral (ADR 0058, B1 · #661). max_turns is
     // already resolved above (CLI precedence), so this overlay leaves it alone.
-    settings_snapshot.apply_agent_loop(&mut cfg);
+    caliban_agent_core::apply_agent_loop(settings_snapshot, &mut cfg);
     // #292: wire a real history compactor. Without this the builder default
     // (`NoopCompactor`) leaves `/compact` and threshold-autocompact as no-ops.
     // The `SummarizingCompactor` needs the provider, so clone before the Arc

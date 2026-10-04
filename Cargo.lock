@@ -1072,6 +1072,7 @@ dependencies = [
  "caliban-common",
  "caliban-config-types",
  "caliban-provider",
+ "caliban-settings",
  "chrono",
  "directories",
  "dirs",

@@ -279,7 +279,7 @@ action = "allow"
         let rm = serde_json::json!({"command": "rm -rf /"});
         let allow_pat = &rules
             .iter()
-            .find(|r| r.action == caliban_agent_core::Action::Allow && r.tool.starts_with("Bash"))
+            .find(|r| r.action == caliban_config_types::Action::Allow && r.tool.starts_with("Bash"))
             .expect("the imported allow rule keeps its verbatim pattern")
             .tool;
         assert_eq!(
@@ -335,12 +335,12 @@ action = "allow"
         };
         let deny = &rules
             .iter()
-            .find(|r| r.action == caliban_agent_core::Action::Deny)
+            .find(|r| r.action == caliban_config_types::Action::Deny)
             .expect("deny rule survives import")
             .tool;
         let allow = &rules
             .iter()
-            .find(|r| r.action == caliban_agent_core::Action::Allow)
+            .find(|r| r.action == caliban_config_types::Action::Allow)
             .expect("allow rule survives import")
             .tool;
 
