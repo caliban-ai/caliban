@@ -31,8 +31,3 @@ chrono             = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# Tests only: `caliban-agent-core` owns `AgentConfig`, the `apply_*` overlay
-# (ADR 0061 / #711), and the runtime `ToolCtx`/`permissions_matcher` these tests
-# exercise. The settings *library* no longer depends on it — the layering edge is
-# inverted (`caliban-agent-core` depends on `caliban-settings`, not the reverse).
-caliban-agent-core = { workspace = true }
