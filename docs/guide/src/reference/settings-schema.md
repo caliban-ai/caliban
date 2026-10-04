@@ -90,7 +90,7 @@ environment (#405). This is on by default and is not (yet) configured through
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `hooks` | `{ string → … }` | `{}` | Raw hook event → handler list map (passed to `caliban_agent_core::HooksConfig`). |
+| `hooks` | `{ string → … }` | `{}` | Raw hook event → handler list map (parsed into `caliban_config_types::HooksConfig`, re-exported as `caliban_agent_core::HooksConfig`). |
 | `disable_all_hooks` | `boolean` | `false` | Kill-switch: disable every external hook handler. |
 | `allow_managed_hooks_only` | `boolean` | `false` | When `true`, only managed-scope hooks fire. |
 | `allowed_http_hook_urls` | `string[]` | `[]` | HTTP-hook URL allowlist (glob patterns). |

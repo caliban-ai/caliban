@@ -568,19 +568,19 @@ limitation and recommend an engine switch instead.
 
 ```
 caliban/             # the user-facing binary
-crates/              # 25 library crates, grouped below
+crates/              # 26 library crates, grouped below
 docs/                # design specs, parity matrix, capability inventory
-docs/adr/            # architecture decision records (0000–0060)
+docs/adr/            # architecture decision records (0000–0061)
 docs/superpowers/    # active design specs + implementation plans
 docs/examples/       # sample settings / permission / hook fragments
 .github/workflows/   # CI
 ```
 
-The 25 library crates, grouped by purpose:
+The 26 library crates, grouped by purpose:
 
 | Group | Crates |
 |---|---|
-| **Foundation** | `caliban-common` (fs/paths/glob/http/expand helpers), `caliban-contract` (caliband launch builder + supervisor wire types; serde-only, for out-of-tree drivers) |
+| **Foundation** | `caliban-common` (fs/paths/glob/http/expand helpers), `caliban-config-types` (shared MCP/permission/hook config shapes; the leaf both settings and its consumers depend on), `caliban-contract` (caliband launch builder + supervisor wire types; serde-only, for out-of-tree drivers) |
 | **Providers** | `caliban-provider` (trait + IR), `caliban-provider-anthropic`, `caliban-provider-openai`, `caliban-provider-google`, `caliban-provider-bedrock`, `caliban-provider-vertex` |
 | **Agent core** | `caliban-agent-core` (loop, hooks, compaction, cache markers), `caliban-tools-builtin` |
 | **Sessions & state** | `caliban-sessions`, `caliban-checkpoint`, `caliban-memory`, `caliban-output-styles` |
@@ -651,7 +651,7 @@ specific enough to act on) live in [caliban-ai Kanban board](https://github.com/
 
 ## Architecture decisions
 
-Browse [`docs/adr/`](docs/adr/) for all 61 ADRs (0000–0060). Highlights by layer:
+Browse [`docs/adr/`](docs/adr/) for all 62 ADRs (0000–0061). Highlights by layer:
 
 - **Foundation (0001–0008):** tokio runtime, error model
   (thiserror libs / anyhow binary), AGPL-3.0, naming, workspace

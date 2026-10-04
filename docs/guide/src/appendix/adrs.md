@@ -44,6 +44,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | [0010](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0010-workspace-root.md) | WorkspaceRoot path resolution + opt-in restricted mode | accepted (restricted-mode default amended by 0048) |
 | [0016](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0016-parallel-tool-dispatch.md) | Parallel tool dispatch (semaphore-bounded; supersedes 0009 sequential clause) | accepted |
 | [0021](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0021-sub-agent-primitive.md) | Sub-agent primitive (`AgentTool`; synchronous in-process; allowlist-filtered registry) | accepted |
+| [0058](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0058-agent-loop-policy-surface.md) | Agent-loop policy surface — model-adaptive turn/time/cost budgets, containment, and verification guidance | accepted |
 
 ### TUI & sessions
 
@@ -84,6 +85,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | [0026](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0026-settings-layering.md) | Unified settings hierarchy (managed > user > project > local) | accepted |
 | [0043](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0043-arc-swap-shared-state.md) | `arc-swap` as the read-mostly shared-state primitive | accepted |
 | [0050](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0050-xdg-first-path-locations.md) | XDG-first path locations on all platforms (drops the macOS-native `~/Library` default; amends 0017) | accepted |
+| [0061](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0061-config-types-leaf-crate.md) | Shared `caliban-config-types` leaf crate inverts settings' upward dependency on its consumers (builds on 0026) | accepted |
 
 ### Extensibility: hooks, skills, plugins, output styles
 
@@ -112,6 +114,8 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | [0034](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0034-bedrock-and-vertex-providers.md) | Bedrock + Vertex providers | accepted |
 | [0038](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0038-model-router-v2.md) | Model router v2 (fallback / hedging / circuit breakers / capability filtering) | accepted |
 | [0039](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0039-image-and-vision-input.md) | Image / vision input | accepted |
+| [0056](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0056-deprecate-ollama-provider.md) | Deprecate the bespoke Ollama provider — reach local models through the OpenAI-compatible surface | accepted (both phases shipped) |
+| [0060](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0060-router-config-through-settings.md) | Router config resolves through the settings layer; `caliban.toml` discovery retired (amends 0038) | accepted |
 
 ### Headless / CI & observability
 
@@ -121,6 +125,7 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | [0033](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0033-opentelemetry-and-cost.md) | OpenTelemetry export + cost accounting | accepted (GenAI semconv scope refined by 0053) |
 | [0049](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0049-result-frame-cc-enrichment.md) | Result-frame enrichment toward the Claude Code contract (amends 0025) | accepted |
 | [0053](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0053-otel-genai-semconv-only.md) | OpenTelemetry GenAI semantic conventions — emit `gen_ai.*` only, no vendor-specific or cost attributes (builds on 0033) | accepted |
+| [0055](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0055-driveable-server-surface.md) | Driveable server surface — MCP-server + ACP + headless HTTP serve over one drive core | accepted (ACP-over-network transport + permission posture added by 0059) |
 
 ### Sub-agents & background fleet
 
@@ -131,3 +136,5 @@ You do not need to read ADRs to use caliban. They exist for contributors and ope
 | [0047](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0047-interactive-background-subagents.md) | Interactive background sub-agents (idle / await-input; amends 0037) | accepted |
 | [0051](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0051-caliband-network-transport.md) | `caliband` network transport — NDJSON over TCP+TLS with a bearer token (Unix socket retained for local; gRPC deferred) | accepted |
 | [0052](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0052-workspace-scoped-caliband.md) | Workspace-scoped `caliband` — multi-source workspace identity + wired per-source worktree isolation (amends 0037) | accepted |
+| [0057](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0057-agent-drain-checkpoint-resume.md) | Graceful drain, checkpoint, and resume for daemon-managed agents | accepted |
+| [0059](https://github.com/caliban-ai/caliban/blob/main/docs/adr/0059-acp-over-network-and-permission-posture.md) | ACP over the network + per-session permission posture (amends 0055) | accepted |
