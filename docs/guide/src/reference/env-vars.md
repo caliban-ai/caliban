@@ -6,7 +6,9 @@ Caliban reads environment variables in two groups: `CALIBAN_*` variables that co
 Variables that mirror a boolean CLI flag (`CALIBAN_NO_MCP`, `CALIBAN_NO_HOOKS`,
 `CALIBAN_AUTO_ALLOW`, and similar) use the flag parser: `1/true/yes/on` enable,
 `0/false/no/off` disable (case-insensitive), and any other value is a startup error.
-Where a row below says "any non-empty value", read it as "a truthy value".
+Rows below marked **"truthy value"** use this parser — note that `0`/`false`/`no`/`off`
+*disable* the flag rather than counting as "set", so setting one of these to `0`
+does **not** turn the behavior on.
 
 The memory variables (`CALIBAN_DISABLE_AUTO_MEMORY`, `CALIBAN_APPROVE_IMPORTS`,
 `CALIBAN_DISABLE_CLAUDE_MD_WALK`, `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD`)
@@ -57,9 +59,9 @@ fold into the merged settings as a layer above every file scope *and* above
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CALIBAN_DEFAULT_PERMISSION_MODE` | `default` | Initial permission mode. Values: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. Folded into the `permissions.default_mode` setting by the env layer (env > file) and attributed in `caliban config print` `_env_overrides`; CLI `--permission-mode` still wins when set (#701). |
-| `CALIBAN_NO_PERMISSIONS` | — | Any non-empty value disables permission gating (all tool calls allowed). Conflicts with `--allow`, `--deny`, `--ask`, `--auto-allow`. |
-| `CALIBAN_AUTO_ALLOW` | — | **Dangerous.** Any non-empty value allows Ask-rule tools without prompting in non-interactive mode. |
-| `CALIBAN_DISABLE_AUTO_MODE` | — | Any non-empty value disables the auto-mode classifier; all calls fall through to Ask. |
+| `CALIBAN_NO_PERMISSIONS` | — | Truthy value disables permission gating (all tool calls allowed). Conflicts with `--allow`, `--deny`, `--ask`, `--auto-allow`. |
+| `CALIBAN_AUTO_ALLOW` | — | **Dangerous.** Truthy value allows Ask-rule tools without prompting in non-interactive mode. |
+| `CALIBAN_DISABLE_AUTO_MODE` | — | Truthy value disables the auto-mode classifier; all calls fall through to Ask. |
 
 ---
 
@@ -67,9 +69,9 @@ fold into the merged settings as a layer above every file scope *and* above
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_NO_PROMPT_CACHE` | — | Any non-empty value disables Anthropic-style prompt caching. |
-| `CALIBAN_NO_PARALLEL_TOOLS` | — | Any non-empty value forces serial tool execution. |
-| `CALIBAN_PARALLEL_TOOL_LIMIT` | CPU cores − 1 (min 1) | Maximum concurrent tool invocations per turn. |
+| `CALIBAN_NO_PROMPT_CACHE` | — | Truthy value disables Anthropic-style prompt caching. |
+| `CALIBAN_NO_PARALLEL_TOOLS` | — | Truthy value forces serial tool execution. |
+| `CALIBAN_PARALLEL_TOOL_LIMIT` | CPU cores − 1 (min 1) | Maximum concurrent tool invocations per turn. Must be **≥ 1**; `0` is rejected at startup (the value is parsed as a non-zero integer). |
 
 ---
 
@@ -77,14 +79,14 @@ fold into the merged settings as a layer above every file scope *and* above
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_NO_HOOKS` | — | Any non-empty value bypasses every external hook handler. In-process hooks still run. |
-| `CALIBAN_NO_SKILLS` | — | Any non-empty value disables skill discovery at startup. |
-| `CALIBAN_NO_MCP` | — | Any non-empty value disables MCP server discovery. |
+| `CALIBAN_NO_HOOKS` | — | Truthy value bypasses every external hook handler. In-process hooks still run. |
+| `CALIBAN_NO_SKILLS` | — | Truthy value disables skill discovery at startup. |
+| `CALIBAN_NO_MCP` | — | Truthy value disables MCP server discovery. |
 | `CALIBAN_MCP_OAUTH_PORT` | `0` (ephemeral) | Loopback port for the MCP OAuth callback server (ADR 0023 Phase C). |
 | `CALIBAN_MCP_TIMEOUT` | `5` | Timeout in **seconds** for MCP server startup/connection. Falls back to `MCP_TIMEOUT` (Claude Code compat) when unset. An unparseable value is ignored and the default stands. |
 | `CALIBAN_MCP_TOOL_TIMEOUT` | `60` | Per-tool-call timeout in **seconds** for MCP tools. Falls back to `MCP_TOOL_TIMEOUT` when unset. An unparseable value is ignored. |
-| `CALIBAN_NO_PLUGINS` | — | Any non-empty value disables plugin discovery. |
-| `CALIBAN_ENABLED_PLUGINS` | — | Comma-separated list of plugin names to enable (all others disabled). |
+| `CALIBAN_NO_PLUGINS` | — | Truthy value disables plugin discovery. |
+| `CALIBAN_ENABLED_PLUGINS` | — | Comma-separated list of plugin names to enable (all others disabled). **Empty is not the same as unset:** when *unset*, every discovered plugin is enabled; when set to an *empty* value, **no** plugins are enabled. |
 | `CALIBAN_PLUGIN_ROOT` | — | **Not read from the environment.** Caliban *sets* this name (and the `CLAUDE_PLUGIN_ROOT` alias) as a substitution token, so `${CALIBAN_PLUGIN_ROOT}` inside a plugin manifest expands to that plugin's absolute install path. Setting it in your shell has no effect. |
 
 ---
@@ -93,7 +95,7 @@ fold into the merged settings as a layer above every file scope *and* above
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALIBAN_NO_SUB_AGENT` | — | Any non-empty value disables the built-in `AgentTool`. |
+| `CALIBAN_NO_SUB_AGENT` | — | Truthy value disables the built-in `AgentTool`. |
 | `CALIBAN_DAEMON_RUNTIME_DIR` | Platform default | Override the runtime socket directory for the supervisor daemon. |
 | `CALIBAN_DAEMON_LISTEN` | — | TCP listen address (e.g. `0.0.0.0:7000`) that switches the `caliband` supervisor into networked control-plane mode; the `caliban agents` CLI dials the same address to reach a remote daemon. Unset means the local Unix-socket path. TLS/token come from the `CALIBAN_DAEMON_TLS_*` / `CALIBAN_DAEMON_TOKEN` vars. |
 | `CALIBAN_KEEP_WORKTREES` | — | Debug escape hatch: keep sub-agent worktrees instead of removing them when the worker exits. |
