@@ -1143,6 +1143,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml",
+ "tracing",
  "url",
 ]
 
@@ -1465,7 +1466,7 @@ dependencies = [
  "arc-swap",
  "caliban-agent-core",
  "caliban-common",
- "caliban-mcp-client",
+ "caliban-config-types",
  "chrono",
  "dirs",
  "fs2",

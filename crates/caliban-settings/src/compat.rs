@@ -5,7 +5,7 @@
 //! transparently. This module bridges between the new typed `Settings`
 //! and the existing ad-hoc loaders in:
 //!
-//! - `caliban_mcp_client::load_config` (`mcp.toml`)
+//! - `caliban_config_types::mcp::load_config` (`mcp.toml`)
 //! - `caliban_agent_core::permissions::load_rules` (`permissions.toml`)
 //! - `caliban_agent_core::HooksConfig::load` (`hooks.toml`)
 //!
@@ -27,28 +27,28 @@ use crate::Settings;
 ///
 /// Returns `true` when legacy data was layered in. The full transport
 /// surface (HTTP/SSE/OAuth/per-server permissions) is preserved on the
-/// round-trip — see `caliban_mcp_client::config::ServerConfig` for the
+/// round-trip — see `caliban_config_types::mcp::ServerConfig` for the
 /// canonical shape.
 pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> bool {
     if !settings.mcp_servers.is_empty() {
         return false;
     }
-    match caliban_mcp_client::load_config(workspace_root) {
+    match caliban_config_types::mcp::load_config(workspace_root) {
         Ok(cfg) if !cfg.servers.is_empty() => {
             for (name, sc) in cfg.servers {
                 let r#type = match sc.transport {
-                    caliban_mcp_client::TransportKind::Stdio => None,
+                    caliban_config_types::mcp::TransportKind::Stdio => None,
                     other => Some(other.as_str().to_string()),
                 };
                 let oauth = match sc.oauth {
-                    caliban_mcp_client::OauthMode::Off => None,
+                    caliban_config_types::mcp::OauthMode::Off => None,
                     other => Some(other.as_str().to_string()),
                 };
                 // Preserve any legacy `[server.X.oauth_config]` block so manual
                 // oauth survives the mcp.toml → settings fold (only emit it when
                 // non-default to avoid writing an empty table).
                 let oauth_config = (sc.manual_oauth
-                    != caliban_mcp_client::ManualOauthConfig::default())
+                    != caliban_config_types::mcp::ManualOauthConfig::default())
                 .then_some(sc.manual_oauth);
                 settings.mcp_servers.insert(
                     name,
@@ -365,7 +365,7 @@ deny = ["delete_*"]
         let server_cfg = &cfg.servers["silverbullet"];
         assert_eq!(
             server_cfg.transport,
-            caliban_mcp_client::TransportKind::Http,
+            caliban_config_types::mcp::TransportKind::Http,
         );
         assert_eq!(
             server_cfg.url.as_ref().map(ToString::to_string),

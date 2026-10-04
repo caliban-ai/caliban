@@ -1,34 +1,15 @@
 //! Errors emitted by the MCP client crate.
+//!
+//! Config-load errors (`mcp.toml` parse/validation) now live in
+//! `caliban_config_types::mcp::ConfigError` (epic #539 / ADR 0061); this enum
+//! covers the MCP *runtime* (spawn, handshake, rpc, transport, OAuth, keyring).
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// Errors emitted by the MCP client crate.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum McpError {
-    /// IO failure reading a config file (other than `NotFound`, which is
-    /// silently treated as "no config").
-    #[error("mcp: io error reading {path}: {source}")]
-    Io {
-        /// Path that failed to read.
-        path: PathBuf,
-        /// Underlying error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// TOML parse error.
-    #[error("mcp: config parse error in {path}: {source}")]
-    ConfigParse {
-        /// Path that failed to parse.
-        path: PathBuf,
-        /// Underlying error.
-        #[source]
-        source: toml::de::Error,
-    },
-    /// Server key doesn't match `[a-z0-9_-]{1,32}`.
-    #[error("mcp: invalid server name '{0}' (must match [a-z0-9_-]{{1,32}})")]
-    InvalidServerName(String),
     /// `${VAR}` substitution found no value in the process env.
     #[error("mcp: env var '{var}' referenced by server '{server}' is not set")]
     MissingEnv {
@@ -121,26 +102,6 @@ pub enum McpError {
         /// Stringified rmcp error.
         message: String,
     },
-    /// `${VAR}` substitution requires a variable that isn't set.
-    #[error("mcp: server '{server}' field '{field}' references unset env var '{var}'")]
-    MissingEnvField {
-        /// Server name.
-        server: String,
-        /// Field whose value referenced the missing variable.
-        field: String,
-        /// Variable name.
-        var: String,
-    },
-    /// `url` was missing, not an absolute http/https URL, or unparseable.
-    #[error("mcp: server '{server}' invalid url '{url}': {reason}")]
-    InvalidUrl {
-        /// Server name.
-        server: String,
-        /// Raw URL value as provided.
-        url: String,
-        /// Human-readable reason (parse error / non-absolute / wrong scheme / etc.).
-        reason: String,
-    },
     /// HTTP/SSE transport requires `url`.
     #[error("mcp: server '{server}' transport='{transport}' requires a 'url' field; none provided")]
     MissingUrl {
@@ -148,14 +109,6 @@ pub enum McpError {
         server: String,
         /// Transport kind that was selected (`"http"` or `"sse"`).
         transport: &'static str,
-    },
-    /// stdio transport doesn't accept `url`/`headers`/`oauth` fields.
-    #[error("mcp: server '{server}' field '{field}' is not valid for transport='stdio'")]
-    StdioFieldMismatch {
-        /// Server name.
-        server: String,
-        /// Field that was misplaced.
-        field: &'static str,
     },
     /// Legacy Phase B variant — superseded by `OauthDiscovery`/`OauthFlow`
     /// in Phase C. Retained for binary compatibility; never constructed.
@@ -169,26 +122,6 @@ pub enum McpError {
         server: String,
         /// Mode the operator requested.
         mode: String,
-    },
-    /// `oauth = "<garbage>"` — not one of `"off"|"auto"|"manual"`.
-    #[error(
-        "mcp: server '{server}' oauth='{value}' is invalid; expected 'off', 'auto', or 'manual'"
-    )]
-    InvalidOauthMode {
-        /// Server name.
-        server: String,
-        /// Value the operator wrote.
-        value: String,
-    },
-    /// `transport = "<garbage>"` — not one of the recognized variants.
-    #[error(
-        "mcp: server '{server}' transport='{value}' is invalid; expected 'stdio', 'http', or 'sse'"
-    )]
-    InvalidTransport {
-        /// Server name.
-        server: String,
-        /// Value the operator wrote.
-        value: String,
     },
     /// A static HTTP header name or value isn't legal HTTP.
     #[error("mcp: server '{server}' header '{name}' is invalid: {reason}")]

@@ -97,7 +97,7 @@ headers = { X-Workspace = "demo" }
     assert!(outcome.settings.mcp_servers.contains_key("silverbullet"));
     let cfg = outcome.settings.mcp_config();
     let server = cfg.servers.get("silverbullet").unwrap();
-    assert_eq!(server.transport, caliban_mcp_client::TransportKind::Http);
+    assert_eq!(server.transport, caliban_config_types::mcp::TransportKind::Http);
     assert_eq!(
         server.url.as_ref().map(ToString::to_string),
         Some("https://mcp.silverbullet.hexadecimate.net/mcp".to_string()),
