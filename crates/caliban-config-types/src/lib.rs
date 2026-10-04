@@ -10,11 +10,19 @@
 //!
 //! See ADR 0061.
 //!
-//! This first slice (#708) carries the MCP config types; permission and hook
-//! types follow in #709.
+//! This crate carries the MCP config types (#708) and the permission, permission-mode,
+//! and hook config types (#709).
 
+pub mod hooks_config;
 pub mod mcp;
+pub mod permission_mode;
+pub mod permissions;
 
+pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
 pub use mcp::{
     ManualOauthConfig, McpConfig, OauthMode, ServerConfig, ServerPermissions, TransportKind,
 };
+pub use permission_mode::PermissionMode;
+pub use permissions::{Action, PermissionsLoadError, Rule, default_rules};
+#[allow(deprecated)]
+pub use permissions::{load_rules, load_rules_file};
