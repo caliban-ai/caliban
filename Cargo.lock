@@ -1070,6 +1070,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "caliban-common",
+ "caliban-config-types",
  "caliban-provider",
  "chrono",
  "directories",
@@ -1136,7 +1137,12 @@ dependencies = [
 name = "caliban-config-types"
 version = "0.15.0"
 dependencies = [
+ "caliban-common",
+ "chrono",
  "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
  "url",
 ]
 
