@@ -23,7 +23,7 @@ use crate::StatuslineConfig;
 // ---------------------------------------------------------------------------
 
 /// A single permissions rule as carried in TOML/JSON. Mirrors the
-/// `caliban_agent_core::Rule` shape but lives here because Settings
+/// `caliban_config_types::Rule` shape but lives here because Settings
 /// owns the wire serde shape (and to avoid a cyclic dep).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -87,7 +87,7 @@ pub struct Permissions {
     pub rules: Vec<RuleSpec>,
     /// When true, refuse --no-permissions / bypass mode at startup.
     pub enforce: Option<bool>,
-    /// Initial [`caliban_agent_core::PermissionMode`] at session start.
+    /// Initial [`caliban_config_types::PermissionMode`] at session start.
     pub default_mode: Option<String>,
     /// Append-only decision log toggle (default true).
     pub audit_log: Option<bool>,
@@ -312,7 +312,8 @@ impl AgentLoopProfile {
 }
 
 /// Every field is `Option` so an unset key leaves the corresponding
-/// [`caliban_agent_core::AgentConfig`] default untouched (behavior-preserving).
+/// `caliban_agent_core::AgentConfig` default untouched (behavior-preserving).
+/// (The overlay lives in `caliban_agent_core::settings_overlay`; see ADR 0061.)
 // No `Eq`: `cost_budget_usd` is `f64` (only `PartialEq`).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -320,7 +321,7 @@ pub struct AgentLoopConfig {
     /// Hard cap on agent-loop iterations. `None` keeps the built-in default
     /// (50). The `--max-turns` CLI flag takes precedence over this
     /// (CLI > settings > default); the precedence is resolved by the caller
-    /// (`startup::compose`), not by [`Settings::apply_agent_loop`], because the
+    /// (`startup::compose`), not by the `caliban_agent_core::settings_overlay::apply_agent_loop` overlay, because the
     /// CLI flag must win — the same reason `max_tokens_recovery` is resolved
     /// inline rather than via an `apply_*` overlay.
     pub max_turns: Option<u32>,
@@ -622,7 +623,7 @@ pub struct Settings {
 
     // ----- hooks ------------------------------------------------------------
     /// Raw hook event → handler list (passed verbatim to
-    /// `caliban_agent_core::HooksConfig`).
+    /// `caliban_config_types::HooksConfig`).
     pub hooks: BTreeMap<String, serde_json::Value>,
     /// Kill-switch — disable every external hook handler.
     pub disable_all_hooks: Option<bool>,
@@ -858,8 +859,8 @@ impl Settings {
     /// legacy three-bucket form: `deny` > `ask` > `allow` (matches the
     /// documented evaluation order in ADR 0020).
     #[must_use]
-    pub fn permission_rules(&self) -> Vec<caliban_agent_core::Rule> {
-        use caliban_agent_core::{Action, Rule};
+    pub fn permission_rules(&self) -> Vec<caliban_config_types::Rule> {
+        use caliban_config_types::{Action, Rule};
         let parse_action = |s: &str| match s.to_ascii_lowercase().as_str() {
             "allow" => Action::Allow,
             "ask" => Action::Ask,
@@ -921,7 +922,7 @@ impl Settings {
     }
 
     /// Project the hook-related fields into a
-    /// [`caliban_agent_core::HooksConfig`].
+    /// [`caliban_config_types::HooksConfig`].
     ///
     /// The scalar / array fields (`disable_all_hooks`,
     /// `allow_managed_hooks_only`, `allowed_http_hook_urls`,
@@ -938,8 +939,8 @@ impl Settings {
     /// The total handler count is preserved via a sentinel in
     /// [`Self::legacy_hook_handler_count`].
     #[must_use]
-    pub fn hook_config(&self) -> caliban_agent_core::HooksConfig {
-        caliban_agent_core::HooksConfig {
+    pub fn hook_config(&self) -> caliban_config_types::HooksConfig {
+        caliban_config_types::HooksConfig {
             disable_all_hooks: self.disable_all_hooks.unwrap_or(false),
             allow_managed_hooks_only: self.allow_managed_hooks_only.unwrap_or(false),
             allowed_http_hook_urls: self.allowed_http_hook_urls.clone(),
@@ -951,25 +952,6 @@ impl Settings {
         }
     }
 
-    /// Apply context-window management knobs onto a fresh
-    /// [`caliban_agent_core::AgentConfig`]. Only fields explicitly set in
-    /// `settings.json` override the defaults; everything else is left at
-    /// the upstream default (see `AgentConfig::default()`).
-    pub fn apply_context_management(&self, cfg: &mut caliban_agent_core::AgentConfig) {
-        if let Some(v) = self.auto_compact_threshold {
-            cfg.auto_compact_threshold = Some(v);
-        }
-        if let Some(v) = self.micro_compact_enabled {
-            cfg.micro_compact_enabled = v;
-        }
-        if let Some(v) = self.tool_result_cap_chars {
-            cfg.tool_result_cap_chars = v;
-        }
-        if let Some(v) = self.min_cache_block_tokens {
-            cfg.min_cache_block_tokens = v;
-        }
-    }
-
     /// Resolve the configured compaction strategy name, defaulting to
     /// `"summarize"` when unset. The strategy object itself is constructed at
     /// agent-build time (it needs the provider); this only resolves the name.
@@ -978,61 +960,10 @@ impl Settings {
         self.compact_strategy.as_deref().unwrap_or("summarize")
     }
 
-    /// Apply stream-watchdog knobs onto a fresh
-    /// [`caliban_agent_core::AgentConfig`]. Only fields explicitly set in
-    /// settings override the defaults. See #263 / #254.
-    pub fn apply_stream_watchdog(&self, cfg: &mut caliban_agent_core::AgentConfig) {
-        if let Some(v) = self.stream_idle_timeout_ms {
-            cfg.stream_idle_timeout_ms = v;
-        }
-        if let Some(v) = self.stream_prefill_timeout_ms {
-            cfg.stream_prefill_timeout_ms = v;
-        }
-    }
-
-    /// Apply the `[agent_loop]` spiral-containment guards onto a fresh
-    /// [`caliban_agent_core::AgentConfig`] (ADR 0058, B1 · #661). Only fields
-    /// explicitly set in settings override the defaults; everything else is
-    /// left at the upstream default (see `AgentConfig::default()`), so an
-    /// absent group is behavior-preserving.
-    ///
-    /// **`max_turns` is intentionally not applied here.** It carries a CLI flag
-    /// (`--max-turns`) that must win over settings, so the caller
-    /// (`startup::compose`) resolves it with the CLI > settings > default idiom
-    /// via [`Self::agent_loop_max_turns`]. Folding it into this overlay would let
-    /// a settings value silently override an explicit CLI flag.
-    pub fn apply_agent_loop(&self, cfg: &mut caliban_agent_core::AgentConfig) {
-        let Some(al) = self.agent_loop.as_ref() else {
-            return;
-        };
-        if let Some(v) = al.no_edit_nudge_threshold {
-            cfg.no_edit_nudge_threshold = v;
-        }
-        if let Some(v) = al.empty_turn_nudge_max {
-            cfg.empty_turn_nudge_max = v;
-        }
-        if let Some(v) = al.max_turn_thinking_chars {
-            cfg.max_turn_thinking_chars = v;
-        }
-        // B2 (#662): a positive value sets the wall-clock deadline; `0` means
-        // "no deadline" (disabled) so a config value cannot accidentally set a
-        // zero-second budget that terminates before the first turn.
-        if let Some(secs) = al.time_budget_secs {
-            cfg.time_budget = (secs > 0).then(|| std::time::Duration::from_secs(secs));
-        }
-        // B3 (#663): a positive value sets the cost cap; `<= 0` disables it so a
-        // config value cannot impose a zero-dollar budget that stops every run.
-        // Enforcement additionally requires an injected cost model (the binary
-        // supplies one); the cap is inert without pricing.
-        if let Some(usd) = al.cost_budget_usd {
-            cfg.cost_budget_usd = (usd > 0.0).then_some(usd);
-        }
-    }
-
     /// The `[agent_loop] max_turns` value, if set. The caller layers CLI over
     /// this over the built-in default (CLI > settings > default); see
-    /// [`Self::apply_agent_loop`] for why `max_turns` is resolved by the caller
-    /// rather than overlaid.
+    /// `caliban_agent_core::settings_overlay::apply_agent_loop` for why
+    /// `max_turns` is resolved by the caller rather than overlaid.
     #[must_use]
     pub fn agent_loop_max_turns(&self) -> Option<u32> {
         self.agent_loop.as_ref().and_then(|al| al.max_turns)
@@ -1351,49 +1282,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_context_management_overrides_each_field() {
-        // Round-trip a settings.toml fragment that sets all four Plan B
-        // context-management knobs to non-default values, then assert
-        // apply_context_management copies each onto a fresh AgentConfig.
-        // Guards the historical wiring gap (PR #60 added the Settings
-        // fields + the helper but never wired the call from build_agent).
-        let raw = r#"{
-            "auto_compact_threshold": 0.42,
-            "micro_compact_enabled": false,
-            "tool_result_cap_chars": 12345,
-            "min_cache_block_tokens": 789
-        }"#;
-        let s: Settings = serde_json::from_str(raw).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        s.apply_context_management(&mut cfg);
-        assert!((cfg.auto_compact_threshold.unwrap() - 0.42_f32).abs() < 1e-6);
-        assert!(!cfg.micro_compact_enabled);
-        assert_eq!(cfg.tool_result_cap_chars, 12_345);
-        assert_eq!(cfg.min_cache_block_tokens, 789);
-    }
-
-    #[test]
     fn compact_strategy_defaults_to_summarize_and_honors_override() {
         let s: Settings = serde_json::from_str(r"{}").unwrap();
         assert_eq!(s.compact_strategy_or_default(), "summarize");
         let s: Settings = serde_json::from_str(r#"{"compact_strategy": "drop-oldest"}"#).unwrap();
         assert_eq!(s.compact_strategy_or_default(), "drop-oldest");
-    }
-
-    #[test]
-    fn apply_context_management_leaves_defaults_when_unset() {
-        // No knobs set → AgentConfig::default() values survive untouched.
-        let s: Settings = serde_json::from_str(r"{}").unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        let snap_threshold = cfg.auto_compact_threshold;
-        let snap_micro = cfg.micro_compact_enabled;
-        let snap_cap = cfg.tool_result_cap_chars;
-        let snap_min = cfg.min_cache_block_tokens;
-        s.apply_context_management(&mut cfg);
-        assert_eq!(cfg.auto_compact_threshold, snap_threshold);
-        assert_eq!(cfg.micro_compact_enabled, snap_micro);
-        assert_eq!(cfg.tool_result_cap_chars, snap_cap);
-        assert_eq!(cfg.min_cache_block_tokens, snap_min);
     }
 
     #[test]
@@ -1515,97 +1408,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_agent_loop_cost_budget_positive_sets_and_nonpositive_disables() {
-        let s: Settings =
-            serde_json::from_str(r#"{"agent_loop": {"cost_budget_usd": 1.25}}"#).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        assert_eq!(cfg.cost_budget_usd, None, "default is no cost cap");
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.cost_budget_usd, Some(1.25));
-
-        // `0` (or negative) disables — never a zero-dollar budget.
-        let s: Settings =
-            serde_json::from_str(r#"{"agent_loop": {"cost_budget_usd": 0}}"#).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.cost_budget_usd, None);
-    }
-
-    #[test]
-    fn apply_agent_loop_time_budget_positive_sets_and_zero_disables() {
-        // A positive value becomes a Duration deadline.
-        let s: Settings =
-            serde_json::from_str(r#"{"agent_loop": {"time_budget_secs": 300}}"#).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        assert_eq!(cfg.time_budget, None, "default is no deadline");
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.time_budget, Some(std::time::Duration::from_mins(5)));
-
-        // `0` explicitly disables (maps to None), never a zero-second budget.
-        let s: Settings =
-            serde_json::from_str(r#"{"agent_loop": {"time_budget_secs": 0}}"#).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.time_budget, None);
-    }
-
-    #[test]
     fn agent_loop_absent_leaves_field_none() {
         let s: Settings = serde_json::from_str(r#"{"model": "test"}"#).unwrap();
         assert!(s.agent_loop.is_none());
         assert_eq!(s.agent_loop_max_turns(), None);
-    }
-
-    #[test]
-    fn apply_agent_loop_overrides_each_guard() {
-        // Every guard set to a non-default value is copied onto a fresh
-        // AgentConfig. max_turns is deliberately NOT applied by this overlay
-        // (CLI precedence — see apply_agent_loop docs), so it stays default.
-        let raw = r#"{
-            "agent_loop": {
-                "max_turns": 7,
-                "no_edit_nudge_threshold": 4,
-                "empty_turn_nudge_max": 1,
-                "max_turn_thinking_chars": 9999
-            }
-        }"#;
-        let s: Settings = serde_json::from_str(raw).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        let default_max_turns = cfg.max_turns;
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.no_edit_nudge_threshold, 4);
-        assert_eq!(cfg.empty_turn_nudge_max, 1);
-        assert_eq!(cfg.max_turn_thinking_chars, 9999);
-        // max_turns is resolved by the caller, not this overlay.
-        assert_eq!(cfg.max_turns, default_max_turns);
-    }
-
-    #[test]
-    fn apply_agent_loop_leaves_defaults_when_unset() {
-        // No agent_loop group → AgentConfig::default() guards survive untouched.
-        let s: Settings = serde_json::from_str(r"{}").unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        let snap_no_edit = cfg.no_edit_nudge_threshold;
-        let snap_empty = cfg.empty_turn_nudge_max;
-        let snap_thinking = cfg.max_turn_thinking_chars;
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.no_edit_nudge_threshold, snap_no_edit);
-        assert_eq!(cfg.empty_turn_nudge_max, snap_empty);
-        assert_eq!(cfg.max_turn_thinking_chars, snap_thinking);
-    }
-
-    #[test]
-    fn apply_agent_loop_partial_leaves_unset_guards_at_default() {
-        // Only one guard set; the others keep their AgentConfig defaults.
-        let raw = r#"{"agent_loop": {"no_edit_nudge_threshold": 0}}"#;
-        let s: Settings = serde_json::from_str(raw).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        let snap_empty = cfg.empty_turn_nudge_max;
-        let snap_thinking = cfg.max_turn_thinking_chars;
-        s.apply_agent_loop(&mut cfg);
-        assert_eq!(cfg.no_edit_nudge_threshold, 0);
-        assert_eq!(cfg.empty_turn_nudge_max, snap_empty);
-        assert_eq!(cfg.max_turn_thinking_chars, snap_thinking);
     }
 
     #[test]
@@ -1614,30 +1420,6 @@ mod tests {
         // dropping it.
         let raw = r#"{"agent_loop": {"no_edit_nudge": 4}}"#;
         assert!(serde_json::from_str::<Settings>(raw).is_err());
-    }
-
-    #[test]
-    fn apply_stream_watchdog_overrides_each_field() {
-        let raw = r#"{
-            "stream_idle_timeout_ms": 45000,
-            "stream_prefill_timeout_ms": 600000
-        }"#;
-        let s: Settings = serde_json::from_str(raw).unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        s.apply_stream_watchdog(&mut cfg);
-        assert_eq!(cfg.stream_idle_timeout_ms, 45_000);
-        assert_eq!(cfg.stream_prefill_timeout_ms, 600_000);
-    }
-
-    #[test]
-    fn apply_stream_watchdog_leaves_defaults_when_unset() {
-        let s: Settings = serde_json::from_str(r"{}").unwrap();
-        let mut cfg = caliban_agent_core::AgentConfig::default();
-        let snap_idle = cfg.stream_idle_timeout_ms;
-        let snap_prefill = cfg.stream_prefill_timeout_ms;
-        s.apply_stream_watchdog(&mut cfg);
-        assert_eq!(cfg.stream_idle_timeout_ms, snap_idle);
-        assert_eq!(cfg.stream_prefill_timeout_ms, snap_prefill);
     }
 
     #[test]
@@ -1673,9 +1455,9 @@ mod tests {
         let rules = s.permission_rules();
         assert_eq!(rules.len(), 3);
         // deny > ask > allow
-        assert_eq!(rules[0].action, caliban_agent_core::Action::Deny);
-        assert_eq!(rules[1].action, caliban_agent_core::Action::Ask);
-        assert_eq!(rules[2].action, caliban_agent_core::Action::Allow);
+        assert_eq!(rules[0].action, caliban_config_types::Action::Deny);
+        assert_eq!(rules[1].action, caliban_config_types::Action::Ask);
+        assert_eq!(rules[2].action, caliban_config_types::Action::Allow);
     }
 
     #[test]
@@ -1774,7 +1556,7 @@ mod tests {
         // here we model the project rules as deny/ask/allow because that's
         // the documented evaluation order Settings::permission_rules emits.
         #[allow(deprecated)]
-        let legacy_tail = caliban_agent_core::default_rules();
+        let legacy_tail = caliban_config_types::default_rules();
 
         // Settings emits deny, ask, allow (the documented eval order). The
         // legacy loader preserves whatever order the TOML declared — but
@@ -1782,13 +1564,13 @@ mod tests {
         // deny → ask → allow. Verify cardinality + per-action grouping
         // matches a deny/ask/allow split of the input.
         assert_eq!(from_settings.len(), 4);
-        assert_eq!(from_settings[0].action, caliban_agent_core::Action::Deny);
+        assert_eq!(from_settings[0].action, caliban_config_types::Action::Deny);
         assert_eq!(from_settings[0].tool, "Bash:rm *");
-        assert_eq!(from_settings[1].action, caliban_agent_core::Action::Ask);
+        assert_eq!(from_settings[1].action, caliban_config_types::Action::Ask);
         assert_eq!(from_settings[1].tool, "Bash");
-        assert_eq!(from_settings[2].action, caliban_agent_core::Action::Allow);
+        assert_eq!(from_settings[2].action, caliban_config_types::Action::Allow);
         assert_eq!(from_settings[2].tool, "Read");
-        assert_eq!(from_settings[3].action, caliban_agent_core::Action::Allow);
+        assert_eq!(from_settings[3].action, caliban_config_types::Action::Allow);
         assert_eq!(from_settings[3].tool, "Grep");
 
         // The legacy default-rules tail (defined by agent-core) is the
@@ -1823,12 +1605,12 @@ action = "ask"
         let rules = s.permission_rules();
         // Expect source order preserved — first rule is allow, NOT pushed behind deny.
         assert_eq!(rules[0].tool, "Bash:git *");
-        assert_eq!(rules[0].action, caliban_agent_core::Action::Allow);
+        assert_eq!(rules[0].action, caliban_config_types::Action::Allow);
         assert_eq!(rules[1].tool, "Bash:rm *");
-        assert_eq!(rules[1].action, caliban_agent_core::Action::Deny);
+        assert_eq!(rules[1].action, caliban_config_types::Action::Deny);
         assert_eq!(rules[1].reason.as_deref(), Some("use git revert"));
         assert_eq!(rules[2].tool, "*");
-        assert_eq!(rules[2].action, caliban_agent_core::Action::Ask);
+        assert_eq!(rules[2].action, caliban_config_types::Action::Ask);
     }
 
     #[test]
@@ -1842,9 +1624,9 @@ ask   = ["*"]
         let s: Settings = toml::from_str(toml_src).unwrap();
         let rules = s.permission_rules();
         // Legacy flatten order is deny → ask → allow (matches v1 behavior).
-        assert_eq!(rules[0].action, caliban_agent_core::Action::Deny);
-        assert_eq!(rules[1].action, caliban_agent_core::Action::Ask);
-        assert_eq!(rules[2].action, caliban_agent_core::Action::Allow);
+        assert_eq!(rules[0].action, caliban_config_types::Action::Deny);
+        assert_eq!(rules[1].action, caliban_config_types::Action::Ask);
+        assert_eq!(rules[2].action, caliban_config_types::Action::Allow);
     }
 
     #[test]
@@ -1870,7 +1652,7 @@ http_hook_allowed_env_vars = ["AUDIT_TOKEN"]
 "#;
         #[allow(deprecated)]
         let from_legacy =
-            caliban_agent_core::HooksConfig::from_str(toml_body, std::path::Path::new("h.toml"))
+            caliban_config_types::HooksConfig::from_str(toml_body, std::path::Path::new("h.toml"))
                 .unwrap();
 
         assert_eq!(

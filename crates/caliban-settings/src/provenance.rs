@@ -35,7 +35,7 @@ pub struct RuleProvenance {
 /// Returns [`LoadError`] on I/O or parse failures in any scope file.
 pub fn load_rules_with_provenance(
     opts: &LoadOptions,
-) -> Result<Vec<(caliban_agent_core::Rule, RuleProvenance)>, LoadError> {
+) -> Result<Vec<(caliban_config_types::Rule, RuleProvenance)>, LoadError> {
     let scopes = [Scope::Local, Scope::Project, Scope::User, Scope::Managed];
 
     let mut out = Vec::new();

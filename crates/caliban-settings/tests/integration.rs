@@ -282,8 +282,8 @@ fn permission_rules_route_into_agent_core() {
     };
     let rules = s.permission_rules();
     assert_eq!(rules.len(), 4);
-    assert_eq!(rules[0].action, caliban_agent_core::Action::Deny);
-    assert_eq!(rules[1].action, caliban_agent_core::Action::Ask);
-    assert_eq!(rules[2].action, caliban_agent_core::Action::Allow);
-    assert_eq!(rules[3].action, caliban_agent_core::Action::Allow);
+    assert_eq!(rules[0].action, caliban_config_types::Action::Deny);
+    assert_eq!(rules[1].action, caliban_config_types::Action::Ask);
+    assert_eq!(rules[2].action, caliban_config_types::Action::Allow);
+    assert_eq!(rules[3].action, caliban_config_types::Action::Allow);
 }

@@ -1072,6 +1072,7 @@ dependencies = [
  "caliban-common",
  "caliban-config-types",
  "caliban-provider",
+ "caliban-settings",
  "chrono",
  "directories",
  "dirs",
@@ -1464,7 +1465,6 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "caliban-agent-core",
  "caliban-common",
  "caliban-config-types",
  "chrono",

@@ -22,6 +22,7 @@ pub mod post_process;
 pub mod registry;
 pub mod retry;
 pub mod session;
+pub mod settings_overlay;
 pub mod stream;
 pub mod todos;
 pub mod tool;
@@ -73,6 +74,7 @@ pub use post_process::{AssistantPostProcessor, NoopPostProcessor};
 pub use registry::ToolRegistry;
 pub use retry::RetryPolicy;
 pub use session::Session;
+pub use settings_overlay::{apply_agent_loop, apply_context_management, apply_stream_watchdog};
 pub use stream::{
     InputProvider, RunOutcome, RunSettings, STREAM_RESULT_TEXT_CAP, StopCondition, StopLevel,
     StopSurface, TurnEvent, TurnEventStream, TurnOutcome,

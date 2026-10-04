@@ -46,7 +46,7 @@ fn append_rule_round_trips_through_settings_load() {
     assert!(
         rules
             .iter()
-            .any(|r| r.tool == "Bash:rm *" && r.action == caliban_agent_core::Action::Deny),
+            .any(|r| r.tool == "Bash:rm *" && r.action == caliban_config_types::Action::Deny),
         "expected a deny rule for 'Bash:rm *' in: {rules:?}"
     );
 }

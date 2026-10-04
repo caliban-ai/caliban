@@ -6,8 +6,8 @@
 //! and the existing ad-hoc loaders in:
 //!
 //! - `caliban_config_types::mcp::load_config` (`mcp.toml`)
-//! - `caliban_agent_core::permissions::load_rules` (`permissions.toml`)
-//! - `caliban_agent_core::HooksConfig::load` (`hooks.toml`)
+//! - `caliban_config_types::permissions::load_rules` (`permissions.toml`)
+//! - `caliban_config_types::HooksConfig::load` (`hooks.toml`)
 //!
 //! All three legacy entry points are `#[deprecated]` in favor of
 //! [`crate::load_settings`]; this module is the single sanctioned consumer
@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use caliban_agent_core::{Action, load_rules};
+use caliban_config_types::{Action, load_rules};
 
 use crate::Settings;
 
@@ -88,7 +88,7 @@ pub fn maybe_load_legacy_mcp(settings: &mut Settings, workspace_root: &Path) -> 
 #[must_use]
 pub fn legacy_permissions_present(workspace_root: &Path) -> bool {
     match load_rules(Vec::new(), workspace_root) {
-        Ok(all) => all.len() > caliban_agent_core::default_rules().len(),
+        Ok(all) => all.len() > caliban_config_types::default_rules().len(),
         Err(_) => false,
     }
 }
@@ -140,11 +140,11 @@ pub fn maybe_load_legacy_permissions(settings: &mut Settings, workspace_root: &P
 /// user-managed-only HTTP-hook allowlists without trusting the project
 /// workspace's `.caliban/hooks.toml` (#409). A missing or unreadable file
 /// yields the empty default.
-fn load_user_scope_hooks() -> caliban_agent_core::HooksConfig {
+fn load_user_scope_hooks() -> caliban_config_types::HooksConfig {
     match caliban_common::paths::platform_config_dir() {
-        Some(dir) => caliban_agent_core::HooksConfig::load_one(&dir.join("caliban/hooks.toml"))
+        Some(dir) => caliban_config_types::HooksConfig::load_one(&dir.join("caliban/hooks.toml"))
             .unwrap_or_default(),
-        None => caliban_agent_core::HooksConfig::default(),
+        None => caliban_config_types::HooksConfig::default(),
     }
 }
 
@@ -154,7 +154,7 @@ pub fn maybe_load_legacy_hooks(settings: &mut Settings, workspace_root: &Path) -
     if !settings.hooks.is_empty() {
         return false;
     }
-    match caliban_agent_core::HooksConfig::load(workspace_root) {
+    match caliban_config_types::HooksConfig::load(workspace_root) {
         Ok(cfg) if cfg.total_handler_count() > 0 || cfg.disable_all_hooks => {
             // We can't faithfully serialize the typed `HooksConfig`
             // back to the loose `serde_json::Value` shape (foreign-

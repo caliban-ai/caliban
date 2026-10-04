@@ -27,7 +27,6 @@ tokio            = { workspace = true }
 fs2              = { workspace = true }
 caliban-common       = { workspace = true }
 caliban-config-types = { workspace = true }
-caliban-agent-core   = { workspace = true }
 chrono             = { workspace = true }
 
 [dev-dependencies]
