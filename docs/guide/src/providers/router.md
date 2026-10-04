@@ -67,7 +67,7 @@ model = "mlx-community/Qwen3.6-27B-4bit"
 Valid `provider` values: `anthropic`, `openai`, `google`.
 
 ```admonish tip title="Local models: use `openai` + base_url"
-For a local model, use `provider = "openai"` with a `[provider.openai] base_url` pointing at your engine's `/v1` endpoint. The route's `model` is sent to the server verbatim, so it must be a name the backend accepts — for `mlx_lm.server` that means the exact Hugging Face repo id. See [Local Inference](./local-inference.md). (The bespoke `ollama` provider was removed in [ADR 0056](../adr/README.md).)
+For a local model, use `provider = "openai"` with a `[router.provider.openai] base_url` pointing at your engine's `/v1` endpoint. The route's `model` is sent to the server verbatim, so it must be a name the backend accepts — for `mlx_lm.server` that means the exact Hugging Face repo id. See [Local Inference](./local-inference.md). (The bespoke `ollama` provider was removed in [ADR 0056](../adr/README.md).)
 ```
 
 ## Provider blocks
@@ -81,7 +81,14 @@ api_key_env = "OPENAI_API_KEY_STAGING"
 base_url = "https://oai-staging.example.com/v1"
 
 [router.provider.google]
-base_url = "https://gemini-proxy.example.com/v1beta"
+api_key_env = "GEMINI_API_KEY_STAGING"
+```
+
+```admonish warning title="`base_url` is ignored for `google`"
+The Google block honors `api_key_env` only. Google AI Studio has a fixed
+endpoint in router v2, so a `base_url` set under `[router.provider.google]` is
+silently discarded — no warning, no error. To point Gemini at a proxy, set the
+`GEMINI_BASE_URL` environment variable instead.
 ```
 
 ```toml

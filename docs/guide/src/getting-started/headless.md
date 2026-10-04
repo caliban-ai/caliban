@@ -57,11 +57,11 @@ Caliban follows `sysexits.h` conventions plus two additional signals:
 | `2` | The final output failed `--json-schema` validation |
 | `64` | Bad flags (`EX_USAGE`) or malformed `stream-json` input |
 | `66` | Missing input (`EX_NOINPUT`) — e.g. `--resume` names a non-existent session |
-| `75` | `--max-turns` exceeded (`EX_TEMPFAIL`) |
+| `75` | A graceful bound was reached (`EX_TEMPFAIL`) — `--max-turns` / `[agent_loop] max_turns`, or the `[agent_loop] time_budget_secs` wall-clock budget |
 | `78` | Configuration error — stdin over 10 MB, settings parse failure |
 | `124` | Cancelled — SIGTERM or Ctrl-C from the agent loop |
 | `130` | SIGINT reached the harness (second Ctrl-C) |
-| `137` | `--max-budget-usd` exceeded |
+| `137` | A cost budget was reached — `--max-budget-usd` or `[agent_loop] cost_budget_usd` |
 
 CI scripts can distinguish budget exhaustion (`137`) from a real failure (`1`/`2`) without parsing stdout.
 

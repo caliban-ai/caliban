@@ -1,6 +1,6 @@
 # Project Status
 
-Caliban v0.12.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
+Caliban v0.15.0 is a pre-1.0 release. The binary (`caliban`) is daily-usable from `main`; the
 core agent loop, TUI, headless mode, sessions, permissions, tools, MCP, sub-agents, memory,
 sandbox, telemetry, and the driveable server surfaces are all shipped. A number of parity
 gaps with Claude Code remain. Per-release detail is in the [Changelog](../changelog.md).
@@ -21,12 +21,14 @@ The table below summarizes the major shipped areas. All items marked ✅ are ava
 | MCP client (stdio + HTTP, OAuth, elicitation, per-server permissions) | ✅ |
 | Sub-agents (in-process, background fleet via `caliband`, worktree isolation) | ✅ |
 | Memory tiers: `CLAUDE.md` ancestry, `@`-imports, auto-memory | ✅ |
-| Settings layering (Managed > User > Project > Local, deep-merge) | ✅ |
+| Settings layering (Managed > User > Project > Local > `--settings`, deep-merge) plus a `CALIBAN_*` environment layer above them | ✅ |
 | Model router v2 (declarative routes, fallback chains, circuit breakers, capability filters) | ✅ |
 | Providers in the binary: Anthropic, OpenAI, Google Gemini (+ local OpenAI-compatible servers); Bedrock/Vertex/Azure adapters are library-only | ✅ |
 | Checkpoints + `/rewind`, including forking a new session from a checkpoint | ✅ |
-| Driveable server surfaces: `caliban mcp serve`, `caliban acp serve`, `caliban http serve` | ✅ |
+| Driveable server surfaces: `caliban mcp serve`, `caliban acp serve`, `caliban http serve`; a fleet worker can also serve ACP on its own TLS+token listener | ✅ |
 | `caliband` graceful drain + resume of daemon agents from a persisted session (a supervisor control-protocol command for orchestrators; there is no `caliban agents` subcommand for it) | ✅ |
+| Agent-loop policy surface: turn / wall-clock / cost budgets, verification guidance, named profiles with adaptive local-vs-cloud defaults | ✅ |
+| Per-session permission posture (`supervised` / `unattended`) on a fleet spawn, authorized upstream and audited | ✅ |
 | Prebuilt macOS arm64 (`aarch64-apple-darwin`) binary on tagged releases | ✅ |
 | Plugins, hooks, skills | ✅ |
 | OS sandbox (Seatbelt on macOS, bubblewrap on Linux) | ✅ |

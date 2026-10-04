@@ -12,6 +12,12 @@ There are three surfaces, each targeting a different kind of consumer, all built
 
 They are not substitutes — pick the one that matches how your consumer wants to talk to caliban.
 
+Each row above is a command you run. There is a fourth way in: a
+`caliband`-managed fleet agent can be driven over its own per-agent network
+listener, either on the default NDJSON session plane or — when the spawn sets
+`drive_protocol = "acp"` — over [ACP](./acp.md#acp-over-the-network). That path
+has no CLI entry point; it is selected by a control plane such as prospero.
+
 ## The shared contract
 
 Every surface exposes the same four operations over the drive core. The wire format differs; the semantics do not.
@@ -45,13 +51,23 @@ ACP instead translates each `TurnEvent` into a native `session/update` notificat
 
 ## Auth model
 
-One policy, applied uniformly by every surface (`CALIBAN_DRIVE_TOKEN`, building on the caliband bearer scheme):
+One policy, applied uniformly by every surface you launch yourself (`CALIBAN_DRIVE_TOKEN`, building on the caliband bearer scheme):
 
 - **Loopback is open.** A connection from the local host is trusted — loopback / the local filesystem is the boundary. `caliban mcp serve` and `caliban acp serve` run over stdio, which is loopback-inherent, so they always admit the peer.
 - **Remote requires a bearer token.** A non-loopback peer must present `Authorization: Bearer <token>` matching the `CALIBAN_DRIVE_TOKEN` set out of band (env / secret), compared in constant time.
 - **Fail closed.** Binding a surface to a non-loopback address with no token configured is refused — caliban never serves unauthenticated on the network.
 
-Transport encryption (TLS) for remote binds is the deployment's concern and is out of scope for the gate.
+Transport encryption (TLS) for these remote binds is the deployment's concern and is out of scope for the gate.
+
+```admonish note title="The per-agent fleet listener is governed separately"
+A fleet worker's own listener does not use `CALIBAN_DRIVE_TOKEN`, and TLS is
+**not** optional there: the supervisor hands each worker
+`CALIBAN_AGENT_TLS_CERT` / `CALIBAN_AGENT_TLS_KEY` and `CALIBAN_AGENT_TOKEN`, and
+a worker started in network mode without them refuses to start. When such a
+worker serves ACP, the ACP-level gate is disabled on purpose — authentication
+has moved down to that transport. See
+[ACP over the network](./acp.md#acp-over-the-network).
+```
 
 ## Permissions
 

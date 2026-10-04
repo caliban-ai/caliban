@@ -88,7 +88,7 @@ A one-liner shell wrapper around `security find-generic-password` (macOS) or `se
 
 ```admonish warning title="Not reachable from the caliban binary"
 The binary and its model router accept only `anthropic`, `openai`, and `google`.
-A `[provider.bedrock]` or `[provider.vertex]` block in `caliban.toml` is rejected at
+A `[router.provider.bedrock]` or `[router.provider.vertex]` block is rejected at
 startup. The notes below apply when you embed `caliban-provider-bedrock` /
 `caliban-provider-vertex` as libraries.
 ```
@@ -99,6 +99,6 @@ When used as libraries, authentication follows each platform's standard credenti
 - **Vertex (Anthropic)** — Google Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`).
 - **Vertex (Google)** — same GCP ADC path as the Anthropic Vertex transport.
 
-See [The Model Router](./router.md) for the full `caliban.toml` syntax, including `[provider.X]` blocks that let you override the env var name or base URL per provider.
+See [The Model Router](./router.md) for the full router syntax, including the `[router.provider.X]` blocks that let you override the env var name or base URL per provider.
 
 For a full listing of every setting key, see [Settings Reference](../configuration/reference.md).

@@ -46,6 +46,14 @@ comment = "safe for CI"
 
 Every tool-call decision (allow, deny, or ask) is appended to an append-only JSONL file.
 
+```admonish warning title="An unattended fleet agent is not in this log"
+A background-fleet agent spawned with `permission_posture = "unattended"`
+installs no permission hooks on the NDJSON session plane, so none of its tool
+calls appear here. Its audit record is a single line on the worker's stderr,
+captured in caliband's output. See
+[Permissions for fleet agents](../subagents/background-fleet.md#permissions-for-fleet-agents).
+```
+
 ### Log location
 
 | Platform | Path |

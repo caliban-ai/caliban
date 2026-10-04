@@ -88,6 +88,21 @@ with no `--advertise-host`), `caliband` logs a startup warning. The endpoints it
 reports would be undialable, so set `--advertise-host` to a routable name such
 as the daemon's Service or pod DNS name.
 
+Each agent gets its own TLS + bearer-token listener from `--agent-port-base`
+upward. The supervisor supplies the worker's credentials as
+`CALIBAN_AGENT_TLS_CERT` / `CALIBAN_AGENT_TLS_KEY` and `CALIBAN_AGENT_TOKEN`; a
+worker started in network mode without them refuses to start rather than serving
+an unauthenticated endpoint.
+
+### Choosing the per-agent protocol
+
+That per-agent listener serves the NDJSON live-attach session plane by default.
+A spawn may instead set `drive_protocol = "acp"`, and the worker serves the
+**Agent Client Protocol** (JSON-RPC) on the *same* listener — one protocol per
+agent, never both at once. This is how a control plane drives in-cluster agents
+over a path it already secures. The stdio `caliban acp serve` path is unrelated
+and unchanged. See [ACP over the network](../driving/acp.md#acp-over-the-network).
+
 ## Agent lifecycle states
 
 | State | Meaning |
@@ -248,6 +263,58 @@ caliban-operator that need to stop agents without losing their work
 Drain and resume are part of the supervisor control protocol (`SupervisorClient::drain`
 and the spawn spec). There is no `caliban agents drain` or resume subcommand;
 `agents spawn` always starts fresh.
+```
+
+## Permissions for fleet agents
+
+A fleet agent has no TTY, so the normal `Ask` modal cannot run. By default it is
+**fail-closed**: read-only tools are allowed and `Bash` / `Write` / `Edit` /
+web tools fall to `Ask`, which a non-interactive worker **denies**. An agent
+spawned with `caliban agents spawn` and nothing else will therefore refuse to
+modify anything.
+
+Three spawn-spec levers change that:
+
+| Field | Effect |
+|---|---|
+| `tool_allowlist` | A list of tool names granted `Allow` ahead of the default rules — the targeted way to let one agent run `Bash` |
+| `permission_posture` | `supervised` (default) keeps the gate; `unattended` drops it entirely |
+| `inherit_hooks` + `inherited_hooks_config` | Reuse the spawning session's hook/permission configuration instead of the worker defaults |
+
+### Permission posture
+
+`permission_posture` ([ADR 0059](../adr/0059-acp-over-network-and-permission-posture.md))
+is a per-session choice an operator makes for long unattended runs:
+
+| Value | Meaning |
+|---|---|
+| `supervised` | *(default, fail-closed)* the normal permission gate; an `Ask` is denied when no human is attached, or surfaced to one when a drive adapter is |
+| `unattended` | the permission gate is removed — every tool runs without asking |
+
+Authorization to *request* `unattended` is enforced **upstream**, by prospero or
+the operator's `Workspace` policy; the worker only honors the field and audits
+it. The wire values deliberately match the `CalibanTask` CR's
+`permissionPosture` enum, so the operator maps one onto the other without
+translation.
+
+An unattended agent on the NDJSON session plane installs no permission hooks at
+all, so its tool calls produce **no entries in the permission audit log** — the
+only record is a line on the worker's stderr, captured in caliband's output:
+
+```text
+[caliban __agent-worker] AUDIT: agent <id> running UNATTENDED — permission gate bypassed (ADR 0059)
+```
+
+Treat that line as the audit trail for an unattended session, and see
+[Headless & Audit](../permissions/headless-and-audit.md) for the JSONL log that
+covers supervised runs.
+
+```admonish note title="Protocol-level only"
+`permission_posture`, `drive_protocol`, `tool_allowlist`, `inherit_hooks`, and
+`resume_session` are spawn-spec fields, not CLI flags. `caliban agents spawn`
+takes only the options listed above and always sends the defaults
+(`supervised` + `ndjson`). Setting them requires a driver that builds the
+control-plane `Spawn` request itself, such as prospero or caliban-operator.
 ```
 
 ## Diagram: agent lifecycle

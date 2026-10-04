@@ -36,10 +36,13 @@ export OPENAI_BASE_URL="http://192.168.1.240:9292/v1"
 caliban --provider openai --model <model-name> "…"
 ```
 
-**Router route (per-model / per-host), in `caliban.toml`:**
+**Router route (per-model / per-host), in `.caliban/settings.toml`:**
 
 ```toml
-[provider.openai]
+[router]
+default_purpose = "main_loop"
+
+[router.provider.openai]
 base_url = "http://192.168.1.240:9292/v1"
 
 [[router.route]]
@@ -47,6 +50,10 @@ purpose = "main_loop"
 provider = "openai"
 model = "<model-name>"
 ```
+
+A standalone `caliban.toml` is no longer discovered automatically — it nests
+provider blocks one level higher (`[provider.openai]`) and must be passed with
+`--config`. See [The Model Router](./router.md).
 
 ```admonish important title="The model name must be one the backend accepts"
 caliban sends the route's `model` field to the server **verbatim**. Engines
@@ -59,6 +66,19 @@ differ in how they treat it:
 - **llama-swap** routes on the name, then passes it through to the backend — so a
   friendly alias is fine for a llama.cpp backend, but a llama-swap entry fronting
   mlx-lm must be keyed by the repo id.
+```
+
+```admonish note title="A local endpoint changes the agent-loop profile"
+Pointing the OpenAI provider at a loopback, private-range, or bareword-LAN host
+also classifies the run as **local** for the adaptive
+[agent-loop profile](../reference/settings-schema.md#agent-loop-policy) — so the
+default profile becomes `local-guarded`, which turns verification guidance on at
+`verify-when-cheap` instead of leaving it `off`. That is deliberate: a weaker
+local model benefits from being nudged to check its own work. Set
+`[agent_loop] profile` or `[agent_loop] verification_guidance` explicitly to opt
+out. Note the detection only recognizes a local setup behind the
+OpenAI-compatible adapter via `OPENAI_BASE_URL`; a local model reached any other
+way should name a profile explicitly.
 ```
 
 ## Engine setup

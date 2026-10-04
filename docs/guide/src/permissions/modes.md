@@ -90,6 +90,16 @@ Without `--allow-dangerously-skip-permissions`:
 In bypass mode the model can execute any tool call without restriction. Use it only in fully sandboxed, disposable environments where you control the entire execution context. Prefer `dontAsk` or `acceptEdits` for typical automation.
 ```
 
+```admonish note title="A background-fleet agent has a separate lever"
+The latch above governs runs you launch from a command line. A `caliband`-managed
+agent is configured by its spawn spec instead, which carries a
+`permission_posture` of `supervised` (default) or `unattended`; `unattended`
+removes the permission gate without any CLI flag being present. It is a
+per-session choice made by the control plane, authorized upstream, not a seventh
+permission mode. See
+[Permission posture](../subagents/background-fleet.md#permission-posture).
+```
+
 ## `--no-permissions`
 
 `--no-permissions` disables the permission system entirely — no rules are evaluated and every tool call is allowed. It conflicts with `--allow`, `--deny`, `--ask`, and `--auto-allow`. The resolved mode surfaces as `"disabled"` in the `system/init` stream-json frame.

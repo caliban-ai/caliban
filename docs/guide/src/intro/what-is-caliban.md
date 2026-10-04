@@ -26,7 +26,7 @@ adapters exist as library crates but are not wired into the binary; see
 
 ```admonish tip title="Provider-agnostic by design"
 Because Caliban normalizes all providers to a single internal IR, you can switch models or
-providers with a single flag (`--provider`, `--model`) or a `caliban.toml` router config,
+providers with a single flag (`--provider`, `--model`) or a declarative `[router]` config,
 without changing your workflow.
 ```
 
@@ -57,4 +57,4 @@ one is a separate repository, and none of them is needed to use caliban on its o
 | [prospero](https://github.com/caliban-ai/prospero) | Control plane for launching, managing, and observing fleets of agents across repositories | Sits above many `caliband` daemons and speaks their wire protocol. It does not depend on caliban crates. |
 | [gonzalo](https://github.com/caliban-ai/gonzalo) | Shareable persistence layer and code graph | Caliban's optional `gonzalo` build feature routes sessions and auto-memory through the gonzalo facade. The `gonzalo-mcp` code-graph server plugs in as an ordinary [MCP server](../extending/mcp.md). |
 | [caliban-operator](https://github.com/caliban-ai/caliban-operator) | Kubernetes operator (`Workspace` and `CalibanTask` CRDs) | Reconciles tasks into sandboxed pods that run `caliband` and caliban agents. |
-| [ariel](https://github.com/caliban-ai/ariel) | Chat bridge for fleet notifications, commands, and approvals: Discord first, then Slack and Microsoft Teams | Works through prospero's HTTP API and keeps identity, channel config, and audit records in gonzalo. It reaches caliban only indirectly, through prospero. Ariel is in **early implementation**: a prospero client, a Discord backend, and an `arield` daemon exist, but the daemon does not yet connect the backend to prospero and gonzalo, so nothing works end to end. |
+| [ariel](https://github.com/caliban-ai/ariel) | Chat bridge for fleet notifications and ChatOps commands: Discord first, then Slack and Microsoft Teams | Works through prospero's HTTP+SSE API and keeps identity, role grants, channel config, and audit records in gonzalo. It reaches caliban only indirectly, through prospero. Ariel is **released and running**: the `arield` daemon posts one live, edited-in-place status message per agent to each channel following a workspace, and the `/ariel` command set (`link`, `status`, `spawn`, `kill`, `respawn`, `channel`, `configure`, `invite`) is authorized against role grants and a per-channel ceiling, with every mutation audited. Approval buttons and thread-as-session conversation are designed but not yet shipped. |

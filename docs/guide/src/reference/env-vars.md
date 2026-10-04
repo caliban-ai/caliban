@@ -2,11 +2,25 @@
 
 Caliban reads environment variables in two groups: `CALIBAN_*` variables that control the harness itself, and per-provider API-key and endpoint variables. Most `CALIBAN_*` flags mirror a corresponding CLI flag; the CLI flag always wins when both are set.
 
-```admonish note title="Boolean flag variables"
+```admonish note title="Boolean variables do not all parse the same way"
 Variables that mirror a boolean CLI flag (`CALIBAN_NO_MCP`, `CALIBAN_NO_HOOKS`,
 `CALIBAN_AUTO_ALLOW`, and similar) use the flag parser: `1/true/yes/on` enable,
 `0/false/no/off` disable (case-insensitive), and any other value is a startup error.
 Where a row below says "any non-empty value", read it as "a truthy value".
+
+The memory variables (`CALIBAN_DISABLE_AUTO_MEMORY`, `CALIBAN_APPROVE_IMPORTS`,
+`CALIBAN_DISABLE_CLAUDE_MD_WALK`, `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD`)
+use a narrower parser: only `1`, `true`, `TRUE`, `True`, `yes`, or `YES` count
+as true. `on` is **not** accepted, and an unrecognized value is silently false
+rather than an error — so a typo disables the knob quietly.
+```
+
+```admonish important title="Five variables override the settings files"
+`CALIBAN_OUTPUT_STYLE`, `CALIBAN_DEFAULT_PERMISSION_MODE`, and the three
+`CALIBAN_STORAGE_*` variables are not read by their subsystems directly — they
+fold into the merged settings as a layer above every file scope *and* above
+`--settings`. See
+[the environment layer](../configuration/settings-layering.md#the-environment-layer).
 ```
 
 ---
@@ -67,11 +81,11 @@ Where a row below says "any non-empty value", read it as "a truthy value".
 | `CALIBAN_NO_SKILLS` | — | Any non-empty value disables skill discovery at startup. |
 | `CALIBAN_NO_MCP` | — | Any non-empty value disables MCP server discovery. |
 | `CALIBAN_MCP_OAUTH_PORT` | `0` (ephemeral) | Loopback port for the MCP OAuth callback server (ADR 0023 Phase C). |
-| `CALIBAN_MCP_TIMEOUT` | — | Timeout (ms) for MCP server startup/connection. |
-| `CALIBAN_MCP_TOOL_TIMEOUT` | — | Per-tool-call timeout (ms) for MCP tools. |
+| `CALIBAN_MCP_TIMEOUT` | `5` | Timeout in **seconds** for MCP server startup/connection. Falls back to `MCP_TIMEOUT` (Claude Code compat) when unset. An unparseable value is ignored and the default stands. |
+| `CALIBAN_MCP_TOOL_TIMEOUT` | `60` | Per-tool-call timeout in **seconds** for MCP tools. Falls back to `MCP_TOOL_TIMEOUT` when unset. An unparseable value is ignored. |
 | `CALIBAN_NO_PLUGINS` | — | Any non-empty value disables plugin discovery. |
 | `CALIBAN_ENABLED_PLUGINS` | — | Comma-separated list of plugin names to enable (all others disabled). |
-| `CALIBAN_PLUGIN_ROOT` | — | Override the plugin install root directory. |
+| `CALIBAN_PLUGIN_ROOT` | — | **Not read from the environment.** Caliban *sets* this name (and the `CLAUDE_PLUGIN_ROOT` alias) as a substitution token, so `${CALIBAN_PLUGIN_ROOT}` inside a plugin manifest expands to that plugin's absolute install path. Setting it in your shell has no effect. |
 
 ---
 
@@ -83,6 +97,9 @@ Where a row below says "any non-empty value", read it as "a truthy value".
 | `CALIBAN_DAEMON_RUNTIME_DIR` | Platform default | Override the runtime socket directory for the supervisor daemon. |
 | `CALIBAN_DAEMON_LISTEN` | — | TCP listen address (e.g. `0.0.0.0:7000`) that switches the `caliband` supervisor into networked control-plane mode; the `caliban agents` CLI dials the same address to reach a remote daemon. Unset means the local Unix-socket path. TLS/token come from the `CALIBAN_DAEMON_TLS_*` / `CALIBAN_DAEMON_TOKEN` vars. |
 | `CALIBAN_KEEP_WORKTREES` | — | Debug escape hatch: keep sub-agent worktrees instead of removing them when the worker exits. |
+| `CALIBAN_AGENT_TOKEN` | — | Bearer token for one agent's own network listener. Set by the supervisor for each worker, not by you; a worker in network mode without it refuses to start. |
+| `CALIBAN_AGENT_TLS_CERT` / `CALIBAN_AGENT_TLS_KEY` | — | PEM paths for the per-agent listener's TLS material, also supplied by the supervisor. Network mode is fail-closed: missing TLS is a hard error, never a plaintext downgrade. |
+| `CALIBAN_AGENT_IDLE_TIMEOUT_SECS` | `300` | How long an interactive worker awaiting operator input stays up with no client attached. `0` disables the timeout. |
 
 ---
 
@@ -99,14 +116,14 @@ Where a row below says "any non-empty value", read it as "a truthy value".
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CALIBAN_DISABLE_AUTO_MEMORY` | — | Any non-empty value disables auto-memory topic-file writing. |
-| `CALIBAN_MEMORY_DIR` | Platform default | Override the auto-memory topic files directory. |
+| `CALIBAN_MEMORY_DIR` | Platform default | Override the **root** under which auto-memory lives; caliban appends `<workspace-slug>/memory`. Ignored when `CALIBAN_AUTO_MEMORY_DIRECTORY` is set. |
 | `CALIBAN_MEMORY_BUDGET_TOKENS` | — | Total token budget across all memory tiers. |
 | `CALIBAN_MEMORY_CAP_TOKENS_AUTO` | — | Token budget cap for the auto-memory tier. |
 | `CALIBAN_MEMORY_CAP_TOKENS_CLAUDE_MD` | — | Token budget cap for the CLAUDE.md tier. |
-| `CALIBAN_AUTO_MEMORY_DIRECTORY` | — | Override the auto-memory directory (alias form). |
+| `CALIBAN_AUTO_MEMORY_DIRECTORY` | — | Override the auto-memory directory **verbatim** — no workspace slug is appended. Checked first, so it wins over `CALIBAN_MEMORY_DIR`. |
 | `CALIBAN_DISABLE_CLAUDE_MD_WALK` | — | Any non-empty value disables the CLAUDE.md walk-up discovery. |
-| `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD` | — | Colon-separated list of extra directories to search for CLAUDE.md. |
-| `CALIBAN_CLAUDE_MD_EXCLUDES` | — | Colon-separated glob patterns to exclude from CLAUDE.md discovery. |
+| `CALIBAN_ADDITIONAL_DIRECTORIES_CLAUDE_MD` | — | **Boolean, not a path list.** When truthy, additional workspace directories are also searched for `CLAUDE.md`. Currently inert in the CLI: the binary has no flag that populates that directory list, so there is nothing for it to enable. |
+| `CALIBAN_CLAUDE_MD_EXCLUDES` | — | Glob patterns to exclude from CLAUDE.md discovery, separated by colons **or newlines**. Patterns that fail to compile are dropped with a warning rather than failing startup. These are **unioned** with the `claude_md_excludes` setting, not replaced by it. |
 | `CALIBAN_APPROVE_IMPORTS` | — | Any non-empty value auto-approves CLAUDE.md `@import` statements. |
 
 ---
@@ -145,7 +162,7 @@ token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CALIBAN_ROUTER_CONFIG` | Settings `[router]` | Explicit path to a standalone `caliban.toml` router config; highest-precedence source, overrides the settings `[router]` section. Also settable via `--config`. (Walk-up discovery was removed in #699.) |
-| `CALIBAN_STRICT_ROUTING` | — | Any non-empty value enables strict routing (no fallback to default route on unknown purpose). |
+| `CALIBAN_STRICT_ROUTING` | `true` (strict) | Governs **vision capability filtering**, not route fallback. Strict is the default; only `false`, `0`, or `no` disable it. With strictness off, an image-bearing request routed to a non-vision model has its image blocks rewritten to a text placeholder (`[image attached — provider does not support vision; dims: …]`) instead of being refused. |
 | `CALIBAN_API_KEY_HELPER_TTL_MS` | — | TTL in milliseconds for API key helper subprocess cache. |
 
 ---
@@ -166,7 +183,7 @@ token itself is never set here: `CALIBAN_STORAGE_REMOTE_TOKEN_ENV` names the
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CALIBAN_OUTPUT_STYLE` | — | Name of the active output style (see [Output Styles](../extending/output-styles.md)). Folded into the `output_style` setting by the env layer (env > file) and attributed in `caliban config print` `_env_overrides` (#701). |
-| `CALIBAN_GRAPHICS` | — | Graphics capability hint (e.g. `kitty`, `sixel`). |
+| `CALIBAN_GRAPHICS` | — | Intended as a graphics capability hint (e.g. `kitty`, `sixel`), but **currently inert** — no production code path reads it. |
 
 ---
 

@@ -38,6 +38,19 @@ Omitting the key (or setting it to `null`) keeps the default of `0.75`; it does
 **not** disable autocompact. To stop strategy-level compaction, set
 `compact_strategy = "noop"` (see below) and rely on manual `/compact`.
 
+```admonish note title="An unknown context window disables autocompaction"
+Autocompaction targets a *fraction* of the context window, so it needs a real
+limit to aim at. If the model is absent from the static table and its server
+reports no context window, caliban treats the window as **unknown** and both
+compactors no-op rather than shrinking the transcript to a fabricated budget —
+so autocompact will never fire, whatever `auto_compact_threshold` says. Manual
+`/compact` is a no-op in that state too, since it runs the same strategy
+compactor. Micro-compaction is unaffected — it dedupes superseded tool results
+and never needs a window. Set the window explicitly in config (or use a server
+that reports `meta.n_ctx`) to get autocompaction back. See
+[Model Selection](../providers/models.md) for how the window is discovered.
+```
+
 ## Compaction strategy
 
 Both autocompact and manual `/compact` run the compactor selected by
