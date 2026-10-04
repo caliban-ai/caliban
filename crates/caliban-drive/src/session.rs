@@ -241,7 +241,6 @@ impl DriveSession {
     /// from the start), then yields live events until the run reaches a terminal
     /// state. Run failures are reported via [`DriveSession::status`], not as an
     /// error item on this stream.
-    #[must_use]
     pub fn subscribe(&self) -> TurnEventStream {
         let (snapshot, mut rx) = self.inner.hub.subscribe();
         let mut status_rx = self.inner.status_rx.clone();

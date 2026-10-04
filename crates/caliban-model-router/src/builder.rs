@@ -58,8 +58,8 @@ impl ModelRouterBuilder {
         let model = model.into();
         let id = format!(
             "{}:{}:{}",
-            &provider,
-            &model,
+            provider,
+            model,
             match purpose {
                 RequestPurpose::MainLoop => "main_loop",
                 RequestPurpose::Summarization => "summarization",
