@@ -19,8 +19,11 @@ pub mod permission_mode;
 pub mod permissions;
 
 pub use hooks_config::{HookHandlerConfig, HookHandlerType, HooksConfig, HooksConfigError};
+#[allow(deprecated)]
+pub use mcp::load_config;
 pub use mcp::{
-    ManualOauthConfig, McpConfig, OauthMode, ServerConfig, ServerPermissions, TransportKind,
+    ConfigError, ManualOauthConfig, McpConfig, OauthMode, ServerConfig, ServerPermissions,
+    TransportKind, discovery_paths, is_valid_server_name,
 };
 pub use permission_mode::PermissionMode;
 pub use permissions::{Action, PermissionsLoadError, Rule, default_rules};
