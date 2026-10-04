@@ -3,7 +3,6 @@
 //! See `docs/superpowers/specs/2026-05-23-permissions-design.md` and
 //! `docs/adr/0020-permission-rules.md`.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,36 +15,14 @@ use crate::hooks::{HookDecision, Hooks, PermCtx, ToolCtx};
 // Rule + Action
 // ---------------------------------------------------------------------------
 
-/// The outcome of matching a rule against a tool call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Action {
-    /// Run the tool without prompting.
-    Allow,
-    /// Reject the tool call.
-    Deny,
-    /// Defer to an interactive prompt via the [`AskHandler`].
-    Ask,
-}
-
-/// One rule from a TOML file or CLI flag.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Rule {
-    /// Pattern of the form `Tool` or `Tool:first-arg-glob`.
-    pub tool: String,
-    /// Action to take when the pattern matches.
-    pub action: Action,
-    /// Optional comment displayed in the Ask modal + audit log; never seen by the model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<String>,
-    /// Deny-only; surfaces to the model in place of the generic
-    /// "permission denied" message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Reserved for v3 time-bounded rules; v2 parses but ignores at evaluation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
+// `Action`, `Rule`, `default_rules`, and the legacy `permissions.toml` loader
+// are plain config data types; they now live in the `caliban-config-types` leaf
+// crate (epic #539 / ADR 0061). Re-exported here so `caliban_agent_core::*`
+// (and `crate::permissions::*`) keep resolving unchanged. The evaluation
+// engine, runtime rule store, and `PermissionsHook` below stay in this crate.
+pub use caliban_config_types::permissions::{Action, PermissionsLoadError, Rule, default_rules};
+#[allow(deprecated)]
+pub use caliban_config_types::permissions::{load_rules, load_rules_file};
 
 /// Runtime-only rule added during a session via the "Always allow/reject"
 /// Ask modal branches. Composes with config rules under existing
@@ -154,12 +131,6 @@ impl RuntimeRuleStore {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RulesFile {
-    #[serde(default, rename = "rule")]
-    rules: Vec<Rule>,
-}
-
 // ---------------------------------------------------------------------------
 // Glob matcher (`*`, `?`) — implementation moved to caliban-common
 // ---------------------------------------------------------------------------
@@ -197,129 +168,6 @@ fn rule_matches(rule: &Rule, ctx: &ToolCtx<'_>) -> bool {
 #[must_use]
 pub fn evaluate_rules<'a>(rules: &'a [Rule], ctx: &ToolCtx<'_>) -> Option<&'a Rule> {
     rules.iter().find(|r| rule_matches(r, ctx))
-}
-
-// ---------------------------------------------------------------------------
-// Built-in defaults
-// ---------------------------------------------------------------------------
-
-/// Built-in default rules applied at the lowest priority. Read-only tools
-/// Allow; mutating tools Ask; catch-all is Ask.
-#[must_use]
-pub fn default_rules() -> Vec<Rule> {
-    [
-        ("Read", Action::Allow),
-        ("Grep", Action::Allow),
-        ("Glob", Action::Allow),
-        ("WebFetch", Action::Ask),
-        ("Bash", Action::Ask),
-        ("Write", Action::Ask),
-        ("Edit", Action::Ask),
-        ("TodoWrite", Action::Allow),
-        ("EnterPlanMode", Action::Allow),
-        ("ExitPlanMode", Action::Allow),
-        ("*", Action::Ask),
-    ]
-    .into_iter()
-    .map(|(t, a)| Rule {
-        tool: t.into(),
-        action: a,
-        comment: None,
-        reason: None,
-        expires_at: None,
-    })
-    .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Loaders
-// ---------------------------------------------------------------------------
-
-/// Errors emitted by the permissions loader.
-#[derive(thiserror::Error, Debug)]
-pub enum PermissionsLoadError {
-    /// IO failure reading a permissions file.
-    #[error("permissions: io error reading {path}: {source}")]
-    Io {
-        /// Path that failed to read.
-        path: PathBuf,
-        /// Underlying error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// TOML parse error.
-    #[error("permissions: parse error in {path}: {source}")]
-    Parse {
-        /// Path that failed to parse.
-        path: PathBuf,
-        /// Underlying error.
-        #[source]
-        source: toml::de::Error,
-    },
-}
-
-/// Load rules from a TOML file. Missing file → `Ok(vec![])`.
-///
-/// # Errors
-/// Returns [`PermissionsLoadError::Io`] on read errors other than `NotFound`,
-/// and [`PermissionsLoadError::Parse`] on malformed TOML.
-#[deprecated(
-    since = "0.0.1",
-    note = "load via caliban-settings; legacy loaders remove in v0.2"
-)]
-pub fn load_rules_file(path: &Path) -> std::result::Result<Vec<Rule>, PermissionsLoadError> {
-    let body = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(PermissionsLoadError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            });
-        }
-    };
-    let parsed: RulesFile =
-        toml::from_str(&body).map_err(|source| PermissionsLoadError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(parsed.rules)
-}
-
-/// Resolve and load rules from the standard locations:
-/// 1. CLI rules (highest priority — caller-supplied).
-/// 2. Project file `<workspace>/.caliban/permissions.toml`.
-/// 3. User file `$XDG_CONFIG_HOME/caliban/permissions.toml`.
-/// 4. Built-in defaults.
-///
-/// Rules from higher-priority sources are placed first; first-match-wins
-/// at evaluation time.
-///
-/// # Errors
-/// Propagates [`PermissionsLoadError`] from the project or user file readers.
-#[deprecated(
-    since = "0.0.1",
-    note = "load via caliban-settings; legacy loaders remove in v0.2"
-)]
-pub fn load_rules(
-    cli_rules: Vec<Rule>,
-    workspace_root: &Path,
-) -> std::result::Result<Vec<Rule>, PermissionsLoadError> {
-    let mut all = cli_rules;
-
-    let project_file = workspace_root.join(".caliban/permissions.toml");
-    #[allow(deprecated)]
-    all.extend(load_rules_file(&project_file)?);
-
-    let user_dir = caliban_common::paths::platform_config_dir()
-        .map(|d| d.join("caliban").join("permissions.toml"));
-    if let Some(p) = user_dir {
-        #[allow(deprecated)]
-        all.extend(load_rules_file(&p)?);
-    }
-
-    all.extend(default_rules());
-    Ok(all)
 }
 
 // ---------------------------------------------------------------------------
@@ -796,24 +644,8 @@ mod tests {
         assert!(matches!(d, HookDecision::Allow));
     }
 
-    // --- TOML loader ---
-
-    #[test]
-    fn rule_deserializes_reason_and_expires_at() {
-        let src = r#"
-[[rule]]
-tool = "Bash"
-action = "deny"
-reason = "no shell access in CI"
-expires_at = "2026-12-31T00:00:00Z"
-"#;
-        let parsed: RulesFile = toml::from_str(src).unwrap();
-        assert_eq!(parsed.rules.len(), 1);
-        let r = &parsed.rules[0];
-        assert_eq!(r.action, Action::Deny);
-        assert_eq!(r.reason.as_deref(), Some("no shell access in CI"));
-        assert!(r.expires_at.is_some());
-    }
+    // --- TOML loader (types + loader live in caliban-config-types now; these
+    // exercise the re-exported surface) ---
 
     #[test]
     #[allow(deprecated)]

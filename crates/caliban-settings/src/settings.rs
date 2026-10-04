@@ -5,7 +5,7 @@
 //!
 //! The struct intentionally mirrors the *top-level* shape of
 //! `settings.json` but does **not** redefine the deep types owned by
-//! other crates (e.g. `caliban_mcp_client::ServerConfig`). Instead the
+//! other crates (e.g. `caliban_config_types::mcp::ServerConfig`). Instead the
 //! settings crate keeps these top-level slices as `serde_json::Value`
 //! / lightweight projection structs and exposes converter helpers (see
 //! [`Settings::mcp_config`] etc.) so callers continue to receive the
@@ -127,10 +127,10 @@ impl ModelSelector {
 }
 
 // ---------------------------------------------------------------------------
-// MCP server (projection of caliban_mcp_client::ServerConfig)
+// MCP server (projection of caliban_config_types::mcp::ServerConfig)
 // ---------------------------------------------------------------------------
 
-/// Projection of `caliban_mcp_client::ServerConfig` carried by Settings.
+/// Projection of `caliban_config_types::mcp::ServerConfig` carried by Settings.
 ///
 /// The crate wraps rather than re-exports the foreign type so we don't
 /// take a hard dependency on `mcp-client`'s serde shape changing (and so
@@ -179,10 +179,10 @@ pub struct McpServerSetting {
     /// not support dynamic client registration (e.g. GitHub) — register an
     /// OAuth app and set `client_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub oauth_config: Option<caliban_mcp_client::ManualOauthConfig>,
+    pub oauth_config: Option<caliban_config_types::mcp::ManualOauthConfig>,
     // ---- common ----
     /// Per-server permission scoping (composes with global rules).
-    pub permissions: caliban_mcp_client::ServerPermissions,
+    pub permissions: caliban_config_types::mcp::ServerPermissions,
     /// Mark this server as disabled.
     pub disabled: bool,
     /// Per-server lazy override (ADR-0046). When `tools.lazy_mcp` is
@@ -760,23 +760,23 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Convert the MCP-server slice into a `caliban_mcp_client::McpConfig`.
+    /// Convert the MCP-server slice into a `caliban_config_types::mcp::McpConfig`.
     ///
     /// We construct the type via its public fields so the conversion
     /// continues to compile even when the foreign crate evolves
     /// independently (per the MCP v2 sibling spec).
     ///
     /// String fields (`type`, `oauth`) are matched against the canonical
-    /// values defined in `caliban_mcp_client::config`. Unrecognized values
+    /// values defined in `caliban_config_types::mcp`. Unrecognized values
     /// fall back to the safest default (`stdio` / `off`) with a `warn!`
     /// log to surface the misconfiguration during a restart.
     #[must_use]
-    pub fn mcp_config(&self) -> caliban_mcp_client::McpConfig {
+    pub fn mcp_config(&self) -> caliban_config_types::mcp::McpConfig {
         // `${VAR}` / `${VAR:-default}` / `${CLAUDE_PROJECT_DIR}` expansion is
         // applied to every string-valued MCP field so secrets (OAuth client
         // secrets, bearer tokens) can live in the environment rather than in
         // `settings.toml`. This matches the legacy `mcp.toml` loader's semantics
-        // (`caliban_mcp_client::config`); `CLAUDE_PROJECT_DIR` binds to the
+        // (`caliban_config_types::mcp`); `CLAUDE_PROJECT_DIR` binds to the
         // current working directory (the workspace root in normal runs).
         let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
         if let Ok(cwd) = std::env::current_dir() {
@@ -808,7 +808,7 @@ impl Settings {
             });
             servers.insert(
                 name.clone(),
-                caliban_mcp_client::ServerConfig {
+                caliban_config_types::mcp::ServerConfig {
                     transport,
                     command: expand_mcp_field(&ctx, name, "command", &s.command),
                     args: s
@@ -849,7 +849,7 @@ impl Settings {
                 },
             );
         }
-        caliban_mcp_client::McpConfig { servers }
+        caliban_config_types::mcp::McpConfig { servers }
     }
 
     /// Convert the `permissions` arrays into a flat `Rule[]` suitable
@@ -1106,13 +1106,13 @@ impl Settings {
 /// Map the `type`/`transport` string to `TransportKind`. Unknown values
 /// warn and fall back to stdio (the safest default — it requires a
 /// `command`, so a downstream "missing command" error will surface).
-fn parse_transport(server: &str, raw: Option<&str>) -> caliban_mcp_client::TransportKind {
+fn parse_transport(server: &str, raw: Option<&str>) -> caliban_config_types::mcp::TransportKind {
     match raw {
-        None => caliban_mcp_client::TransportKind::Stdio,
+        None => caliban_config_types::mcp::TransportKind::Stdio,
         Some(s) => match s.to_ascii_lowercase().as_str() {
-            "stdio" => caliban_mcp_client::TransportKind::Stdio,
-            "http" => caliban_mcp_client::TransportKind::Http,
-            "sse" => caliban_mcp_client::TransportKind::Sse,
+            "stdio" => caliban_config_types::mcp::TransportKind::Stdio,
+            "http" => caliban_config_types::mcp::TransportKind::Http,
+            "sse" => caliban_config_types::mcp::TransportKind::Sse,
             other => {
                 tracing::warn!(
                     target: caliban_common::tracing_targets::TARGET_MCP,
@@ -1120,7 +1120,7 @@ fn parse_transport(server: &str, raw: Option<&str>) -> caliban_mcp_client::Trans
                     value = other,
                     "unknown MCP server transport; falling back to stdio",
                 );
-                caliban_mcp_client::TransportKind::Stdio
+                caliban_config_types::mcp::TransportKind::Stdio
             }
         },
     }
@@ -1128,13 +1128,13 @@ fn parse_transport(server: &str, raw: Option<&str>) -> caliban_mcp_client::Trans
 
 /// Map the `oauth` string to `OauthMode`. Unknown values warn and fall
 /// back to `off`.
-fn parse_oauth(server: &str, raw: Option<&str>) -> caliban_mcp_client::OauthMode {
+fn parse_oauth(server: &str, raw: Option<&str>) -> caliban_config_types::mcp::OauthMode {
     match raw {
-        None => caliban_mcp_client::OauthMode::Off,
+        None => caliban_config_types::mcp::OauthMode::Off,
         Some(s) => match s.to_ascii_lowercase().as_str() {
-            "off" => caliban_mcp_client::OauthMode::Off,
-            "auto" => caliban_mcp_client::OauthMode::Auto,
-            "manual" => caliban_mcp_client::OauthMode::Manual,
+            "off" => caliban_config_types::mcp::OauthMode::Off,
+            "auto" => caliban_config_types::mcp::OauthMode::Auto,
+            "manual" => caliban_config_types::mcp::OauthMode::Manual,
             other => {
                 tracing::warn!(
                     target: caliban_common::tracing_targets::TARGET_MCP,
@@ -1142,7 +1142,7 @@ fn parse_oauth(server: &str, raw: Option<&str>) -> caliban_mcp_client::OauthMode
                     value = other,
                     "unknown MCP oauth mode; falling back to off",
                 );
-                caliban_mcp_client::OauthMode::Off
+                caliban_config_types::mcp::OauthMode::Off
             }
         },
     }
@@ -1180,12 +1180,12 @@ fn expand_mcp_field(
 fn expand_manual_oauth(
     ctx: &caliban_common::expand::ExpandContext,
     server: &str,
-    cfg: caliban_mcp_client::ManualOauthConfig,
-) -> caliban_mcp_client::ManualOauthConfig {
+    cfg: caliban_config_types::mcp::ManualOauthConfig,
+) -> caliban_config_types::mcp::ManualOauthConfig {
     let expand_opt = |field: &str, v: Option<String>| -> Option<String> {
         v.map(|raw| expand_mcp_field(ctx, server, field, &raw))
     };
-    caliban_mcp_client::ManualOauthConfig {
+    caliban_config_types::mcp::ManualOauthConfig {
         client_id: expand_opt("oauth_config.client_id", cfg.client_id),
         client_secret: expand_opt("oauth_config.client_secret", cfg.client_secret),
         auth_url: expand_opt("oauth_config.auth_url", cfg.auth_url),
@@ -1280,7 +1280,7 @@ mod tests {
         let mut ctx = caliban_common::expand::ExpandContext::from_process_env();
         ctx.set("CID", "Iv1.abc");
         ctx.set("SEC", "shhh");
-        let cfg = caliban_mcp_client::ManualOauthConfig {
+        let cfg = caliban_config_types::mcp::ManualOauthConfig {
             client_id: Some("${CID}".to_string()),
             client_secret: Some("${SEC}".to_string()),
             auth_url: None,

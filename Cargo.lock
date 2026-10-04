@@ -1070,6 +1070,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "caliban-common",
+ "caliban-config-types",
  "caliban-provider",
  "chrono",
  "directories",
@@ -1133,6 +1134,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliban-config-types"
+version = "0.15.0"
+dependencies = [
+ "caliban-common",
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "caliban-contract"
 version = "0.15.0"
 dependencies = [
@@ -1184,6 +1199,7 @@ dependencies = [
  "base64 0.22.1",
  "caliban-agent-core",
  "caliban-common",
+ "caliban-config-types",
  "caliban-provider",
  "chrono",
  "dirs",
@@ -1450,7 +1466,7 @@ dependencies = [
  "arc-swap",
  "caliban-agent-core",
  "caliban-common",
- "caliban-mcp-client",
+ "caliban-config-types",
  "chrono",
  "dirs",
  "fs2",
