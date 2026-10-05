@@ -236,6 +236,22 @@ mod tests {
             }
         }
 
+        // The kernel does not enforce DAC permission bits for root (euid 0): a
+        // 0o000 directory is still writable, so the write below would succeed and
+        // the expected error never fires. Skip under root so the test is honest
+        // wherever it runs — e.g. a container build queue whose pods run as root
+        // (#730). CI runs non-root and exercises the real denial path below.
+        #[allow(unsafe_code)]
+        // libc::geteuid() is a stable, infallible FFI call; std exposes no safe equivalent (cf. shell/bash.rs)
+        let running_as_root = unsafe { libc::geteuid() } == 0;
+        if running_as_root {
+            eprintln!(
+                "skipping permission_denied_errors: running as root (euid 0) bypasses \
+                 directory permission checks"
+            );
+            return;
+        }
+
         let tmp = TempDir::new().unwrap();
         let locked_dir = tmp.path().join("locked");
         std::fs::create_dir_all(&locked_dir).unwrap();
