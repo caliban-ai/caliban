@@ -233,19 +233,33 @@ fn build_one(
         "google" => {
             use caliban_provider_google::{GoogleProvider, config::AIStudioConfig};
             let api_key_env = block.api_key_env.as_deref().unwrap_or("GEMINI_API_KEY");
-            // base_url override is provider-specific; ignored for AI Studio's
-            // fixed endpoint in v2 (operator can pin via env vars).
-            let _ = block.base_url;
-            let key = resolve_key("google", api_key_env, pool)?;
-            let inner = GoogleProvider::ai_studio(AIStudioConfig::new(key))?;
+            // Honor a `[router.provider.google] base_url` override — AIStudioConfig
+            // carries a base_url the AI Studio transport actually uses, so this was
+            // simply unwired (previously `let _ = block.base_url`), silently
+            // dropping a configured key (#722). Mirrors the openai branch.
+            let base_url = block.base_url.clone();
+            let base_url_overridden = base_url.is_some();
+            let make_cfg = move |key: secrecy::SecretString| -> Result<AIStudioConfig> {
+                let mut cfg = AIStudioConfig::new(key);
+                if let Some(url) = base_url.as_ref() {
+                    cfg.base_url = url::Url::parse(url)?;
+                }
+                Ok(cfg)
+            };
+            // A local `base_url` override (a proxy / self-hosted gateway) needs no
+            // key — tolerate an absent one there; canonical AI Studio still requires
+            // it, same as the openai branch.
+            let key = resolve_key_optional("google", api_key_env, pool, base_url_overridden)?;
+            let inner = GoogleProvider::ai_studio(make_cfg(key)?)?;
             Ok(wrap_with_refresh_if_helper(
                 inner,
                 pool,
                 "google",
                 "google",
                 move |k| {
-                    GoogleProvider::ai_studio(AIStudioConfig::new(k))
-                        .map_err(caliban_provider::Error::adapter)
+                    let cfg =
+                        make_cfg(k).map_err(|e| caliban_provider::Error::Adapter(e.into()))?;
+                    GoogleProvider::ai_studio(cfg).map_err(caliban_provider::Error::adapter)
                 },
             ))
         }
@@ -544,6 +558,26 @@ model = "x"
         let wiring = wire_router(Some(&value), None, &empty_pool)
             .unwrap()
             .expect("settings [router] should wire");
+        assert!(wiring.from_settings, "settings-sourced wiring");
+        assert_eq!(wiring.router.routes().len(), 1);
+    }
+
+    #[test]
+    fn google_base_url_override_is_honored() {
+        // #722: a `[router.provider.google] base_url` must reach the provider.
+        // With an empty key pool, wiring only succeeds if the override was
+        // applied — it makes GEMINI_API_KEY optional, same as the openai path.
+        // Before the fix the key was dropped (`let _ = block.base_url`) and a
+        // real key was still required, so this would have failed.
+        let empty_pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
+        let value = serde_json::json!({
+            "default_purpose": "main_loop",
+            "route": [ { "purpose": "main_loop", "provider": "google", "model": "gemini-x" } ],
+            "provider": { "google": { "base_url": "http://localhost:8080" } }
+        });
+        let wiring = wire_router(Some(&value), None, &empty_pool)
+            .unwrap()
+            .expect("settings [router] with google base_url should wire");
         assert!(wiring.from_settings, "settings-sourced wiring");
         assert_eq!(wiring.router.routes().len(), 1);
     }
