@@ -64,6 +64,17 @@ pub(crate) fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
 /// operators about rules that work.
 #[must_use]
 pub fn validate_pattern(pattern: &str) -> Option<String> {
+    // An empty pattern parses cleanly but matches nothing (`glob_match("", v)`
+    // is only ever true for an empty value), so an empty rule is a silent no-op
+    // — the operator clearly meant *something* (#671). Flag it explicitly rather
+    // than falling through to the generic "names no tool" message below.
+    if pattern.is_empty() {
+        return Some(
+            "an empty pattern matches nothing — remove the rule, or write a real \
+             pattern like `Tool(<glob>)`, `Tool:<glob>`, or `*` to match every call"
+                .to_string(),
+        );
+    }
     // An unclosed `Tool(<glob>` is almost certainly a typo of the paren form:
     // it degrades into a literal tool name that no tool can ever be called.
     if paren_open(pattern).is_some() && !pattern.ends_with(')') {
@@ -716,6 +727,18 @@ mod tests {
                 "{pat} can never match and should be reported"
             );
         }
+    }
+
+    #[test]
+    fn validate_pattern_flags_empty_pattern() {
+        // An empty `pattern = ""` rule loads cleanly but is a silent no-op
+        // (#671): it must be flagged, with an empty-specific message rather than
+        // the generic "names no tool".
+        let why = validate_pattern("").expect("empty pattern must be flagged");
+        assert!(
+            why.contains("empty pattern matches nothing"),
+            "empty pattern should get the empty-specific message, got: {why}"
+        );
     }
 
     #[test]
