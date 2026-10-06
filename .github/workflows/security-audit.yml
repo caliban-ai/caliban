@@ -1,7 +1,9 @@
 name: security-audit
 
-# Advisory gate (#258). Fails when a RustSec advisory affects any crate in
-# Cargo.lock, except the entries explicitly triaged in deny.toml. Runs when the
+# Advisory check (#258) — advisory report, not a merge gate. The job itself
+# fails when a RustSec advisory affects any crate in Cargo.lock, except the
+# entries explicitly triaged in deny.toml, but it is non-required (see below) so
+# a red run surfaces the advisory without blocking the merge. Runs when the
 # dependency graph changes AND on a weekly schedule so advisories disclosed
 # against otherwise-static dependencies are still caught.
 #

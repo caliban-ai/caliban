@@ -22,7 +22,9 @@ fn main() {
         ""
     };
     // Commit date (UTC, YYYY-MM-DD) ties the date to the SHA rather than to
-    // wall-clock build time, keeping the string reproducible for a given commit.
+    // wall-clock build time. `format-local` renders in the TZ env var, which
+    // `git()` pins to UTC — so the date is the same for a given commit on every
+    // builder regardless of its local timezone, keeping the string reproducible.
     let date = git(&[
         "show",
         "-s",
@@ -40,9 +42,14 @@ fn main() {
 
 /// Run `git <args>` from the crate dir, returning trimmed stdout or `""` on any
 /// failure (git missing, not a repo, non-zero exit).
+///
+/// `TZ=UTC` pins date rendering: `git show --date=format-local` formats in the
+/// TZ env var, so this keeps the embedded commit date identical across builders
+/// in any timezone. Harmless for the non-date git calls.
 fn git(args: &[&str]) -> String {
     Command::new("git")
         .args(args)
+        .env("TZ", "UTC")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -64,6 +71,13 @@ fn worktree_dirty() -> bool {
 /// Rebuild when the checked-out commit changes so the embedded SHA never goes
 /// stale between commits. Resolves the real git dir (correct even inside a
 /// linked worktree) and watches HEAD plus the branch ref it points at.
+///
+/// The `-dirty` marker is therefore **best-effort between commits**: Cargo's
+/// `rerun-if-changed` can only watch named paths (here HEAD + the branch ref),
+/// not "any tracked file", so editing or reverting a tracked file without
+/// committing does not re-run this script. `-dirty` refreshes on the next
+/// commit, ref move, or clean rebuild — accurate at every commit boundary, only
+/// possibly stale in the window between commits.
 fn emit_rerun_triggers() {
     let git_dir = git(&["rev-parse", "--absolute-git-dir"]);
     if git_dir.is_empty() {
