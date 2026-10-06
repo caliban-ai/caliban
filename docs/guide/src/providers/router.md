@@ -84,11 +84,12 @@ base_url = "https://oai-staging.example.com/v1"
 api_key_env = "GEMINI_API_KEY_STAGING"
 ```
 
-```admonish warning title="`base_url` is ignored for `google`"
-The Google block honors `api_key_env` only. Google AI Studio has a fixed
-endpoint in router v2, so a `base_url` set under `[router.provider.google]` is
-silently discarded — no warning, no error. To point Gemini at a proxy, set the
-`GEMINI_BASE_URL` environment variable instead.
+```admonish note title="`base_url` for `google`"
+The Google block honors both `api_key_env` and `base_url`. A `base_url` set
+under `[router.provider.google]` points the AI Studio transport at that endpoint
+(e.g. a proxy or self-hosted gateway); as with `openai`, a local override makes
+the API key optional. The `GEMINI_BASE_URL` environment variable still works for
+the single-provider (non-router) path.
 ```
 
 ```toml
