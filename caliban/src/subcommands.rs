@@ -163,12 +163,26 @@ fn config_print_envelope(outcome: &caliban_settings::LoadOutcome) -> Result<serd
 /// Handle `caliban config <verb>` (ADR 0026). Reads the layered
 /// settings, then either prints them or migrates legacy per-feature
 /// TOMLs into the project-scope `settings.json`.
-pub(crate) fn run_config(cmd: &ConfigCommand) -> Result<i32> {
+pub(crate) fn run_config(
+    cmd: &ConfigCommand,
+    settings_overlay: Option<&str>,
+    setting_sources: Option<&str>,
+) -> Result<i32> {
     let workspace = std::env::current_dir().context("could not get cwd")?;
     let mut opts = caliban_settings::LoadOptions::new(workspace.clone());
-    // `print` and `migrate` both reflect what would *actually* load in
-    // a normal run, so we don't override scope_filter / overlay here.
+    // `print` and `migrate` both reflect what would *actually* load in a normal
+    // run, so honor the same `--setting-sources` / `--settings` flags the run
+    // path applies (compose::load_layered_settings). Without this, `config
+    // print` ignored them while the global `--help` implied otherwise (#723).
     opts.bare = false;
+    if let Some(csv) = setting_sources {
+        opts = opts.with_sources_csv(csv).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if let Some(overlay) = settings_overlay {
+        opts = opts
+            .with_cli_overlay(overlay)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
     let outcome = caliban_settings::load_settings(&opts)
         .map_err(|e| anyhow::anyhow!(e))
         .context("load layered settings")?;

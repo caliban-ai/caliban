@@ -669,7 +669,7 @@ pub(crate) struct Args {
     pub(crate) config_path: Option<PathBuf>,
 
     /// Spawn a background sub-agent with the given task and return
-    /// immediately. Equivalent to `caliban agents spawn --bg --prompt
+    /// immediately. Equivalent to `caliban agents spawn --prompt
     /// <task>`. ADR 0037.
     #[arg(long = "bg", value_name = "TASK")]
     pub(crate) bg: Option<String>,
@@ -891,9 +891,6 @@ pub(crate) enum PermsCommand {
     },
     /// Remove a permission rule from a scope file.
     Remove {
-        /// Remove by ordinal position (1-based).
-        #[arg(long)]
-        index: Option<usize>,
         /// Remove all rules whose pattern equals this value.
         #[arg(long)]
         pattern: Option<String>,
@@ -1010,17 +1007,18 @@ pub(crate) enum ConfigCommand {
 pub(crate) enum AgentsCommand {
     /// List registered background agents.
     List,
-    /// Stream a running agent's transcript live (Ctrl+D detaches).
+    /// Stream a running agent's transcript live (Ctrl+C detaches).
     Attach {
         /// Target agent id.
         id: String,
     },
-    /// Print the agent's session log (`session.json`).
+    /// Print the agent's transcript (`stdout.ndjson`).
     Logs {
         /// Target agent id.
         id: String,
     },
-    /// Terminate an agent (SIGTERM → SIGKILL after grace).
+    /// Terminate an agent (SIGTERM; the worker flushes and exits within its
+    /// grace window — no forced SIGKILL).
     Kill {
         /// Target agent id.
         id: String,

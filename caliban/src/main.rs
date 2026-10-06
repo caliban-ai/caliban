@@ -110,7 +110,11 @@ async fn main() -> Result<()> {
     // `caliban config <verb>` — settings inspection / migration. No
     // provider or daemon needed (ADR 0026).
     if let Some(CalibanCommand::Config { inner }) = &args.command {
-        let code = subcommands::run_config(inner)?;
+        let code = subcommands::run_config(
+            inner,
+            args.settings_overlay.as_deref(),
+            args.setting_sources.as_deref(),
+        )?;
         std::process::exit(code);
     }
 

@@ -31,11 +31,7 @@ pub(crate) fn run(cmd: &PermsCommand) -> i32 {
             comment.as_deref(),
             reason.as_deref(),
         ),
-        PermsCommand::Remove {
-            index,
-            pattern,
-            scope,
-        } => cmd_remove(*index, pattern.as_deref(), scope.as_deref()),
+        PermsCommand::Remove { pattern, scope } => cmd_remove(pattern.as_deref(), scope.as_deref()),
         PermsCommand::Import {
             from,
             scope,
@@ -303,7 +299,7 @@ fn cmd_add(
     }
 }
 
-fn cmd_remove(index: Option<usize>, pattern: Option<&str>, scope: Option<&str>) -> i32 {
+fn cmd_remove(pattern: Option<&str>, scope: Option<&str>) -> i32 {
     let Some(s) = parse_scope(scope.or(Some("project"))) else {
         return 1;
     };
@@ -333,12 +329,8 @@ fn cmd_remove(index: Option<usize>, pattern: Option<&str>, scope: Option<&str>) 
                 1
             }
         }
-    } else if index.is_some() {
-        // Index-based removal reserved for v3; for v2 require --pattern.
-        eprintln!("[caliban perms] --index removal not supported in v2; use --pattern");
-        2
     } else {
-        eprintln!("[caliban perms] must specify --pattern or --index");
+        eprintln!("[caliban perms] must specify --pattern");
         2
     }
 }
