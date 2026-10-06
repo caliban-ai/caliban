@@ -236,6 +236,10 @@ pub(crate) struct HeadlessRunConfig {
     /// Raw model identifier as requested by the operator. Compared against
     /// each `TurnStart.model` to detect silent model substitution (F4).
     pub(crate) requested_model: String,
+    /// Model IDs the provider confirmed via `/v1/models` (empty when it lists
+    /// none). Lets the mismatch check tell an alias proxy's backend label from a
+    /// genuine substitution, suppressing the false-positive warning (#715).
+    pub(crate) known_models: std::collections::HashSet<String>,
     /// Current working directory at run start.
     pub(crate) cwd: String,
     /// Optional buffer of hook events accumulated by an outer
@@ -274,6 +278,7 @@ impl HeadlessRunConfig {
             plugins: Vec::new(),
             model_summary: "mock/mock".into(),
             requested_model: "mock".into(),
+            known_models: std::collections::HashSet::new(),
             cwd: ".".into(),
             hook_buffer: None,
             permission_mode: "default".into(),
@@ -406,11 +411,13 @@ impl<W: Write> HeadlessDriver<W> {
     /// Construct a new driver writing to `writer`.
     pub(crate) fn new(writer: W, config: HeadlessRunConfig) -> Self {
         let encoder = encoder::for_format(config.output_format);
+        let decoder = crate::stream_decode::StreamDecoder::new()
+            .with_known_models(config.known_models.clone());
         Self {
             writer,
             config,
             encoder,
-            decoder: crate::stream_decode::StreamDecoder::new(),
+            decoder,
             tool_calls_seen: 0,
             last_assistant_text: String::new(),
             final_messages: Vec::new(),

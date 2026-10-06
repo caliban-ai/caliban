@@ -31,7 +31,15 @@ pub(crate) async fn run_and_render(
     use caliban_agent_core::TurnEvent;
 
     let requested_model = agent.active_model().as_str().to_string();
-    let mut decoder = crate::stream_decode::StreamDecoder::new();
+    // Models the provider confirmed via `/v1/models` — lets the decoder tell a
+    // genuine substitution from an alias proxy's backend label (#715).
+    let known_models: std::collections::HashSet<String> = agent
+        .provider()
+        .list_models()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    let mut decoder = crate::stream_decode::StreamDecoder::new().with_known_models(known_models);
     let mut stream = agent.stream_until_done(messages, cancel);
     let mut at_column_zero = true;
     let mut final_messages: Vec<Message> = Vec::new();
@@ -567,6 +575,14 @@ pub(crate) async fn run_headless(
         plugins: plugin_descriptors,
         model_summary,
         requested_model: model.clone(),
+        // Provider-confirmed model IDs (`/v1/models`) so the headless mismatch
+        // check can distinguish an alias proxy from a substitution (#715).
+        known_models: agent
+            .provider()
+            .list_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect(),
         cwd,
         hook_buffer: hook_event_buffer,
         permission_mode: permission_mode_str,

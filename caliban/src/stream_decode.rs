@@ -40,12 +40,26 @@ pub(crate) fn model_mismatch_text(requested: &str, actual: &str) -> String {
 pub(crate) struct StreamDecoder {
     tool_inputs: HashMap<String, ToolInput>,
     seen_mismatches: HashSet<(String, String)>,
+    /// Model IDs the provider confirmed via `/v1/models` (empty when the
+    /// provider doesn't list models). A stream `model` that differs from the
+    /// requested id is a *substitution* only if the requested id is NOT in this
+    /// set; when it IS, the differing name is an alias/backend label (llama-swap,
+    /// `LiteLLM`, …), not a silent substitution, so the warning is suppressed (#715).
+    known_models: HashSet<String>,
 }
 
 impl StreamDecoder {
     /// A fresh decoder for one run.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Record the provider's confirmed model IDs (its `/v1/models` listing), used
+    /// to suppress false-positive mismatch warnings behind alias proxies (#715).
+    #[must_use]
+    pub(crate) fn with_known_models(mut self, ids: HashSet<String>) -> Self {
+        self.known_models = ids;
+        self
     }
 
     /// Record a tool call's start (its name), keyed by `tool_use_id`.
@@ -88,6 +102,10 @@ impl StreamDecoder {
     pub(crate) fn note_model_mismatch(&mut self, requested: &str, actual: &str) -> bool {
         !actual.is_empty()
             && actual != requested
+            // The provider confirmed `requested` exists (it listed it via
+            // `/v1/models`), so a differing stream name is an alias/backend
+            // label, not a silent substitution — don't warn (#715).
+            && !self.known_models.contains(requested)
             && self
                 .seen_mismatches
                 .insert((requested.to_string(), actual.to_string()))
@@ -146,6 +164,37 @@ mod tests {
         let mut d = StreamDecoder::new();
         assert!(!d.note_model_mismatch("a", "a"), "exact match");
         assert!(!d.note_model_mismatch("a", ""), "empty actual");
+    }
+
+    #[test]
+    fn mismatch_suppressed_for_known_alias() {
+        // #715: llama-swap lists the alias `qwen3.8-27b-gguf` via /v1/models and
+        // proxies to llama.cpp, which reports its own `-hf` name in the stream.
+        // The requested id is confirmed present, so the differing stream name is
+        // an alias/backend label — no warning.
+        let known: HashSet<String> = ["qwen3.8-27b-gguf".to_string()].into_iter().collect();
+        let mut d = StreamDecoder::new().with_known_models(known);
+        assert!(
+            !d.note_model_mismatch("qwen3.8-27b-gguf", "unsloth/Qwen3.8-27B-GGUF:UD-Q5_K_M"),
+            "a confirmed id differing from the stream model is an alias, not a substitution"
+        );
+    }
+
+    #[test]
+    fn mismatch_warns_for_genuine_substitution() {
+        // A genuine substitution (LM Studio serves a *different loaded model* for
+        // an unknown id): the requested id is NOT in /v1/models, so it must still
+        // warn exactly once.
+        let known: HashSet<String> = ["llama-3.1-8b".to_string()].into_iter().collect();
+        let mut d = StreamDecoder::new().with_known_models(known);
+        assert!(
+            d.note_model_mismatch("typo-model", "llama-3.1-8b"),
+            "an unknown requested id served as a different loaded model still warns"
+        );
+        assert!(
+            !d.note_model_mismatch("typo-model", "llama-3.1-8b"),
+            "deduped"
+        );
     }
 
     #[test]

@@ -68,6 +68,16 @@ differ in how they treat it:
   mlx-lm must be keyed by the repo id.
 ```
 
+```admonish note title="Alias proxies don't trigger a model-mismatch warning"
+With an alias proxy (llama-swap, LiteLLM, …) the backend often reports its own
+model name in the response (e.g. llama.cpp's `-hf` id) rather than the alias you
+requested. caliban does **not** warn about this: when the requested id is present
+in the server's `/v1/models` listing, a differing stream name is treated as an
+alias/backend label, not a silent substitution (#715). The mismatch warning still
+fires for the case it exists for — a server that serves a *different loaded model*
+for an id it never listed (the LM Studio substitution case).
+```
+
 ```admonish note title="A local endpoint changes the agent-loop profile"
 Pointing the OpenAI provider at a loopback, private-range, or bareword-LAN host
 also classifies the run as **local** for the adaptive
