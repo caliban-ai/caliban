@@ -1,3 +1,8 @@
+# Pinned Rust toolchain — the single source of truth for local dev and CI (every
+# workflow installs it with rustup, which reads this file's channel + components).
+# Pin freshness: review ~quarterly and bump one or two minor versions at a time
+# rather than letting it drift; a large jump surfaces new clippy lints in layers
+# (cf. the 1.95 -> 1.99 jump, #718). Checklist in docs/releasing.md.
 [toolchain]
 channel    = "1.99.0"
 components = ["rustfmt", "clippy"]

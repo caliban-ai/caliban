@@ -38,9 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        # rustup reads the pin from rust-toolchain.toml (#728); add the release
+        # target on top.
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin
 
       - name: Verify tag matches workspace version
         # Same guard publish.yml uses: tag vX.Y.Z must equal the caliban package

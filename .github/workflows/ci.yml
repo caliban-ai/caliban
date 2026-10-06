@@ -57,7 +57,10 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         if: steps.changes.outputs.code == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # No toolchain version here: rustup (preinstalled on the runner) reads
+        # the channel + components pin from rust-toolchain.toml — the single
+        # source of truth (#728).
+        run: rustup show active-toolchain || rustup toolchain install
 
       - name: Cache cargo registry & target
         if: steps.changes.outputs.code == 'true'
@@ -105,9 +108,11 @@ jobs:
       # Homebrew-toolchain workaround documented in scripts/coverage.sh).
       - name: Install Rust toolchain (from rust-toolchain.toml)
         if: needs.check.outputs.code == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+        # rustup reads the pin from rust-toolchain.toml (#728); add the extra
+        # coverage component on top.
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add llvm-tools-preview
       - name: Cache cargo registry & target
         if: needs.check.outputs.code == 'true'
         uses: Swatinem/rust-cache@v2
@@ -163,7 +168,8 @@ jobs:
         uses: actions/checkout@v5
       - name: Install Rust toolchain (from rust-toolchain.toml)
         if: needs.check.outputs.code == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # rustup reads the pin from rust-toolchain.toml (#728).
+        run: rustup show active-toolchain || rustup toolchain install
       - name: Cache cargo registry & target
         if: needs.check.outputs.code == 'true'
         uses: Swatinem/rust-cache@v2

@@ -104,3 +104,26 @@ re-uploaded at the same version. Recovery is simply to **re-run
 `scripts/publish.sh`** — it skips everything already live and continues with the
 rest. (If you must do it by hand: `cargo publish -p <crate> --no-verify` for each
 remaining crate, in dependency order.)
+
+## Rust toolchain pin freshness
+
+The Rust toolchain is pinned in `rust-toolchain.toml` (`channel = "1.99.0"`) —
+the single source of truth. Every CI workflow installs it with `rustup`
+(`rustup show active-toolchain || rustup toolchain install`), which reads that
+file (channel + components), and local `cargo` auto-installs the pin on first
+use. There is exactly **one** place to change it.
+
+Dependabot does not track the `channel` in `rust-toolchain.toml`, so pin
+freshness is a lightweight manual cadence rather than an automated PR:
+
+- [ ] **Quarterly** (or when cutting a release), check for a newer stable Rust.
+- [ ] Bump `channel` in `rust-toolchain.toml` by **one or two minor versions at a
+      time**. Avoid multi-version jumps — new clippy lints land in layers, so a
+      large jump is a painful reactive catch-up (the 1.95 → 1.99 bump, #718, is
+      the cautionary example).
+- [ ] Run the full gate (`fmt`/`clippy`/`build`/`test`) under the new pin and fix
+      any new lints. **Validate via the toolchain's own binaries** — `rustup run
+      <ver> cargo clippy` PATH-shadows a Homebrew `cargo-clippy` and silently
+      hides new lints (#718); run
+      `$HOME/.rustup/toolchains/<ver>-*/bin/cargo-clippy` and confirm
+      `cargo-clippy --version` matches the bumped version before pushing.
