@@ -8,6 +8,9 @@
 # caliban
 
 <p align="center">
+  <a href="https://crates.io/crates/caliban"><img alt="crates.io" src="https://img.shields.io/crates/v/caliban.svg?logo=rust"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/crates/l/caliban.svg"></a>
+  <a href="https://github.com/caliban-ai/caliban/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/caliban-ai/caliban/ci.yml?branch=main&logo=github&label=CI"></a>
   <a href="https://discord.gg/jq4P4R5EGh"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20the%20chat-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
