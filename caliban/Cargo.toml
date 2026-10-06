@@ -76,7 +76,7 @@ base64                     = { workspace = true }
 # `clipboard` feature (default-on) so headless builds can opt out via
 # `--no-default-features` to avoid the X11/Wayland link-time deps.
 arboard                    = { workspace = true, optional = true }
-ratatui = { version = "0.29.0", features = ["crossterm"] }
+ratatui = { version = "0.30.0", features = ["crossterm"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 nucleo-matcher           = { workspace = true }
 ignore                   = { workspace = true }
