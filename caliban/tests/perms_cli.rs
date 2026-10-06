@@ -415,22 +415,24 @@ fn perms_list_unknown_scope_exits_one() {
 }
 
 #[test]
-fn perms_remove_without_pattern_or_index_exits_two() {
+fn perms_remove_without_pattern_exits_two() {
     let dir = tempfile::tempdir().unwrap();
     let out = perms(dir.path(), &["remove", "--scope", "project"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("must specify --pattern or --index"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("must specify --pattern"));
 }
 
 #[test]
-fn perms_remove_index_is_unsupported_in_v2() {
+fn perms_remove_index_flag_removed() {
+    // `--index` was advertised but rejected at runtime; it is now removed
+    // entirely (#723), so clap rejects it as an unknown argument.
     let dir = tempfile::tempdir().unwrap();
     let out = perms(
         dir.path(),
         &["remove", "--index", "1", "--scope", "project"],
     );
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--index removal not supported"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--index"));
 }
 
 #[test]
