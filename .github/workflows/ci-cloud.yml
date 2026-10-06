@@ -37,7 +37,9 @@ jobs:
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        # rustup reads the pin from rust-toolchain.toml (#728).
+        run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo build  --workspace --features caliban-provider-anthropic/bedrock,caliban-provider-anthropic/vertex,caliban-provider-openai/azure,caliban-provider-google/vertex

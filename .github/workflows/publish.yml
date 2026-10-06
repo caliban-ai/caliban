@@ -22,7 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        # rustup reads the pin from rust-toolchain.toml (#728).
+        run: rustup show active-toolchain || rustup toolchain install
 
       - name: Verify tag matches workspace version
         # Guard 3: tag v0.1.0 must equal the workspace package version.
