@@ -25,6 +25,34 @@ The model can request a background sub-agent by setting `background: true`
 in an `AgentTool` call. The parent session receives the id and a note to
 check back via `caliban attach <id>`.
 
+### Agent definitions (`frontmatter_path`)
+
+A spawn may name an **agent definition** — a Markdown file with YAML
+frontmatter — by setting `SpawnSpec.frontmatter_path` over the supervisor wire
+(this is how `prospero`/`caliban-operator` map a `CalibanTask`'s `agentType`).
+The worker loads it and applies:
+
+```markdown
+---
+model: claude-opus-4-8      # optional — applied when the spawn sets no model
+tools: [Read, Grep, Bash]   # optional — tool allowlist when the spawn sets none
+name: reviewer              # optional, informational
+description: ...            # optional, informational
+---
+You are a careful code reviewer. ...   # body → the agent's system prompt
+```
+
+**Precedence:** explicit `SpawnSpec` fields (`model`, `tool_allowlist`) win over
+the definition; the file fills only what the spawn leaves unset. The body
+becomes the agent's system prompt on a fresh start (a resumed session keeps its
+existing history). A named-but-unloadable definition fails the spawn rather than
+silently starting a default agent.
+
+> **Note.** Resolution is by **path** today. Selecting a definition **by name**
+> (an agents directory + `agent_type` lookup) is a planned follow-up. The ACP
+> (`drive_protocol = "acp"`) path applies the spawn's `model`/`provider` but does
+> not yet apply a definition's tools/system-prompt — also tracked as follow-up.
+
 ## The `caliband` daemon
 
 `caliband` is a separate binary shipped alongside `caliban`. It runs as a

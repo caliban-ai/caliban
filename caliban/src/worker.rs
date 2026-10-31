@@ -697,6 +697,28 @@ pub(crate) async fn run(
             return 70;
         }
     };
+    // Load an optional agent definition named by the spawn (#689). Its model /
+    // tools / system-prompt body apply below; explicit SpawnSpec fields win.
+    // A named-but-unloadable definition is a hard error — the spawn asked for an
+    // agent it can't run.
+    let agent_def = match record.spec.frontmatter_path.as_deref() {
+        Some(path) => match load_agent_definition(path) {
+            Ok(def) => Some(def),
+            Err(e) => {
+                eprintln!(
+                    "[caliban __agent-worker] frontmatter {}: {e}",
+                    path.display()
+                );
+                return 64; // EX_USAGE
+            }
+        },
+        None => None,
+    };
+    // Tool allowlist with SpawnSpec precedence over the definition (#689); used
+    // for both registry filtering and the default permission gate.
+    let effective_allowlist =
+        effective_tool_allowlist(record.spec.tool_allowlist.as_deref(), agent_def.as_ref());
+
     // Select the provider from the spawn spec (#93). Must precede provider
     // construction and model defaulting (default_model_for keys off it).
     if let Some(p) = record.spec.provider.as_deref() {
@@ -707,7 +729,9 @@ pub(crate) async fn run(
             return 64; // EX_USAGE
         }
     }
-    if let Some(model) = record.spec.model.clone() {
+    // Model: explicit spec.model wins over the definition's model; neither set
+    // leaves the provider default to resolve below (#689).
+    if let Some(model) = effective_agent_model(record.spec.model.as_deref(), agent_def.as_ref()) {
         args.model = Some(model);
     }
 
@@ -756,7 +780,7 @@ pub(crate) async fn run(
         &worker_settings,
         &topic_backend,
     );
-    let registry = filter_registry(registry, record.spec.tool_allowlist.as_deref());
+    let registry = filter_registry(registry, effective_allowlist.as_deref());
 
     // Permission gate: inherit the parent's policy when asked + available
     // (#84), else the binary-default gate (#75).
@@ -789,7 +813,7 @@ pub(crate) async fn run(
             // #75 default (supervised) gate: read-only Allow; Bash/Write/Edit Ask →
             // denied non-interactively (a drive adapter surfaces the Ask to a human
             // when one is attached).
-            let rules = build_worker_rules(record.spec.tool_allowlist.as_deref());
+            let rules = build_worker_rules(effective_allowlist.as_deref());
             let ask: Arc<dyn caliban_agent_core::AskHandler> =
                 Arc::new(caliban_agent_core::NonInteractiveAskHandler { auto_allow: false });
             Arc::new(caliban_agent_core::PermissionsHook::new(
@@ -819,9 +843,22 @@ pub(crate) async fn run(
     // operator message; a fresh start seeds the first user turn.
     let messages =
         load_resume_messages(record.spec.resume_session.as_deref()).unwrap_or_else(|| {
-            vec![caliban_provider::Message::user_text(
+            // Fresh start: seed the agent definition's body as the system prompt
+            // at position 0 (#689), mirroring the main.rs fresh-session path.
+            // On resume the prior history already carries its system message, so
+            // we don't inject a second one.
+            let mut msgs = Vec::new();
+            if let Some(body) = agent_def
+                .as_ref()
+                .map(|d| d.body.as_str())
+                .filter(|b| !b.is_empty())
+            {
+                msgs.push(caliban_provider::Message::system_text(body));
+            }
+            msgs.push(caliban_provider::Message::user_text(
                 record.spec.initial_prompt.clone(),
-            )]
+            ));
+            msgs
         });
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stream = if let Some(provider) = input_source {
@@ -1008,6 +1045,60 @@ fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::R
     }
     rules.extend(caliban_agent_core::default_rules());
     rules
+}
+
+/// An agent definition loaded from a `SpawnSpec.frontmatter_path` markdown file
+/// (#689): YAML frontmatter + a body used as the agent's system prompt. Any
+/// frontmatter keys beyond `model` / `tools` (e.g. `name`, `description`) are
+/// accepted but informational — only these two are applied, and explicit
+/// `SpawnSpec` fields take precedence over them.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AgentDefinition {
+    /// Model id; applied only when the spawn spec sets no model.
+    #[serde(default)]
+    model: Option<String>,
+    /// Tool allowlist; applied only when the spawn spec sets none.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    /// The markdown body: the agent's system prompt. Filled from the document
+    /// body, not the YAML.
+    #[serde(skip)]
+    body: String,
+}
+
+/// Load and parse an agent definition from `path` (#689). Errors as a string on
+/// a read failure, missing/invalid frontmatter, or malformed YAML.
+fn load_agent_definition(path: &std::path::Path) -> Result<AgentDefinition, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+    let (yaml, body) =
+        caliban_common::frontmatter::split(&raw).map_err(|e| e.reason().to_string())?;
+    let mut def: AgentDefinition =
+        serde_yaml::from_str(yaml).map_err(|e| format!("invalid frontmatter yaml: {e}"))?;
+    def.body = body.trim().to_string();
+    Ok(def)
+}
+
+/// Effective model: an explicit `SpawnSpec.model` wins over the agent
+/// definition's `model` (#689). `None` leaves the provider default to resolve.
+fn effective_agent_model(
+    spec_model: Option<&str>,
+    def: Option<&AgentDefinition>,
+) -> Option<String> {
+    spec_model
+        .map(str::to_string)
+        .or_else(|| def.and_then(|d| d.model.clone()))
+}
+
+/// Effective tool allowlist: an explicit `SpawnSpec.tool_allowlist` wins over the
+/// agent definition's `tools` (#689). `None` means "no allowlist" (unchanged
+/// registry + default permission tail).
+fn effective_tool_allowlist(
+    spec_allowlist: Option<&[String]>,
+    def: Option<&AgentDefinition>,
+) -> Option<Vec<String>> {
+    spec_allowlist
+        .map(<[String]>::to_vec)
+        .or_else(|| def.and_then(|d| d.tools.clone()))
 }
 
 /// Max time a per-agent session-plane peer may take to complete the TLS
@@ -1289,6 +1380,67 @@ mod tests {
         ));
     }
     use caliban_agent_core::{Action, default_rules};
+
+    // --- agent definition honoring (#689) ---
+
+    #[test]
+    fn agent_definition_parses_model_tools_and_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviewer.md");
+        std::fs::write(
+            &path,
+            "---\nname: reviewer\ndescription: careful reviewer\nmodel: claude-opus-4-8\ntools: [Read, Grep]\n---\nYou are a careful code reviewer.\n",
+        )
+        .unwrap();
+        let def = load_agent_definition(&path).expect("parses");
+        assert_eq!(def.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(
+            def.tools,
+            Some(vec!["Read".to_string(), "Grep".to_string()])
+        );
+        // name/description are accepted but ignored; body becomes the prompt.
+        assert_eq!(def.body, "You are a careful code reviewer.");
+    }
+
+    #[test]
+    fn agent_definition_missing_frontmatter_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.md");
+        std::fs::write(&path, "no frontmatter here").unwrap();
+        assert!(load_agent_definition(&path).is_err());
+    }
+
+    #[test]
+    fn spawn_spec_fields_win_over_agent_definition() {
+        // #689 precedence: an explicit SpawnSpec model/tool_allowlist overrides
+        // the definition; the definition fills only what the spec leaves unset.
+        let def = AgentDefinition {
+            model: Some("def-model".into()),
+            tools: Some(vec!["Read".into()]),
+            body: String::new(),
+        };
+        // Spec set → spec wins.
+        assert_eq!(
+            effective_agent_model(Some("spec-model"), Some(&def)).as_deref(),
+            Some("spec-model")
+        );
+        assert_eq!(
+            effective_tool_allowlist(Some(&["Bash".to_string()]), Some(&def)),
+            Some(vec!["Bash".to_string()])
+        );
+        // Spec unset → definition fills in.
+        assert_eq!(
+            effective_agent_model(None, Some(&def)).as_deref(),
+            Some("def-model")
+        );
+        assert_eq!(
+            effective_tool_allowlist(None, Some(&def)),
+            Some(vec!["Read".to_string()])
+        );
+        // Neither → None (provider default / no allowlist).
+        assert_eq!(effective_agent_model(None, None), None);
+        assert_eq!(effective_tool_allowlist(None, None), None);
+    }
 
     // --- session persistence + resume (#651, ADR 0057) ---
 
