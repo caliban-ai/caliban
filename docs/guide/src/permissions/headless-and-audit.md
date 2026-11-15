@@ -48,9 +48,11 @@ Every tool-call decision (allow, deny, or ask) is appended to an append-only JSO
 
 ```admonish warning title="An unattended fleet agent is not in this log"
 A background-fleet agent spawned with `permission_posture = "unattended"`
-installs no permission hooks on the NDJSON session plane, so none of its tool
-calls appear here. Its audit record is a single line on the worker's stderr,
-captured in caliband's output. See
+bypasses the permission gate on **both** drive paths (the NDJSON session plane
+and the ACP transport, #720), so none of its tool calls appear here. A managed
+`permissions.enforce = true` refuses that bypass on both paths — the worker exits
+with `EX_CONFIG` rather than run ungated. Its audit record is otherwise a single
+line on the worker's stderr, captured in caliband's output. See
 [Permissions for fleet agents](../subagents/background-fleet.md#permissions-for-fleet-agents).
 ```
 

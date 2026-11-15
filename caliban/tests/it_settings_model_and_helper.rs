@@ -39,6 +39,7 @@ fn load(workspace: &std::path::Path) -> caliban_settings::Settings {
         cli_overlay: None,
         bare: false,
         schema_validate: false,
+        env_vars: None,
     };
     load_settings(&opts).expect("load_settings").settings
 }

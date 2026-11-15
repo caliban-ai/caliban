@@ -17,7 +17,7 @@ use thiserror::Error;
 use crate::merge::merge_values;
 use crate::schema::validate_value;
 use crate::scope::{Scope, ScopePaths};
-use crate::settings::{EnvOverride, Settings};
+use crate::settings::{ENV_DEFAULT_PERMISSION_MODE, EnvOverride, Settings};
 
 /// Emit a tracing WARN at most once per unique message for the lifetime of
 /// the process.  Prevents log spam when `load_settings` is called in a
@@ -71,6 +71,12 @@ pub struct LoadOptions {
     /// Run schema validation; default `true`. Invalid documents warn
     /// but don't fail.
     pub schema_validate: bool,
+    /// Explicit environment for the settings env layer. `None` (the production
+    /// default) reads the real process environment; tests inject a map so the
+    /// env layer is exercised hermetically and in parallel without mutating the
+    /// process env (the same pure-lookup shape `Settings::apply_env_overrides`
+    /// takes).
+    pub env_vars: Option<BTreeMap<String, String>>,
 }
 
 impl Default for LoadOptions {
@@ -82,6 +88,7 @@ impl Default for LoadOptions {
             cli_overlay: None,
             bare: false,
             schema_validate: true,
+            env_vars: None,
         }
     }
 }
@@ -97,6 +104,7 @@ impl LoadOptions {
             cli_overlay: None,
             bare: false,
             schema_validate: true,
+            env_vars: None,
         }
     }
 
@@ -232,13 +240,19 @@ fn strip_user_managed_only_keys(value: &mut Value) -> Vec<&'static str> {
 /// [`LoadOutcome::validation_warnings`]).
 #[allow(clippy::too_many_lines)]
 pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
+    // Env settings layer lookup: a test-injected map (`LoadOptions::env_vars`)
+    // when present, else the real process environment (#659, #720).
+    let env_lookup = |k: &str| match &opts.env_vars {
+        Some(m) => m.get(k).cloned(),
+        None => std::env::var(k).ok(),
+    };
     if opts.bare {
         // Even in bare mode the `CALIBAN_STORAGE_*` env overrides apply: they are
         // an explicit operator gesture (like the other CALIBAN_* env vars caliban
         // honors regardless of on-disk config), not file configuration (#659).
         let mut settings = Settings::default();
         let env_overrides = settings
-            .apply_env_overrides(|k| std::env::var(k).ok())
+            .apply_env_overrides(env_lookup)
             .map_err(LoadError::EnvOverride)?;
         return Ok(LoadOutcome {
             settings,
@@ -452,13 +466,45 @@ pub fn load_settings(opts: &LoadOptions) -> Result<LoadOutcome, LoadError> {
     // Step 6: deserialize.
     let mut settings: Settings = serde_json::from_value(accumulated).map_err(LoadError::Final)?;
 
+    // #720: a managed scope that blocks parent settings
+    // (`parent_settings_behavior = "block"`) must outrank the environment layer
+    // for the permission mode — otherwise `CALIBAN_DEFAULT_PERMISSION_MODE`
+    // silently overrides a managed `permissions.default_mode`, and a deployment
+    // that believes it pinned the mode has not. Snapshot the managed scope's own
+    // `default_mode` (the value it locked, not the merged one) so it can be
+    // re-asserted after the env layer below.
+    let managed_locked_mode: Option<String> = if managed_blocks {
+        per_scope
+            .iter()
+            .find(|(scope, _, _)| *scope == Scope::Managed)
+            .and_then(|(_, v, _)| v.get("permissions"))
+            .and_then(|p| p.get("default_mode"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        None
+    };
+
     // Step 6b: environment overrides for storage (#659). Env wins over the
     // loaded file settings so caliban-operator can point an agent pod at a
     // remote gonzalod (and name its token var via `token_env`) without
     // generating a caliban settings file (caliban-operator ADR 0005).
-    let env_overrides = settings
-        .apply_env_overrides(|k| std::env::var(k).ok())
+    let mut env_overrides = settings
+        .apply_env_overrides(env_lookup)
         .map_err(LoadError::EnvOverride)?;
+
+    // #720: re-assert the managed-locked permission mode over the env layer.
+    if let Some(locked) = managed_locked_mode
+        && settings.permissions.default_mode.as_deref() != Some(locked.as_str())
+    {
+        settings.permissions.default_mode = Some(locked);
+        env_overrides.retain(|o| o.key_path != "permissions.default_mode");
+        warnings.push(format!(
+            "{}: {ENV_DEFAULT_PERMISSION_MODE} ignored — permissions.default_mode is \
+             pinned by a managed scope with parent_settings_behavior = \"block\" (#720)",
+            Scope::Managed.label()
+        ));
+    }
 
     // Step 7: legacy `.toml` compat shims.
     //
@@ -690,6 +736,73 @@ mod tests {
         let outcome = load_settings(&opts).unwrap();
         assert!(outcome.settings.model.is_none());
         assert!(outcome.sources.is_empty());
+    }
+
+    #[test]
+    fn managed_block_pins_permission_mode_over_env() {
+        // #720: a managed scope with parent_settings_behavior = "block" that sets
+        // permissions.default_mode must outrank CALIBAN_DEFAULT_PERMISSION_MODE,
+        // or a pinned-down deployment is silently bypassable via the env.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(
+            &tmp.path().join("managed/managed-settings.json"),
+            r#"{"parent_settings_behavior": "block", "permissions": {"default_mode": "plan"}}"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            paths: fake_paths(tmp.path()),
+            env_vars: Some(BTreeMap::from([(
+                ENV_DEFAULT_PERMISSION_MODE.to_string(),
+                "bypassPermissions".to_string(),
+            )])),
+            ..LoadOptions::default()
+        };
+        let outcome = load_settings(&opts).unwrap();
+        assert_eq!(
+            outcome.settings.permissions.default_mode.as_deref(),
+            Some("plan"),
+            "managed block must pin default_mode over the env var (#720)"
+        );
+        assert!(
+            !outcome
+                .env_overrides
+                .iter()
+                .any(|o| o.key_path == "permissions.default_mode"),
+            "the ignored env override must not be reported as applied"
+        );
+        assert!(
+            outcome
+                .validation_warnings
+                .iter()
+                .any(|w| w.contains("pinned by a managed scope")),
+            "a warning should explain the ignored env override"
+        );
+    }
+
+    #[test]
+    fn env_overrides_permission_mode_without_managed_block() {
+        // Control: a managed scope that sets the mode but does NOT block leaves
+        // the env layer winning, preserving the #538 "env wins" default.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(
+            &tmp.path().join("managed/managed-settings.json"),
+            r#"{"permissions": {"default_mode": "plan"}}"#,
+        );
+        let opts = LoadOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            paths: fake_paths(tmp.path()),
+            env_vars: Some(BTreeMap::from([(
+                ENV_DEFAULT_PERMISSION_MODE.to_string(),
+                "acceptEdits".to_string(),
+            )])),
+            ..LoadOptions::default()
+        };
+        let outcome = load_settings(&opts).unwrap();
+        assert_eq!(
+            outcome.settings.permissions.default_mode.as_deref(),
+            Some("acceptEdits"),
+            "without a managed block, the env layer still wins (#538)"
+        );
     }
 
     #[test]

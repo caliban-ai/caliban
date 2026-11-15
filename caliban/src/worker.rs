@@ -793,6 +793,22 @@ pub(crate) async fn run(
     } else {
         None
     };
+    // #720: a managed `permissions.enforce = true` must refuse the unattended
+    // bypass on BOTH drive paths. The ACP path refuses via build_prod_factory's
+    // enforce gate; the NDJSON path installed NoopHooks before `enforce` was ever
+    // consulted, so the setting had no effect here. Check it first and fail
+    // closed (EX_CONFIG), matching the ACP path's exit code.
+    if enforce_refuses_unattended_bypass(
+        record.spec.permission_posture,
+        worker_settings.permissions.enforce,
+    ) {
+        eprintln!(
+            "[caliban __agent-worker] permissions.enforce = true refuses the UNATTENDED \
+             permission-gate bypass for agent {}",
+            record.id
+        );
+        return 78; // EX_CONFIG
+    }
     // Permission posture (#676, ADR 0059) is the primary lever and is honored
     // before the inherit/default gate: `unattended` runs under a bypass profile
     // (no permission gate at all); `supervised` (the default) keeps the normal
@@ -1030,6 +1046,18 @@ fn permission_posture_bypasses_gate(posture: caliban_supervisor::PermissionPostu
     matches!(posture, caliban_supervisor::PermissionPosture::Unattended)
 }
 
+/// #720: an `unattended` posture bypasses the permission gate, but a managed
+/// `permissions.enforce = true` must *refuse* that bypass. This is the shared
+/// contract both drive paths now honor — the ACP path enforces it in
+/// `build_prod_factory` (via the `bypassPermissions` mode it sets), the NDJSON
+/// path checks it here before installing the no-op gate.
+fn enforce_refuses_unattended_bypass(
+    posture: caliban_supervisor::PermissionPosture,
+    enforce: Option<bool>,
+) -> bool {
+    permission_posture_bypasses_gate(posture) && enforce == Some(true)
+}
+
 fn build_worker_rules(allowlist: Option<&[String]>) -> Vec<caliban_agent_core::Rule> {
     let mut rules: Vec<caliban_agent_core::Rule> = Vec::new();
     if let Some(names) = allowlist {
@@ -1152,7 +1180,14 @@ async fn run_acp_worker(
             "[caliban __agent-worker] AUDIT: agent {} serving ACP UNATTENDED — permission gate bypassed (ADR 0059)",
             record.id
         );
+        // #720: the latch alone does NOT bypass the gate — `resolve_startup_mode`
+        // only uses it to *validate* `bypassPermissions`, so without also naming
+        // the mode the ACP worker ran gated (`Default`), unlike the NDJSON path.
+        // Name the mode so the gate is actually bypassed, and so the enforce gate
+        // in `build_prod_factory` refuses it when `permissions.enforce = true`
+        // (which is how enforce now protects this path too).
         args.allow_dangerously_skip_permissions = true;
+        args.permission_mode = Some("bypassPermissions".to_string());
     }
 
     let pool = Arc::new(caliban_settings::ApiKeyHelperPool::from_raw(None));
@@ -1377,6 +1412,31 @@ mod tests {
         // Fail-closed: the default posture keeps the gate.
         assert!(!permission_posture_bypasses_gate(
             PermissionPosture::default()
+        ));
+    }
+
+    #[test]
+    fn enforce_refuses_unattended_bypass_contract() {
+        // #720: permissions.enforce = true refuses the unattended bypass; the
+        // NDJSON path checks this helper, the ACP path enforces the same contract
+        // via build_prod_factory. Supervised and enforce-off leave the bypass /
+        // normal gate untouched.
+        use caliban_supervisor::PermissionPosture;
+        assert!(enforce_refuses_unattended_bypass(
+            PermissionPosture::Unattended,
+            Some(true)
+        ));
+        assert!(!enforce_refuses_unattended_bypass(
+            PermissionPosture::Unattended,
+            None
+        ));
+        assert!(!enforce_refuses_unattended_bypass(
+            PermissionPosture::Unattended,
+            Some(false)
+        ));
+        assert!(!enforce_refuses_unattended_bypass(
+            PermissionPosture::Supervised,
+            Some(true)
         ));
     }
     use caliban_agent_core::{Action, default_rules};
