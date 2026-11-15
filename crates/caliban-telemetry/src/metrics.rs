@@ -449,8 +449,8 @@ mod tests {
             .iter()
             // opentelemetry_sdk 0.33: ResourceMetrics/ScopeMetrics/Metric expose
             // accessor methods instead of public fields (#735).
-            .flat_map(|rm| rm.scope_metrics())
-            .flat_map(|sm| sm.metrics())
+            .flat_map(opentelemetry_sdk::metrics::data::ResourceMetrics::scope_metrics)
+            .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
             .map(|m| m.name().to_string())
             .collect();
         assert!(
