@@ -17,4 +17,18 @@ ignore = [
   # tests in caliban-telemetry); never present in the shipped binary. Re-check if
   # opentelemetry_sdk drops it.
   { id = "RUSTSEC-2025-0052", reason = "async-std discontinued/unmaintained; dev-only via opentelemetry_sdk test deps, not in the shipped binary" },
+
+  # unsafe-libyaml 0.2.11 — unmaintained (no vulnerability). Pulled by serde_yaml
+  # 0.9 (itself deprecated), which parses only trusted, local files at startup —
+  # skill / agent-definition / output-style / memory-topic frontmatter — never
+  # attacker-controlled network input. No maintained drop-in avoids it:
+  # serde_yaml_ng still depends on unsafe-libyaml, and serde_yml is an unvetted
+  # 0.0.x. Accepted per the deny.toml policy (see docs/releasing.md); revisit if a
+  # vulnerability is disclosed or a vetted maintained YAML crate becomes available.
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained; via serde_yaml for trusted local frontmatter only; no maintained drop-in (serde_yaml_ng still uses it)" },
+
+  # pin-utils 0.1.0 — unmaintained (no vulnerability). A one-file pin-projection
+  # macro helper pulled transitively by the futures stack; its API is frozen and
+  # trivially correct. Nothing actionable to bump. Revisit if consumers drop it.
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; frozen transitive macro helper via the futures stack; no fix exists or is needed" },
 ]

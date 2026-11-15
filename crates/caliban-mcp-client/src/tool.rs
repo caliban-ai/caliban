@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use caliban_agent_core::{Tool, ToolContext, ToolError};
 use caliban_provider::{ContentBlock, ImageBlock, ImageSource, TextBlock};
-use rmcp::model::{CallToolRequestParams, CallToolResult, Content, RawContent};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock as McpContent};
 use serde_json::Value;
 
 use crate::client::Conn;
@@ -105,17 +105,17 @@ impl McpTool {
 /// Translate rmcp content into caliban `ContentBlock`s. Text + image map
 /// directly; audio falls back to a text notice; embedded resources and resource
 /// links are surfaced as text descriptions of their URI.
-fn translate_content(blocks: Vec<Content>) -> Vec<ContentBlock> {
+fn translate_content(blocks: Vec<McpContent>) -> Vec<ContentBlock> {
     let mut out: Vec<ContentBlock> = Vec::with_capacity(blocks.len());
     for block in blocks {
-        // `Content` is `Annotated<RawContent>`; deref to the raw payload.
-        let raw: RawContent = block.raw;
-        match raw {
-            RawContent::Text(t) => out.push(ContentBlock::Text(TextBlock {
+        // rmcp 3.x unified `Annotated<RawContent>` into the `ContentBlock` enum
+        // (no more `.raw`); match it directly.
+        match block {
+            McpContent::Text(t) => out.push(ContentBlock::Text(TextBlock {
                 text: t.text,
                 cache_control: None,
             })),
-            RawContent::Image(i) => out.push(ContentBlock::Image(ImageBlock {
+            McpContent::Image(i) => out.push(ContentBlock::Image(ImageBlock {
                 source: ImageSource::Base64 {
                     media_type: i.mime_type,
                     data: i.data,
@@ -124,7 +124,7 @@ fn translate_content(blocks: Vec<Content>) -> Vec<ContentBlock> {
                 sha256: None,
                 dims: None,
             })),
-            RawContent::Audio(a) => out.push(ContentBlock::Text(TextBlock {
+            McpContent::Audio(a) => out.push(ContentBlock::Text(TextBlock {
                 text: format!(
                     "[audio content not yet supported by caliban; {} bytes of base64 audio/{}]",
                     a.data.len(),
@@ -132,24 +132,32 @@ fn translate_content(blocks: Vec<Content>) -> Vec<ContentBlock> {
                 ),
                 cache_control: None,
             })),
-            RawContent::Resource(r) => {
+            McpContent::Resource(r) => {
                 let uri = match &r.resource {
                     rmcp::model::ResourceContents::TextResourceContents { uri, .. }
                     | rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => {
                         uri.clone()
                     }
+                    // `ResourceContents` is `#[non_exhaustive]` in rmcp 3.x.
+                    _ => "<unknown>".to_string(),
                 };
                 out.push(ContentBlock::Text(TextBlock {
                     text: format!("[embedded resource: {uri}]"),
                     cache_control: None,
                 }));
             }
-            RawContent::ResourceLink(link) => {
+            McpContent::ResourceLink(link) => {
                 out.push(ContentBlock::Text(TextBlock {
                     text: format!("[resource link: {} — {}]", link.name, link.uri),
                     cache_control: None,
                 }));
             }
+            // `ContentBlock` is `#[non_exhaustive]`; surface any future variant
+            // as a text notice rather than dropping it silently.
+            other => out.push(ContentBlock::Text(TextBlock {
+                text: format!("[unsupported MCP content: {other:?}]"),
+                cache_control: None,
+            })),
         }
     }
     out
@@ -159,7 +167,7 @@ fn translate_content(blocks: Vec<Content>) -> Vec<ContentBlock> {
 fn format_server_error(result: &CallToolResult) -> String {
     let mut s = String::new();
     for block in &result.content {
-        if let RawContent::Text(t) = &block.raw {
+        if let McpContent::Text(t) = block {
             if !s.is_empty() {
                 s.push('\n');
             }
@@ -270,7 +278,7 @@ mod tests {
 
     #[test]
     fn translate_text_block() {
-        let blocks = vec![Content::text("hello")];
+        let blocks = vec![McpContent::text("hello")];
         let out = translate_content(blocks);
         assert_eq!(out.len(), 1);
         let ContentBlock::Text(t) = &out[0] else {
@@ -281,7 +289,7 @@ mod tests {
 
     #[test]
     fn translate_image_block() {
-        let blocks = vec![Content::image("BASE64DATA", "image/png")];
+        let blocks = vec![McpContent::image("BASE64DATA", "image/png")];
         let out = translate_content(blocks);
         assert_eq!(out.len(), 1);
         let ContentBlock::Image(i) = &out[0] else {
@@ -300,14 +308,7 @@ mod tests {
 
     #[test]
     fn translate_audio_falls_back_to_text() {
-        let raw = RawContent::Audio(rmcp::model::RawAudioContent {
-            data: "AUDIODATA".to_string(),
-            mime_type: "wav".to_string(),
-        });
-        let block = rmcp::model::Annotated {
-            raw,
-            annotations: None,
-        };
+        let block = McpContent::audio("AUDIODATA", "wav");
         let out = translate_content(vec![block]);
         assert_eq!(out.len(), 1);
         let ContentBlock::Text(t) = &out[0] else {

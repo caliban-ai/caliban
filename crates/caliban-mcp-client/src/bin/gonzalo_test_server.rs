@@ -15,8 +15,8 @@ use std::sync::Arc;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::io::stdio;
@@ -66,8 +66,8 @@ fn missing_required(args: &serde_json::Map<String, Value>) -> Option<&'static st
 }
 
 impl ServerHandler for GonzaloFixture {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions("gonzalo code-graph fixture (contract mock)")
     }
 
@@ -87,14 +87,15 @@ impl ServerHandler for GonzaloFixture {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let args = request.arguments.unwrap_or_default();
 
         // Every code-graph tool requires the documented args.
         if let Some(missing) = missing_required(&args) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "missing or empty required argument `{missing}`"
-            ))]));
+            ))])
+            .into());
         }
         let name = args["name"].as_str().unwrap_or_default();
         let repo = args["repo"].as_str().unwrap_or_default();
@@ -113,15 +114,14 @@ impl ServerHandler for GonzaloFixture {
                 json!([format!("{name}_edge_a"), format!("{name}_edge_b"),])
             }
             other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "unknown tool `{other}`"
-                ))]));
+                ))])
+                .into());
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            body.to_string(),
-        )]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(body.to_string())]).into())
     }
 }
 

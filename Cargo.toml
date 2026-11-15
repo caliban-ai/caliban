@@ -112,7 +112,7 @@ uuid          = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 dirs   = "5"
 toml   = "0.8"
-rmcp   = { version = "1.7", features = [
+rmcp   = { version = "3", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client",
@@ -122,7 +122,7 @@ rmcp   = { version = "1.7", features = [
     # enables `reqwest?/rustls` so rmcp's default reqwest::Client speaks
     # https. Without it, the streamable-http worker rejects any https URL
     # with hyper-util's "invalid URL, scheme is not http" connect error.
-    # rmcp 1.7 pins reqwest 0.13 transitively, so our workspace
+    # rmcp pins reqwest 0.13 transitively, so our workspace
     # `reqwest = "0.12"` rustls-tls feature does not unify across the
     # major bump and cannot fix this from the outside.
     "reqwest",

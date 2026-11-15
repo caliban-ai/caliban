@@ -10,8 +10,8 @@ use std::time::Duration;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::io::stdio;
@@ -20,8 +20,8 @@ use rmcp::transport::io::stdio;
 struct TestServer;
 
 impl ServerHandler for TestServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions("caliban-mcp-client integration test server")
     }
 
@@ -68,18 +68,19 @@ impl ServerHandler for TestServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         match request.name.as_ref() {
             "echo" => {
                 let payload = request.arguments.map_or_else(
                     || "(no input)".to_string(),
                     |m| serde_json::Value::Object(m).to_string(),
                 );
-                Ok(CallToolResult::success(vec![Content::text(payload)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(payload)]).into())
             }
-            "fail" => Ok(CallToolResult::error(vec![Content::text(
+            "fail" => Ok(CallToolResult::error(vec![ContentBlock::text(
                 "tool fail: intentional failure",
-            )])),
+            )])
+            .into()),
             "slow" => {
                 let ms: u64 = request
                     .arguments
@@ -88,13 +89,14 @@ impl ServerHandler for TestServer {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(5_000);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "slept {ms}ms"
-                ))]))
+                Ok(
+                    CallToolResult::success(vec![ContentBlock::text(format!("slept {ms}ms"))])
+                        .into(),
+                )
             }
-            "weird/name.tool" => Ok(CallToolResult::success(vec![Content::text(
-                "weird-tool ok",
-            )])),
+            "weird/name.tool" => {
+                Ok(CallToolResult::success(vec![ContentBlock::text("weird-tool ok")]).into())
+            }
             _other => Err(rmcp::ErrorData::method_not_found::<
                 rmcp::model::CallToolRequestMethod,
             >()),
