@@ -97,13 +97,15 @@ With `"block"` active, users cannot override `model` from their own settings or 
 When `parent_settings_behavior = "block"` is set in the managed scope, user, project, local, and CLI settings for locked keys are ignored. The effective values come from the managed scope for those keys.
 ```
 
-```admonish danger title="Managed lockdown does not cover the environment layer"
+```admonish warning title="Managed lockdown pins the permission mode; other env keys still apply"
 The reordering above applies to the five file/CLI scopes. The
-[environment layer](#the-environment-layer) is applied *afterwards*, so
-`CALIBAN_OUTPUT_STYLE` and `CALIBAN_DEFAULT_PERMISSION_MODE` still override a
-managed block — including a managed `permissions.default_mode`. If you rely on
-managed settings to pin a permission mode, you must also control the agent's
-environment; the file scope alone is not sufficient.
+[environment layer](#the-environment-layer) is applied *afterwards*. As of #720,
+a managed-block `permissions.default_mode` is **pinned**:
+`CALIBAN_DEFAULT_PERMISSION_MODE` cannot override it (the ignored override is
+logged as a warning). Other env-shadowed keys such as `CALIBAN_OUTPUT_STYLE` are
+*not* yet covered by the lockdown and still apply over a managed block, so if you
+rely on the managed scope to pin one of those you must also control the agent's
+environment.
 ```
 
 ## `--setting-sources` — scope filtering

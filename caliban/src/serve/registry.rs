@@ -649,4 +649,26 @@ mod tests {
             "enforce=true without a bypass flag should assemble cleanly"
         );
     }
+
+    #[test]
+    fn enforce_gate_refuses_unattended_bypass_mode() {
+        // #720: the ACP worker expresses an `unattended` posture by setting
+        // `--permission-mode bypassPermissions` (worker.rs::run_acp_worker), so
+        // permissions.enforce = true must refuse it at factory assembly — that is
+        // how enforce now protects the ACP path, matching the NDJSON path.
+        use clap::Parser as _;
+        let args =
+            crate::args::Args::parse_from(["caliban", "--permission-mode", "bypassPermissions"]);
+        let mut settings = caliban_settings::Settings::default();
+        settings.permissions.enforce = Some(true);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let msg = super::build_prod_factory(&args, settings, provider)
+            .err()
+            .expect("enforce=true + bypassPermissions must be refused")
+            .to_string();
+        assert!(
+            msg.contains("enforce") && msg.contains("bypassPermissions"),
+            "error should name the refused mode, got: {msg}"
+        );
+    }
 }

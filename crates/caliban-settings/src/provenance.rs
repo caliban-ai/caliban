@@ -134,6 +134,7 @@ rules = [
             cli_overlay: None,
             bare: false,
             schema_validate: false,
+            env_vars: None,
         };
 
         let result = load_rules_with_provenance(&opts).unwrap();
@@ -168,6 +169,7 @@ rules = [
             cli_overlay: None,
             bare: false,
             schema_validate: false,
+            env_vars: None,
         };
 
         let result = load_rules_with_provenance(&opts).unwrap();
@@ -215,6 +217,7 @@ rules = [
             cli_overlay: None,
             bare: false,
             schema_validate: false,
+            env_vars: None,
         };
 
         let result = load_rules_with_provenance(&opts).unwrap();
