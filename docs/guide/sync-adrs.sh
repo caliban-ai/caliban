@@ -53,3 +53,32 @@ tmp="$SUMMARY.tmp"
 sed "/$MARKER/q" "$SUMMARY" > "$tmp"
 printf '%s' "$entries" >> "$tmp"
 mv "$tmp" "$SUMMARY"
+
+# Completeness gate for the hand-curated topical appendix (#725).
+#
+# `appendix/adrs.md` groups records into editorial topical sections, so unlike
+# the index/SUMMARY above it is NOT generated — and nothing used to fail when a
+# new ADR skipped it, so it drifted seven records behind before #712 caught it.
+# Fail here, naming any ADR present in docs/adr/ but absent from the appendix, so
+# a missed record shows up at docs-build time instead of silently rotting. The
+# curation (topical grouping) is preserved; only completeness is enforced.
+APPENDIX="$GUIDE_SRC/appendix/adrs.md"
+if [[ -f "$APPENDIX" ]]; then
+  missing=""
+  for f in "$ADR_SRC"/*.md; do
+    is_adr "$f" || continue
+    num="$(basename "$f" | sed -E 's/^([0-9]{4})-.*/\1/')"
+    # ADRs appear in the appendix as the Markdown link `[NNNN](…)`; a plain
+    # fixed-string match on `[NNNN]` is enough and avoids false hits on digits
+    # inside prose.
+    grep -qF -- "[$num]" "$APPENDIX" || missing+="  $num  ($(basename "$f"))"$'\n'
+  done
+  if [[ -n "$missing" ]]; then
+    {
+      echo "error: these ADRs are missing from $APPENDIX (#725):"
+      printf '%s' "$missing"
+      echo "Add each to the appropriate topical section — the appendix is hand-curated, not generated."
+    } >&2
+    exit 1
+  fi
+fi
