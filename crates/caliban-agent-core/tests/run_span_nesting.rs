@@ -24,9 +24,9 @@ use caliban_provider::{
 };
 use futures::StreamExt as _;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_sdk::export::trace::SpanData;
-use opentelemetry_sdk::testing::trace::InMemorySpanExporterBuilder;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::InMemorySpanExporterBuilder;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::trace::SpanData;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -116,7 +116,7 @@ fn end_turn_events() -> Vec<caliban_provider::error::Result<StreamEvent>> {
 #[tokio::test]
 async fn child_spans_nest_under_run_span() {
     let exporter = InMemorySpanExporterBuilder::new().build();
-    let otel_provider = TracerProvider::builder()
+    let otel_provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = otel_provider.tracer("caliban-test");

@@ -64,14 +64,18 @@ mod otlp_pipeline {
 
     use opentelemetry::KeyValue;
     use opentelemetry_sdk::Resource;
-    use opentelemetry_sdk::trace::TracerProvider;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
 
     /// Build the `service.*` resource stamped onto every exported span.
     pub(super) fn caliban_resource(app_version: &str) -> Resource {
-        Resource::new(vec![
-            KeyValue::new("service.name", "caliban"),
-            KeyValue::new("service.version", app_version.to_string()),
-        ])
+        // opentelemetry_sdk 0.33: `Resource::new` is private; build via the
+        // builder (#735).
+        Resource::builder()
+            .with_attributes(vec![
+                KeyValue::new("service.name", "caliban"),
+                KeyValue::new("service.version", app_version.to_string()),
+            ])
+            .build()
     }
 
     /// Select and build the OTLP span exporter for the configured protocol.
@@ -197,11 +201,13 @@ mod otlp_pipeline {
     pub(super) fn build_tracer_provider(
         config: &TelemetryConfig,
         app_version: &str,
-    ) -> Result<TracerProvider, TelemetryError> {
-        use opentelemetry_sdk::runtime;
+    ) -> Result<SdkTracerProvider, TelemetryError> {
         let exporter = build_span_exporter(config)?;
-        let provider = TracerProvider::builder()
-            .with_batch_exporter(exporter, runtime::Tokio)
+        // opentelemetry_sdk 0.33: the batch span processor runs on its own
+        // background thread, so `with_batch_exporter` no longer takes a runtime
+        // (#735). The dedicated thread drives the exporter independently.
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
             .with_resource(caliban_resource(app_version))
             .build();
         Ok(provider)
@@ -302,9 +308,10 @@ mod otlp_pipeline {
         app_version: &str,
     ) -> Result<opentelemetry_sdk::metrics::SdkMeterProvider, TelemetryError> {
         use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-        use opentelemetry_sdk::runtime;
         let exporter = build_metric_exporter(config)?;
-        let reader = PeriodicReader::builder(exporter, runtime::Tokio)
+        // opentelemetry_sdk 0.33: the periodic reader manages its own export
+        // thread; `builder` no longer takes a runtime (#735).
+        let reader = PeriodicReader::builder(exporter)
             .with_interval(config.metric_export_interval)
             .build();
         let provider = SdkMeterProvider::builder()
@@ -485,7 +492,7 @@ pub struct Telemetry {
     /// setup failed (export off; cost/metrics unaffected). Cheaply clonable —
     /// it wraps an `Arc` internally.
     #[cfg(feature = "otlp")]
-    tracer_provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     /// Real OTLP metrics provider, built alongside `tracer_provider` when
     /// telemetry is enabled. Held so `shutdown` can force-flush the periodic
     /// reader before exit. `None` when disabled / setup failed (#427).
@@ -738,14 +745,14 @@ impl Telemetry {
         // before the process exits.
         #[cfg(feature = "otlp")]
         if let Some(provider) = self.tracer_provider.as_ref() {
-            for result in provider.force_flush() {
-                if let Err(e) = result {
-                    tracing::warn!(
-                        target: caliban_common::tracing_targets::TARGET_TELEMETRY,
-                        error = %e,
-                        "otlp span force-flush error during shutdown",
-                    );
-                }
+            // opentelemetry_sdk 0.33: force_flush returns a single OTelSdkResult
+            // (previously a Vec of per-processor results), #735.
+            if let Err(e) = provider.force_flush() {
+                tracing::warn!(
+                    target: caliban_common::tracing_targets::TARGET_TELEMETRY,
+                    error = %e,
+                    "otlp span force-flush error during shutdown",
+                );
             }
             if let Err(e) = provider.shutdown() {
                 tracing::warn!(
@@ -951,13 +958,13 @@ mod otlp_tests {
         let resource = otlp_pipeline::caliban_resource("9.9.9");
         assert_eq!(
             resource
-                .get(Key::from_static_str("service.name"))
+                .get(&Key::from_static_str("service.name"))
                 .map(|v| v.as_str().into_owned()),
             Some("caliban".to_string()),
         );
         assert_eq!(
             resource
-                .get(Key::from_static_str("service.version"))
+                .get(&Key::from_static_str("service.version"))
                 .map(|v| v.as_str().into_owned()),
             Some("9.9.9".to_string()),
         );
@@ -1056,8 +1063,8 @@ mod otlp_tests {
     fn tracing_span_exports_through_layer() {
         use opentelemetry::Key;
         use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::testing::trace::InMemorySpanExporterBuilder;
-        use opentelemetry_sdk::trace::TracerProvider;
+        use opentelemetry_sdk::trace::InMemorySpanExporterBuilder;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
         use tracing_subscriber::Registry;
         use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -1066,12 +1073,12 @@ mod otlp_tests {
         // Assert the resource we hand to the provider carries service.name.
         assert_eq!(
             resource
-                .get(Key::from_static_str("service.name"))
+                .get(&Key::from_static_str("service.name"))
                 .map(|v| v.as_str().into_owned()),
             Some("caliban".to_string()),
         );
 
-        let provider = TracerProvider::builder()
+        let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .with_resource(resource)
             .build();
