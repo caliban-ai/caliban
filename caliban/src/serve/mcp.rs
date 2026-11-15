@@ -25,7 +25,7 @@ use std::sync::Arc;
 use caliban_drive::DriveInbound;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -116,11 +116,11 @@ impl McpServer {
     }
 
     fn err(msg: impl Into<String>) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.into())])
+        CallToolResult::error(vec![ContentBlock::text(msg.into())])
     }
 
     fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
-        Ok(CallToolResult::success(vec![Content::json(value)?]))
+        Ok(CallToolResult::success(vec![ContentBlock::json(value)?]))
     }
 }
 
@@ -238,8 +238,8 @@ impl McpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Drive a caliban agent over MCP. Start a run with caliban_run, then loop \
              caliban_poll with an advancing cursor to read TurnEvent batches (each wrapped \
              as {v, event}) until status is done/failed. Use caliban_send_input to feed an \
