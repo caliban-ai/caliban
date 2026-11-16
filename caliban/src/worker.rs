@@ -1164,7 +1164,25 @@ async fn run_acp_worker(
             return 64; // EX_USAGE
         }
     }
-    if let Some(model) = record.spec.model.clone() {
+    // Load an optional agent definition named by the spawn (#689/#741) so the
+    // ACP path honors the same model / tools / system-prompt the NDJSON path
+    // (`run`) does. A named-but-unloadable definition is a hard error.
+    let agent_def = match record.spec.frontmatter_path.as_deref() {
+        Some(path) => match load_agent_definition(path) {
+            Ok(def) => Some(def),
+            Err(e) => {
+                eprintln!(
+                    "[caliban __agent-worker] frontmatter {}: {e}",
+                    path.display()
+                );
+                return 64; // EX_USAGE
+            }
+        },
+        None => None,
+    };
+    // Model: explicit spec.model wins over the definition's model (#689),
+    // matching the NDJSON path. Previously the ACP path applied only spec.model.
+    if let Some(model) = effective_agent_model(record.spec.model.as_deref(), agent_def.as_ref()) {
         args.model = Some(model);
     }
 
@@ -1208,9 +1226,23 @@ async fn run_acp_worker(
         .map(|o| o.settings)
         .unwrap_or_default();
 
+    // #741: thread the agent definition's tool allowlist + system-prompt body
+    // into the factory so each ACP-driven run scopes tools and seeds the system
+    // prompt exactly as the NDJSON path does. Empty when no definition was named.
+    let agent_def_override = crate::serve::registry::AgentDefinitionOverride {
+        tool_allowlist: effective_tool_allowlist(
+            record.spec.tool_allowlist.as_deref(),
+            agent_def.as_ref(),
+        ),
+        system_prompt: agent_def
+            .as_ref()
+            .map(|d| d.body.clone())
+            .filter(|b| !b.is_empty()),
+    };
+
     let factory: Arc<dyn crate::serve::registry::AgentFactory> =
         match crate::serve::registry::build_prod_factory(&args, settings, provider) {
-            Ok(f) => Arc::new(f),
+            Ok(f) => Arc::new(f.with_agent_definition(agent_def_override)),
             Err(e) => {
                 // Fail closed: e.g. an `enforce = true` policy refusing the
                 // unattended bypass flag. Never serve an ungated ACP endpoint.
