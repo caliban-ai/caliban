@@ -267,6 +267,24 @@ impl DriveRegistry {
 // Production agent factory — shared by every serve entrypoint.
 // ---------------------------------------------------------------------------
 
+/// Agent-definition overrides threaded into a driven run (#741): the tool
+/// allowlist and system-prompt body resolved from a `SpawnSpec.frontmatter_path`
+/// definition (#689). The NDJSON drive path (`worker::run`) applies these
+/// directly; this carries the same two levers onto the ACP path, which builds
+/// its agent through [`ProdAgentFactory`], so both transports honor an agent
+/// definition identically. Empty (the default) means "no definition" — the
+/// factory then builds the full registry and seeds no system prompt, exactly as
+/// before.
+#[derive(Clone, Default)]
+pub(crate) struct AgentDefinitionOverride {
+    /// Effective tool allowlist (`SpawnSpec` precedence over the definition).
+    /// When `Some`, the per-run registry is filtered to just these tools.
+    pub(crate) tool_allowlist: Option<Vec<String>>,
+    /// The definition body used as the agent's system prompt, seeded at message
+    /// position 0 on a fresh run (never when empty).
+    pub(crate) system_prompt: Option<String>,
+}
+
 /// The production [`AgentFactory`]: builds a real agent (real provider + the
 /// full builtin tool registry) with a fresh [`DriveAskHandler`] per run.
 pub(crate) struct ProdAgentFactory {
@@ -276,6 +294,29 @@ pub(crate) struct ProdAgentFactory {
     model: String,
     max_tokens: u32,
     workspace_root: std::path::PathBuf,
+    /// Optional agent-definition levers (#741); empty unless a spawn named a
+    /// definition and the entrypoint threaded it in via
+    /// [`ProdAgentFactory::with_agent_definition`].
+    agent_definition: AgentDefinitionOverride,
+}
+
+/// Filter a tool registry down to an allowlist, preserving the registry
+/// unchanged when the allowlist is `None`. Mirrors the NDJSON path's
+/// `worker::filter_registry` so both drive paths scope tools identically (#741).
+fn filter_registry(
+    registry: caliban_agent_core::ToolRegistry,
+    allowlist: Option<&[String]>,
+) -> caliban_agent_core::ToolRegistry {
+    let Some(names) = allowlist else {
+        return registry;
+    };
+    let mut filtered = caliban_agent_core::ToolRegistry::new();
+    for name in names {
+        if let Some(t) = registry.get(name) {
+            filtered.register(Arc::clone(t));
+        }
+    }
+    filtered
 }
 
 impl AgentFactory for ProdAgentFactory {
@@ -299,6 +340,9 @@ impl AgentFactory for ProdAgentFactory {
             &self.settings,
             &topic_backend,
         );
+        // #741: scope the registry to the agent definition's tool allowlist when
+        // one was threaded in, matching the NDJSON path's `filter_registry`.
+        let registry = filter_registry(registry, self.agent_definition.tool_allowlist.as_deref());
 
         let (permissions, perm_rx) = self.build_run_permissions()?;
 
@@ -310,9 +354,22 @@ impl AgentFactory for ProdAgentFactory {
             .hooks(permissions)
             .build()?;
 
+        // #741: seed the definition's body as the system prompt at position 0 on
+        // a fresh run (mirroring `worker::run`); the user prompt follows.
+        let mut messages = Vec::new();
+        if let Some(body) = self
+            .agent_definition
+            .system_prompt
+            .as_deref()
+            .filter(|b| !b.is_empty())
+        {
+            messages.push(Message::system_text(body));
+        }
+        messages.push(Message::user_text(spec.prompt.clone()));
+
         Ok(BuiltRun {
             agent: Arc::new(agent),
-            messages: vec![Message::user_text(spec.prompt.clone())],
+            messages,
             perm_rx,
             interactive: spec.interactive,
         })
@@ -320,6 +377,16 @@ impl AgentFactory for ProdAgentFactory {
 }
 
 impl ProdAgentFactory {
+    /// Attach agent-definition overrides (#741) so this factory's runs scope
+    /// tools to the definition's allowlist and seed its body as the system
+    /// prompt. Builder-style so the serve entrypoints that have no definition
+    /// (MCP/HTTP, and a definition-less ACP spawn) are unchanged. Called by the
+    /// per-agent ACP worker after assembling the factory.
+    pub(crate) fn with_agent_definition(mut self, def: AgentDefinitionOverride) -> Self {
+        self.agent_definition = def;
+        self
+    }
+
     /// Build the per-run permission chain — layered rules → `ModeFilter` →
     /// audit → runtime rules, exactly as an interactive/headless run gets it —
     /// with this run's [`DriveAskHandler`] injected as the Ask handler.
@@ -418,6 +485,9 @@ pub(crate) fn build_prod_factory(
         model,
         max_tokens: args.max_tokens,
         workspace_root: workspace.root().to_path_buf(),
+        // No agent definition by default; the ACP worker attaches one via
+        // `with_agent_definition` when a spawn named it (#741).
+        agent_definition: AgentDefinitionOverride::default(),
     })
 }
 
@@ -608,6 +678,75 @@ mod tests {
         assert_eq!(built.messages.len(), 1);
         assert!(built.interactive);
         drop(built);
+    }
+
+    #[test]
+    fn agent_definition_scopes_tools_and_seeds_system_prompt() {
+        // #741: an ACP-driven run must honor the agent definition's tool
+        // allowlist and system-prompt body, exactly as the NDJSON path does.
+        // The worker threads these in via `with_agent_definition`; assert both
+        // levers land on the built run.
+        use caliban_provider::Role;
+        use clap::Parser as _;
+
+        let args = crate::args::Args::parse_from(["caliban"]);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let factory =
+            super::build_prod_factory(&args, caliban_settings::Settings::default(), provider)
+                .expect("factory assembles")
+                .with_agent_definition(super::AgentDefinitionOverride {
+                    tool_allowlist: Some(vec!["Read".to_string()]),
+                    system_prompt: Some("You are a read-only reviewer.".to_string()),
+                });
+        let built = factory
+            .build_run(&RunSpec {
+                prompt: "look at the diff".into(),
+                interactive: false,
+            })
+            .expect("build_run succeeds");
+
+        // System prompt seeded at position 0, user prompt follows.
+        assert_eq!(built.messages.len(), 2, "system prompt + user prompt");
+        assert_eq!(built.messages[0].role, Role::System);
+        assert_eq!(built.messages[1].role, Role::User);
+
+        // Registry scoped to the allowlist: the granted tool is present, a
+        // non-allowlisted builtin (Bash) is filtered out.
+        let names: std::collections::BTreeSet<&str> = built.agent.tools().names().collect();
+        assert!(names.contains("Read"), "allowlisted tool kept: {names:?}");
+        assert!(
+            !names.contains("Bash"),
+            "non-allowlisted tool filtered out: {names:?}"
+        );
+    }
+
+    #[test]
+    fn no_agent_definition_leaves_registry_and_messages_unchanged() {
+        // The default (no definition) path is unchanged: full registry, no
+        // seeded system prompt — only the user prompt (#741).
+        use caliban_provider::Role;
+        use clap::Parser as _;
+
+        let args = crate::args::Args::parse_from(["caliban"]);
+        let provider = Arc::new(MockProvider::new()) as Arc<dyn Provider + Send + Sync>;
+        let factory =
+            super::build_prod_factory(&args, caliban_settings::Settings::default(), provider)
+                .expect("factory assembles");
+        let built = factory
+            .build_run(&RunSpec {
+                prompt: "hi".into(),
+                interactive: false,
+            })
+            .expect("build_run succeeds");
+
+        assert_eq!(built.messages.len(), 1, "only the user prompt");
+        assert_eq!(built.messages[0].role, Role::User);
+        // Full registry: both Read and Bash present (no allowlist filtering).
+        let names: std::collections::BTreeSet<&str> = built.agent.tools().names().collect();
+        assert!(
+            names.contains("Read") && names.contains("Bash"),
+            "{names:?}"
+        );
     }
 
     #[test]
