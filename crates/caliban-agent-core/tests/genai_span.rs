@@ -16,9 +16,9 @@ use caliban_provider::{
 use futures::StreamExt as _;
 use opentelemetry::Value;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_sdk::export::trace::SpanData;
-use opentelemetry_sdk::testing::trace::InMemorySpanExporterBuilder;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::InMemorySpanExporterBuilder;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::trace::SpanData;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -114,7 +114,7 @@ fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a Value> {
 #[tokio::test]
 async fn one_turn_emits_gen_ai_chat_span() {
     let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = TracerProvider::builder()
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("caliban-test");
@@ -223,7 +223,7 @@ async fn one_turn_emits_gen_ai_chat_span() {
 #[tokio::test]
 async fn cached_turn_input_tokens_not_double_counted() {
     let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = TracerProvider::builder()
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("caliban-test");

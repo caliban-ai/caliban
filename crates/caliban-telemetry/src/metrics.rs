@@ -431,12 +431,11 @@ mod tests {
         // #427: an emit must reach a real OTel exporter through the attached
         // MeterProvider — both the counter path and the active_time gauge path.
         use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
         use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-        use opentelemetry_sdk::runtime;
-        use opentelemetry_sdk::testing::metrics::InMemoryMetricExporter;
 
         let exporter = InMemoryMetricExporter::default();
-        let reader = PeriodicReader::builder(exporter.clone(), runtime::Tokio).build();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
 
         let e = em().with_otel_meter(provider.meter("caliban"));
@@ -448,9 +447,11 @@ mod tests {
             .get_finished_metrics()
             .expect("metrics")
             .iter()
-            .flat_map(|rm| rm.scope_metrics.iter())
-            .flat_map(|sm| sm.metrics.iter())
-            .map(|m| m.name.to_string())
+            // opentelemetry_sdk 0.33: ResourceMetrics/ScopeMetrics/Metric expose
+            // accessor methods instead of public fields (#735).
+            .flat_map(opentelemetry_sdk::metrics::data::ResourceMetrics::scope_metrics)
+            .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+            .map(|m| m.name().to_string())
             .collect();
         assert!(
             names.iter().any(|n| n == "caliban.token.usage"),

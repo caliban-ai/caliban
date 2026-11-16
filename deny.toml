@@ -12,12 +12,6 @@
 [advisories]
 # Deny every advisory by default; only the IDs below are exempted.
 ignore = [
-  # async-std 1.13 — discontinued/unmaintained (no vulnerability). Pulled only as
-  # a dev-dependency of opentelemetry_sdk (used by the in-memory span-exporter
-  # tests in caliban-telemetry); never present in the shipped binary. Re-check if
-  # opentelemetry_sdk drops it.
-  { id = "RUSTSEC-2025-0052", reason = "async-std discontinued/unmaintained; dev-only via opentelemetry_sdk test deps, not in the shipped binary" },
-
   # unsafe-libyaml 0.2.11 — unmaintained (no vulnerability). Pulled by serde_yaml
   # 0.9 (itself deprecated), which parses only trusted, local files at startup —
   # skill / agent-definition / output-style / memory-topic frontmatter — never

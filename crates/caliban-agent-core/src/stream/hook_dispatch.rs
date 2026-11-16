@@ -11,7 +11,7 @@ use std::time::Instant;
 use caliban_common::tracing_targets::TARGET_TOOLS;
 use caliban_provider::{ContentBlock, TextBlock, ToolResultBlock};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
+use tracing::Instrument;
 
 use super::StopCondition;
 use crate::agent::Agent;
@@ -36,15 +36,15 @@ use crate::tool::{ToolContext, ToolError};
 // names map verbatim to OTel attribute keys via tracing-opentelemetry; `otel.name`
 // sets the exported span name ("execute_tool {tool}"). Span kind defaults to
 // INTERNAL, which is what the semconv specifies for execute_tool.
-#[instrument(
-    skip(agent, input, cancel),
-    fields(
-        otel.name = tracing::field::Empty,
-        gen_ai.operation.name = "execute_tool",
-        gen_ai.tool.name = tool_name,
-        gen_ai.tool.call.id = tool_use_id,
-    )
-)]
+//
+// The span is built and its `otel.name` recorded *before* it is entered (the
+// body runs inside `.instrument(span)`). tracing-opentelemetry only honors a
+// recorded `otel.name` while the span is still in its Builder state: once the
+// span has been entered it holds a live OTel span, and `SpanBuilderUpdates::
+// update_span` drops `name`/`kind` updates (keeping only status/attributes). An
+// `#[instrument]` span is entered before the function body runs, so a name
+// recorded in-body would be silently ignored — hence the explicit handle here,
+// matching the `chat` span in `stream/mod.rs`.
 pub(crate) async fn dispatch_tool(
     agent: &Agent,
     session_id: &str,
@@ -54,8 +54,39 @@ pub(crate) async fn dispatch_tool(
     input: serde_json::Value,
     cancel: &CancellationToken,
 ) -> std::result::Result<ToolResultBlock, StopCondition> {
-    tracing::Span::current().record("otel.name", format!("execute_tool {tool_name}").as_str());
+    let span = tracing::info_span!(
+        "dispatch_tool",
+        otel.name = tracing::field::Empty,
+        gen_ai.operation.name = "execute_tool",
+        gen_ai.tool.name = tool_name,
+        gen_ai.tool.call.id = tool_use_id,
+        session_id,
+        turn_index,
+    );
+    span.record("otel.name", format!("execute_tool {tool_name}").as_str());
 
+    dispatch_tool_inner(
+        agent,
+        session_id,
+        turn_index,
+        tool_use_id,
+        tool_name,
+        input,
+        cancel,
+    )
+    .instrument(span)
+    .await
+}
+
+async fn dispatch_tool_inner(
+    agent: &Agent,
+    session_id: &str,
+    turn_index: u32,
+    tool_use_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+    cancel: &CancellationToken,
+) -> std::result::Result<ToolResultBlock, StopCondition> {
     if cancel.is_cancelled() {
         return Err(StopCondition::Cancelled);
     }
