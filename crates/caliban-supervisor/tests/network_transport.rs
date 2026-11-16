@@ -72,6 +72,7 @@ fn spec() -> SpawnSpec {
     SpawnSpec {
         label: Some("test".into()),
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: "hi".into(),
         model: None,
         provider: None,

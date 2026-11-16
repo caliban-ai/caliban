@@ -20,6 +20,7 @@ async fn worker_runs_and_writes_ndjson() {
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
+            agent_type: None,
             initial_prompt: "Say the single word: pong".into(),
             model: None,
             provider: None,
@@ -76,6 +77,7 @@ async fn worker_rejects_unknown_provider_with_exit_64() {
         spec: caliban_supervisor::proto::SpawnSpec {
             label: None,
             frontmatter_path: None,
+            agent_type: None,
             initial_prompt: "hi".into(),
             model: None,
             provider: Some("definitely-not-a-provider".into()),

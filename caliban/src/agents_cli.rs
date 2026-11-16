@@ -333,6 +333,7 @@ pub(crate) async fn run_agents(cmd: &crate::AgentsCommand, repo_root: &Path) -> 
             let spec = SpawnSpec {
                 label: label.clone(),
                 frontmatter_path: None,
+                agent_type: None,
                 initial_prompt: prompt.clone(),
                 model: None,
                 provider: (*provider).map(|p| crate::provider_name(p).to_string()),
@@ -522,6 +523,7 @@ pub(crate) async fn run_bg(task: &str, repo_root: &Path) -> i32 {
     let spec = SpawnSpec {
         label: None,
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: task.to_string(),
         model: None,
         // `run_bg` is the bare `--bg` shortcut with no ambient parent

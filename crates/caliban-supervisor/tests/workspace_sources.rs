@@ -45,6 +45,7 @@ fn spawn_spec(source: Option<&str>, isolation_worktree: bool) -> SpawnSpec {
     SpawnSpec {
         label: None,
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: "hi".into(),
         model: None,
         provider: None,

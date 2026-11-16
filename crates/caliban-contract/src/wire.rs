@@ -116,6 +116,15 @@ pub struct SpawnSpec {
     /// Path to the frontmatter markdown file (if any).
     #[serde(default)]
     pub frontmatter_path: Option<PathBuf>,
+    /// Name of an agent definition to resolve by discovery, rather than by an
+    /// explicit [`Self::frontmatter_path`] (#741). The worker looks up
+    /// `<name>.md` under the agents discovery roots — project
+    /// `<workspace>/.caliban/agents/`, then user `<config>/caliban/agents/` —
+    /// first match wins. `frontmatter_path` (an explicit path) takes precedence
+    /// when both are set. A name that resolves to nothing is a hard error, like
+    /// an unloadable path. Maps to the operator/prospero `agentType` selector.
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Initial prompt handed to the sub-agent.
     pub initial_prompt: String,
     /// Optional model override.

@@ -1066,6 +1066,7 @@ pub(crate) fn install_sub_agent(
             let spec = caliban_supervisor::SpawnSpec {
                 label: input.label.clone(),
                 frontmatter_path: None,
+                agent_type: None,
                 initial_prompt: input.prompt.clone(),
                 model: input.model.clone(),
                 provider: Some(parent_provider.clone()),

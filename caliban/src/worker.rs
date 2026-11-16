@@ -697,22 +697,18 @@ pub(crate) async fn run(
             return 70;
         }
     };
-    // Load an optional agent definition named by the spawn (#689). Its model /
-    // tools / system-prompt body apply below; explicit SpawnSpec fields win.
-    // A named-but-unloadable definition is a hard error — the spawn asked for an
-    // agent it can't run.
-    let agent_def = match record.spec.frontmatter_path.as_deref() {
-        Some(path) => match load_agent_definition(path) {
-            Ok(def) => Some(def),
-            Err(e) => {
-                eprintln!(
-                    "[caliban __agent-worker] frontmatter {}: {e}",
-                    path.display()
-                );
-                return 64; // EX_USAGE
-            }
-        },
-        None => None,
+    // Load an optional agent definition named by the spawn — by explicit
+    // `frontmatter_path` (#689) or by `agent_type` name discovery (#741). Its
+    // model / tools / system-prompt body apply below; explicit SpawnSpec fields
+    // win. A named-but-unresolvable/unloadable definition is a hard error — the
+    // spawn asked for an agent it can't run. The agents discovery root is the
+    // cwd (matching `WorkspaceRoot::current_dir`), falling back to the session
+    // dir, so the project lookup `<root>/.caliban/agents/<name>.md` anchors where
+    // the registry + settings resolve from.
+    let discovery_root = std::env::current_dir().unwrap_or_else(|_| record.session_dir.clone());
+    let agent_def = match load_spawn_agent_definition(&record.spec, &record.id, &discovery_root) {
+        Ok(def) => def,
+        Err(code) => return code,
     };
     // Tool allowlist with SpawnSpec precedence over the definition (#689); used
     // for both registry filtering and the default permission gate.
@@ -1106,6 +1102,89 @@ fn load_agent_definition(path: &std::path::Path) -> Result<AgentDefinition, Stri
     Ok(def)
 }
 
+/// Resolve an agent definition named by `agent_type` to a file on disk (#741).
+/// Discovery roots, first match wins:
+///   1. project — `<workspace_root>/.caliban/agents/<name>.md`
+///   2. user    — `<platform_config_dir>/caliban/agents/<name>.md`
+///
+/// Mirrors the output-styles `DiscoveryRoots` convention (`.caliban/` project,
+/// `platform_config_dir()/caliban/` user). Returns `None` when the name resolves
+/// to no readable file — the caller treats that as a hard error. The name must
+/// be a single safe path component: one containing a path separator or `..` is
+/// rejected so `agent_type` can never escape the agents directory (defense in
+/// depth; `agent_type` originates upstream in prospero / the operator).
+fn resolve_agent_definition_by_name(
+    name: &str,
+    workspace_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || std::path::Path::new(name).components().count() != 1
+    {
+        return None;
+    }
+    let file = format!("{name}.md");
+    let project = workspace_root.join(".caliban").join("agents").join(&file);
+    if project.is_file() {
+        return Some(project);
+    }
+    let user = caliban_common::paths::platform_config_dir()
+        .map(|d| d.join("caliban").join("agents").join(&file));
+    match user {
+        Some(p) if p.is_file() => Some(p),
+        _ => None,
+    }
+}
+
+/// Resolve + load the agent definition a spawn selected, shared by both drive
+/// paths (#741) so NDJSON and ACP honor an agent identically. Precedence: an
+/// explicit `SpawnSpec.frontmatter_path` (a path) wins over
+/// `SpawnSpec.agent_type` (a name resolved via
+/// [`resolve_agent_definition_by_name`]). Returns `Ok(None)` when the spawn
+/// named no definition; `Err(code)` (an already-logged `sysexits` code) when a
+/// named definition is unloadable or a name resolves to nothing — the spawn
+/// asked for an agent it can't run.
+fn load_spawn_agent_definition(
+    spec: &caliban_supervisor::SpawnSpec,
+    agent_id: &str,
+    workspace_root: &std::path::Path,
+) -> Result<Option<AgentDefinition>, i32> {
+    if let Some(path) = spec.frontmatter_path.as_deref() {
+        return match load_agent_definition(path) {
+            Ok(def) => Ok(Some(def)),
+            Err(e) => {
+                eprintln!(
+                    "[caliban __agent-worker] frontmatter {}: {e}",
+                    path.display()
+                );
+                Err(64) // EX_USAGE
+            }
+        };
+    }
+    if let Some(name) = spec.agent_type.as_deref() {
+        let Some(path) = resolve_agent_definition_by_name(name, workspace_root) else {
+            eprintln!(
+                "[caliban __agent-worker] agent {agent_id}: agent_type {name:?} not found under \
+                 .caliban/agents (project) or <config>/caliban/agents (user)"
+            );
+            return Err(64); // EX_USAGE
+        };
+        return match load_agent_definition(&path) {
+            Ok(def) => Ok(Some(def)),
+            Err(e) => {
+                eprintln!(
+                    "[caliban __agent-worker] agent_type {name:?} ({}): {e}",
+                    path.display()
+                );
+                Err(64) // EX_USAGE
+            }
+        };
+    }
+    Ok(None)
+}
+
 /// Effective model: an explicit `SpawnSpec.model` wins over the agent
 /// definition's `model` (#689). `None` leaves the provider default to resolve.
 fn effective_agent_model(
@@ -1164,21 +1243,16 @@ async fn run_acp_worker(
             return 64; // EX_USAGE
         }
     }
-    // Load an optional agent definition named by the spawn (#689/#741) so the
-    // ACP path honors the same model / tools / system-prompt the NDJSON path
-    // (`run`) does. A named-but-unloadable definition is a hard error.
-    let agent_def = match record.spec.frontmatter_path.as_deref() {
-        Some(path) => match load_agent_definition(path) {
-            Ok(def) => Some(def),
-            Err(e) => {
-                eprintln!(
-                    "[caliban __agent-worker] frontmatter {}: {e}",
-                    path.display()
-                );
-                return 64; // EX_USAGE
-            }
-        },
-        None => None,
+    // Load an optional agent definition named by the spawn — by `frontmatter_path`
+    // (#689) or `agent_type` name discovery (#741) — so the ACP path honors the
+    // same model / tools / system-prompt the NDJSON path (`run`) does, via the
+    // shared resolver. A named-but-unresolvable/unloadable definition is a hard
+    // error. Discovery root is the cwd (matching `WorkspaceRoot::current_dir`),
+    // falling back to the session dir.
+    let discovery_root = std::env::current_dir().unwrap_or_else(|_| record.session_dir.clone());
+    let agent_def = match load_spawn_agent_definition(&record.spec, &record.id, &discovery_root) {
+        Ok(def) => def,
+        Err(code) => return code,
     };
     // Model: explicit spec.model wins over the definition's model (#689),
     // matching the NDJSON path. Previously the ACP path applied only spec.model.
@@ -1532,6 +1606,129 @@ mod tests {
         // Neither → None (provider default / no allowlist).
         assert_eq!(effective_agent_model(None, None), None);
         assert_eq!(effective_tool_allowlist(None, None), None);
+    }
+
+    // --- by-name agent-definition discovery (#741) ---
+
+    /// A minimal `SpawnSpec` for exercising definition selection; only the two
+    /// selector fields vary.
+    fn spawn_spec_named(
+        frontmatter_path: Option<std::path::PathBuf>,
+        agent_type: Option<String>,
+    ) -> caliban_supervisor::proto::SpawnSpec {
+        caliban_supervisor::proto::SpawnSpec {
+            label: None,
+            frontmatter_path,
+            agent_type,
+            initial_prompt: "hi".into(),
+            model: None,
+            provider: None,
+            tool_allowlist: None,
+            isolation_worktree: false,
+            inherit_hooks: true,
+            interactive: false,
+            inherited_hooks_config: None,
+            source: None,
+            resume_session: None,
+            permission_posture: caliban_supervisor::PermissionPosture::default(),
+            drive_protocol: caliban_supervisor::DriveProtocol::default(),
+        }
+    }
+
+    /// Write a valid agent definition at `<root>/.caliban/agents/<name>.md`.
+    fn write_project_agent(root: &std::path::Path, name: &str, model: &str) {
+        let dir = root.join(".caliban").join("agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: d\nmodel: {model}\n---\nBe {name}.\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_by_name_finds_project_definition() {
+        let ws = tempfile::tempdir().unwrap();
+        write_project_agent(ws.path(), "reviewer", "m1");
+        let got = resolve_agent_definition_by_name("reviewer", ws.path());
+        assert_eq!(
+            got.as_deref(),
+            Some(ws.path().join(".caliban/agents/reviewer.md").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_by_name_absent_returns_none() {
+        let ws = tempfile::tempdir().unwrap();
+        // A name that exists in neither the project nor the user root.
+        assert_eq!(
+            resolve_agent_definition_by_name("caliban-741-definitely-absent-xyz", ws.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_by_name_rejects_traversal_and_separators() {
+        let ws = tempfile::tempdir().unwrap();
+        // Even if a traversal target happened to exist, these are rejected before
+        // any filesystem lookup, so `agent_type` can never escape the agents dir.
+        for bad in ["../secret", "a/b", "..", "", "sub/dir/x", r"a\b"] {
+            assert_eq!(
+                resolve_agent_definition_by_name(bad, ws.path()),
+                None,
+                "name {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn load_spawn_frontmatter_path_wins_over_agent_type() {
+        // An explicit path beats a name when both are set (#741 precedence).
+        let ws = tempfile::tempdir().unwrap();
+        write_project_agent(ws.path(), "named", "name-model");
+        let fm = ws.path().join("explicit.md");
+        std::fs::write(
+            &fm,
+            "---\nname: x\ndescription: d\nmodel: path-model\n---\nBody.\n",
+        )
+        .unwrap();
+        let spec = spawn_spec_named(Some(fm), Some("named".into()));
+        let def = load_spawn_agent_definition(&spec, "a1", ws.path())
+            .expect("loads")
+            .expect("some");
+        assert_eq!(def.model.as_deref(), Some("path-model"));
+    }
+
+    #[test]
+    fn load_spawn_resolves_agent_type_by_name() {
+        let ws = tempfile::tempdir().unwrap();
+        write_project_agent(ws.path(), "reviewer", "rev-model");
+        let spec = spawn_spec_named(None, Some("reviewer".into()));
+        let def = load_spawn_agent_definition(&spec, "a1", ws.path())
+            .expect("loads")
+            .expect("some");
+        assert_eq!(def.model.as_deref(), Some("rev-model"));
+        assert_eq!(def.body, "Be reviewer.");
+    }
+
+    #[test]
+    fn load_spawn_unknown_agent_type_is_hard_error() {
+        let ws = tempfile::tempdir().unwrap();
+        let spec = spawn_spec_named(None, Some("caliban-741-definitely-absent-xyz".into()));
+        assert!(
+            matches!(load_spawn_agent_definition(&spec, "a1", ws.path()), Err(64)),
+            "an unresolvable agent_type must be EX_USAGE"
+        );
+    }
+
+    #[test]
+    fn load_spawn_no_selector_is_none() {
+        let ws = tempfile::tempdir().unwrap();
+        let spec = spawn_spec_named(None, None);
+        assert!(matches!(
+            load_spawn_agent_definition(&spec, "a1", ws.path()),
+            Ok(None)
+        ));
     }
 
     // --- session persistence + resume (#651, ADR 0057) ---
@@ -1897,6 +2094,7 @@ mod tests {
             spec: caliban_supervisor::proto::SpawnSpec {
                 label: None,
                 frontmatter_path: None,
+                agent_type: None,
                 initial_prompt: "hi".into(),
                 model: None,
                 provider: None,

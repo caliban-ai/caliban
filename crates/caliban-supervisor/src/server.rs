@@ -852,6 +852,7 @@ mod tests {
         crate::proto::SpawnSpec {
             label: Some(label.into()),
             frontmatter_path: None,
+            agent_type: None,
             initial_prompt: "hi".into(),
             model: None,
             provider: None,

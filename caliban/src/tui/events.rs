@@ -1009,6 +1009,7 @@ pub(crate) fn handoff_to_supervisor(app: &mut App) {
     let spec = SpawnSpec {
         label: Some("backgrounded-by-ctrl-b".into()),
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: "(snapshot)".into(),
         model: None,
         provider: None,
