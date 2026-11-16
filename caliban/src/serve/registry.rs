@@ -277,8 +277,8 @@ impl DriveRegistry {
 /// before.
 #[derive(Clone, Default)]
 pub(crate) struct AgentDefinitionOverride {
-    /// Effective tool allowlist (SpawnSpec precedence over the definition). When
-    /// `Some`, the per-run registry is filtered to just these tools.
+    /// Effective tool allowlist (`SpawnSpec` precedence over the definition).
+    /// When `Some`, the per-run registry is filtered to just these tools.
     pub(crate) tool_allowlist: Option<Vec<String>>,
     /// The definition body used as the agent's system prompt, seeded at message
     /// position 0 on a fresh run (never when empty).
