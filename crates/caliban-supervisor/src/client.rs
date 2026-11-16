@@ -117,7 +117,12 @@ impl SupervisorClient {
         &self,
         spec: crate::proto::SpawnSpec,
     ) -> Result<(crate::proto::AgentId, Endpoint), ClientError> {
-        match self.request(&CtlRequest::Spawn { spec }).await? {
+        match self
+            .request(&CtlRequest::Spawn {
+                spec: Box::new(spec),
+            })
+            .await?
+        {
             CtlReply::Spawned { id, endpoint } => Ok((id, endpoint)),
             CtlReply::Error { error } => Err(error.into()),
             other => Err(ClientError::Unexpected(format!("{other:?}"))),

@@ -35,6 +35,7 @@ fn spec() -> SpawnSpec {
     SpawnSpec {
         label: Some("test".into()),
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: "hi".into(),
         model: None,
         provider: None,
@@ -471,6 +472,7 @@ async fn spawn_launches_worker_and_reaches_done() {
     let spec = SpawnSpec {
         label: Some("w".into()),
         frontmatter_path: None,
+        agent_type: None,
         initial_prompt: "hi".into(),
         model: None,
         provider: None,

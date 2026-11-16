@@ -162,6 +162,7 @@ mod tests {
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
+                agent_type: None,
                 initial_prompt: "hi".into(),
                 model: None,
                 provider: None,
@@ -245,6 +246,7 @@ mod tests {
         rec.spec = SpawnSpec {
             label: Some("worker".into()),
             frontmatter_path: Some(PathBuf::from("/fm/agent.md")),
+            agent_type: None,
             initial_prompt: "do the thing".into(),
             model: Some("opus".into()),
             provider: None,

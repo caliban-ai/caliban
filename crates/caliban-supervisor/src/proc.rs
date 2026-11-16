@@ -377,6 +377,7 @@ mod tests {
             spec: SpawnSpec {
                 label: None,
                 frontmatter_path: None,
+                agent_type: None,
                 initial_prompt: "hi".into(),
                 model: None,
                 provider: None,
