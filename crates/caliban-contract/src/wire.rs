@@ -237,8 +237,11 @@ pub enum CtlRequest {
     List,
     /// Register and start a new agent.
     Spawn {
-        /// Spec describing the agent to create.
-        spec: SpawnSpec,
+        /// Spec describing the agent to create. Boxed so this variant does not
+        /// bloat every `CtlRequest` value to `SpawnSpec`'s size
+        /// (`clippy::large_enum_variant`); serde serializes `Box<T>`
+        /// transparently, so the wire format is unchanged.
+        spec: Box<SpawnSpec>,
     },
     /// Return the dedicated socket for an agent so the caller can attach.
     Attach {

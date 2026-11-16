@@ -522,7 +522,7 @@ impl Supervisor {
                 };
                 let rec = {
                     let mut r = self.registry.lock().await;
-                    r.register(spec, endpoint, working_dir)
+                    r.register(*spec, endpoint, working_dir)
                 };
                 let reply = CtlReply::Spawned {
                     id: rec.id.clone(),
